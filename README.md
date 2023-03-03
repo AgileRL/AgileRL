@@ -70,13 +70,23 @@ try:
 except:
     num_actions = env.action_space.shape[0]
 
-agent_pop = initialPopulation(INIT_HP['ALGO'], num_states, num_actions, INIT_HP, INIT_HP['POP_SIZE'], device=device)
+agent_pop = initialPopulation(INIT_HP['ALGO'],
+  num_states,
+  num_actions,
+  INIT_HP,
+  INIT_HP['POP_SIZE'],
+  device=device)
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 ```
 field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
-tournament = TournamentSelection(INIT_HP['TOURN_SIZE'], INIT_HP['ELITISM'], INIT_HP['POP_SIZE'], INIT_HP['EVO_EPOCHS'])
+
+tournament = TournamentSelection(INIT_HP['TOURN_SIZE'],
+    INIT_HP['ELITISM'],
+    INIT_HP['POP_SIZE'],
+    INIT_HP['EVO_EPOCHS'])
+    
 mutations = Mutations(no_mutation=MUTATION_PARAMS['NO_MUT'], 
     architecture=MUTATION_PARAMS['ARCH_MUT'], 
     new_layer_prob=MUTATION_PARAMS['NEW_LAYER'], 
