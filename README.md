@@ -20,6 +20,10 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
     python benchmarking.py
 ```
 
+## Algorithms implemented
+  * DQN
+  * DDPG
+
 ## Use in your training loop
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities. For example:
 ```
@@ -102,9 +106,3 @@ trained_pop, pop_fitnesses = train(env,
     wb=INIT_HP['WANDB'],
     device=device)
 ```
-
-## Algorithms implemented
-  * DQN
-  * DDPG
-
-
