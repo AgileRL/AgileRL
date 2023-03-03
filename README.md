@@ -3,7 +3,7 @@
   <img src=https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png height="120">
 </p>
 <p align="center"><b>Reinforcement learning streamlined.</b> Easier and faster reinforcement learning with RLOps.<br>
-Visit our [website](https://agilerl.com).</p>
+Visit our <a href="https://agilerl.com">website</a>.</p>
 
 This is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
   
