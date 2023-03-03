@@ -1,0 +1,97 @@
+import torch
+import numpy as np
+import gymnasium as gym
+
+from components.replay_buffer import ReplayBuffer
+from hpo.tournament import TournamentSelection
+from hpo.mutation import Mutations
+from utils import initialPopulation, printHyperparams, plotPopulationScore
+from training.train import train
+
+def main(INIT_HP, MUTATION_PARAMS):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print('============ AgileRL ============')
+    print(f'DEVICE: {device}')
+
+    env = gym.make(INIT_HP['ENV_NAME'], render_mode='rgb_array')
+    num_states = env.observation_space.shape[0]
+    try:
+        num_actions = env.action_space.n
+    except:
+        num_actions = env.action_space.shape[0]
+
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
+    tournament = TournamentSelection(INIT_HP['TOURN_SIZE'], INIT_HP['ELITISM'], INIT_HP['POP_SIZE'], INIT_HP['EVO_EPOCHS'])
+    mutations = Mutations(no_mutation=MUTATION_PARAMS['NO_MUT'], 
+        architecture=MUTATION_PARAMS['ARCH_MUT'], 
+        new_layer_prob=MUTATION_PARAMS['NEW_LAYER'], 
+        parameters=MUTATION_PARAMS['PARAMS_MUT'], 
+        activation=MUTATION_PARAMS['ACT_MUT'], 
+        rl_hp=MUTATION_PARAMS['RL_HP_MUT'], 
+        rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'], 
+        mutation_sd=MUTATION_PARAMS['MUT_SD'], 
+        rand_seed=MUTATION_PARAMS['RAND_SEED'],
+        device=device)
+
+    agent_pop = initialPopulation(INIT_HP['ALGO'], num_states, num_actions, INIT_HP, INIT_HP['POP_SIZE'], device=device)
+
+    trained_pop, pop_fitnesses = train(env,
+        INIT_HP['ENV_NAME'],
+        INIT_HP['ALGO'],
+        agent_pop,
+        memory=memory,
+        n_episodes=INIT_HP['EPISODES'],
+        evo_epochs=INIT_HP['EVO_EPOCHS'],
+        evo_loop=1,
+        target=INIT_HP['TARGET_SCORE'],
+        chkpt=INIT_HP['SAVE_CHKPT'],
+        tournament=tournament,
+        mutation=mutations,
+        wb=INIT_HP['WANDB'],
+        device=device)
+
+    printHyperparams(trained_pop)
+    # plotPopulationScore(trained_pop)
+
+    if str(device) == "cuda":
+        torch.cuda.empty_cache()
+
+
+if __name__ == '__main__':
+    INIT_HP = {
+        'ENV_NAME': 'LunarLanderContinuous-v2',
+        'ALGO': 'DDPG',
+        # 'ENV_NAME': 'LunarLander-v2',
+        # 'ALGO': 'DQN',
+        'HIDDEN_SIZE': [64,64],
+        'BATCH_SIZE': 256,
+        'LR': 1e-3,
+        'EPISODES': 2000,
+        'TARGET_SCORE': 200.,     # early training stop at avg score of last 100 episodes
+        'GAMMA': 0.99,            # discount factor
+        'MEMORY_SIZE': 10000,     # max memory buffer size
+        'LEARN_STEP': 1,          # how often to learn
+        'TAU': 1e-3,              # for soft update of target parameters
+        'SAVE_CHKPT': False,      # save trained network .pth file
+        'TOURN_SIZE': 2,
+        'ELITISM': True,
+        'POP_SIZE': 6,
+        'EVO_EPOCHS': 20,
+        'POLICY_FREQ': 2,
+        'WANDB': True
+    }
+
+    MUTATION_PARAMS = {
+        'NO_MUT': 0.4, #0.2,
+        'ARCH_MUT': 0.2, #0.2,
+        'NEW_LAYER': 0.2,
+        'PARAMS_MUT': 0.2, # 0.2,
+        'ACT_MUT': 0, #0.2,
+        'RL_HP_MUT': 0.2,
+        'RL_HP_SELECTION': ['lr', 'batch_size'],
+        'MUT_SD': 0.1,
+        'RAND_SEED': 1,
+    }
+
+    main(INIT_HP, MUTATION_PARAMS)
