@@ -45,7 +45,6 @@ def main(INIT_HP, MUTATION_PARAMS):
         evo_epochs=INIT_HP['EVO_EPOCHS'],
         evo_loop=1,
         target=INIT_HP['TARGET_SCORE'],
-        chkpt=INIT_HP['SAVE_CHKPT'],
         tournament=tournament,
         mutation=mutations,
         wb=INIT_HP['WANDB'],
@@ -79,8 +78,7 @@ if __name__ == '__main__':
         'WANDB': True                   # Log with Weights and Biases
     }
 
-    MUTATION_PARAMS = {
-        # Relative probabilities
+    MUTATION_PARAMS = {  # Relative probabilities
         'NO_MUT': 0.4,                              # No mutation
         'ARCH_MUT': 0.2,                            # Architecture mutation
         'NEW_LAYER': 0.2,                           # New layer mutation
