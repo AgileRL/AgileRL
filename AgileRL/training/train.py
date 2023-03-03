@@ -4,7 +4,7 @@ from tqdm import trange
 import wandb
 from datetime import datetime
 
-def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, chkpt=False, wb=False, device='cpu'):
+def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, wb=False, device='cpu'):
 
     if wb:
         wandb.init(
