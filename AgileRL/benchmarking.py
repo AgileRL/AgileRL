@@ -60,38 +60,36 @@ def main(INIT_HP, MUTATION_PARAMS):
 
 if __name__ == '__main__':
     INIT_HP = {
-        'ENV_NAME': 'LunarLanderContinuous-v2',
-        'ALGO': 'DDPG',
-        # 'ENV_NAME': 'LunarLander-v2',
-        # 'ALGO': 'DQN',
-        'HIDDEN_SIZE': [64,64],
-        'BATCH_SIZE': 256,
-        'LR': 1e-3,
-        'EPISODES': 2000,
-        'TARGET_SCORE': 200.,     # early training stop at avg score of last 100 episodes
-        'GAMMA': 0.99,            # discount factor
-        'MEMORY_SIZE': 10000,     # max memory buffer size
-        'LEARN_STEP': 1,          # how often to learn
-        'TAU': 1e-3,              # for soft update of target parameters
-        'SAVE_CHKPT': False,      # save trained network .pth file
-        'TOURN_SIZE': 2,
-        'ELITISM': True,
-        'POP_SIZE': 6,
-        'EVO_EPOCHS': 20,
-        'POLICY_FREQ': 2,
-        'WANDB': True
+        'ENV_NAME': 'LunarLander-v2',   # Gym environment name
+        'ALGO': 'DQN',                  # Algorithm
+        'HIDDEN_SIZE': [64,64],         # Actor network hidden size
+        'BATCH_SIZE': 256,              # Batch size
+        'LR': 1e-3,                     # Learning rate
+        'EPISODES': 2000,               # Max no. episodes
+        'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
+        'GAMMA': 0.99,                  # Discount factor
+        'MEMORY_SIZE': 10000,           # Max memory buffer size
+        'LEARN_STEP': 1,                # Learning frequency
+        'TAU': 1e-3,                    # For soft update of target parameters
+        'TOURN_SIZE': 2,                # Tournament size
+        'ELITISM': True,                # Elitism in tournament selection
+        'POP_SIZE': 6,                  # Population size
+        'EVO_EPOCHS': 20,               # Evolution frequency
+        'POLICY_FREQ': 2,               # Policy network update frequency
+        'WANDB': True                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {
-        'NO_MUT': 0.4, #0.2,
-        'ARCH_MUT': 0.2, #0.2,
-        'NEW_LAYER': 0.2,
-        'PARAMS_MUT': 0.2, # 0.2,
-        'ACT_MUT': 0, #0.2,
-        'RL_HP_MUT': 0.2,
-        'RL_HP_SELECTION': ['lr', 'batch_size'],
-        'MUT_SD': 0.1,
-        'RAND_SEED': 1,
+        # Relative probabilities
+        'NO_MUT': 0.4,                              # No mutation
+        'ARCH_MUT': 0.2,                            # Architecture mutation
+        'NEW_LAYER': 0.2,                           # New layer mutation
+        'PARAMS_MUT': 0.2,                          # Network parameters mutation
+        'ACT_MUT': 0,                               # Activation layer mutation
+        'RL_HP_MUT': 0.2,                           # Learning HP mutation
+        'RL_HP_SELECTION': ['lr', 'batch_size'],    # Learning HPs to choose from
+        'MUT_SD': 0.1,                              # Mutation strength
+        'RAND_SEED': 1,                             # Random seed
     }
 
     main(INIT_HP, MUTATION_PARAMS)
