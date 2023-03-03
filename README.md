@@ -20,7 +20,7 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
     python benchmarking.py
 ```
 
-## Algorithms implemented
+## Algorithms implemented (more coming soon!)
   * DQN
   * DDPG
 
