@@ -13,11 +13,11 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
 
 ## Get Started
 ```
-    git clone https://github.com/AgileRL/AgileRL
-    pip install -r requirements.txt
+git clone https://github.com/AgileRL/AgileRL
+pip install -r requirements.txt
 ```
 ```    
-    python benchmarking.py
+python benchmarking.py
 ```
 
 ## Algorithms implemented (more coming soon!)
