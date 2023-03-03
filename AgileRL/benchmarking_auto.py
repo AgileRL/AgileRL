@@ -43,7 +43,6 @@ def main(INIT_HP, MUTATION_PARAMS):
         evo_epochs=INIT_HP['EVO_EPOCHS'],
         evo_loop=1,
         target=INIT_HP['TARGET_SCORE'],
-        chkpt=INIT_HP['SAVE_CHKPT'],
         tournament=tournament,
         mutation=mutations,
         device=device)
@@ -74,7 +73,6 @@ if __name__ == '__main__':
             'MEMORY_SIZE': 10000,     # max memory buffer size
             'LEARN_STEP': 1,          # how often to learn
             'TAU': 1e-3,              # for soft update of target parameters
-            'SAVE_CHKPT': False,      # save trained network .pth file
             'TOURN_SIZE': 2,
             'ELITISM': True,
             'POP_SIZE': 6,
