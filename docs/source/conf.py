@@ -31,7 +31,7 @@ templates_path = ['_templates']
 
 html_theme = 'sphinx_rtd_theme'
 html_static_path = ['_static']
-html_logo = "https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png"
+html_logo = "https://user-images.githubusercontent.com/47857277/223126514-8b3131a2-1fde-4a6e-bb93-e12eb45af785.png"
 html_theme_options = {
     'logo_only': False,
     'display_version': False,
