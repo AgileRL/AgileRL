@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from algorithms.dqn import DQN
-from algorithms.ddpg import DDPG
+from AgileRL.algorithms.dqn import DQN
+from AgileRL.algorithms.ddpg import DDPG
 
 def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1, device='cpu'):
     population = []
