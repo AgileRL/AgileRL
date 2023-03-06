@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from networks.evolvable_mlp import EvolvableMLP
+from AgileRL.networks.evolvable_mlp import EvolvableMLP
 
 class DQN():
     def __init__(self, n_states, n_actions, index, h_size = [64,64], batch_size=64, lr=1e-4, gamma=0.99, learn_step=5, tau=1e-3, mutation=None, device='cpu'):
@@ -54,7 +54,7 @@ class DQN():
 
         q_target = self.net_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
         y_j = rewards + self.gamma * q_target * (1 - dones)          # target, if terminal then y_j = rewards
-        q_eval = self.net_eval(states).gather(1, actions)
+        q_eval = self.net_eval(states).gather(1, actions.long())
 
         # loss backprop
         loss = self.criterion(q_eval, y_j)

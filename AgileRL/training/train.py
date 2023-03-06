@@ -1,4 +1,3 @@
-import torch
 import numpy as np
 from tqdm import trange
 import wandb
@@ -25,22 +24,22 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo
     pop_fitnesses = []
     total_steps = 0
 
+    # RL training loop
     for idx_epi in pbar:
-        # RL training
-        for idx_agent, agent in enumerate(pop):
-            state = env.reset()[0]
+        for agent in pop:   # Loop through population
+            state = env.reset()[0]  # Reset environment at start of episode
             score = 0
-            idx_step = 0
             for idx_step in range(max_steps):
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(action)
+                action = agent.getAction(state, epsilon)    # Get next action from agent
+                next_state, reward, done, _, _ = env.step(action)   # Act in environment
                 
+                # Save experience to replay buffer
                 memory.save2memory(state, action, reward, next_state, done)
 
-                # To learn or not to learn - that is the question
+                # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-                    experiences = memory.sample(agent.batch_size)
-                    agent.learn(experiences)
+                    experiences = memory.sample(agent.batch_size)   # Sample replay buffer
+                    agent.learn(experiences)    # Learn according to agent's RL algorithm
                 
                 state = next_state
                 score += reward
@@ -53,7 +52,7 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo
             agent.steps[-1] += idx_step+1
             total_steps += idx_step+1
 
-        epsilon = max(eps_end, epsilon*eps_decay)
+        epsilon = max(eps_end, epsilon*eps_decay)   # Update epsilon for exploration
 
         # Now evolve if necessary
         if (idx_epi+1) % evo_epochs == 0:

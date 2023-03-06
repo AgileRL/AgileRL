@@ -12,7 +12,7 @@ Evolutionary HPO has been shown to drastically reduce overall training times by 
 We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
 
 Check out the :doc:`usage` section for further information, including
-how to :ref:`install` the project.
+how to :ref:`install`.
 
 .. note::
 

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from networks.evolvable_mlp import EvolvableMLP
+from AgileRL.networks.evolvable_mlp import EvolvableMLP
 
 class DDPG():
     def __init__(self, n_states, n_actions, index, h_size = [64,64], batch_size=64, lr=1e-4, gamma=0.99, learn_step=5, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
