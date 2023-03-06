@@ -29,7 +29,7 @@ Run benchmarking demo:
    $ python benchmarking.py
 
 
-Training an RL agent
+Quickstart: Training an RL agent
 ----------------
 
 Before starting training, there are some meta-hyperparameters and settings that must be set.
