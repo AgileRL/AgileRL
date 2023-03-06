@@ -13,10 +13,17 @@ Evolutionary HPO has been shown to drastically reduce overall training times by 
 We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
 
 ## Get Started
+Install as a package with pip: 
+```
+git clone https://github.com/AgileRL/AgileRL.git
+pip install -e AgileRL
+```
+Or install in development mode: (Recommended due to nascent nature of this library)
 ```
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -r requirements.txt
 ```
+Run benchmarking demo:
 ```    
 python benchmarking.py
 ```
