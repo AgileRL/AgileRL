@@ -19,7 +19,7 @@ Training an RL agent
 Before starting training, there are some meta-hyperparameters and settings that must be set.
 These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities. For example:
 
-.. code-block::
+.. code-block:: python
     INIT_HP = {
         'ENV_NAME': 'LunarLander-v2',   # Gym environment name
         'ALGO': 'DQN',                  # Algorithm
@@ -40,7 +40,7 @@ These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS`
         'WANDB': True                   # Log with Weights and Biases
     }
 
-.. code-block::
+.. code-block:: python
     MUTATION_PARAMS = {
         # Relative probabilities
         'NO_MUT': 0.4,                              # No mutation
@@ -56,7 +56,7 @@ These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS`
 
 First, use ``utils.initialPopulation()`` to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 
-.. code-block::
+.. code-block:: python
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = gym.make(INIT_HP['ENV_NAME'], render_mode='rgb_array')
     num_states = env.observation_space.shape[0]
@@ -74,7 +74,7 @@ First, use ``utils.initialPopulation()`` to create a list of agents - our popula
 
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 
-.. code-block::
+.. code-block:: python
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
 
@@ -96,7 +96,7 @@ Next, create the tournament, mutations and experience replay buffer objects that
 
 The easiest training loop implementation is to use our ``training.train()`` function. It requires the agent have functions ``getAction()`` and ``learn()``.
 
-.. code-block::
+.. code-block:: python
     trained_pop, pop_fitnesses = train(env,
         INIT_HP['ENV_NAME'],
         INIT_HP['ALGO'],
