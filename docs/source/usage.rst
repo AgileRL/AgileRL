@@ -6,12 +6,28 @@ Usage
 Installation
 ------------
 
-To use AgileRL, first download the source code and install requirements:
+To use AgileRL, first download the source code and install requirements
+
+Install as a package with pip: 
 
 .. code-block:: console
 
-   (.venv) $ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-   (.venv) $ pip install -r requirements.txt
+   $ git clone https://github.com/AgileRL/AgileRL.git
+   $ pip install -e AgileRL
+
+Or install in development mode: (Recommended due to nascent nature of this library)
+
+.. code-block:: console
+
+   $ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+   $ pip install -r requirements.txt
+
+Run benchmarking demo:
+
+.. code-block:: console
+
+   $ python benchmarking.py
+
 
 Training an RL agent
 ----------------
