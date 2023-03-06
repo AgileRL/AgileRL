@@ -2,7 +2,7 @@
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png height="120">
 </p>
-<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>.</p>
+<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.</p>
 
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://agilerl.readthedocs.io/en/latest/?badge=latest)
 
@@ -124,3 +124,4 @@ trained_pop, pop_fitnesses = train(env,
     wb=INIT_HP['WANDB'],
     device=device)
 ```
+View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.
