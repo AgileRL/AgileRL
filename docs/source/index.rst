@@ -24,4 +24,5 @@ Contents
 .. toctree::
 
    usage
+   training
    api
