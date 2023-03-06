@@ -3,7 +3,7 @@ Usage
 
 .. _install:
 
-Installation
+Install AgileRL
 ------------
 
 To use AgileRL, first download the source code and install requirements
