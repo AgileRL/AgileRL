@@ -3,7 +3,7 @@ from tqdm import trange
 import wandb
 from datetime import datetime
 
-def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
+def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
     if wb:
         wandb.init(
             # set the wandb project where this run will be logged
@@ -36,7 +36,7 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
                 
                 # Save experience to replay buffer
-                memory.save2memory(state, action, reward, next_state, done)
+                memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
@@ -46,8 +46,8 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo
                 state = next_state
                 score += reward
 
-                if done:
-                    break
+                # if done:
+                #     break
             
             agent.scores.append(score)
             

@@ -34,8 +34,10 @@ class DQN():
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon):
-        state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-
+        state = torch.from_numpy(state).float().to(self.device)
+        if len(state.size())<2:
+            state = state.unsqueeze(0)
+            
         self.net_eval.eval()
         with torch.no_grad():
             action_values = self.net_eval(state)
@@ -43,9 +45,9 @@ class DQN():
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = random.choice(np.arange(self.n_actions))
+            action = np.random.randint(0, self.n_actions, size=state.size()[0])
         else:
-            action = np.argmax(action_values.cpu().data.numpy())
+            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
         return action
 

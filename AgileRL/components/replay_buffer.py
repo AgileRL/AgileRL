@@ -32,3 +32,8 @@ class ReplayBuffer():
     def save2memory(self, state, action, reward, next_state, done):
         self.add(state, action, reward, next_state, done)
         self.counter += 1
+
+    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
+        for state, action, reward, next_state, done in zip(states, actions, rewards, next_states, dones):
+            self.add(state, action, reward, next_state, done)
+            self.counter += 1
