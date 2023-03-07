@@ -18,7 +18,7 @@ class Mutations():
         self.mutation_sd = mutation_sd          # Mutation strength
 
         # Set algorithm dictionary with agent network names for mutation
-        # Use custom agent dict, or pre-configured  agent from API
+        # Use custom agent dict, or pre-configured agent from API
         if type(algo) is dict:
             self.algo = algo
         else:

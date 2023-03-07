@@ -32,7 +32,7 @@ python benchmarking.py
   * DQN
   * DDPG
 
-## Use in your training loop
+## Train an agent
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities. For example:
 ```
 INIT_HP = {
@@ -96,7 +96,8 @@ tournament = TournamentSelection(INIT_HP['TOURN_SIZE'],
     INIT_HP['POP_SIZE'],
     INIT_HP['EVO_EPOCHS'])
     
-mutations = Mutations(no_mutation=MUTATION_PARAMS['NO_MUT'], 
+mutations = Mutations(algo=INIT_HP['ALGO'],
+    no_mutation=MUTATION_PARAMS['NO_MUT'], 
     architecture=MUTATION_PARAMS['ARCH_MUT'], 
     new_layer_prob=MUTATION_PARAMS['NEW_LAYER'], 
     parameters=MUTATION_PARAMS['PARAMS_MUT'], 
@@ -125,6 +126,7 @@ trained_pop, pop_fitnesses = train(env,
     device=device)
 ```
 
+### Custom Training Loop
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```
@@ -146,33 +148,34 @@ INIT_HP = {
             }
 
 pop = initialPopulation(algo='DQN',           # Algorithm
-                        num_states=8,           # State dimension
-                        num_actions=4,          # Action dimension
+                        num_states=8,         # State dimension
+                        num_actions=4,        # Action dimension
                         INIT_HP=INIT_HP,      # Initial hyperparameters
                         population_size=6,    # Population size
                         device=torch.device("cuda"))
 
 field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(n_actions=4,              # Number of agent actions
-                        memory_size=10000,        # Max replay buffer size
-                        field_names=field_names,  # Field names to store in memory
-                        device=torch.device("cuda"))
+                      memory_size=10000,        # Max replay buffer size
+                      field_names=field_names,  # Field names to store in memory
+                      device=torch.device("cuda"))
 
 tournament = TournamentSelection(tournament_size=2, # Tournament selection size
-                                    elitism=True,      # Elitism in tournament selection
-                                    population_size=6, # Population size
-                                    evo_step=1)        # Evaluate using last N fitness scores
+                                 elitism=True,      # Elitism in tournament selection
+                                 population_size=6, # Population size
+                                 evo_step=1)        # Evaluate using last N fitness scores
 
-mutations = Mutations(no_mutation=0.4,                      # No mutation
-                        architecture=0.2,                     # Architecture mutation
-                        new_layer_prob=0.2,                   # New layer mutation
-                        parameters=0.2,                       # Network parameters mutation
-                        activation=0,                         # Activation layer mutation
-                        rl_hp=0.2,                            # Learning HP mutation
-                        rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
-                        mutation_sd=0.1,                      # Mutation strength
-                        rand_seed=1,                          # Random seed
-                        device=torch.device("cuda"))
+mutations = Mutations(algo='DQN',                           # Algorithm
+                      no_mutation=0.4,                      # No mutation
+                      architecture=0.2,                     # Architecture mutation
+                      new_layer_prob=0.2,                   # New layer mutation
+                      parameters=0.2,                       # Network parameters mutation
+                      activation=0,                         # Activation layer mutation
+                      rl_hp=0.2,                            # Learning HP mutation
+                      rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
+                      mutation_sd=0.1,                      # Mutation strength
+                      rand_seed=1,                          # Random seed
+                      device=torch.device("cuda"))
 
 max_episodes = 1000 # Max training episodes
 max_steps = 500     # Max steps per episode
