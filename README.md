@@ -15,17 +15,12 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
 ## Get Started
 Install as a package with pip: 
 ```
-git clone https://github.com/AgileRL/AgileRL.git
-pip install -e AgileRL
+pip install agilerl
 ```
 Or install in development mode: (Recommended due to nascent nature of this library)
 ```
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -r requirements.txt
-```
-Run benchmarking demo:
-```    
-python benchmarking.py
 ```
 
 ## Algorithms implemented (more coming soon!)
@@ -71,13 +66,17 @@ MUTATION_PARAMS = {
 ```
 First, use <code>utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```
+from agilerl.utils import makeVectEnvs, initialPopulation
+import torch
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-env = gym.make(INIT_HP['ENV_NAME'], render_mode='rgb_array')
-num_states = env.observation_space.shape[0]
+
+env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
+num_states = env.single_observation_space.shape[0]
 try:
-    num_actions = env.action_space.n
+    num_actions = env.single_action_space.n
 except:
-    num_actions = env.action_space.shape[0]
+    num_actions = env.single_action_space.shape[0]
 
 agent_pop = initialPopulation(INIT_HP['ALGO'],
   num_states,
@@ -88,6 +87,11 @@ agent_pop = initialPopulation(INIT_HP['ALGO'],
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 ```
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
+import torch
+
 field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
 
@@ -110,6 +114,8 @@ mutations = Mutations(algo=INIT_HP['ALGO'],
 ```
 The easiest training loop implementation is to use our <code>training.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
 ```
+from agilerl.training.train import train
+
 trained_pop, pop_fitnesses = train(env,
     INIT_HP['ENV_NAME'],
     INIT_HP['ALGO'],
@@ -130,7 +136,7 @@ trained_pop, pop_fitnesses = train(env,
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```
-from agilerl.utils import initialPopulation
+from agilerl.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
@@ -189,7 +195,7 @@ epsilon = eps_start
 evo_epochs = 5      # Evolution frequency
 evo_loop = 1        # Number of evaluation episodes
 
-env = gym.make('LunarLander-v2', render_mode='rgb_array')   # Create environment
+env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
 
 # TRAINING LOOP
 for idx_epi in range(max_episodes):
@@ -201,7 +207,7 @@ for idx_epi in range(max_episodes):
             next_state, reward, done, _, _ = env.step(action)   # Act in environment
             
             # Save experience to replay buffer
-            memory.save2memory(state, action, reward, next_state, done)
+            memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
             # Learn according to learning frequency
             if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
@@ -210,9 +216,6 @@ for idx_epi in range(max_episodes):
             
             state = next_state
             score += reward
-
-            if done:
-                break
 
     epsilon = max(eps_end, epsilon*eps_decay) # Update epsilon for exploration
 
