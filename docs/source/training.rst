@@ -167,7 +167,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 .. code-block:: python
 
-    from agilerl.utils import initialPopulation
+    from agilerl.utils import makeVectEnvs, initialPopulation
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.hpo.mutation import Mutations
@@ -226,7 +226,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    env = gym.make('LunarLander-v2', render_mode='rgb_array')   # Create environment
+    env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
 
     # TRAINING LOOP
     for idx_epi in range(max_episodes):
@@ -238,7 +238,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
                 
                 # Save experience to replay buffer
-                memory.save2memory(state, action, reward, next_state, done)
+                memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
@@ -247,9 +247,6 @@ Alternatively, use a custom training loop. Combining all of the above:
                 
                 state = next_state
                 score += reward
-
-                if done:
-                    break
 
         epsilon = max(eps_end, epsilon*eps_decay) # Update epsilon for exploration
 

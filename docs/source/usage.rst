@@ -6,14 +6,13 @@ Usage
 Install AgileRL
 ------------
 
-To use AgileRL, first download the source code and install requirements
+To use AgileRL, first download the source code and install requirements.
 
 Install as a package with pip: 
 
 .. code-block:: console
 
-   $ git clone https://github.com/AgileRL/AgileRL.git
-   $ pip install -e AgileRL
+   $ pip install agilerl
 
 Or install in development mode: (Recommended due to nascent nature of this library)
 
@@ -21,12 +20,6 @@ Or install in development mode: (Recommended due to nascent nature of this libra
 
    $ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
    $ pip install -r requirements.txt
-
-Run benchmarking demo:
-
-.. code-block:: console
-
-   $ python benchmarking.py
 
 
 Quickstart: Training an RL agent
@@ -76,13 +69,17 @@ First, use ``utils.initialPopulation()`` to create a list of agents - our popula
 
 .. code-block:: python
 
+    from agilerl.utils import makeVectEnvs, initialPopulation
+    import torch
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = gym.make(INIT_HP['ENV_NAME'], render_mode='rgb_array')
-    num_states = env.observation_space.shape[0]
+
+    env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
+    num_states = env.single_observation_space.shape[0]
     try:
-        num_actions = env.action_space.n
+        num_actions = env.single_action_space.n
     except:
-        num_actions = env.action_space.shape[0]
+        num_actions = env.single_action_space.shape[0]
 
     agent_pop = initialPopulation(INIT_HP['ALGO'],
         num_states,
@@ -94,6 +91,11 @@ First, use ``utils.initialPopulation()`` to create a list of agents - our popula
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 
 .. code-block:: python
+
+    from agilerl.components.replay_buffer import ReplayBuffer
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.hpo.mutation import Mutations
+    import torch
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
@@ -118,6 +120,8 @@ Next, create the tournament, mutations and experience replay buffer objects that
 The easiest training loop implementation is to use our ``training.train()`` function. It requires the agent have functions ``getAction()`` and ``learn()``.
 
 .. code-block:: python
+
+    from agilerl.training.train import train
 
     trained_pop, pop_fitnesses = train(env,
         INIT_HP['ENV_NAME'],
