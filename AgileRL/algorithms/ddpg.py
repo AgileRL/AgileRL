@@ -40,7 +40,9 @@ class DDPG():
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon):
-        state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+        state = torch.from_numpy(state).float().to(self.device)
+        if len(state.size())<2:
+            state = state.unsqueeze(0)
 
         self.actor.eval()
         with torch.no_grad():
@@ -49,9 +51,9 @@ class DDPG():
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = (np.random.rand(2).astype('float32')-0.5)*2
+            action = (np.random.rand(state.size()[0], self.n_actions).astype('float32')-0.5)*2
         else:
-            action = action_values.cpu().data.numpy().flatten()
+            action = action_values.cpu().data.numpy()
 
         return action
 
