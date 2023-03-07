@@ -32,7 +32,7 @@ python benchmarking.py
   * DQN
   * DDPG
 
-## Use in your training loop
+## Train an agent
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities. For example:
 ```
 INIT_HP = {
@@ -126,6 +126,7 @@ trained_pop, pop_fitnesses = train(env,
     device=device)
 ```
 
+### Custom Training Loop
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```
