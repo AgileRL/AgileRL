@@ -41,8 +41,8 @@ are more likely to remain present in the population. The sequence of evolution (
               }
 
     agent_pop = initialPopulation(algo='DQN',           # Algorithm
-                                  num_states=8,           # State dimension
-                                  num_actions=4,          # Action dimension
+                                  num_states=8,         # State dimension
+                                  num_actions=4,        # Action dimension
                                   INIT_HP=INIT_HP,      # Initial hyperparameters
                                   population_size=6,    # Population size
                                   device=torch.device("cuda"))
@@ -119,7 +119,8 @@ Tournament selection and mutation should be applied sequentially to fully evolve
     from AgileRL.hpo.mutation import Mutations
     import torch
 
-    mutations = Mutations(no_mutation=0.4,                      # No mutation
+    mutations = Mutations(algo='DQN',                           # Algorithm
+                          no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
                           parameters=0.2,                       # Network parameters mutation
@@ -181,11 +182,11 @@ Alternatively, use a custom training loop. Combining all of the above:
                 'GAMMA': 0.99,          # Discount factor
                 'LEARN_STEP': 1,        # Learning frequency
                 'TAU': 1e-3             # For soft update of target network parameters
-              }
+                }
 
     pop = initialPopulation(algo='DQN',           # Algorithm
-                            num_states=8,           # State dimension
-                            num_actions=4,          # Action dimension
+                            num_states=8,         # State dimension
+                            num_actions=4,        # Action dimension
                             INIT_HP=INIT_HP,      # Initial hyperparameters
                             population_size=6,    # Population size
                             device=torch.device("cuda"))
@@ -201,7 +202,8 @@ Alternatively, use a custom training loop. Combining all of the above:
                                      population_size=6, # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
 
-    mutations = Mutations(no_mutation=0.4,                      # No mutation
+    mutations = Mutations(algo='DQN',                           # Algorithm
+                          no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
                           parameters=0.2,                       # Network parameters mutation
@@ -211,10 +213,10 @@ Alternatively, use a custom training loop. Combining all of the above:
                           mutation_sd=0.1,                      # Mutation strength
                           rand_seed=1,                          # Random seed
                           device=torch.device("cuda"))
-    
+
     max_episodes = 1000 # Max training episodes
     max_steps = 500     # Max steps per episode
-    
+
     # Exploration params
     eps_start = 1.0     # Max exploration
     eps_end = 0.1       # Min exploration
