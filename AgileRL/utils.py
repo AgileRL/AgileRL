@@ -1,8 +1,8 @@
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
-from AgileRL.algorithms.dqn import DQN
-from AgileRL.algorithms.ddpg import DDPG
+from agilerl.algorithms.dqn import DQN
+from agilerl.algorithms.ddpg import DDPG
 
 def makeVectEnvs(env_name, num_envs):
     return gym.vector.AsyncVectorEnv([lambda: gym.make(env_name) for i in range(num_envs)])
