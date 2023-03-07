@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from AgileRL.networks.evolvable_mlp import EvolvableMLP
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 class DQN():
     def __init__(self, n_states, n_actions, index, h_size = [64,64], batch_size=64, lr=1e-4, gamma=0.99, learn_step=5, tau=1e-3, mutation=None, device='cpu'):

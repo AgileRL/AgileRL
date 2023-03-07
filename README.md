@@ -130,10 +130,10 @@ trained_pop, pop_fitnesses = train(env,
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```
-from AgileRL.utils import initialPopulation
-from AgileRL.components.replay_buffer import ReplayBuffer
-from AgileRL.hpo.tournament import TournamentSelection
-from AgileRL.hpo.mutation import Mutations
+from agilerl.utils import initialPopulation
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
 import gymnasium as gym
 import numpy as np
 import torch
