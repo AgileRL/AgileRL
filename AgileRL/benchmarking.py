@@ -1,11 +1,11 @@
 import torch
 import gymnasium as gym
 
-from AgileRL.components.replay_buffer import ReplayBuffer
-from AgileRL.hpo.tournament import TournamentSelection
-from AgileRL.hpo.mutation import Mutations
-from AgileRL.utils import makeVectEnvs, initialPopulation, printHyperparams, plotPopulationScore
-from AgileRL.training.train import train
+from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
+from agilerl.utils import makeVectEnvs, initialPopulation, printHyperparams, plotPopulationScore
+from agilerl.training.train import train
 
 def main(INIT_HP, MUTATION_PARAMS):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

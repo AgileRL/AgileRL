@@ -28,7 +28,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from AgileRL.utils import initialPopulation
+    from agilerl.utils import initialPopulation
     import torch
 
     INIT_HP = {
@@ -62,7 +62,7 @@ During training it can be added to using the ``ReplayBuffer.save2memory()`` func
 
 .. code-block:: python
 
-    from AgileRL.components.replay_buffer import ReplayBuffer
+    from agilerl.components.replay_buffer import ReplayBuffer
     import torch
 
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -86,7 +86,7 @@ of agents.
 
 .. code-block:: python
 
-    from AgileRL.hpo.tournament import TournamentSelection
+    from agilerl.hpo.tournament import TournamentSelection
 
     tournament = TournamentSelection(tournament_size=2, # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -116,7 +116,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 
 .. code-block:: python
 
-    from AgileRL.hpo.mutation import Mutations
+    from agilerl.hpo.mutation import Mutations
     import torch
 
     mutations = Mutations(algo='DQN',                           # Algorithm
@@ -142,7 +142,7 @@ easiest to use our training function, which returns a population of trained agen
 
 .. code-block:: python
 
-    from AgileRL.training.train import train
+    from agilerl.training.train import train
     import gymnasium as gym
     import torch
 
@@ -167,10 +167,10 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 .. code-block:: python
 
-    from AgileRL.utils import initialPopulation
-    from AgileRL.components.replay_buffer import ReplayBuffer
-    from AgileRL.hpo.tournament import TournamentSelection
-    from AgileRL.hpo.mutation import Mutations
+    from agilerl.utils import initialPopulation
+    from agilerl.components.replay_buffer import ReplayBuffer
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.hpo.mutation import Mutations
     import gymnasium as gym
     import numpy as np
     import torch
