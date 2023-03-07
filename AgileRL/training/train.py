@@ -3,7 +3,7 @@ from tqdm import trange
 import wandb
 from datetime import datetime
 
-def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, wb=False, device='cpu'):
+def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
     if wb:
         wandb.init(
             # set the wandb project where this run will be logged
@@ -15,6 +15,8 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo
             "env": env_name,
             }
         )
+
+    save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
     
     epsilon = eps_start
 
@@ -83,6 +85,13 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=1000, evo
                 # Tournament selection and population mutation
                 elite, pop = tournament.select(pop)
                 pop = mutation.mutation(pop)
-        
-    wandb.finish()
+
+        # Save model checkpoint
+        if checkpoint is not None:
+            if (idx_epi+1) % checkpoint == 0:
+                for i, agent in enumerate(pop):
+                    agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+
+    if wb:
+        wandb.finish()
     return pop, pop_fitnesses
