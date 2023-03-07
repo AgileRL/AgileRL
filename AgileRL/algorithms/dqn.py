@@ -110,3 +110,40 @@ class DQN():
         clone.scores = copy.deepcopy(self.scores)
 
         return clone
+    
+    def saveCheckpoint(self, path):
+        torch.save({
+                    'net_eval_init_dict': self.net_eval.init_dict,
+                    'net_eval_state_dict': self.net_eval.state_dict(),
+                    'net_target_init_dict': self.net_target.init_dict,
+                    'net_target_state_dict': self.net_target.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'batch_size': self.batch_size,
+                    'lr': self.lr,
+                    'gamma': self.gamma,
+                    'learn_step': self.learn_step,
+                    'tau': self.tau,
+                    'mutation': self.mut,
+                    'index': self.index, 
+                    'scores': self.scores,
+                    'fitness': self.fitness,
+                    'steps': self.steps,
+                    }, path)
+        
+    def loadCheckpoint(self, path):
+        checkpoint = torch.load(path)
+        self.net_eval = EvolvableMLP(**checkpoint['net_eval_init_dict'])
+        self.net_eval.load_state_dict(checkpoint['net_eval_state_dict'])
+        self.net_target = EvolvableMLP(**checkpoint['net_target_init_dict'])
+        self.net_target.load_state_dict(checkpoint['net_target_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.batch_size = checkpoint['batch_size']
+        self.lr = checkpoint['lr']
+        self.gamma = checkpoint['gamma']
+        self.learn_step = checkpoint['learn_step']
+        self.tau = checkpoint['tau']
+        self.mut = checkpoint['mutation']
+        self.index = checkpoint['index']
+        self.scores = checkpoint['scores']
+        self.fitness = checkpoint['fitness']
+        self.steps = checkpoint['steps']
