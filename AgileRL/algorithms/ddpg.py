@@ -139,3 +139,50 @@ class DDPG():
         clone.scores = copy.deepcopy(self.scores)
 
         return clone
+    
+    def saveCheckpoint(self, path):
+        torch.save({
+                    'actor_init_dict': self.actor.init_dict,
+                    'actor_state_dict': self.actor.state_dict(),
+                    'actor_target_init_dict': self.actor_target.init_dict,
+                    'actor_target_state_dict': self.actor_target.state_dict(),
+                    'critic_init_dict': self.critic.init_dict,
+                    'critic_state_dict': self.critic.state_dict(),
+                    'critic_target_init_dict': self.critic_target.init_dict,
+                    'critic_target_state_dict': self.critic_target.state_dict(),
+                    'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
+                    'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
+                    'batch_size': self.batch_size,
+                    'lr': self.lr,
+                    'gamma': self.gamma,
+                    'learn_step': self.learn_step,
+                    'tau': self.tau,
+                    'mutation': self.mut,
+                    'index': self.index, 
+                    'scores': self.scores,
+                    'fitness': self.fitness,
+                    'steps': self.steps,
+                    }, path)
+        
+    def loadCheckpoint(self, path):
+        checkpoint = torch.load(path)
+        self.actor = EvolvableMLP(**checkpoint['actor_init_dict'])
+        self.actor.load_state_dict(checkpoint['actor_state_dict'])
+        self.actor_target = EvolvableMLP(**checkpoint['actor_target_init_dict'])
+        self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+        self.critic = EvolvableMLP(**checkpoint['critic_init_dict'])
+        self.critic.load_state_dict(checkpoint['critic_state_dict'])
+        self.critic_target = EvolvableMLP(**checkpoint['critic_target_init_dict'])
+        self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
+        self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
+        self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
+        self.batch_size = checkpoint['batch_size']
+        self.lr = checkpoint['lr']
+        self.gamma = checkpoint['gamma']
+        self.learn_step = checkpoint['learn_step']
+        self.tau = checkpoint['tau']
+        self.mut = checkpoint['mutation']
+        self.index = checkpoint['index']
+        self.scores = checkpoint['scores']
+        self.fitness = checkpoint['fitness']
+        self.steps = checkpoint['steps']
