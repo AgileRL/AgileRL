@@ -85,11 +85,11 @@ First, use ``utils.initialPopulation()`` to create a list of agents - our popula
         num_actions = env.action_space.shape[0]
 
     agent_pop = initialPopulation(INIT_HP['ALGO'],
-    num_states,
-    num_actions,
-    INIT_HP,
-    INIT_HP['POP_SIZE'],
-    device=device)
+        num_states,
+        num_actions,
+        INIT_HP,
+        INIT_HP['POP_SIZE'],
+        device=device)
 
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 
@@ -103,7 +103,8 @@ Next, create the tournament, mutations and experience replay buffer objects that
         INIT_HP['POP_SIZE'],
         INIT_HP['EVO_EPOCHS'])
         
-    mutations = Mutations(no_mutation=MUTATION_PARAMS['NO_MUT'], 
+    mutations = Mutations(algo=INIT_HP['ALGO'],
+        no_mutation=MUTATION_PARAMS['NO_MUT'], 
         architecture=MUTATION_PARAMS['ARCH_MUT'], 
         new_layer_prob=MUTATION_PARAMS['NEW_LAYER'], 
         parameters=MUTATION_PARAMS['PARAMS_MUT'], 
