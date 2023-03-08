@@ -24,7 +24,8 @@ Contents
 --------
 
 .. toctree::
+   :maxdepth: 3
 
-   get_started/index.rst
-   training
-   api
+   get_started/index
+   training/index
+   api/index
