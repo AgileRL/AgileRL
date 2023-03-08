@@ -21,7 +21,6 @@ def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1,
                 batch_size = INIT_HP['BATCH_SIZE'],
                 lr = INIT_HP['LR'],
                 gamma = INIT_HP['GAMMA'],
-                learn_step = INIT_HP['LEARN_STEP'],
                 tau = INIT_HP['TAU'],
                 device=device
                 )
@@ -37,7 +36,6 @@ def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1,
                 batch_size = INIT_HP['BATCH_SIZE'],
                 lr = INIT_HP['LR'],
                 gamma = INIT_HP['GAMMA'],
-                learn_step = INIT_HP['LEARN_STEP'],
                 tau = INIT_HP['TAU'],
                 policy_freq = INIT_HP['POLICY_FREQ'],
                 device=device

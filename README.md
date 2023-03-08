@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://agilerl.readthedocs.io/en/latest/?badge=latest)
-[![Downloads](https://static.pepy.tech/badge/agilerl)](https://pepy.tech/project/agilerl)
+[![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 
 This is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
   
@@ -31,7 +31,7 @@ pip install -r requirements.txt
 
 ## Train an agent
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities. For example:
-```
+```python
 INIT_HP = {
     'ENV_NAME': 'LunarLander-v2',   # Gym environment name
     'ALGO': 'DQN',                  # Algorithm
@@ -52,7 +52,7 @@ INIT_HP = {
     'WANDB': True                   # Log with Weights and Biases
 }
 ```
-```
+```python
 MUTATION_PARAMS = {
     # Relative probabilities
     'NO_MUT': 0.4,                              # No mutation
@@ -67,7 +67,7 @@ MUTATION_PARAMS = {
 }
 ```
 First, use <code>utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
-```
+```python
 from agilerl.utils import makeVectEnvs, initialPopulation
 import torch
 
@@ -88,7 +88,7 @@ agent_pop = initialPopulation(INIT_HP['ALGO'],
   device=device)
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
-```
+```python
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
@@ -115,7 +115,7 @@ mutations = Mutations(algo=INIT_HP['ALGO'],
     device=device)
 ```
 The easiest training loop implementation is to use our <code>training.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
-```
+```python
 from agilerl.training.train import train
 
 trained_pop, pop_fitnesses = train(env,
@@ -137,7 +137,7 @@ trained_pop, pop_fitnesses = train(env,
 ### Custom Training Loop
 Alternatively, use a custom training loop. Combining all of the above:
 
-```
+```python
 from agilerl.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection

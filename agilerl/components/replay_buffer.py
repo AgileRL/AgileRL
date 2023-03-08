@@ -4,7 +4,7 @@ from collections import deque, namedtuple
 import random
 
 class ReplayBuffer():
-    def __init__(self, n_actions, memory_size, field_names, device):
+    def __init__(self, n_actions, memory_size, field_names, device='cpu'):
         self.n_actions = n_actions
         self.memory = deque(maxlen = memory_size)
         self.experience = namedtuple("Experience", field_names=field_names)

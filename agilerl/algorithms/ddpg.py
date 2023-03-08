@@ -7,7 +7,7 @@ import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 class DDPG():
-    def __init__(self, n_states, n_actions, index, h_size = [64,64], batch_size=64, lr=1e-4, gamma=0.99, learn_step=5, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
+    def __init__(self, n_states, n_actions, index, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
         self.algo = 'DDPG'
         self.n_states = n_states
         self.n_actions = n_actions
@@ -15,7 +15,6 @@ class DDPG():
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
-        self.learn_step = learn_step
         self.tau = tau
         self.mut = mutation
         self.policy_freq = policy_freq
@@ -123,7 +122,6 @@ class DDPG():
                             batch_size=self.batch_size,
                             lr=self.lr,
                             gamma=self.gamma,
-                            learn_step=self.learn_step,
                             tau=self.tau,
                             device=self.device,
                            )
@@ -157,7 +155,6 @@ class DDPG():
                     'batch_size': self.batch_size,
                     'lr': self.lr,
                     'gamma': self.gamma,
-                    'learn_step': self.learn_step,
                     'tau': self.tau,
                     'mutation': self.mut,
                     'index': self.index, 
@@ -181,7 +178,6 @@ class DDPG():
         self.batch_size = checkpoint['batch_size']
         self.lr = checkpoint['lr']
         self.gamma = checkpoint['gamma']
-        self.learn_step = checkpoint['learn_step']
         self.tau = checkpoint['tau']
         self.mut = checkpoint['mutation']
         self.index = checkpoint['index']
