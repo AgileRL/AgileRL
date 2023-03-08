@@ -1,9 +1,6 @@
 Training
 ========
 
-Contents
---------
-
 .. toctree::
    :maxdepth: 2
 
