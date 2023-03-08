@@ -59,10 +59,8 @@ def main(INIT_HP, MUTATION_PARAMS):
 
 if __name__ == '__main__':
     INIT_HP = {
-        # 'ENV_NAME': 'LunarLander-v2',   # Gym environment name
-        # 'ALGO': 'DQN',                  # Algorithm
-        'ENV_NAME': 'LunarLanderContinuous-v2',   # Gym environment name
-        'ALGO': 'DDPG',                  # Algorithm
+        'ENV_NAME': 'LunarLander-v2',   # Gym environment name
+        'ALGO': 'DQN',                  # Algorithm
         'HIDDEN_SIZE': [64,64],         # Actor network hidden size
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
@@ -77,7 +75,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': False                   # Log with Weights and Biases
+        'WANDB': True                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
