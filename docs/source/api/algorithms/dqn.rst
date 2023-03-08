@@ -64,4 +64,6 @@ aaaaa
 
 bbb
 
+.. autoclass:: agilerl.algorithms.dqn.DQN
+
 .. autosummary::
