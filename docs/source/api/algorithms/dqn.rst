@@ -56,4 +56,6 @@ Example
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.dqn.DQN
+.. autoclass:: agilerl.algorithms.dqn
+
+.. autosummary::
