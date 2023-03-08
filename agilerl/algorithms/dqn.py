@@ -7,7 +7,21 @@ import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 class DQN():
-    def __init__(self, n_states, n_actions, index, h_size = [64,64], batch_size=64, lr=1e-4, gamma=0.99, learn_step=5, tau=1e-3, mutation=None, device='cpu'):
+    """
+    The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
+
+    :param n_states: (int) State observation dimension
+    :param n_actions: (int) Action dimension
+    :index: (int) Index to keep track of object instance during tournament selection and mutation
+    :h_size: (List[int]) Network hidden layers size
+    :batch_size: (int) Size of batched sample from replay buffer for learning
+    :lr: (float) Learning rate for optimizer
+    :gamma: (float) Discount factor
+    :tau: (float) For soft update of target network parameters
+    :mutation: (str) Most recent mutation to agent
+    :device: (str) Device for accelerated computing, 'cpu' or 'cuda'
+    """
+    def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
         self.algo = 'DQN'
         
         self.n_states = n_states
@@ -16,7 +30,6 @@ class DQN():
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
-        self.learn_step = learn_step
         self.tau = tau
         self.mut = mutation
         self.device = device
@@ -99,7 +112,6 @@ class DQN():
                             batch_size=self.batch_size,
                             lr=self.lr,
                             gamma=self.gamma,
-                            learn_step=self.learn_step,
                             tau=self.tau,
                             device=self.device,
                            )
@@ -123,7 +135,6 @@ class DQN():
                     'batch_size': self.batch_size,
                     'lr': self.lr,
                     'gamma': self.gamma,
-                    'learn_step': self.learn_step,
                     'tau': self.tau,
                     'mutation': self.mut,
                     'index': self.index, 
@@ -142,7 +153,6 @@ class DQN():
         self.batch_size = checkpoint['batch_size']
         self.lr = checkpoint['lr']
         self.gamma = checkpoint['gamma']
-        self.learn_step = checkpoint['learn_step']
         self.tau = checkpoint['tau']
         self.mut = checkpoint['mutation']
         self.index = checkpoint['index']
