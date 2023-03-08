@@ -1,4 +1,4 @@
-Usage
+Get started
 =====
 
 .. _install:
