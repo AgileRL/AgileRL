@@ -58,4 +58,10 @@ Parameters
 
 .. autoclass:: agilerl.algorithms.dqn
 
+aaaaa
+
+.. autoclass:: agilerl.algorithms.DQN
+
+bbb
+
 .. autosummary::
