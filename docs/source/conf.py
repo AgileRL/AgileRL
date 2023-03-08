@@ -35,6 +35,7 @@ html_logo = "https://user-images.githubusercontent.com/47857277/223126514-8b3131
 html_theme_options = {
     'logo_only': False,
     'display_version': False,
+    'navigation_depth': 3
 }
 
 # -- Options for EPUB output
