@@ -5,9 +5,6 @@ AgileRL is intially focused on reducing the time taken for training models and h
 for reinforcement learning. Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, 
 without requiring numerous training runs. 
 
-Contents
---------
-
 .. toctree::
    :maxdepth: 2
 
