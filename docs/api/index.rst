@@ -8,5 +8,5 @@ API
    components/index
    hpo/index
    networks/index
-   training
+   train
    utils
