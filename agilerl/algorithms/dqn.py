@@ -27,7 +27,7 @@ class DQN():
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults t0 'cpu'
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
     def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):

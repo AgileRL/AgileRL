@@ -30,7 +30,7 @@ class DDPG():
         :type mutation: str, optional
         :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
         :type policy_freq: int, optional
-        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults t0 'cpu'
+        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
         :type device: str, optional
         """
         self.algo = 'DDPG'
