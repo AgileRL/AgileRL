@@ -2,11 +2,12 @@
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png height="120">
 </p>
-<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.</p>
+<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>. Join the <a href="https://discord.gg/eB8HyTA2ux">Discord Server</a> to collaborate.</p>
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://agilerl.readthedocs.io/en/latest/?badge=latest)
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
+[![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
 This is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
   
@@ -16,11 +17,11 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
 
 ## Get Started
 Install as a package with pip: 
-```
+```bash
 pip install agilerl
 ```
 Or install in development mode: (Recommended due to nascent nature of this library)
-```
+```bash
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -r requirements.txt
 ```
