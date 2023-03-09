@@ -25,7 +25,7 @@ class Mutations():
     :type mutation_sd: float
     :param rand_seed: Random seed for repeatability, defaults to None
     :type rand_seed: int, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults t0 'cpu'
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
     def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, activation, rl_hp, rl_hp_selection, mutation_sd, rand_seed=None, device='cpu'):

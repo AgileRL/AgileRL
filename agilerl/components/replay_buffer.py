@@ -12,7 +12,7 @@ class ReplayBuffer():
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults t0 'cpu'
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
     def __init__(self, n_actions, memory_size, field_names, device='cpu'):
