@@ -4,6 +4,47 @@ import wandb
 from datetime import datetime
 
 def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
+    """The general training function. Returns trained population of agents and their fitnesses. 
+
+    :param env: The environment to train in. Can be vectorized.
+    :type env: Gym-style environment
+    :param env_name: Environment name
+    :type env_name: str
+    :param algo: RL algorithm name
+    :type algo: str
+    :param pop: Population of agents
+    :type pop: List[object]
+    :param memory: Experience Replay Buffer
+    :type memory: object
+    :param n_episodes: Maximum number of training episodes, defaults to 2000
+    :type n_episodes: int, optional
+    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
+    :type max_steps: int, optional
+    :param evo_epochs: Evolution frequency (episodes), defaults to 5
+    :type evo_epochs: int, optional
+    :param evo_loop: Number of evaluation episodes, defaults to 1
+    :type evo_loop: int, optional
+    :param eps_start: Maximum exploration - initial epsilon value, defaults to 1.0
+    :type eps_start: float, optional
+    :param eps_end: Minimum exploration - final epsilon value, defaults to 0.1
+    :type eps_end: float, optional
+    :param eps_decay: Epsilon decay per episode, defaults to 0.995
+    :type eps_decay: float, optional
+    :param target: Target score for early stopping, defaults to 200.
+    :type target: float, optional
+    :param tournament: Tournament selection object, defaults to None
+    :type tournament: object, optional
+    :param mutation: Mutation object, defaults to None
+    :type mutation: object, optional
+    :param checkpoint: Checkpoint frequency (episodes), defaults to None
+    :type checkpoint: int, optional
+    :param checkpoint_path: Location to save checkpoint, defaults to None
+    :type checkpoint_path: str, optional
+    :param wb: Weights & Biases tracking
+    :type wb: bool
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    """
     if wb:
         wandb.init(
             # set the wandb project where this run will be logged
