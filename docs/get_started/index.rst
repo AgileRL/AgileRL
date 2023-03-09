@@ -10,16 +10,16 @@ To use AgileRL, first download the source code and install requirements.
 
 Install as a package with pip: 
 
-.. code-block:: console
+.. code-block:: bash
 
-   $ pip install agilerl
+   pip install agilerl
 
 Or install in development mode: (Recommended due to nascent nature of this library)
 
-.. code-block:: console
+.. code-block:: bash
 
-   $ git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-   $ pip install -r requirements.txt
+   git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+   pip install -r requirements.txt
 
 
 Quickstart: Training an RL agent

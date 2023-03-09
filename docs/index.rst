@@ -6,7 +6,7 @@ Welcome to AgileRL's documentation!
    :align: center
 
 
-|License| |Docs status| |PyPI download total|
+|License| |Docs status| |PyPI download total| |Discord|
 
 .. |License| image:: https://img.shields.io/badge/License-Apache_2.0-blue.svg
    :target: https://opensource.org/licenses/Apache-2.0
@@ -16,6 +16,9 @@ Welcome to AgileRL's documentation!
    
 .. |PyPI download total| image:: https://static.pepy.tech/badge/agilerl
    :target: https://pypi.python.org/pypi/agilerl/
+
+.. |Discord| image:: https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat
+   :target: https://discord.gg/eB8HyTA2ux
 
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
