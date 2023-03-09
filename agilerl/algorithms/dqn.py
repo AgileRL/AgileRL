@@ -55,7 +55,15 @@ class DQN():
         self.optimizer = optim.Adam(self.net_eval.parameters(), lr=self.lr)
         self.criterion = nn.MSELoss()
 
-    def getAction(self, state, epsilon):
+    def getAction(self, state, epsilon=0):
+        """Returns the next action to take in the environment. Epsilon is the probability of taking a random action, used for exploration.
+        For epsilon-greedy behaviour, set epsilon to 0.
+
+        :param state: State observation, or multiple observations in a batch
+        :type state: float or List[float]
+        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :type epsilon: float, optional
+        """
         state = torch.from_numpy(state).float().to(self.device)
         if len(state.size())<2:
             state = state.unsqueeze(0)

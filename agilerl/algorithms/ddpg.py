@@ -38,7 +38,7 @@ class DDPG():
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
         self.criterion = nn.MSELoss()
 
-    def getAction(self, state, epsilon):
+    def getAction(self, state, epsilon=0):
         state = torch.from_numpy(state).float().to(self.device)
         if len(state.size())<2:
             state = state.unsqueeze(0)
