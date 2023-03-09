@@ -59,9 +59,3 @@ Parameters
 .. autoclass:: agilerl.algorithms.dqn.DQN
   :members:
   :inherited-members:
-
-aaaa
-
-.. autoclass:: DQN
-  :members:
-  :inherited-members:

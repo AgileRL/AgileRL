@@ -32,7 +32,6 @@ class DQN():
     """
     def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
         self.algo = 'DQN'
-        
         self.n_states = n_states
         self.n_actions = n_actions
         self.h_size = h_size
@@ -82,6 +81,11 @@ class DQN():
         return action
 
     def learn(self, experiences):
+        """Updates agent network parameters to learn from experiences.
+
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
+        :type state: List[torch.Tensor[float]]
+        """
         states, actions, rewards, next_states, dones = experiences
 
         q_target = self.net_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
@@ -98,10 +102,21 @@ class DQN():
         self.softUpdate()
 
     def softUpdate(self):
+        """Soft updates target network.
+        """
         for eval_param, target_param in zip(self.net_eval.parameters(), self.net_target.parameters()):
             target_param.data.copy_(self.tau*eval_param.data + (1.0-self.tau)*target_param.data)
 
     def test(self, env, max_steps=500, loop=3):
+        """Returns mean test score of agent in environment with epsilon-greedy policy.
+
+        :param env: The environment to be tested in
+        :type env: Gym-style environment
+        :param max_steps: Maximum number of testing steps, defaults to 500
+        :type max_steps: int, optional
+        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
+        :type loop: int, optional
+        """
         with torch.no_grad():
             rewards = []
             for i in range(loop):
@@ -119,6 +134,11 @@ class DQN():
         return mean_fit
 
     def clone(self, index=None):
+        """Returns cloned agent identical to self.
+
+        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
+        :type index: int, optional
+        """
         if index is None:
             index = self.index
 
@@ -143,6 +163,11 @@ class DQN():
         return clone
     
     def saveCheckpoint(self, path):
+        """Saves a checkpoint of agent properties and network weights to path.
+
+        :param path: Location to save checkpoint at
+        :type path: string
+        """
         torch.save({
                     'net_eval_init_dict': self.net_eval.init_dict,
                     'net_eval_state_dict': self.net_eval.state_dict(),
@@ -161,6 +186,11 @@ class DQN():
                     }, path)
         
     def loadCheckpoint(self, path):
+        """Loads saved agent properties and network weights from checkpoint.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
         checkpoint = torch.load(path)
         self.net_eval = EvolvableMLP(**checkpoint['net_eval_init_dict'])
         self.net_eval.load_state_dict(checkpoint['net_eval_state_dict'])
