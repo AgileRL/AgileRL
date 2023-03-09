@@ -10,16 +10,26 @@ class DQN():
     """
     The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
-    :param n_states: (int) State observation dimension
-    :param n_actions: (int) Action dimension
-    :index: (int) Index to keep track of object instance during tournament selection and mutation
-    :h_size: (List[int]) Network hidden layers size
-    :batch_size: (int) Size of batched sample from replay buffer for learning
-    :lr: (float) Learning rate for optimizer
-    :gamma: (float) Discount factor
-    :tau: (float) For soft update of target network parameters
-    :mutation: (str) Most recent mutation to agent
-    :device: (str) Device for accelerated computing, 'cpu' or 'cuda'
+    :param n_states: State observation dimension
+    :type n_states: int
+    :param n_actions: Action dimension
+    :type n_actions: int
+    :param index: Index to keep track of object instance during tournament selection and mutation
+    :type index: int, optional
+    :param h_size: Network hidden layers size
+    :type h_size: List[int], optional
+    :param batch_size: Size of batched sample from replay buffer for learning
+    :type batch_size: int, optional
+    :param lr: Learning rate for optimizer
+    :type lr: float, optional
+    :param gamma: Discount factor
+    :type gamma: float, optional
+    :param tau: For soft update of target network parameters
+    :type tau: float, optional
+    :param mutation: Most recent mutation to agent
+    :type mutation: str, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda'
+    :type device: str, optional
     """
     def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
         self.algo = 'DQN'
