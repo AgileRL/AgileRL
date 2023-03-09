@@ -7,28 +7,27 @@ import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 class DQN():
-    """
-    The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
+    """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
     :param n_states: State observation dimension
     :type n_states: int
     :param n_actions: Action dimension
     :type n_actions: int
-    :param index: Index to keep track of object instance during tournament selection and mutation
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param h_size: Network hidden layers size
+    :param h_size: Network hidden layers size, defaults to [64,64]
     :type h_size: List[int], optional
-    :param batch_size: Size of batched sample from replay buffer for learning
+    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer
+    :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param gamma: Discount factor
+    :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
-    :param tau: For soft update of target network parameters
+    :param tau: For soft update of target network parameters, defaults to 1e-3
     :type tau: float, optional
-    :param mutation: Most recent mutation to agent
+    :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda'
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults t0 'cpu'
     :type device: str, optional
     """
     def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
