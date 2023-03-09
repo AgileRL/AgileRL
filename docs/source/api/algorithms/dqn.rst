@@ -66,4 +66,10 @@ bbb
 
 .. autoclass:: agilerl.algorithms.dqn.DQN
 
+.. autoclass:: DQN
+
+.. autoclass:: DQN
+  :members:
+  :inherited-members:
+
 .. autosummary::
