@@ -4,11 +4,33 @@ import matplotlib.pyplot as plt
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ddpg import DDPG
 
-def makeVectEnvs(env_name, num_envs):
+def makeVectEnvs(env_name, num_envs=1):
+    """Returns async-vectorized gym environments.
+
+    :param env_name: Gym environment name
+    :type env_name: str
+    :param num_ens: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
+    """
     return gym.vector.AsyncVectorEnv([lambda: gym.make(env_name) for i in range(num_envs)])
  
 
 def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1, device='cpu'):
+    """Returns population of identical agents.
+    
+    :param algo: RL algorithm
+    :type algo: str
+    :param num_states: State observation dimension
+    :type num_states: int
+    :param num_actions: Action dimension
+    :type num_actions: int
+    :param INIT_HP: Initial hyperparameters
+    :type INIT_HP: dict
+    :param population_size: Number of agents in population, defaults to 1
+    :type population_size: int, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    """
     population = []
 
     if algo == 'DQN':
@@ -45,18 +67,20 @@ def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1,
     return population
 
 def printHyperparams(pop):
+    """Prints current hyperparameters of agents in a population and their fitnesses.
+
+    :param pop: Population of agents
+    :type pop: List[object]
+    """
     for agent in pop:
         print('Agent ID: {}    Mean 100 fitness: {:.2f}    lr: {}    Batch Size: {}'.format(agent.index, np.mean(agent.fitness[-100:]), agent.lr, agent.batch_size))
-    
-def plotScore(scores, update_freq):
-    episodes = [i*update_freq for i, x in enumerate(scores)]
-    plt.figure()
-    plt.plot(episodes, scores)
-    plt.title("Score History")
-    plt.xlabel("Episodes")
-    plt.show()
 
 def plotPopulationScore(pop):
+    """Plots the fitness scores of agents in a population.
+
+    :param pop: Population of agents
+    :type pop: List[object]
+    """
     plt.figure()
     for agent in pop:
         scores = agent.fitness
