@@ -2,6 +2,17 @@ import numpy as np
 import copy
 
 class TournamentSelection():
+    """The tournament selection class.
+    
+    :param tournament_size: Tournament selection size
+    :type tournament_size: int
+    :param elitism: Elitism in tournament selection
+    :type elitism: bool
+    :param population_size: Number of agents in population
+    :type population_size: int
+    :param evo_step: Number of most recent fitness scores to use in evaluation
+    :type evo_step: int
+    """
 
     def __init__(self, tournament_size, elitism, population_size, evo_step):
         self.tournament_size = tournament_size
@@ -16,6 +27,11 @@ class TournamentSelection():
         return winner
 
     def select(self, population):
+        """Returns best agent and new population of agents following tournament selection.
+        
+        :param population: Population of agents
+        :type population: List[object]
+        """
         last_fitness = [np.mean(indi.fitness[-self.evo_step:]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
 
