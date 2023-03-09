@@ -3,6 +3,31 @@ import numpy as np
 import fastrand
 
 class Mutations():
+    """The Mutations class for evolutionary hyperparameter optimization.
+
+    :param algo: RL algorithm used. Use str e.g. 'DQN' if using AgileRL implementation of algorithm, or provide a dict with names of agent networks
+    :type algo: str or dict
+    :param no_mutation: Relative probability of no mutation
+    :type no_mutation: float
+    :param architecture: Relative probability of architecture mutation
+    :type architecture: float
+    :param new_layer_prob: Relative probability of new layer mutation (type of architecture mutation)
+    :type new_layer_prob: float
+    :param parameters: Relative probability of network parameters mutation
+    :type parameters: float
+    :param activation: Relative probability of activation layer mutation
+    :type activation: float
+    :param rl_hp: Relative probability of learning hyperparameter mutation
+    :type rl_hp: float
+    :param rl_hp_selection: Learning hyperparameter mutations to choose from
+    :type rl_hp_selection: List[str]
+    :param mutation_sd: Mutation strength
+    :type mutation_sd: float
+    :param rand_seed: Random seed for repeatability, defaults to None
+    :type rand_seed: int, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults t0 'cpu'
+    :type device: str, optional
+    """
     def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, activation, rl_hp, rl_hp_selection, mutation_sd, rand_seed=None, device='cpu'):
         self.rng = np.random.RandomState(rand_seed) # Random seed for repeatability
         
@@ -27,11 +52,21 @@ class Mutations():
         self.device = device
 
     def no_mutation(self, individual):
+        """Returns individual from population without mutation.
+        
+        :param individual: Individual agent from population
+        :type individual: object
+        """
         individual.mut = 'None' # No mutation
         return individual
 
     # Generic mutation function - gather mutation options and select from these
     def mutation(self, population):
+        """Returns mutated population.
+
+        :param population: Population of agents
+        :type population: List[object]
+        """
         # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = []
         mutation_proba = []
@@ -83,6 +118,11 @@ class Mutations():
         return mutated_population
 
     def rl_hyperparam_mutation(self, individual):
+        """Returns individual from population with RL hyperparameter mutation.
+        
+        :param individual: Individual agent from population
+        :type individual: object
+        """
         # Learning hyperparameter mutation
         rl_params = self.rl_hp_selection
         mutate_param = self.rng.choice(rl_params, 1)[0] # Select HP to mutate from options
@@ -116,6 +156,11 @@ class Mutations():
         return individual
 
     def activation_mutation(self, individual):
+        """Returns individual from population with activation layer mutation.
+        
+        :param individual: Individual agent from population
+        :type individual: object
+        """
         # Mutate network activation layer
         offspring_actor = getattr(individual, self.algo['actor']['eval'])
         offspring_actor = self._permutate_activation(offspring_actor)   # Mutate activation function
@@ -146,6 +191,11 @@ class Mutations():
         return network.to(self.device)
 
     def parameter_mutation(self, individual):
+        """Returns individual from population with network parameters mutation.
+        
+        :param individual: Individual agent from population
+        :type individual: object
+        """
         # Mutate network parameters
         offspring_actor = getattr(individual, self.algo['actor']['eval'])
         offspring_actor = self.classic_parameter_mutation(offspring_actor) # Network parameter mutation function
@@ -159,6 +209,11 @@ class Mutations():
         return weight
 
     def classic_parameter_mutation(self, network):
+        """Returns network with mutated weights.
+        
+        :param network: Neural network to mutate
+        :type individual: torch.nn.Module
+        """
         # Function to mutate network weights with Gaussian noise
         mut_strength = self.mutation_sd
         num_mutation_frac = 0.1
@@ -202,6 +257,11 @@ class Mutations():
 
 
     def architecture_mutate(self, individual):
+        """Returns individual from population with network architecture mutation.
+        
+        :param individual: Individual agent from population
+        :type individual: object
+        """
         # Mutate network architecture by adding layers or nodes
         offspring_actor = getattr(individual, self.algo['actor']['eval']).clone()
         offspring_critics = [getattr(individual, critic['eval']).clone() for critic in self.algo['critics']]
@@ -226,6 +286,11 @@ class Mutations():
         return individual
 
     def get_algo_nets(self, algo):
+        """Returns dictionary with agent network names.
+        
+        :param algo: RL algorithm
+        :type algo: string
+        """
         # Function to return dictionary with names of agent networks to allow mutation
         if algo == 'DQN':
             nets = {
