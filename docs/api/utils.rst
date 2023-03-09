@@ -1,9 +1,6 @@
 Utils
 =====
 
-Parameters
-------------
-
 .. autofunction:: agilerl.utils.makeVectEnvs
 
 .. autofunction:: agilerl.utils.initialPopulation
