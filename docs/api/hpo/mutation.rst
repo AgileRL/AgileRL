@@ -4,6 +4,6 @@ Mutation
 Parameters
 ------------
 
-.. autoclass:: agilerl.hpo.mutation.Mutation
+.. autoclass:: agilerl.hpo.mutation.Mutations
   :members:
   :inherited-members:

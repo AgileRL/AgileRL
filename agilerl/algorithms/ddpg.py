@@ -67,7 +67,7 @@ class DDPG():
         """Returns the next action to take in the environment. Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
-        :param state: State observation, or multiple observations in a batch
+        :param state: Environment observation, or multiple observations in a batch
         :type state: float or List[float]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
