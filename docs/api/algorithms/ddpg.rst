@@ -57,6 +57,6 @@ Example
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.dpg.DDPG
+.. autoclass:: agilerl.algorithms.ddpg.DDPG
   :members:
   :inherited-members:
