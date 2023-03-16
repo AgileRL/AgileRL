@@ -75,15 +75,21 @@ First, use ``utils.initialPopulation()`` to create a list of agents - our popula
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
-    num_states = env.single_observation_space.shape[0]
     try:
-        num_actions = env.single_action_space.n
+        num_states = env.single_observation_space.n         # Discrete observation space
+        one_hot = True                                      # Requires one-hot encoding
     except:
-        num_actions = env.single_action_space.shape[0]
+        num_states = env.single_observation_space.shape[0]  # Continuous observation space
+        one_hot = False                                     # Does not require one-hot encoding
+    try:
+        num_actions = env.single_action_space.n             # Discrete action space
+    except:
+        num_actions = env.single_action_space.shape[0]      # Continuous action space
 
     agent_pop = initialPopulation(INIT_HP['ALGO'],
         num_states,
         num_actions,
+        one_hot,
         INIT_HP,
         INIT_HP['POP_SIZE'],
         device=device)

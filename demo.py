@@ -16,16 +16,29 @@ if __name__ == "__main__":
                 'LEARN_STEP': 1,        # Learning frequency
                 'TAU': 1e-3             # For soft update of target network parameters
               }
+    
+    env = makeVectEnvs('Taxi-v3', num_envs=16)   # Create environment
+    try:
+        num_states = env.single_observation_space.n         # Discrete observation space
+        one_hot = True                                       # Requires one-hot encoding
+    except:
+        num_states = env.single_observation_space.shape[0]  # Continuous observation space
+        one_hot = False                                      # Does not require one-hot encoding
+    try:
+        num_actions = env.single_action_space.n             # Discrete action space
+    except:
+        num_actions = env.single_action_space.shape[0]      # Continuous action space
 
-    pop = initialPopulation(algo='DQN',             # Algorithm
-                            num_states=8,           # State dimension
-                            num_actions=4,          # Action dimension
-                            INIT_HP=INIT_HP,        # Initial hyperparameters
-                            population_size=6,      # Population size
+    pop = initialPopulation(algo='DQN',                 # Algorithm
+                            num_states=num_states,      # State dimension
+                            num_actions=num_actions,    # Action dimension
+                            one_hot=one_hot,            # One-hot encoding
+                            INIT_HP=INIT_HP,            # Initial hyperparameters
+                            population_size=6,          # Population size
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(n_actions=4,              # Number of agent actions
+    memory = ReplayBuffer(n_actions=num_actions,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
@@ -59,8 +72,6 @@ if __name__ == "__main__":
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
-
     # TRAINING LOOP
     for idx_epi in range(max_episodes):
         for agent in pop:   # Loop through population
@@ -69,7 +80,6 @@ if __name__ == "__main__":
             for idx_step in range(max_steps):
                 action = agent.getAction(state, epsilon)    # Get next action from agent
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
-                
                 # Save experience to replay buffer
                 memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 

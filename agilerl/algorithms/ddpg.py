@@ -7,37 +7,40 @@ import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 class DDPG():
-    def __init__(self, n_states, n_actions, index, h_size=[64,64], batch_size=64, lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
-        """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
+    """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
-        :param n_states: State observation dimension
-        :type n_states: int
-        :param n_actions: Action dimension
-        :type n_actions: int
-        :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
-        :type index: int, optional
-        :param h_size: Network hidden layers size, defaults to [64,64]
-        :type h_size: List[int], optional
-        :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
-        :type batch_size: int, optional
-        :param lr: Learning rate for optimizer, defaults to 1e-4
-        :type lr: float, optional
-        :param learn_step: Learning frequency, defaults to 5
-        :type learn_step: int, optional
-        :param gamma: Discount factor, defaults to 0.99
-        :type gamma: float, optional
-        :param tau: For soft update of target network parameters, defaults to 1e-3
-        :type tau: float, optional
-        :param mutation: Most recent mutation to agent, defaults to None
-        :type mutation: str, optional
-        :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
-        :type policy_freq: int, optional
-        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-        :type device: str, optional
-        """
+    :param n_states: State observation dimension
+    :type n_states: int
+    :param n_actions: Action dimension
+    :type n_actions: int
+    :param one_hot: One-hot encoding, used with discrete observation spaces
+    :type one_hot: bool
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
+    :type index: int, optional
+    :param h_size: Network hidden layers size, defaults to [64,64]
+    :type h_size: List[int], optional
+    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
+    :type batch_size: int, optional
+    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :type lr: float, optional
+    :param learn_step: Learning frequency, defaults to 5
+    :type learn_step: int, optional
+    :param gamma: Discount factor, defaults to 0.99
+    :type gamma: float, optional
+    :param tau: For soft update of target network parameters, defaults to 1e-3
+    :type tau: float, optional
+    :param mutation: Most recent mutation to agent, defaults to None
+    :type mutation: str, optional
+    :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
+    :type policy_freq: int, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    """
+    def __init__(self, n_states, n_actions, one_hot, index, h_size=[64,64], batch_size=64, lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
         self.algo = 'DDPG'
         self.n_states = n_states
         self.n_actions = n_actions
+        self.one_hot = one_hot
         self.h_size = h_size
         self.batch_size = batch_size
         self.lr = lr
@@ -76,6 +79,10 @@ class DDPG():
         :type epsilon: float, optional
         """
         state = torch.from_numpy(state).float().to(self.device)
+
+        if self.one_hot:
+            state = nn.functional.one_hot(state.long(), num_classes=self.n_states).float().squeeze()
+        
         if len(state.size())<2:
             state = state.unsqueeze(0)
 
@@ -103,6 +110,10 @@ class DDPG():
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
+
+        if self.one_hot:
+            states = nn.functional.one_hot(states.long(), num_classes=self.n_states).float().squeeze()
+            next_states = nn.functional.one_hot(next_states.long(), num_classes=self.n_states).float().squeeze()
 
         input_combined = torch.cat([states, actions], 1)
         q_value = self.critic(input_combined)
@@ -176,6 +187,7 @@ class DDPG():
 
         clone = type(self)(n_states=self.n_states,
                             n_actions=self.n_actions,
+                            one_hot=self.one_hot,
                             index=index, 
                             h_size = self.h_size, 
                             batch_size=self.batch_size,

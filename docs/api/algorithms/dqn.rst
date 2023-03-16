@@ -37,7 +37,7 @@ Example
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(n_actions=4, memory_size=10000, field_names=field_names)
 
-    agent = DQN(n_states=8, n_actions=4)   # Create DQN agent
+    agent = DQN(n_states=8, n_actions=4, one_hot=False)   # Create DQN agent
 
     state = env.reset()[0]  # Reset environment at start of episode
     while True:
