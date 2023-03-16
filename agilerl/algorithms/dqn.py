@@ -21,6 +21,8 @@ class DQN():
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
+    :param learn_step: Learning frequency, defaults to 5
+    :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 1e-3
@@ -30,7 +32,7 @@ class DQN():
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
+    def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
         self.algo = 'DQN'
         self.n_states = n_states
         self.n_actions = n_actions
