@@ -13,6 +13,8 @@ class DQN():
     :type n_states: int
     :param n_actions: Action dimension
     :type n_actions: int
+    :param one_hot: One-hot encoding, used with discrete observation spaces
+    :type one_hot: bool
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param h_size: Network hidden layers size, defaults to [64,64]
@@ -32,10 +34,11 @@ class DQN():
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    def __init__(self, n_states, n_actions, index=0, h_size=[64,64], batch_size=64, lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
+    def __init__(self, n_states, n_actions, one_hot, index=0, h_size=[64,64], batch_size=64, lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
         self.algo = 'DQN'
         self.n_states = n_states
         self.n_actions = n_actions
+        self.one_hot = one_hot
         self.h_size = h_size
         self.batch_size = batch_size
         self.lr = lr
@@ -67,9 +70,13 @@ class DQN():
         :type epsilon: float, optional
         """
         state = torch.from_numpy(state).float().to(self.device)
+
+        if self.one_hot:
+            state = nn.functional.one_hot(state.long(), num_classes=self.n_states).float().squeeze()
+        
         if len(state.size())<2:
             state = state.unsqueeze(0)
-            
+
         self.net_eval.eval()
         with torch.no_grad():
             action_values = self.net_eval(state)
@@ -90,6 +97,10 @@ class DQN():
         :type state: List[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
+
+        if self.one_hot:
+            states = nn.functional.one_hot(states.long(), num_classes=self.n_states).float().squeeze()
+            next_states = nn.functional.one_hot(next_states.long(), num_classes=self.n_states).float().squeeze()
 
         q_target = self.net_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
         y_j = rewards + self.gamma * q_target * (1 - dones)          # target, if terminal then y_j = rewards
@@ -145,6 +156,7 @@ class DQN():
 
         clone = type(self)(n_states=self.n_states,
                             n_actions=self.n_actions,
+                            one_hot=self.one_hot,
                             index=index, 
                             h_size = self.h_size, 
                             batch_size=self.batch_size,

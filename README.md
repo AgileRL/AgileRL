@@ -79,7 +79,12 @@ import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
-num_states = env.single_observation_space.shape[0]
+try:
+    num_states = env.single_observation_space.n
+    one_hot = True
+except:
+    num_states = env.single_observation_space.shape[0]
+    one_hot = True
 try:
     num_actions = env.single_action_space.n
 except:
@@ -88,6 +93,7 @@ except:
 agent_pop = initialPopulation(INIT_HP['ALGO'],
   num_states,
   num_actions,
+  one_hot,
   INIT_HP,
   INIT_HP['POP_SIZE'],
   device=device)
@@ -160,15 +166,28 @@ INIT_HP = {
             'TAU': 1e-3             # For soft update of target network parameters
             }
 
-pop = initialPopulation(algo='DQN',           # Algorithm
-                        num_states=8,         # State dimension
-                        num_actions=4,        # Action dimension
-                        INIT_HP=INIT_HP,      # Initial hyperparameters
-                        population_size=6,    # Population size
+env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
+try:
+    num_states = env.single_observation_space.n         # Discrete observation space
+    one_hot = True                                      # Requires one-hot encoding
+except:
+    num_states = env.single_observation_space.shape[0]  # Continuous observation space
+    one_hot = False                                     # Does not require one-hot encoding
+try:
+    num_actions = env.single_action_space.n             # Discrete action space
+except:
+    num_actions = env.single_action_space.shape[0]      # Continuous action space
+
+pop = initialPopulation(algo='DQN',                 # Algorithm
+                        num_states=num_states,      # State dimension
+                        num_actions=num_actions,    # Action dimension
+                        one_hot=one_hot,            # One-hot encoding
+                        INIT_HP=INIT_HP,            # Initial hyperparameters
+                        population_size=6,          # Population size
                         device=torch.device("cuda"))
 
 field_names = ["state", "action", "reward", "next_state", "done"]
-memory = ReplayBuffer(n_actions=4,              # Number of agent actions
+memory = ReplayBuffer(n_actions=num_actions,    # Number of agent actions
                       memory_size=10000,        # Max replay buffer size
                       field_names=field_names,  # Field names to store in memory
                       device=torch.device("cuda"))

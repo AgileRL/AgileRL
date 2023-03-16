@@ -15,7 +15,7 @@ def makeVectEnvs(env_name, num_envs=1):
     return gym.vector.AsyncVectorEnv([lambda: gym.make(env_name) for i in range(num_envs)])
  
 
-def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1, device='cpu'):
+def initialPopulation(algo, num_states, num_actions, one_hot, INIT_HP, population_size=1, device='cpu'):
     """Returns population of identical agents.
     
     :param algo: RL algorithm
@@ -24,6 +24,8 @@ def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1,
     :type num_states: int
     :param num_actions: Action dimension
     :type num_actions: int
+    :param one_hot: One-hot encoding
+    :type one_hot: bool
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
     :param population_size: Number of agents in population, defaults to 1
@@ -38,6 +40,7 @@ def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1,
             agent = DQN(
                 n_states = num_states,
                 n_actions = num_actions,
+                one_hot = one_hot,
                 index = idx,
                 h_size = INIT_HP['HIDDEN_SIZE'],
                 batch_size = INIT_HP['BATCH_SIZE'],
@@ -54,6 +57,7 @@ def initialPopulation(algo, num_states, num_actions, INIT_HP, population_size=1,
             agent = DDPG(
                 n_states = num_states,
                 n_actions = num_actions,
+                one_hot = one_hot,
                 index = idx,
                 h_size = INIT_HP['HIDDEN_SIZE'],
                 batch_size = INIT_HP['BATCH_SIZE'],
