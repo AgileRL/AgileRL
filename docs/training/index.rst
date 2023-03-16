@@ -28,7 +28,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils import initialPopulation
+    from agilerl.utils import makeVectEnvs, initialPopulation
     import torch
 
     INIT_HP = {
@@ -40,11 +40,25 @@ are more likely to remain present in the population. The sequence of evolution (
                 'TAU': 1e-3             # For soft update of target network parameters
               }
 
-    agent_pop = initialPopulation(algo='DQN',           # Algorithm
-                                  num_states=8,         # State dimension
-                                  num_actions=4,        # Action dimension
-                                  INIT_HP=INIT_HP,      # Initial hyperparameters
-                                  population_size=6,    # Population size
+    env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
+    try:
+        num_states = env.single_observation_space.n         # Discrete observation space
+        one_hot = True                                      # Requires one-hot encoding
+    except:
+        num_states = env.single_observation_space.shape[0]  # Continuous observation space
+        one_hot = False                                     # Does not require one-hot encoding
+    try:
+        num_actions = env.single_action_space.n             # Discrete action space
+    except:
+        num_actions = env.single_action_space.shape[0]      # Continuous action space
+
+
+    agent_pop = initialPopulation(algo='DQN',               # Algorithm
+                                  num_states=num_states,    # State dimension
+                                  num_actions=num_actions,  # Action dimension
+                                  one_hot=one_hot,          # One-hot encoding
+                                  INIT_HP=INIT_HP,          # Initial hyperparameters
+                                  population_size=6,        # Population size
                                   device=torch.device("cuda"))
 
 
@@ -67,7 +81,7 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
     import torch
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(n_actions=4,              # Number of agent actions
+    memory = ReplayBuffer(n_actions=num_actions,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
@@ -147,8 +161,6 @@ easiest to use our training function, which returns a population of trained agen
     import gymnasium as gym
     import torch
 
-    env = gym.make('LunarLander-v2', render_mode='rgb_array')
-
     trained_pop, pop_fitnesses = train(env=env,                     # Gym-style environment
                                        env_name='LunarLander-v2',   # Environment name
                                        algo='DQN',                  # Algorithm
@@ -188,6 +200,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     pop = initialPopulation(algo='DQN',           # Algorithm
                             num_states=8,         # State dimension
                             num_actions=4,        # Action dimension
+                            one_hot=False,        # One-hot encoding
                             INIT_HP=INIT_HP,      # Initial hyperparameters
                             population_size=6,    # Population size
                             device=torch.device("cuda"))
