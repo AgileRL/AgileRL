@@ -7,7 +7,7 @@ import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 class DDPG():
-    def __init__(self, n_states, n_actions, index, h_size=[64,64], batch_size=64, lr=1e-4, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
+    def __init__(self, n_states, n_actions, index, h_size=[64,64], batch_size=64, lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, device='cpu'):
         """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
         :param n_states: State observation dimension
@@ -22,6 +22,8 @@ class DDPG():
         :type batch_size: int, optional
         :param lr: Learning rate for optimizer, defaults to 1e-4
         :type lr: float, optional
+        :param learn_step: Learning frequency, defaults to 5
+        :type learn_step: int, optional
         :param gamma: Discount factor, defaults to 0.99
         :type gamma: float, optional
         :param tau: For soft update of target network parameters, defaults to 1e-3
@@ -39,6 +41,7 @@ class DDPG():
         self.h_size = h_size
         self.batch_size = batch_size
         self.lr = lr
+        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mutation
@@ -157,8 +160,6 @@ class DDPG():
                     action = self.getAction(state, epsilon=0)
                     state, reward, done, _, _ = env.step(action)
                     score += reward
-                    if done:
-                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
