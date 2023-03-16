@@ -138,7 +138,6 @@ The easiest training loop implementation is to use our ``training.train()`` func
         evo_epochs=INIT_HP['EVO_EPOCHS'],
         evo_loop=1,
         target=INIT_HP['TARGET_SCORE'],
-        chkpt=INIT_HP['SAVE_CHKPT'],
         tournament=tournament,
         mutation=mutations,
         wb=INIT_HP['WANDB'],
