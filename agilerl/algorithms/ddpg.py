@@ -160,8 +160,6 @@ class DDPG():
                     action = self.getAction(state, epsilon=0)
                     state, reward, done, _, _ = env.step(action)
                     score += reward
-                    if done:
-                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

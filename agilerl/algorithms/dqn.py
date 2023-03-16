@@ -39,6 +39,7 @@ class DQN():
         self.h_size = h_size
         self.batch_size = batch_size
         self.lr = lr
+        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mutation
@@ -128,8 +129,6 @@ class DQN():
                     action = self.getAction(state, epsilon=0)
                     state, reward, done, _, _ = env.step(action)
                     score += reward
-                    if done:
-                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
