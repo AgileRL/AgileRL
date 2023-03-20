@@ -84,7 +84,7 @@ try:
     one_hot = True
 except:
     num_states = env.single_observation_space.shape[0]
-    one_hot = True
+    one_hot = False
 try:
     num_actions = env.single_action_space.n
 except:
