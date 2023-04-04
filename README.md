@@ -40,18 +40,22 @@ Or install in development mode: (Recommended due to nascent nature of this libra
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -r requirements.txt
 ```
+Demo:
+```bash
+python demo.py
+```
 
 ## Algorithms implemented (more coming soon!)
   * DQN
   * DDPG
 
 ## Train an agent
-Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities. For example:
+Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
 ```python
 INIT_HP = {
     'ENV_NAME': 'LunarLander-v2',   # Gym environment name
     'ALGO': 'DQN',                  # Algorithm
-    'HIDDEN_SIZE': [64,64],         # Actor network hidden size
+    'CHANNELS_LAST': False,         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     'BATCH_SIZE': 256,              # Batch size
     'LR': 1e-3,                     # Learning rate
     'EPISODES': 2000,               # Max no. episodes
@@ -82,6 +86,12 @@ MUTATION_PARAMS = {
     'RAND_SEED': 1,                             # Random seed
 }
 ```
+```python
+NET_CONFIG = {
+    'arch': 'mlp',      # Network architecture
+    'h_size': [32, 32], # Actor hidden size
+}
+```
 First, use <code>utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```python
 from agilerl.utils import makeVectEnvs, initialPopulation
@@ -91,23 +101,27 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
 try:
-    num_states = env.single_observation_space.n
-    one_hot = True
+    state_dim = env.single_observation_space.n          # Discrete observation space
+    one_hot = True                                      # Requires one-hot encoding
 except:
-    num_states = env.single_observation_space.shape[0]
-    one_hot = False
+    state_dim = env.single_observation_space.shape      # Continuous observation space
+    one_hot = False                                     # Does not require one-hot encoding
 try:
-    num_actions = env.single_action_space.n
+    action_dim = env.single_action_space.n             # Discrete action space
 except:
-    num_actions = env.single_action_space.shape[0]
+    action_dim = env.single_action_space.shape[0]      # Continuous action space
 
-agent_pop = initialPopulation(INIT_HP['ALGO'],
-  num_states,
-  num_actions,
-  one_hot,
-  INIT_HP,
-  INIT_HP['POP_SIZE'],
-  device=device)
+if INIT_HP['CHANNELS_LAST']:
+    state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
+agent_pop = initialPopulation(algo=INIT_HP['ALGO'],                 # Algorithm
+                              state_dim=state_dim,                  # State dimension
+                              action_dim=action_dim,                # Action dimension
+                              one_hot=one_hot,                      # One-hot encoding
+                              net_config=NET_CONFIG,                # Network configuration
+                              INIT_HP=INIT_HP,                      # Initial hyperparameters
+                              population_size=INIT_HP['POP_SIZE'],  # Population size
+                              device=torch.device("cuda"))
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 ```python
@@ -117,42 +131,47 @@ from agilerl.hpo.mutation import Mutations
 import torch
 
 field_names = ["state", "action", "reward", "next_state", "done"]
-memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
+memory = ReplayBuffer(action_dim=action_dim,                # Number of agent actions
+                      memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
+                      field_names=field_names,              # Field names to store in memory
+                      device=torch.device("cuda"))
 
-tournament = TournamentSelection(INIT_HP['TOURN_SIZE'],
-    INIT_HP['ELITISM'],
-    INIT_HP['POP_SIZE'],
-    INIT_HP['EVO_EPOCHS'])
-    
-mutations = Mutations(algo=INIT_HP['ALGO'],
-    no_mutation=MUTATION_PARAMS['NO_MUT'], 
-    architecture=MUTATION_PARAMS['ARCH_MUT'], 
-    new_layer_prob=MUTATION_PARAMS['NEW_LAYER'], 
-    parameters=MUTATION_PARAMS['PARAMS_MUT'], 
-    activation=MUTATION_PARAMS['ACT_MUT'], 
-    rl_hp=MUTATION_PARAMS['RL_HP_MUT'], 
-    rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'], 
-    mutation_sd=MUTATION_PARAMS['MUT_SD'], 
-    rand_seed=MUTATION_PARAMS['RAND_SEED'],
-    device=device)
+tournament = TournamentSelection(tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
+                                 elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
+                                 population_size=INIT_HP['POP_SIZE'],   # Population size
+                                 evo_step=INIT_HP['EVO_EPOCHS'])        # Evaluate using last N fitness scores
+
+mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Algorithm
+                      no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
+                      architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
+                      new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
+                      parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
+                      activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
+                      rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
+                      rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'],   # Learning HPs to choose from
+                      mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
+                      arch=NET_CONFIG['arch'],                              # Network architecture
+                      rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
+                      device=torch.device("cuda"))
 ```
 The easiest training loop implementation is to use our <code>training.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
 ```python
 from agilerl.training.train import train
 
-trained_pop, pop_fitnesses = train(env,
-    INIT_HP['ENV_NAME'],
-    INIT_HP['ALGO'],
-    agent_pop,
-    memory=memory,
-    n_episodes=INIT_HP['EPISODES'],
-    evo_epochs=INIT_HP['EVO_EPOCHS'],
-    evo_loop=1,
-    target=INIT_HP['TARGET_SCORE'],
-    tournament=tournament,
-    mutation=mutations,
-    wb=INIT_HP['WANDB'],
-    device=device)
+trained_pop, pop_fitnesses = train(env=env,                             # Gym-style environment
+                                   env_name=INIT_HP['ENV_NAME'],        # Environment name
+                                   algo=INIT_HP['ALGO'],                # Algorithm
+                                   pop=agent_pop,                       # Population of agents
+                                   memory=memory,                       # Replay buffer
+                                   swap_channels=False,                 # Swap image channel from last to first
+                                   n_episodes=INIT_HP['EPISODES'],      # Max number of training episodes
+                                   evo_epochs=INIT_HP['EVO_EPOCHS'],    # Evolution frequency
+                                   evo_loop=1,                          # Number of evaluation episodes per agent
+                                   target=INIT_HP['TARGET_SCORE'],      # Target score for early stopping
+                                   tournament=tournament,               # Tournament selection object
+                                   mutation=mutations,                  # Mutations object
+                                   wb=INIT_HP['WANDB'],                 # Weights and Biases tracking
+                                   device=torch.device("cuda"))
 ```
 
 ### Custom Training Loop
@@ -167,37 +186,31 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+NET_CONFIG = {
+                'arch': 'mlp',       # Network architecture
+                'h_size': [32, 32],  # Actor hidden size
+             }
+
 INIT_HP = {
-            'HIDDEN_SIZE': [64,64], # Actor network hidden size
             'BATCH_SIZE': 128,      # Batch size
             'LR': 1e-3,             # Learning rate
             'GAMMA': 0.99,          # Discount factor
             'LEARN_STEP': 1,        # Learning frequency
-            'TAU': 1e-3             # For soft update of target network parameters
-            }
+            'TAU': 1e-3,            # For soft update of target network parameters
+            'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+          }
 
-env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
-try:
-    num_states = env.single_observation_space.n         # Discrete observation space
-    one_hot = True                                      # Requires one-hot encoding
-except:
-    num_states = env.single_observation_space.shape[0]  # Continuous observation space
-    one_hot = False                                     # Does not require one-hot encoding
-try:
-    num_actions = env.single_action_space.n             # Discrete action space
-except:
-    num_actions = env.single_action_space.shape[0]      # Continuous action space
-
-pop = initialPopulation(algo='DQN',                 # Algorithm
-                        num_states=num_states,      # State dimension
-                        num_actions=num_actions,    # Action dimension
-                        one_hot=one_hot,            # One-hot encoding
-                        INIT_HP=INIT_HP,            # Initial hyperparameters
-                        population_size=6,          # Population size
+pop = initialPopulation(algo='DQN',             # Algorithm
+                        state_dim=(8,),         # State dimension
+                        action_dim=4,           # Action dimension
+                        one_hot=False,          # One-hot encoding
+                        net_config=NET_CONFIG,  # Network configuration
+                        INIT_HP=INIT_HP,        # Initial hyperparameters
+                        population_size=6,      # Population size
                         device=torch.device("cuda"))
 
 field_names = ["state", "action", "reward", "next_state", "done"]
-memory = ReplayBuffer(n_actions=num_actions,    # Number of agent actions
+memory = ReplayBuffer(action_dim=4,             # Number of agent actions
                       memory_size=10000,        # Max replay buffer size
                       field_names=field_names,  # Field names to store in memory
                       device=torch.device("cuda"))
@@ -216,6 +229,7 @@ mutations = Mutations(algo='DQN',                           # Algorithm
                       rl_hp=0.2,                            # Learning HP mutation
                       rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
                       mutation_sd=0.1,                      # Mutation strength
+                      arch=NET_CONFIG['arch'],              # Network architecture
                       rand_seed=1,                          # Random seed
                       device=torch.device("cuda"))
 
@@ -259,7 +273,7 @@ for idx_epi in range(max_episodes):
     if (idx_epi+1) % evo_epochs == 0:
         
         # Evaluate population
-        fitnesses = [agent.test(env, max_steps=max_steps, loop=evo_loop) for agent in pop]
+        fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
 
         print(f'Episode {idx_epi+1}/{max_episodes}')
         print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
