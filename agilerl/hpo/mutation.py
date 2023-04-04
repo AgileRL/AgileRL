@@ -23,13 +23,17 @@ class Mutations():
     :type rl_hp_selection: List[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
+    :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
+    :type arch: str, optional
     :param rand_seed: Random seed for repeatability, defaults to None
     :type rand_seed: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, activation, rl_hp, rl_hp_selection, mutation_sd, rand_seed=None, device='cpu'):
+    def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, activation, rl_hp, rl_hp_selection, mutation_sd, arch='mlp', rand_seed=None, device='cpu'):
         self.rng = np.random.RandomState(rand_seed) # Random seed for repeatability
+
+        self.arch = arch    # Network architecture type
         
         # Relative probabilities of mutation
         self.no_mut = no_mutation               # No mutation
@@ -135,6 +139,7 @@ class Mutations():
             else:
                 individual.batch_size = min(128, max(8, int(individual.batch_size * 0.8)))
             individual.mut = 'bs'
+
         elif mutate_param == 'lr':
             if random_num > 0.5:
                 individual.lr = min(0.005, max(0.00001, individual.lr * 1.2))
@@ -153,6 +158,12 @@ class Mutations():
                 setattr(individual, critic['optimizer'], type(critic_opt)(net_params, lr=individual.lr)) 
             individual.mut = 'lr'
 
+        elif mutate_param == 'learn_step':
+            if random_num > 0.5:
+                individual.learn_step = min(1, max(0, int(individual.learn_step * 1.5)))
+            else:
+                individual.learn_step = min(1, max(0, int(individual.learn_step * 0.75)))
+
         return individual
 
     def activation_mutation(self, individual):
@@ -161,6 +172,10 @@ class Mutations():
         :param individual: Individual agent from population
         :type individual: object
         """
+        if individual.algo == 'DDPG':   # Needs to stay tanh for DDPG continuous actions
+            individual.mut = 'None'
+            return individual
+        
         # Mutate network activation layer
         offspring_actor = getattr(individual, self.algo['actor']['eval'])
         offspring_actor = self._permutate_activation(offspring_actor)   # Mutate activation function
@@ -177,13 +192,20 @@ class Mutations():
 
     def _permutate_activation(self, network):
         # Function to change network activation layer
-        possible_activations = ['relu', 'elu', 'tanh']
-        current_activation = network.activation
+        possible_activations = ['relu', 'elu', 'gelu']
+        if self.arch == 'cnn':
+            current_activation = network.mlp_activation
+        else:   # mlp
+            current_activation = network.activation
         # Remove current activation from options to ensure different new activation layer
         possible_activations.remove(current_activation)
         new_activation = self.rng.choice(possible_activations, size=1)[0]   # Select new activation
         net_dict = network.init_dict
-        net_dict['activation'] = new_activation
+        if self.arch == 'cnn':
+            net_dict['mlp_activation'] = new_activation
+            net_dict['cnn_activation'] = new_activation
+        else:   # mlp
+            net_dict['activation'] = new_activation
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
         network = new_network
@@ -266,17 +288,44 @@ class Mutations():
         offspring_actor = getattr(individual, self.algo['actor']['eval']).clone()
         offspring_critics = [getattr(individual, critic['eval']).clone() for critic in self.algo['critics']]
 
+        rand_numb = self.rng.uniform(0, 1)
+
         # Randomly select whether to add layer or node with relative probabilities
         # If algorithm has critics, apply to these too
-        rand_numb = self.rng.uniform(0, 1)
-        if rand_numb < self.new_layer_prob:
-            offspring_actor.add_layer()
-            for offspring_critic in offspring_critics:
-                offspring_critic.add_layer()
-        else:
-            node_dict = offspring_actor.add_node()
-            for offspring_critic in offspring_critics:
-                offspring_critic.add_node(**node_dict)
+
+        if self.arch == 'cnn':
+            if rand_numb < self.new_layer_prob/2:
+                offspring_actor.add_mlp_layer()
+                for offspring_critic in offspring_critics:
+                    offspring_critic.add_mlp_layer()
+            elif self.new_layer_prob/2 <= rand_numb < self.new_layer_prob:
+                offspring_actor.add_cnn_layer()
+                for offspring_critic in offspring_critics:
+                    offspring_critic.add_cnn_layer()
+            else:
+                rand_numb = self.rng.uniform(0, 1)
+                if rand_numb < 0.2:
+                    offspring_actor.change_cnn_kernal()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.change_cnn_kernal()
+                elif 0.2 <= rand_numb < 0.65:
+                    offspring_actor.add_cnn_channel()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_cnn_channel()
+                else:
+                    offspring_actor.add_mlp_node()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_mlp_node()
+            
+        else:   # mlp            
+            if rand_numb < self.new_layer_prob:
+                offspring_actor.add_layer()
+                for offspring_critic in offspring_critics:
+                    offspring_critic.add_layer()
+            else:
+                node_dict = offspring_actor.add_node()
+                for offspring_critic in offspring_critics:
+                    offspring_critic.add_node(**node_dict)
 
         setattr(individual, self.algo['actor']['eval'], offspring_actor.to(self.device))
         for offspring_critic, critic in zip(offspring_critics, self.algo['critics']):
@@ -295,8 +344,8 @@ class Mutations():
         if algo == 'DQN':
             nets = {
                 'actor': {
-                    'eval': 'net_eval',
-                    'target': 'net_target',
+                    'eval': 'actor',
+                    'target': 'actor_target',
                     'optimizer': 'optimizer'
                     },
                 'critics': []
