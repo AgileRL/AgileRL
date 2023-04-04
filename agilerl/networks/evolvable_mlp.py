@@ -20,11 +20,11 @@ class EvolvableMLP(nn.Module):
     :param output_activation: Output activation layer, defaults to None
     :type output_activation: str, optional
     :param layer_norm: Normalization between layers, defaults to False
-    :type layer_norm: bool
+    :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
-    :type output_vanish: bool
+    :type output_vanish: bool, optional
     :param stored_values: Stored network weights, defaults to None
-    :type stored_values: numpy.array()
+    :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """

@@ -15,15 +15,15 @@ def makeVectEnvs(env_name, num_envs=1):
     return gym.vector.AsyncVectorEnv([lambda: gym.make(env_name) for i in range(num_envs)])
  
 
-def initialPopulation(algo, num_states, num_actions, one_hot, INIT_HP, population_size=1, device='cpu'):
+def initialPopulation(algo, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size=1, device='cpu'):
     """Returns population of identical agents.
     
     :param algo: RL algorithm
     :type algo: str
-    :param num_states: State observation dimension
-    :type num_states: int
-    :param num_actions: Action dimension
-    :type num_actions: int
+    :param state_dim: State observation dimension
+    :type state_dim: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param one_hot: One-hot encoding
     :type one_hot: bool
     :param INIT_HP: Initial hyperparameters
@@ -38,11 +38,11 @@ def initialPopulation(algo, num_states, num_actions, one_hot, INIT_HP, populatio
     if algo == 'DQN':
         for idx in range(population_size):
             agent = DQN(
-                n_states = num_states,
-                n_actions = num_actions,
+                state_dim = state_dim,
+                action_dim = action_dim,
                 one_hot = one_hot,
                 index = idx,
-                h_size = INIT_HP['HIDDEN_SIZE'],
+                net_config = net_config,
                 batch_size = INIT_HP['BATCH_SIZE'],
                 lr = INIT_HP['LR'],
                 learn_step = INIT_HP['LEARN_STEP'],
@@ -55,11 +55,11 @@ def initialPopulation(algo, num_states, num_actions, one_hot, INIT_HP, populatio
     elif algo == 'DDPG':
         for idx in range(population_size):
             agent = DDPG(
-                n_states = num_states,
-                n_actions = num_actions,
+                state_dim = state_dim,
+                action_dim = action_dim,
                 one_hot = one_hot,
                 index = idx,
-                h_size = INIT_HP['HIDDEN_SIZE'],
+                net_config = net_config,
                 batch_size = INIT_HP['BATCH_SIZE'],
                 lr = INIT_HP['LR'],
                 learn_step = INIT_HP['LEARN_STEP'],
