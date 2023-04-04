@@ -7,20 +7,28 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.utils import makeVectEnvs, initialPopulation, printHyperparams, plotPopulationScore
 from agilerl.training.train import train
 
-def main(INIT_HP, MUTATION_PARAMS):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('============ AgileRL ============')
     print(f'DEVICE: {device}')
 
-    env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
-    num_states = env.single_observation_space.shape[0]
+    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
     try:
-        num_actions = env.single_action_space.n
+        state_dim = env.single_observation_space.n
+        one_hot = True
     except:
-        num_actions = env.single_action_space.shape[0]
+        state_dim = env.single_observation_space.shape
+        one_hot = False
+    try:
+        action_dim = env.single_action_space.n
+    except:
+        action_dim = env.single_action_space.shape[0]
+
+    if INIT_HP['CHANNELS_LAST']:
+        state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(num_actions, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
+    memory = ReplayBuffer(action_dim, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
     tournament = TournamentSelection(INIT_HP['TOURN_SIZE'], INIT_HP['ELITISM'], INIT_HP['POP_SIZE'], INIT_HP['EVO_EPOCHS'])
     mutations = Mutations(algo=INIT_HP['ALGO'],
                         no_mutation=MUTATION_PARAMS['NO_MUT'], 
@@ -31,16 +39,18 @@ def main(INIT_HP, MUTATION_PARAMS):
                         rl_hp=MUTATION_PARAMS['RL_HP_MUT'], 
                         rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'], 
                         mutation_sd=MUTATION_PARAMS['MUT_SD'], 
+                        arch=NET_CONFIG['arch'],
                         rand_seed=MUTATION_PARAMS['RAND_SEED'],
                         device=device)
 
-    agent_pop = initialPopulation(INIT_HP['ALGO'], num_states, num_actions, INIT_HP, INIT_HP['POP_SIZE'], device=device)
+    agent_pop = initialPopulation(INIT_HP['ALGO'], state_dim, action_dim, one_hot, NET_CONFIG, INIT_HP, INIT_HP['POP_SIZE'], device=device)
 
     trained_pop, pop_fitnesses = train(env,
         INIT_HP['ENV_NAME'],
         INIT_HP['ALGO'],
         agent_pop,
         memory=memory,
+        swap_channels=INIT_HP['CHANNELS_LAST'],
         n_episodes=INIT_HP['EPISODES'],
         evo_epochs=INIT_HP['EVO_EPOCHS'],
         evo_loop=1,
@@ -61,7 +71,7 @@ if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'LunarLander-v2',   # Gym environment name
         'ALGO': 'DQN',                  # Algorithm
-        'HIDDEN_SIZE': [64,64],         # Actor network hidden size
+        'CHANNELS_LAST': False,         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
         'EPISODES': 2000,               # Max no. episodes
@@ -90,4 +100,9 @@ if __name__ == '__main__':
         'RAND_SEED': 1,                             # Random seed
     }
 
-    main(INIT_HP, MUTATION_PARAMS)
+    NET_CONFIG = {
+        'arch': 'mlp',      # Network architecture
+        'h_size': [32, 32],    # Actor hidden size
+    }
+
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

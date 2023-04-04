@@ -3,7 +3,7 @@ from tqdm import trange
 import wandb
 from datetime import datetime
 
-def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
+def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
     """The general training function. Returns trained population of agents and their fitnesses. 
 
     :param env: The environment to train in. Can be vectorized.
@@ -16,6 +16,8 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
+    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+    :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
     :param max_steps: Maximum number of steps in environment per episode, defaults to 500
@@ -40,8 +42,8 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
-    :param wb: Weights & Biases tracking
-    :type wb: bool
+    :param wb: Weights & Biases tracking, defaults to False
+    :type wb: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -72,28 +74,31 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_
         for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
+
             for idx_step in range(max_steps):
+                if swap_channels:
+                    state = np.moveaxis(state, [3], [1])
                 action = agent.getAction(state, epsilon)    # Get next action from agent
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
-                
+
                 # Save experience to replay buffer
-                memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                if swap_channels:
+                    memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+                else:
+                    memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
                     experiences = memory.sample(agent.batch_size)   # Sample replay buffer
                     agent.learn(experiences)    # Learn according to agent's RL algorithm
-                
+
                 state = next_state
                 score += reward
-
-                # if done:
-                #     break
             
             agent.scores.append(score)
             
-            agent.steps[-1] += idx_step+1
-            total_steps += idx_step+1
+            agent.steps[-1] += max_steps
+            total_steps += max_steps
 
         epsilon = max(eps_end, epsilon*eps_decay)   # Update epsilon for exploration
 
@@ -101,7 +106,7 @@ def train(env, env_name, algo, pop, memory, n_episodes=2000, max_steps=500, evo_
         if (idx_epi+1) % evo_epochs == 0:
             
             # Evaluate population
-            fitnesses = [agent.test(env, max_steps=max_steps, loop=evo_loop) for agent in pop]
+            fitnesses = [agent.test(env, swap_channels=swap_channels, max_steps=max_steps, loop=evo_loop) for agent in pop]
             pop_fitnesses.append(fitnesses)
 
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
