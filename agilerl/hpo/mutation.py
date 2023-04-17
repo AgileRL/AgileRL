@@ -204,7 +204,7 @@ class Mutations():
         if self.arch == 'cnn':
             net_dict['mlp_activation'] = new_activation
             net_dict['cnn_activation'] = new_activation
-        else:   # mlp
+        else:   # mlp or transformer
             net_dict['activation'] = new_activation
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
@@ -316,16 +316,55 @@ class Mutations():
                     offspring_actor.add_mlp_node()
                     for offspring_critic in offspring_critics:
                         offspring_critic.add_mlp_node()
+
+        elif self.arch == 'transformer':
+            if rand_numb < self.new_layer_prob/2:
+                if self.rng.uniform(0, 1) < 0.5:
+                    offspring_actor.add_encoder_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_encoder_layer()
+                else:
+                    offspring_actor.remove_encoder_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.remove_encoder_layer()
+            elif self.new_layer_prob/2 <= rand_numb < self.new_layer_prob:
+                if self.rng.uniform(0, 1) < 0.5:
+                    offspring_actor.add_decoder_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_decoder_layer()
+                else:
+                    offspring_actor.remove_decoder_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.remove_decoder_layer()
+            else:
+                if self.rng.uniform(0, 1) < 0.5:
+                    node_dict = offspring_actor.add_node()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_node(**node_dict)
+                else:
+                    node_dict = offspring_actor.remove_node()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.remove_node(**node_dict)
             
         else:   # mlp            
             if rand_numb < self.new_layer_prob:
-                offspring_actor.add_layer()
-                for offspring_critic in offspring_critics:
-                    offspring_critic.add_layer()
+                if self.rng.uniform(0, 1) < 0.5:
+                    offspring_actor.add_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_layer()
+                else:
+                    offspring_actor.remove_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.remove_layer()
             else:
-                node_dict = offspring_actor.add_node()
-                for offspring_critic in offspring_critics:
-                    offspring_critic.add_node(**node_dict)
+                if self.rng.uniform(0, 1) < 0.5:
+                    node_dict = offspring_actor.add_node()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_node(**node_dict)
+                else:
+                    node_dict = offspring_actor.remove_node()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.remove_node(**node_dict)
 
         setattr(individual, self.algo['actor']['eval'], offspring_actor.to(self.device))
         for offspring_critic, critic in zip(offspring_critics, self.algo['critics']):
