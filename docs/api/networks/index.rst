@@ -12,3 +12,4 @@ We are constantly adding more neural network architectures, with a view to add r
 
    evolvable_mlp
    evolvable_cnn
+   evolvable_transformer

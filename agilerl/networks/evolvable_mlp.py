@@ -111,7 +111,7 @@ class EvolvableMLP(nn.Module):
         """Returns number of parameters in neural network.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         count = 0
         for name, param in self.named_parameters():
@@ -123,7 +123,7 @@ class EvolvableMLP(nn.Module):
         """Returns current pytorch gradient in same order as genome's flattened parameter vector.
         
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         tot_size = self.count_parameters(without_layer_norm)
         pvec = np.zeros(tot_size, np.float32)
@@ -139,7 +139,7 @@ class EvolvableMLP(nn.Module):
         """Returns current flattened neural network weights.
         
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         tot_size = self.count_parameters(without_layer_norm)
         pvec = np.zeros(tot_size, np.float32)
@@ -157,7 +157,7 @@ class EvolvableMLP(nn.Module):
         :param pvec: Network weights
         :type pvec: np.array()
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         count = 0
 
@@ -176,7 +176,7 @@ class EvolvableMLP(nn.Module):
         """
         init_dict = {"num_inputs": self.num_inputs, "num_outputs": self.num_outputs, "hidden_size": self.hidden_size,
                      "activation": self.activation, "output_activation": self.output_activation,
-                     "layer_norm": self.layer_norm}
+                     "layer_norm": self.layer_norm, "device": self.device}
         return init_dict
 
     @property
