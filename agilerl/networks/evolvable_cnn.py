@@ -284,7 +284,7 @@ class EvolvableCNN(nn.Module):
         """Returns number of parameters in neural network.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         count = 0
         for name, param in self.named_parameters():
@@ -296,7 +296,7 @@ class EvolvableCNN(nn.Module):
         """Returns current pytorch gradient in same order as genome's flattened parameter vector.
         
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         tot_size = self.count_parameters(without_layer_norm)
         pvec = np.zeros(tot_size, np.float32)
@@ -312,7 +312,7 @@ class EvolvableCNN(nn.Module):
         """Returns current flattened neural network weights.
         
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         tot_size = self.count_parameters(without_layer_norm)
         pvec = np.zeros(tot_size, np.float32)
@@ -330,7 +330,7 @@ class EvolvableCNN(nn.Module):
         :param pvec: Network weights
         :type pvec: np.array()
         :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool
+        :type without_layer_norm: bool, optional
         """
         count = 0
 
