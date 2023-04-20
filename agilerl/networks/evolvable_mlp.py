@@ -54,7 +54,7 @@ class EvolvableMLP(nn.Module):
         """
         activation_functions = {'tanh': nn.Tanh, 'linear': nn.Identity, 'relu': nn.ReLU, 'elu': nn.ELU,
                                 'softsign': nn.Softsign, 'sigmoid': nn.Sigmoid, 'softplus': nn.Softplus,
-                                'lrelu': nn.LeakyReLU, 'prelu': nn.PReLU, }
+                                'lrelu': nn.LeakyReLU, 'prelu': nn.PReLU, 'gelu': nn.GELU}
 
         return activation_functions[activation_names]()
 
