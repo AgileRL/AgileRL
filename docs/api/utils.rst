@@ -7,6 +7,4 @@ Utils
 
 .. autofunction:: agilerl.utils.printHyperparams
 
-.. autofunction:: agilerl.utils.plotScore
-
 .. autofunction:: agilerl.utils.plotPopulationScore
