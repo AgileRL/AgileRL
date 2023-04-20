@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 import warnings
-from evolvable_mlp import EvolvableMLP
+from networks.evolvable_mlp import EvolvableMLP
 
 class EvolvableGPT(nn.Module):
     """The Evolvable GPT class.
