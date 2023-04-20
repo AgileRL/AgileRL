@@ -8,18 +8,18 @@ import torch.nn as nn
 import math
 import warnings
 
-class EvolvableTransformer(nn.Module):
-    """The Evolvable Transformer class.
+class EvolvableBERT(nn.Module):
+    """The Evolvable BERT class.
     
     :param encoder_layers: Encoder layer(s) hidden size
     :type encoder_layers: List[int]
     :param decoder_layers: Decoder layer(s) hidden size
     :type decoder_layers: List[int]
-    :param seq2seq: Sequence to sequence transformer, using positional and token embeddings, defaults to True
-    :type seq2seq: bool, optional
-    :param src_vocab_size: Source vocabulary size, defaults to 
+    :param end2end: End to end transformer, using positional and token embeddings, defaults to True
+    :type end2end: bool, optional
+    :param src_vocab_size: Source vocabulary size, defaults to 10837
     :type src_vocab_size: int, optional
-    :param tgt_vocab_size: Target vocabulary size, defaults to 
+    :param tgt_vocab_size: Target vocabulary size, defaults to 10837
     :type tgt_vocab_size: int, optional
     :param encoder_norm: Encoder output normalization, defaults to True
     :type encoder_norm: bool, optional
@@ -27,8 +27,8 @@ class EvolvableTransformer(nn.Module):
     :type decoder_norm: bool, optional
     :param d_model: Number of expected features in the encoder/decoder inputs, defaults to 512
     :type d_model: int, optional
-    :param nhead: Number of heads in the multiheadattention models, defaults to 8
-    :type nhead: int, optional
+    :param n_head: Number of heads in the multiheadattention models, defaults to 8
+    :type n_head: int, optional
     :param dropout: Dropout value, defaults to 0.1
     :type dropout: float, optional
     :param activation: Activation function of encoder/decoder intermediate layer, defaults to 'relu'
@@ -48,20 +48,20 @@ class EvolvableTransformer(nn.Module):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    def __init__(self, encoder_layers: List[int], decoder_layers: List[int], seq2seq: bool=True, src_vocab_size: int=10837, tgt_vocab_size: int=10837, encoder_norm: bool=True, 
-                 decoder_norm: bool=True, d_model: int=512, nhead: int=8, dropout: float=0.1, activation: str='relu', layer_norm_eps: float=1e-5, batch_first: bool=False, 
+    def __init__(self, encoder_layers: List[int], decoder_layers: List[int], end2end: bool=True, src_vocab_size: int=10837, tgt_vocab_size: int=10837, encoder_norm: bool=True, 
+                 decoder_norm: bool=True, d_model: int=512, n_head: int=8, dropout: float=0.1, activation: str='relu', layer_norm_eps: float=1e-5, batch_first: bool=False, 
                  norm_first: bool=False, max_encoder_layers: int=12, max_decoder_layers: int=12, stored_values=None, device='cpu'):
-        super(EvolvableTransformer, self).__init__()
+        super(EvolvableBERT, self).__init__()
 
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
-        self.seq2seq = seq2seq
+        self.end2end = end2end
         self.src_vocab_size = src_vocab_size
         self.tgt_vocab_size = tgt_vocab_size
         self.encoder_norm = encoder_norm
         self.decoder_norm = decoder_norm
         self.d_model = d_model
-        self.nhead = nhead
+        self.n_head = n_head
         self.dropout = dropout
         self.activation = activation
         self.layer_norm_eps = layer_norm_eps
@@ -72,11 +72,17 @@ class EvolvableTransformer(nn.Module):
 
         self.device = device
 
-        if self.seq2seq:
+        if self.end2end:
             self.generator = nn.Linear(self.d_model, tgt_vocab_size)
             self.src_tok_emb = TokenEmbedding(src_vocab_size, self.d_model)
             self.tgt_tok_emb = TokenEmbedding(tgt_vocab_size, self.d_model)
             self.positional_encoding = PositionalEncoder(self.d_model, self.dropout)
+        else:
+            self.wte = TokenEmbedding(src_vocab_size, self.d_model)
+            if len(self.encoder_layers)>0:
+                self.wpe = PositionalEncoding(self.d_model, self.encoder_layers[0])
+            else:
+                self.wpe = PositionalEncoding(self.d_model, self.decoder_layers[0])
 
         self.encoder, self.decoder = self.create_nets()
         self.encoder_keys = list(self.encoder.keys())
@@ -93,7 +99,7 @@ class EvolvableTransformer(nn.Module):
         """
         activation_functions = {'tanh': nn.Tanh, 'linear': nn.Identity, 'relu': nn.ReLU, 'elu': nn.ELU,
                                 'softsign': nn.Softsign, 'sigmoid': nn.Sigmoid, 'softplus': nn.Softplus,
-                                'lrelu': nn.LeakyReLU, 'prelu': nn.PReLU, }
+                                'lrelu': nn.LeakyReLU, 'prelu': nn.PReLU, 'gelu': nn.GELU}
 
         return activation_functions[activation_names]()
 
@@ -105,7 +111,7 @@ class EvolvableTransformer(nn.Module):
 
         # Create the encoder
         for n, dim_feedfwd in enumerate(self.encoder_layers):
-            encoder_dict[f"encoder_layer_{str(n)}"] = nn.modules.TransformerEncoderLayer(self.d_model, self.nhead, dim_feedfwd, self.dropout, 
+            encoder_dict[f"encoder_layer_{str(n)}"] = nn.modules.TransformerEncoderLayer(self.d_model, self.n_head, dim_feedfwd, self.dropout, 
                                                                                          self.activation, self.layer_norm_eps, self.batch_first, 
                                                                                          self.norm_first, device=self.device)
         if self.encoder_norm:
@@ -113,7 +119,7 @@ class EvolvableTransformer(nn.Module):
             
         # Create the decoder
         for n, dim_feedfwd in enumerate(self.decoder_layers):
-            decoder_dict[f"decoder_layer_{str(n)}"] = nn.modules.TransformerDecoderLayer(self.d_model, self.nhead, dim_feedfwd, self.dropout, 
+            decoder_dict[f"decoder_layer_{str(n)}"] = nn.modules.TransformerDecoderLayer(self.d_model, self.n_head, dim_feedfwd, self.dropout, 
                                                                                          self.activation, self.layer_norm_eps, self.batch_first, 
                                                                                          self.norm_first, device=self.device)
         if self.decoder_norm:
@@ -183,11 +189,11 @@ class EvolvableTransformer(nn.Module):
         :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
-        encoder_output = self.encode(src, src_mask, src_key_padding_mask, is_causal)
+        encoder_output, encoder_hidden_states = self.encode(src, src_mask, src_key_padding_mask, is_causal)
         memory = encoder_output
-        decoder_output = self.decode(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask)
+        decoder_output, decoder_hidden_states = self.decode(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask)
 
-        if self.seq2seq:
+        if self.end2end:
             decoder_output = self.generator(decoder_output)
 
         return decoder_output
@@ -204,7 +210,7 @@ class EvolvableTransformer(nn.Module):
         :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
-        if self.seq2seq:
+        if self.end2end:
             src = self.positional_encoding(self.src_tok_emb(src))
 
         # Encoder forward pass preparation
@@ -238,16 +244,22 @@ class EvolvableTransformer(nn.Module):
                     make_causal = True
         is_causal = make_causal
 
+        all_hidden_states = ()
+
         # Encoder forward pass
         for key in self.encoder_keys:
             if 'norm' not in key:
+                all_hidden_states = all_hidden_states + (encoder_output,)
                 encoder_output = self.encoder[key](encoder_output, src_mask=src_mask, is_causal=is_causal, 
                                                    src_key_padding_mask=src_key_padding_mask_for_layers)
+        all_hidden_states = all_hidden_states + (encoder_output,)
         if convert_to_nested:
             encoder_output = encoder_output.to_padded_tensor(0.)
+            all_hidden_states = all_hidden_states + (encoder_output,)
         if ['encoder_norm_0'] in self.encoder_keys:
             encoder_output = self.encoder['encoder_norm_0'](encoder_output)
-        return encoder_output
+            all_hidden_states = all_hidden_states + (encoder_output,)
+        return encoder_output, all_hidden_states
     
     def decode(self, tgt, memory, tgt_mask=None, memory_mask=None, tgt_key_padding_mask=None, memory_key_padding_mask=None):
         """Returns decoded transformer input.
@@ -265,20 +277,25 @@ class EvolvableTransformer(nn.Module):
         :param memory_key_padding_mask: Tensor mask for memory keys per batch, defaults to None
         :type memory_key_padding_mask: torch.Tensor, optional
         """
-        if self.seq2seq:
+        if self.end2end:
             tgt = self.positional_encoding(self.src_tok_emb(tgt))
+
+        all_hidden_states = ()
 
         # Decoder forward pass        
         decoder_output = tgt
         for key in self.decoder_keys:
             if 'norm' not in key:
+                all_hidden_states = all_hidden_states + (decoder_output,)
                 decoder_output = self.decoder[key](decoder_output, memory, tgt_mask=tgt_mask,
                          memory_mask=memory_mask,
                          tgt_key_padding_mask=tgt_key_padding_mask,
                          memory_key_padding_mask=memory_key_padding_mask)
+        all_hidden_states = all_hidden_states + (decoder_output,)
         if ['decoder_norm_0'] in self.decoder_keys:
             decoder_output = self.decoder['decoder_norm_0'](decoder_output)
-        return decoder_output
+            all_hidden_states = all_hidden_states + (decoder_output,)
+        return decoder_output, all_hidden_states
     
     def check_encoder_sparsity_fast_path(self, src, output, first_layer, str_first_layer, mask, src_key_padding_mask, src_key_padding_mask_for_layers):
         """Returns encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
@@ -434,9 +451,9 @@ class EvolvableTransformer(nn.Module):
     def init_dict(self):
         """Returns model information in dictionary.
         """        
-        init_dict = {"encoder_layers": self.encoder_layers, "decoder_layers": self.decoder_layers, "seq2seq": self.seq2seq, "src_vocab_size": self.src_vocab_size, 
+        init_dict = {"encoder_layers": self.encoder_layers, "decoder_layers": self.decoder_layers, "end2end": self.end2end, "src_vocab_size": self.src_vocab_size, 
                      "tgt_vocab_size": self.tgt_vocab_size, "encoder_norm": self.encoder_norm, "decoder_norm": self.decoder_norm, "d_model": self.d_model, 
-                     "nhead": self.nhead, "dropout": self.dropout, "activation": self.activation, "layer_norm_eps": self.layer_norm_eps, "batch_first": self.batch_first, 
+                     "n_head": self.n_head, "dropout": self.dropout, "activation": self.activation, "layer_norm_eps": self.layer_norm_eps, "batch_first": self.batch_first, 
                      "norm_first": self.norm_first, "max_encoder_layers": self.max_encoder_layers, "max_decoder_layers": self.max_decoder_layers, "device": self.device}
         return init_dict
 
@@ -650,8 +667,8 @@ class PositionalEncoder(nn.Module):
     :type emb_size: int
     :param dropout: Dropout value, defaults to 0.1
     :type dropout: float, optional
-    :param max_len: Maximum length of sequence, defaults to 5000
-    :type max_len: int, optional
+    :param maxlen: Maximum length of sequence, defaults to 5000
+    :type maxlen: int, optional
     """
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000):
         super(PositionalEncoder, self).__init__()
@@ -673,6 +690,20 @@ class PositionalEncoder(nn.Module):
         """
         return self.dropout(x + self.pos_embedding[:x.size(0), :])
     
+class PositionalEncoding(nn.Module):
+    """The positional embedding class. Converts tensor of input indices into corresponding tensor of position embeddings."""
+    def __init__(self, max_positions: int, emb_size):
+        super(PositionalEncoding, self).__init__()
+        self.embedding = nn.Embedding(max_positions, emb_size)
+        self.emb_size = emb_size
+
+    def forward(self, tokens: torch.Tensor):
+        """Forward pass through position embedding module.
+        :param tokens: Tokens to embed
+        :type tokens: torch.Tensor
+        """
+        return self.embedding(tokens)
+
 class TokenEmbedding(nn.Module):
     """The token embedding class. Converts tensor of input indices into corresponding tensor of token embeddings."""
     def __init__(self, vocab_size: int, emb_size):
@@ -685,7 +716,8 @@ class TokenEmbedding(nn.Module):
         :param tokens: Tokens to embed
         :type tokens: torch.Tensor
         """
-        return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
+        # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
+        return self.embedding(tokens)
 
 def _none_or_dtype(input):
     """Returns None or dtype of input. Adapted from torch.nn.functional.
