@@ -11,17 +11,17 @@ Parameters
 .. autoclass:: agilerl.networks.evolvable_gpt.LayerNorm
   :members:
 
-.. autoclass:: agilerl.networks.evolvable_bert.CausalSelfAttention
+.. autoclass:: agilerl.networks.evolvable_gpt.CausalSelfAttention
   :members:
 
-.. autoclass:: agilerl.networks.evolvable_bert.Block
+.. autoclass:: agilerl.networks.evolvable_gpt.Block
   :members:
 
-.. autoclass:: agilerl.networks.evolvable_bert.MLP
+.. autoclass:: agilerl.networks.evolvable_gpt.MLP
   :members:
 
-.. autoclass:: agilerl.networks.evolvable_bert.PositionalEncoding
+.. autoclass:: agilerl.networks.evolvable_gpt.PositionalEncoding
   :members:
 
-.. autoclass:: agilerl.networks.evolvable_bert.TokenEmbedding
+.. autoclass:: agilerl.networks.evolvable_gpt.TokenEmbedding
   :members:
