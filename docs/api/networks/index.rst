@@ -4,6 +4,7 @@ Networks
 Evolvable network architectures implemented: (More coming soon!)
     * MLP
     * CNN
+    * Transformers - GPT and BERT
 
 We are constantly adding more neural network architectures, with a view to add recurrent and hierarchical networks soon.
 
@@ -12,4 +13,5 @@ We are constantly adding more neural network architectures, with a view to add r
 
    evolvable_mlp
    evolvable_cnn
-   evolvable_transformer
+   evolvable_gpt
+   evolvable_bert
