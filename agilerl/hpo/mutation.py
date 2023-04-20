@@ -204,7 +204,7 @@ class Mutations():
         if self.arch == 'cnn':
             net_dict['mlp_activation'] = new_activation
             net_dict['cnn_activation'] = new_activation
-        else:   # mlp or transformer
+        else:   # mlp or bert
             net_dict['activation'] = new_activation
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
@@ -317,7 +317,7 @@ class Mutations():
                     for offspring_critic in offspring_critics:
                         offspring_critic.add_mlp_node()
 
-        elif self.arch == 'transformer':
+        elif self.arch == 'bert':
             if rand_numb < self.new_layer_prob/2:
                 if self.rng.uniform(0, 1) < 0.5:
                     offspring_actor.add_encoder_layer()
