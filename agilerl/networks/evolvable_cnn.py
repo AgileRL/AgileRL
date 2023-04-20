@@ -153,7 +153,7 @@ class EvolvableCNN(nn.Module):
         """
         activation_functions = {'tanh': nn.Tanh, 'gelu': nn.GELU, 'relu': nn.ReLU, 'elu': nn.ELU,
                                 'softsign': nn.Softsign, 'sigmoid': nn.Sigmoid, 'softplus': nn.Softplus,
-                                'lrelu': nn.LeakyReLU, 'prelu': nn.PReLU, }
+                                'lrelu': nn.LeakyReLU, 'prelu': nn.PReLU, 'gelu': nn.GELU}
         return activation_functions[activation_names]()
 
     def create_mlp(self, input_size, output_size, hidden_size, name):
