@@ -366,7 +366,6 @@ class ILQL(nn.Module):
                 weights[i], dim=0, index=action_idxs[i, :n[i]], src=w_values[i, :n[i]])
         if self.clip_weight is not None:
             weights = torch.clip(weights, max=self.clip_weight)
-        # print(list(map(lambda x: list(map(lambda y: (y[0], self.dataset.tokenizer.id_to_token(y[1].item()),), zip(*x))), zip(weights.detach().cpu().tolist(), tokens))))
         return weights
 
     def awac_loss(self, tokens, attn_mask, logits, w):
