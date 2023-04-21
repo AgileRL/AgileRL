@@ -2,6 +2,7 @@ import torch.optim as optim
 import numpy as np
 import fastrand
 
+
 class Mutations():
     """The Mutations class for evolutionary hyperparameter optimization.
 
@@ -30,25 +31,41 @@ class Mutations():
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, activation, rl_hp, rl_hp_selection, mutation_sd, arch='mlp', rand_seed=None, device='cpu'):
-        self.rng = np.random.RandomState(rand_seed) # Random seed for repeatability
+
+    def __init__(
+            self,
+            algo,
+            no_mutation,
+            architecture,
+            new_layer_prob,
+            parameters,
+            activation,
+            rl_hp,
+            rl_hp_selection,
+            mutation_sd,
+            arch='mlp',
+            rand_seed=None,
+            device='cpu'):
+        # Random seed for repeatability
+        self.rng = np.random.RandomState(rand_seed)
 
         self.arch = arch    # Network architecture type
-        
+
         # Relative probabilities of mutation
         self.no_mut = no_mutation               # No mutation
         self.architecture_mut = architecture    # Architecture mutation
-        self.new_layer_prob = new_layer_prob    # New layer mutation (type of architecture mutation)
+        # New layer mutation (type of architecture mutation)
+        self.new_layer_prob = new_layer_prob
         self.parameters_mut = parameters        # Network parameters mutation
         self.activation_mut = activation        # Activation layer mutation
         self.rl_hp_mut = rl_hp                  # Learning HP mutation
-        
+
         self.rl_hp_selection = rl_hp_selection  # Learning HPs to choose from
         self.mutation_sd = mutation_sd          # Mutation strength
 
         # Set algorithm dictionary with agent network names for mutation
         # Use custom agent dict, or pre-configured agent from API
-        if type(algo) is dict:
+        if isinstance(algo, dict):
             self.algo = algo
         else:
             self.algo = self.get_algo_nets(algo)
@@ -57,11 +74,11 @@ class Mutations():
 
     def no_mutation(self, individual):
         """Returns individual from population without mutation.
-        
+
         :param individual: Individual agent from population
         :type individual: object
         """
-        individual.mut = 'None' # No mutation
+        individual.mut = 'None'  # No mutation
         return individual
 
     # Generic mutation function - gather mutation options and select from these
@@ -71,7 +88,8 @@ class Mutations():
         :param population: Population of agents
         :type population: List[object]
         """
-        # Create lists of possible mutation functions and their respective relative probabilities
+        # Create lists of possible mutation functions and their respective
+        # relative probabilities
         mutation_options = []
         mutation_proba = []
         if self.no_mut:
@@ -90,32 +108,41 @@ class Mutations():
             mutation_options.append(self.rl_hyperparam_mutation)
             mutation_proba.append(float(self.rl_hp_mut))
 
-        if len(mutation_options) == 0: # Return if no mutation options
+        if len(mutation_options) == 0:  # Return if no mutation options
             return population
 
-        mutation_proba = np.array(mutation_proba) / np.sum(mutation_proba) # Normalize probs
+        mutation_proba = np.array(mutation_proba) / \
+            np.sum(mutation_proba)  # Normalize probs
 
-        # Raandomly choose mutation for each agent in population from options with relative probabilities
-        mutation_choice = self.rng.choice(mutation_options, len(population), p=mutation_proba)
+        # Raandomly choose mutation for each agent in population from options with
+        # relative probabilities
+        mutation_choice = self.rng.choice(
+            mutation_options, len(population), p=mutation_proba)
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
 
-            individual = mutation(individual)   # Call mutation function for each individual
+            # Call mutation function for each individual
+            individual = mutation(individual)
 
             offspring_actor = getattr(individual, self.algo['actor']['eval'])
-                        
-            # Reinitialise target network with frozen weights due to potential mutation in architecture of value network
+
+            # Reinitialise target network with frozen weights due to potential
+            # mutation in architecture of value network
             ind_target = type(offspring_actor)(**offspring_actor.init_dict)
             ind_target.load_state_dict(offspring_actor.state_dict())
-            setattr(individual, self.algo['actor']['target'], ind_target.to(self.device))
+            setattr(individual, self.algo['actor']
+                    ['target'], ind_target.to(self.device))
 
-            # If algorithm has critics, reinitialize their respective target networks too
+            # If algorithm has critics, reinitialize their respective target networks
+            # too
             for critic in self.algo['critics']:
                 offspring_critic = getattr(individual, critic['eval'])
-                ind_target = type(offspring_critic)(**offspring_critic.init_dict)
+                ind_target = type(offspring_critic)(
+                    **offspring_critic.init_dict)
                 ind_target.load_state_dict(offspring_critic.state_dict())
-                setattr(individual, critic['target'], ind_target.to(self.device))
+                setattr(individual, critic['target'],
+                        ind_target.to(self.device))
 
             mutated_population.append(individual)
 
@@ -123,21 +150,24 @@ class Mutations():
 
     def rl_hyperparam_mutation(self, individual):
         """Returns individual from population with RL hyperparameter mutation.
-        
+
         :param individual: Individual agent from population
         :type individual: object
         """
         # Learning hyperparameter mutation
         rl_params = self.rl_hp_selection
-        mutate_param = self.rng.choice(rl_params, 1)[0] # Select HP to mutate from options
+        # Select HP to mutate from options
+        mutate_param = self.rng.choice(rl_params, 1)[0]
 
         # Increase or decrease HP randomly (within clipped limits)
         random_num = self.rng.uniform(0, 1)
         if mutate_param == 'batch_size':
             if random_num > 0.5:
-                individual.batch_size = min(128, max(8, int(individual.batch_size * 1.2)))
+                individual.batch_size = min(
+                    128, max(8, int(individual.batch_size * 1.2)))
             else:
-                individual.batch_size = min(128, max(8, int(individual.batch_size * 0.8)))
+                individual.batch_size = min(
+                    128, max(8, int(individual.batch_size * 0.8)))
             individual.mut = 'bs'
 
         elif mutate_param == 'lr':
@@ -145,48 +175,56 @@ class Mutations():
                 individual.lr = min(0.005, max(0.00001, individual.lr * 1.2))
             else:
                 individual.lr = min(0.005, max(0.00001, individual.lr * 0.8))
-            
+
             # Reinitialise optimizer if new learning rate
             actor_opt = getattr(individual, self.algo['actor']['optimizer'])
-            net_params = getattr(individual, self.algo['actor']['eval']).parameters()
-            setattr(individual, self.algo['actor']['optimizer'], type(actor_opt)(net_params, lr=individual.lr))
-            
+            net_params = getattr(
+                individual, self.algo['actor']['eval']).parameters()
+            setattr(individual, self.algo['actor']['optimizer'], type(
+                actor_opt)(net_params, lr=individual.lr))
+
             # If algorithm has critics, reinitialise their optimizers too
             for critic in self.algo['critics']:
                 critic_opt = getattr(individual, critic['optimizer'])
                 net_params = getattr(individual, critic['eval']).parameters()
-                setattr(individual, critic['optimizer'], type(critic_opt)(net_params, lr=individual.lr)) 
+                setattr(individual, critic['optimizer'], type(
+                    critic_opt)(net_params, lr=individual.lr))
             individual.mut = 'lr'
 
         elif mutate_param == 'learn_step':
             if random_num > 0.5:
-                individual.learn_step = min(1, max(0, int(individual.learn_step * 1.5)))
+                individual.learn_step = min(
+                    1, max(0, int(individual.learn_step * 1.5)))
             else:
-                individual.learn_step = min(1, max(0, int(individual.learn_step * 0.75)))
+                individual.learn_step = min(
+                    1, max(0, int(individual.learn_step * 0.75)))
 
         return individual
 
     def activation_mutation(self, individual):
         """Returns individual from population with activation layer mutation.
-        
+
         :param individual: Individual agent from population
         :type individual: object
         """
         if individual.algo == 'DDPG':   # Needs to stay tanh for DDPG continuous actions
             individual.mut = 'None'
             return individual
-        
+
         # Mutate network activation layer
         offspring_actor = getattr(individual, self.algo['actor']['eval'])
-        offspring_actor = self._permutate_activation(offspring_actor)   # Mutate activation function
-        setattr(individual, self.algo['actor']['eval'], offspring_actor.to(self.device))
+        offspring_actor = self._permutate_activation(
+            offspring_actor)   # Mutate activation function
+        setattr(individual, self.algo['actor']
+                ['eval'], offspring_actor.to(self.device))
 
         # If algorithm has critics, mutate their activations too
         for critic in self.algo['critics']:
             offspring_critic = getattr(individual, critic['eval'])
             offspring_critic = self._permutate_activation(offspring_critic)
-            setattr(individual, critic['eval'], offspring_critic.to(self.device))
-        
+            setattr(individual, critic['eval'],
+                    offspring_critic.to(self.device))
+
         individual.mut = 'act'
         return individual
 
@@ -197,9 +235,11 @@ class Mutations():
             current_activation = network.mlp_activation
         else:   # mlp
             current_activation = network.activation
-        # Remove current activation from options to ensure different new activation layer
+        # Remove current activation from options to ensure different new
+        # activation layer
         possible_activations.remove(current_activation)
-        new_activation = self.rng.choice(possible_activations, size=1)[0]   # Select new activation
+        new_activation = self.rng.choice(possible_activations, size=1)[
+            0]   # Select new activation
         net_dict = network.init_dict
         if self.arch == 'cnn':
             net_dict['mlp_activation'] = new_activation
@@ -214,25 +254,29 @@ class Mutations():
 
     def parameter_mutation(self, individual):
         """Returns individual from population with network parameters mutation.
-        
+
         :param individual: Individual agent from population
         :type individual: object
         """
         # Mutate network parameters
         offspring_actor = getattr(individual, self.algo['actor']['eval'])
-        offspring_actor = self.classic_parameter_mutation(offspring_actor) # Network parameter mutation function
-        setattr(individual, self.algo['actor']['eval'], offspring_actor.to(self.device))
+        offspring_actor = self.classic_parameter_mutation(
+            offspring_actor)  # Network parameter mutation function
+        setattr(individual, self.algo['actor']
+                ['eval'], offspring_actor.to(self.device))
         individual.mut = 'param'
         return individual
 
     def regularize_weight(self, weight, mag):
-        if weight > mag: weight = mag
-        if weight < -mag: weight = -mag
+        if weight > mag:
+            weight = mag
+        if weight < -mag:
+            weight = -mag
         return weight
 
     def classic_parameter_mutation(self, network):
         """Returns network with mutated weights.
-        
+
         :param network: Neural network to mutate
         :type individual: torch.nn.Module
         """
@@ -247,7 +291,7 @@ class Mutations():
 
         potential_keys = []
         for i, key in enumerate(model_params):  # Mutate each param
-            if not 'norm' in key:
+            if 'norm' not in key:
                 W = model_params[key]
                 if len(W.shape) == 2:  # Weights, no bias
                     potential_keys.append(key)
@@ -260,33 +304,38 @@ class Mutations():
             W = model_params[key]
             num_weights = W.shape[0] * W.shape[1]
             # Number of mutation instances
-            num_mutations = fastrand.pcg32bounded(int(np.ceil(num_mutation_frac * num_weights)))
+            num_mutations = fastrand.pcg32bounded(
+                int(np.ceil(num_mutation_frac * num_weights)))
             for _ in range(num_mutations):
                 ind_dim1 = fastrand.pcg32bounded(W.shape[0])
                 ind_dim2 = fastrand.pcg32bounded(W.shape[-1])
                 random_num = self.rng.uniform(0, 1)
 
                 if random_num < super_mut_prob:  # Super Mutation probability
-                    W[ind_dim1, ind_dim2] += self.rng.normal(0, np.abs(super_mut_strength * W[ind_dim1, ind_dim2].item()))
+                    W[ind_dim1, ind_dim2] += self.rng.normal(
+                        0, np.abs(super_mut_strength * W[ind_dim1, ind_dim2].item()))
                 elif random_num < reset_prob:  # Reset probability
                     W[ind_dim1, ind_dim2] = self.rng.normal(0, 1)
                 else:  # mutauion even normal
-                    W[ind_dim1, ind_dim2] += self.rng.normal(0, np.abs(mut_strength * W[ind_dim1, ind_dim2].item()))
+                    W[ind_dim1, ind_dim2] += self.rng.normal(
+                        0, np.abs(mut_strength * W[ind_dim1, ind_dim2].item()))
 
                 # Regularization hard limit
-                W[ind_dim1, ind_dim2] = self.regularize_weight(W[ind_dim1, ind_dim2].item(), 1000000)
+                W[ind_dim1, ind_dim2] = self.regularize_weight(
+                    W[ind_dim1, ind_dim2].item(), 1000000)
         return network.to(self.device)
-
 
     def architecture_mutate(self, individual):
         """Returns individual from population with network architecture mutation.
-        
+
         :param individual: Individual agent from population
         :type individual: object
         """
         # Mutate network architecture by adding layers or nodes
-        offspring_actor = getattr(individual, self.algo['actor']['eval']).clone()
-        offspring_critics = [getattr(individual, critic['eval']).clone() for critic in self.algo['critics']]
+        offspring_actor = getattr(
+            individual, self.algo['actor']['eval']).clone()
+        offspring_critics = [getattr(individual, critic['eval']).clone()
+                             for critic in self.algo['critics']]
 
         rand_numb = self.rng.uniform(0, 1)
 
@@ -294,11 +343,11 @@ class Mutations():
         # If algorithm has critics, apply to these too
 
         if self.arch == 'cnn':
-            if rand_numb < self.new_layer_prob/2:
+            if rand_numb < self.new_layer_prob / 2:
                 offspring_actor.add_mlp_layer()
                 for offspring_critic in offspring_critics:
                     offspring_critic.add_mlp_layer()
-            elif self.new_layer_prob/2 <= rand_numb < self.new_layer_prob:
+            elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
                 offspring_actor.add_cnn_layer()
                 for offspring_critic in offspring_critics:
                     offspring_critic.add_cnn_layer()
@@ -318,7 +367,7 @@ class Mutations():
                         offspring_critic.add_mlp_node()
 
         elif self.arch == 'bert':
-            if rand_numb < self.new_layer_prob/2:
+            if rand_numb < self.new_layer_prob / 2:
                 if self.rng.uniform(0, 1) < 0.5:
                     offspring_actor.add_encoder_layer()
                     for offspring_critic in offspring_critics:
@@ -327,7 +376,7 @@ class Mutations():
                     offspring_actor.remove_encoder_layer()
                     for offspring_critic in offspring_critics:
                         offspring_critic.remove_encoder_layer()
-            elif self.new_layer_prob/2 <= rand_numb < self.new_layer_prob:
+            elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
                 if self.rng.uniform(0, 1) < 0.5:
                     offspring_actor.add_decoder_layer()
                     for offspring_critic in offspring_critics:
@@ -345,8 +394,8 @@ class Mutations():
                     node_dict = offspring_actor.remove_node()
                     for offspring_critic in offspring_critics:
                         offspring_critic.remove_node(**node_dict)
-            
-        else:   # mlp            
+
+        else:   # mlp
             if rand_numb < self.new_layer_prob:
                 if self.rng.uniform(0, 1) < 0.5:
                     offspring_actor.add_layer()
@@ -366,16 +415,18 @@ class Mutations():
                     for offspring_critic in offspring_critics:
                         offspring_critic.remove_node(**node_dict)
 
-        setattr(individual, self.algo['actor']['eval'], offspring_actor.to(self.device))
+        setattr(individual, self.algo['actor']
+                ['eval'], offspring_actor.to(self.device))
         for offspring_critic, critic in zip(offspring_critics, self.algo['critics']):
-            setattr(individual, critic['eval'], offspring_critic.to(self.device))
-           
+            setattr(individual, critic['eval'],
+                    offspring_critic.to(self.device))
+
         individual.mut = 'arch'
         return individual
 
     def get_algo_nets(self, algo):
         """Returns dictionary with agent network names.
-        
+
         :param algo: RL algorithm
         :type algo: string
         """
@@ -386,7 +437,7 @@ class Mutations():
                     'eval': 'actor',
                     'target': 'actor_target',
                     'optimizer': 'optimizer'
-                    },
+                },
                 'critics': []
             }
         elif algo == 'DDPG':
@@ -395,11 +446,11 @@ class Mutations():
                     'eval': 'actor',
                     'target': 'actor_target',
                     'optimizer': 'actor_optimizer'
-                    },
+                },
                 'critics': [{
                     'eval': 'critic',
                     'target': 'critic_target',
                     'optimizer': 'critic_optimizer'
-                    }]
+                }]
             }
         return nets

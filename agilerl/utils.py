@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ddpg import DDPG
 
+
 def makeVectEnvs(env_name, num_envs=1):
     """Returns async-vectorized gym environments.
 
@@ -12,12 +13,14 @@ def makeVectEnvs(env_name, num_envs=1):
     :param num_ens: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     """
-    return gym.vector.AsyncVectorEnv([lambda: gym.make(env_name) for i in range(num_envs)])
- 
+    return gym.vector.AsyncVectorEnv(
+        [lambda: gym.make(env_name) for i in range(num_envs)])
 
-def initialPopulation(algo, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size=1, device='cpu'):
+
+def initialPopulation(algo, state_dim, action_dim, one_hot,
+                      net_config, INIT_HP, population_size=1, device='cpu'):
     """Returns population of identical agents.
-    
+
     :param algo: RL algorithm
     :type algo: str
     :param state_dim: State observation dimension
@@ -38,39 +41,40 @@ def initialPopulation(algo, state_dim, action_dim, one_hot, net_config, INIT_HP,
     if algo == 'DQN':
         for idx in range(population_size):
             agent = DQN(
-                state_dim = state_dim,
-                action_dim = action_dim,
-                one_hot = one_hot,
-                index = idx,
-                net_config = net_config,
-                batch_size = INIT_HP['BATCH_SIZE'],
-                lr = INIT_HP['LR'],
-                learn_step = INIT_HP['LEARN_STEP'],
-                gamma = INIT_HP['GAMMA'],
-                tau = INIT_HP['TAU'],
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                index=idx,
+                net_config=net_config,
+                batch_size=INIT_HP['BATCH_SIZE'],
+                lr=INIT_HP['LR'],
+                learn_step=INIT_HP['LEARN_STEP'],
+                gamma=INIT_HP['GAMMA'],
+                tau=INIT_HP['TAU'],
                 device=device
-                )
+            )
             population.append(agent)
 
     elif algo == 'DDPG':
         for idx in range(population_size):
             agent = DDPG(
-                state_dim = state_dim,
-                action_dim = action_dim,
-                one_hot = one_hot,
-                index = idx,
-                net_config = net_config,
-                batch_size = INIT_HP['BATCH_SIZE'],
-                lr = INIT_HP['LR'],
-                learn_step = INIT_HP['LEARN_STEP'],
-                gamma = INIT_HP['GAMMA'],
-                tau = INIT_HP['TAU'],
-                policy_freq = INIT_HP['POLICY_FREQ'],
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                index=idx,
+                net_config=net_config,
+                batch_size=INIT_HP['BATCH_SIZE'],
+                lr=INIT_HP['LR'],
+                learn_step=INIT_HP['LEARN_STEP'],
+                gamma=INIT_HP['GAMMA'],
+                tau=INIT_HP['TAU'],
+                policy_freq=INIT_HP['POLICY_FREQ'],
                 device=device
-                )
+            )
             population.append(agent)
 
     return population
+
 
 def printHyperparams(pop):
     """Prints current hyperparameters of agents in a population and their fitnesses.
@@ -79,7 +83,9 @@ def printHyperparams(pop):
     :type pop: List[object]
     """
     for agent in pop:
-        print('Agent ID: {}    Mean 100 fitness: {:.2f}    lr: {}    Batch Size: {}'.format(agent.index, np.mean(agent.fitness[-100:]), agent.lr, agent.batch_size))
+        print('Agent ID: {}    Mean 100 fitness: {:.2f}    lr: {}    Batch Size: {}'.format(
+            agent.index, np.mean(agent.fitness[-100:]), agent.lr, agent.batch_size))
+
 
 def plotPopulationScore(pop):
     """Plots the fitness scores of agents in a population.

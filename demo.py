@@ -8,18 +8,19 @@ import torch
 
 if __name__ == '__main__':
     NET_CONFIG = {
-                    'arch': 'mlp',       # Network architecture
-                    'h_size': [32, 32],  # Actor hidden size
-                }
+        'arch': 'mlp',       # Network architecture
+        'h_size': [32, 32],  # Actor hidden size
+    }
 
     INIT_HP = {
-                'BATCH_SIZE': 128,      # Batch size
-                'LR': 1e-3,             # Learning rate
-                'GAMMA': 0.99,          # Discount factor
-                'LEARN_STEP': 1,        # Learning frequency
-                'TAU': 1e-3,            # For soft update of target network parameters
-                'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            }
+        'BATCH_SIZE': 128,      # Batch size
+        'LR': 1e-3,             # Learning rate
+        'GAMMA': 0.99,          # Discount factor
+        'LEARN_STEP': 1,        # Learning frequency
+        'TAU': 1e-3,            # For soft update of target network parameters
+        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        'CHANNELS_LAST': False
+    }
 
     pop = initialPopulation(algo='DQN',             # Algorithm
                             state_dim=(8,),            # State dimension
@@ -32,29 +33,31 @@ if __name__ == '__main__':
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(action_dim=4,             # Number of agent actions
-                        memory_size=10000,        # Max replay buffer size
-                        field_names=field_names,  # Field names to store in memory
-                        device=torch.device("cuda"))
+                          memory_size=10000,        # Max replay buffer size
+                          field_names=field_names,  # Field names to store in memory
+                          device=torch.device("cuda"))
 
-    tournament = TournamentSelection(tournament_size=2, # Tournament selection size
-                                    elitism=True,      # Elitism in tournament selection
-                                    population_size=6, # Population size
-                                    evo_step=1)        # Evaluate using last N fitness scores
+    tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
+                                     elitism=True,      # Elitism in tournament selection
+                                     population_size=6,  # Population size
+                                     evo_step=1)        # Evaluate using last N fitness scores
 
     mutations = Mutations(algo='DQN',                           # Algorithm
-                        no_mutation=0.4,                      # No mutation
-                        architecture=0.2,                     # Architecture mutation
-                        new_layer_prob=0.2,                   # New layer mutation
-                        parameters=0.2,                       # Network parameters mutation
-                        activation=0,                         # Activation layer mutation
-                        rl_hp=0.2,                            # Learning HP mutation
-                        rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
-                        mutation_sd=0.1,                      # Mutation strength
-                        arch=NET_CONFIG['arch'],              # Network architecture
-                        rand_seed=1,                          # Random seed
-                        device=torch.device("cuda"))
+                          no_mutation=0.4,                      # No mutation
+                          architecture=0.2,                     # Architecture mutation
+                          new_layer_prob=0.2,                   # New layer mutation
+                          parameters=0.2,                       # Network parameters mutation
+                          activation=0,                         # Activation layer mutation
+                          rl_hp=0.2,                            # Learning HP mutation
+                          # Learning HPs to choose from
+                          rl_hp_selection=['lr', 'batch_size'],
+                          mutation_sd=0.1,                      # Mutation strength
+                          # Network architecture
+                          arch=NET_CONFIG['arch'],
+                          rand_seed=1,                          # Random seed
+                          device=torch.device("cuda"))
 
-    max_episodes = 1000 # Max training episodes
+    max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
 
     # Exploration params
@@ -78,31 +81,44 @@ if __name__ == '__main__':
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
             for idx_step in range(max_steps):
-                action = agent.getAction(state, epsilon)    # Get next action from agent
-                next_state, reward, done, _, _ = env.step(action)   # Act in environment
-                
+                # Get next action from agent
+                action = agent.getAction(state, epsilon)
+                next_state, reward, done, _, _ = env.step(
+                    action)   # Act in environment
+
                 # Save experience to replay buffer
-                memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                memory.save2memoryVectEnvs(
+                    state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
-                if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-                    experiences = memory.sample(agent.batch_size) # Sample replay buffer
-                    agent.learn(experiences)    # Learn according to agent's RL algorithm
-                
+                if memory.counter % agent.learn_step == 0 and len(
+                        memory) >= agent.batch_size:
+                    experiences = memory.sample(
+                        agent.batch_size)  # Sample replay buffer
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
+
                 state = next_state
                 score += reward
 
-        epsilon = max(eps_end, epsilon*eps_decay) # Update epsilon for exploration
+        # Update epsilon for exploration
+        epsilon = max(eps_end, epsilon * eps_decay)
 
         # Now evolve population if necessary
-        if (idx_epi+1) % evo_epochs == 0:
-            
+        if (idx_epi + 1) % evo_epochs == 0:
+
             # Evaluate population
-            fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=False,
+                    max_steps=max_steps,
+                    loop=evo_loop) for agent in pop]
 
             print(f'Episode {idx_epi+1}/{max_episodes}')
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            print(
+                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)

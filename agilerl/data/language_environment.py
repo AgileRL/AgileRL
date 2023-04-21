@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 from utils.cache import Cache
 
+
 class Language_Observation(ABC):
     @abstractmethod
     def to_sequence(self) -> Tuple[List[str, Optional[float]], bool]:
@@ -32,6 +33,7 @@ class Language_Environment(ABC):
     def is_terminal(self) -> bool:
         pass
 
+
 class Policy(ABC):
     def __init__(self) -> None:
         super().__init__()
@@ -47,7 +49,9 @@ class Policy(ABC):
     def eval(self):
         pass
 
-def interact_environment(env: Language_Environment, policy: Policy, obs: Optional[Language_Observation]=None):
+
+def interact_environment(env: Language_Environment, policy: Policy,
+                         obs: Optional[Language_Observation] = None):
     obs_sequence = []
     if obs is None:
         obs = env.reset()
