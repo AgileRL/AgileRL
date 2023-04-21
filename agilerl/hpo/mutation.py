@@ -1,4 +1,3 @@
-import torch.optim as optim
 import numpy as np
 import fastrand
 

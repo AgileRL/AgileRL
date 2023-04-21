@@ -1,6 +1,6 @@
 import copy
 from collections import OrderedDict
-from typing import List
+import inspect
 import numpy as np
 import torch
 import torch.nn as nn
@@ -184,7 +184,8 @@ class EvolvableGPT(nn.Module):
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
+            # inference-time mini-optimization: only forward the lm_head on the very last 
+            # position
             # note: using list [-1] to preserve the time dim
             logits = self.lm_head(x[:, [-1], :])
             loss = None

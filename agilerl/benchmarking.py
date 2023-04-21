@@ -1,10 +1,9 @@
 import torch
-import gymnasium as gym
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.utils import makeVectEnvs, initialPopulation, printHyperparams, plotPopulationScore
+from agilerl.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train import train
 
 
