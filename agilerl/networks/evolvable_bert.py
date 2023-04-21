@@ -682,7 +682,7 @@ class EvolvableBERT(nn.Module):
     def clone(self):
         """Returns clone of neural net with identical parameters.
         """
-        clone = EvolvableTransformer(**copy.deepcopy(self.init_dict))
+        clone = EvolvableBERT(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
 

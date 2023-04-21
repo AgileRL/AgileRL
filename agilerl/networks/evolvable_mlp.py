@@ -105,9 +105,9 @@ class EvolvableMLP(nn.Module):
             output_layer.weight.data.mul_(0.1)
             output_layer.bias.data.mul_(0.1)
 
-        net_dict[f"linear_layer_output"] = output_layer
+        net_dict["linear_layer_output"] = output_layer
         if self.output_activation is not None:
-            net_dict[f"activation_output"] = self.get_activation(
+            net_dict["activation_output"] = self.get_activation(
                 self.output_activation)
 
         return nn.Sequential(net_dict)

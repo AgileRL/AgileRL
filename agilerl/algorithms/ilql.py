@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn import functional as F
-from typing import Any, Callable, Dict, List, Tuple, Union, Optional
+from typing import Any, Callable, List, Tuple, Union, Optional
 import wandb
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_gpt import EvolvableGPT
@@ -495,7 +495,7 @@ class ILQL(nn.Module):
         }
 
     def get_loss(self,
-                 items: InputType,
+                 items,
                  awac_weight=0.0,
                  v_loss_weight=0.0,
                  q_loss_weight=0.0,
@@ -573,21 +573,11 @@ class ILQL(nn.Module):
             ((act_weights * (1 - terminals[:, :-1])).sum() / max(n, 1)).item(), n)
         logs['transformer'] = transformer_logs
 
-        def postproc_f(l): return l.update(
-            {
-                'loss': awac_weight *
-                l['token_loss'] +
-                q_loss_weight *
-                l['q_loss'] +
-                v_loss_weight *
-                l['v_loss'] +
-                cql_loss_weight *
-                l['cql_loss'] +
-                dm_loss_weight *
-                l['dm_loss']})
-
-        def hist_f(l): return l.update(
-            {'advantage_hist': wandb.Histogram(advantages)})
+        def postproc_f(x):
+            return x.update({'loss': awac_weight * x['token_loss'] + q_loss_weight * x['q_loss'] + v_loss_weight * x['v_loss'] + cql_loss_weight * x['cql_loss'] + dm_loss_weight * x['dm_loss']})
+        def hist_f(x):
+            return x.update({'advantage_hist': wandb.Histogram(advantages)})
+        
         return loss, logs, [postproc_f, hist_f]
 
     def score(self,
@@ -654,7 +644,7 @@ class ILQL(nn.Module):
         return weights, model_outputs
 
     def get_scores(self,
-                   items: InputType,
+                   items,
                    beta: float = 1.0,
                    exp_weights: bool = False,
                    clip_weight: Optional[float] = None,

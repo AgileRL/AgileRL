@@ -181,8 +181,7 @@ class EvolvableCNN(nn.Module):
             'sigmoid': nn.Sigmoid,
             'softplus': nn.Softplus,
             'lrelu': nn.LeakyReLU,
-            'prelu': nn.PReLU,
-            'gelu': nn.GELU}
+            'prelu': nn.PReLU}
         return activation_functions[activation_names]()
 
     def create_mlp(self, input_size, output_size, hidden_size, name):
@@ -289,13 +288,13 @@ class EvolvableCNN(nn.Module):
     def reset_noise(self):
         """Resets noise of value and advantage networks.
         """
-        for l in self.value_net:
-            if isinstance(l, NoisyLinear):
-                l.reset_noise()
+        for layer in self.value_net:
+            if isinstance(layer, NoisyLinear):
+                layer.reset_noise()
         if self.rainbow:
-            for l in self.advantage_net:
-                if isinstance(l, NoisyLinear):
-                    l.reset_noise()
+            for layer in self.advantage_net:
+                if isinstance(layer, NoisyLinear):
+                    layer.reset_noise()
 
     def forward(self, x, xc=None):
         """Returns output of neural network.
