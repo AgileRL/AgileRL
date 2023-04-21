@@ -17,7 +17,7 @@ When contributing to AgileRL, we ask that you:
 
 There are many ways to contribute, from writing tutorials or blog posts, improving the documentation, submitting bug reports and feature requests or writing code which can be incorporated into AgileRL itself.
 
-All members of the AgileRL community are expected to follow the [Python Community Code of Conduct](https://www.python.org/psf/codeofconduct/).
+All members of the AgileRL community are expected to follow the [Code of Conduct](https://github.com/AgileRL/AgileRL/blob/main/CODE_OF_CONDUCT.md).
 
 ## Your First Contribution
 AgileRL is nascent, and so there is a lot of scope to contribute on what you find interesting. You can have a big impact on the framework now and get involved in our exciting early development.
