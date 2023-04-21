@@ -40,7 +40,7 @@ html_theme_options = {
     'logo_only': False,
     'display_version': False,
     'navigation_depth': 3,
-    "collapse_navigation" : False
+    "collapse_navigation": False
 }
 
 # -- Options for EPUB output

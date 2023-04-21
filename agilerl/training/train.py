@@ -3,8 +3,29 @@ from tqdm import trange
 import wandb
 from datetime import datetime
 
-def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
-    """The general training function. Returns trained population of agents and their fitnesses. 
+
+def train(
+        env,
+        env_name,
+        algo,
+        pop,
+        memory,
+        swap_channels=False,
+        n_episodes=2000,
+        max_steps=500,
+        evo_epochs=5,
+        evo_loop=1,
+        eps_start=1.0,
+        eps_end=0.1,
+        eps_decay=0.995,
+        target=200.,
+        tournament=None,
+        mutation=None,
+        checkpoint=None,
+        checkpoint_path=None,
+        wb=False,
+        device='cpu'):
+    """The general training function. Returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
     :type env: Gym-style environment
@@ -51,16 +72,18 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
         wandb.init(
             # set the wandb project where this run will be logged
             project="AgileRL",
-            name="{}-EvoHPO-{}-{}".format(env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")),
+            name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                                          datetime.now().strftime("%m%d%Y%H%M%S")),
             # track hyperparameters and run metadata
             config={
-            "algo": "Evo HPO {}".format(algo),
-            "env": env_name,
+                "algo": "Evo HPO {}".format(algo),
+                "env": env_name,
             }
         )
 
-    save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
-    
+    save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
+        env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
+
     epsilon = eps_start
 
     bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
@@ -78,42 +101,59 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
             for idx_step in range(max_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [3], [1])
-                action = agent.getAction(state, epsilon)    # Get next action from agent
-                next_state, reward, done, _, _ = env.step(action)   # Act in environment
+                # Get next action from agent
+                action = agent.getAction(state, epsilon)
+                next_state, reward, done, _, _ = env.step(
+                    action)   # Act in environment
 
                 # Save experience to replay buffer
                 if swap_channels:
-                    memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
                 else:
-                    memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
-                if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-                    experiences = memory.sample(agent.batch_size)   # Sample replay buffer
-                    agent.learn(experiences)    # Learn according to agent's RL algorithm
+                if memory.counter % agent.learn_step == 0 and len(
+                        memory) >= agent.batch_size:
+                    experiences = memory.sample(
+                        agent.batch_size)   # Sample replay buffer
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
 
                 state = next_state
                 score += reward
-            
+
             agent.scores.append(score)
-            
+
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
-        epsilon = max(eps_end, epsilon*eps_decay)   # Update epsilon for exploration
+        # Update epsilon for exploration
+        epsilon = max(eps_end, epsilon * eps_decay)
 
         # Now evolve if necessary
-        if (idx_epi+1) % evo_epochs == 0:
-            
+        if (idx_epi + 1) % evo_epochs == 0:
+
             # Evaluate population
-            fitnesses = [agent.test(env, swap_channels=swap_channels, max_steps=max_steps, loop=evo_loop) for agent in pop]
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=swap_channels,
+                    max_steps=max_steps,
+                    loop=evo_loop) for agent in pop]
             pop_fitnesses.append(fitnesses)
 
-            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+            mean_scores = np.mean([agent.scores[-20:]
+                                  for agent in pop], axis=1)
 
             if wb:
-                wandb.log({"global_step": total_steps, "eval/mean_score": np.mean(mean_scores), "eval/mean_reward": np.mean(fitnesses), "eval/best_fitness": np.max(fitnesses)})
-            
+                wandb.log({"global_step": total_steps,
+                           "eval/mean_score": np.mean(mean_scores),
+                           "eval/mean_reward": np.mean(fitnesses),
+                           "eval/best_fitness": np.max(fitnesses)})
+
             # Update step counter
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
@@ -122,7 +162,8 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
             pbar.update(0)
 
             # Early stop if consistently reaches target
-            if np.all(np.greater([np.mean(agent.fitness[-100:]) for agent in pop], target)) and idx_epi >= 100:
+            if np.all(np.greater([np.mean(agent.fitness[-100:])
+                      for agent in pop], target)) and idx_epi >= 100:
                 if wb:
                     wandb.finish()
                 return pop, pop_fitnesses
@@ -134,7 +175,7 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
 
         # Save model checkpoint
         if checkpoint is not None:
-            if (idx_epi+1) % checkpoint == 0:
+            if (idx_epi + 1) % checkpoint == 0:
                 for i, agent in enumerate(pop):
                     agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
 

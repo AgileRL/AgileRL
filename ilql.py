@@ -7,6 +7,7 @@ import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 
+
 class ILQL():
     """The ILQL algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf
 
@@ -35,8 +36,25 @@ class ILQL():
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    def __init__(self, state_dim, action_dim, one_hot, index=0, net_config={'arch':'mlp','h_size':[64,64]}, batch_size=64, 
-                 lr=1e-4, learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu'):
+
+    def __init__(
+        self,
+        state_dim,
+        action_dim,
+        one_hot,
+        index=0,
+        net_config={
+            'arch': 'mlp',
+            'h_size': [
+            64,
+            64]},
+            batch_size=64,
+            lr=1e-4,
+            learn_step=5,
+            gamma=0.99,
+            tau=1e-3,
+            mutation=None,
+            device='cpu'):
         self.algo = 'ILQL'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -57,15 +75,39 @@ class ILQL():
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
-            self.actor = EvolvableMLP(num_inputs=state_dim[0], num_outputs=action_dim, hidden_size=self.net_config['h_size'], device=self.device).to(self.device)
-            self.actor_target = EvolvableMLP(num_inputs=state_dim[0], num_outputs=action_dim, hidden_size=self.net_config['h_size'], device=self.device).to(self.device)
+            self.actor = EvolvableMLP(
+                num_inputs=state_dim[0],
+                num_outputs=action_dim,
+                hidden_size=self.net_config['h_size'],
+                device=self.device).to(
+                self.device)
+            self.actor_target = EvolvableMLP(
+                num_inputs=state_dim[0],
+                num_outputs=action_dim,
+                hidden_size=self.net_config['h_size'],
+                device=self.device).to(
+                self.device)
             self.actor_target.load_state_dict(self.actor.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
-            self.actor = EvolvableCNN(input_shape=state_dim, num_actions=action_dim, channel_size=self.net_config['c_size'], kernal_size=self.net_config['k_size'],
-                                      stride_size=self.net_config['s_size'], hidden_size=self.net_config['h_size'], device=self.device).to(self.device)
-            self.actor_target = EvolvableCNN(input_shape=state_dim, num_actions=action_dim, channel_size=self.net_config['c_size'], kernal_size=self.net_config['k_size'],
-                                             stride_size=self.net_config['s_size'], hidden_size=self.net_config['h_size'], device=self.device).to(self.device)
+            self.actor = EvolvableCNN(
+                input_shape=state_dim,
+                num_actions=action_dim,
+                channel_size=self.net_config['c_size'],
+                kernal_size=self.net_config['k_size'],
+                stride_size=self.net_config['s_size'],
+                hidden_size=self.net_config['h_size'],
+                device=self.device).to(
+                self.device)
+            self.actor_target = EvolvableCNN(
+                input_shape=state_dim,
+                num_actions=action_dim,
+                channel_size=self.net_config['c_size'],
+                kernal_size=self.net_config['k_size'],
+                stride_size=self.net_config['s_size'],
+                hidden_size=self.net_config['h_size'],
+                device=self.device).to(
+                self.device)
             self.actor_target.load_state_dict(self.actor.state_dict())
 
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
@@ -83,9 +125,10 @@ class ILQL():
         state = torch.from_numpy(state).float().to(self.device)
 
         if self.one_hot:
-            state = nn.functional.one_hot(state.long(), num_classes=self.state_dim[0]).float().squeeze()
-        
-        if len(state.size())<2:
+            state = nn.functional.one_hot(
+                state.long(), num_classes=self.state_dim[0]).float().squeeze()
+
+        if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
         self.actor.eval()
@@ -95,7 +138,8 @@ class ILQL():
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = np.random.randint(0, self.action_dim, size=state.size()[0])
+            action = np.random.randint(
+                0, self.action_dim, size=state.size()[0])
         else:
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
@@ -110,11 +154,15 @@ class ILQL():
         states, actions, rewards, next_states, dones = experiences
 
         if self.one_hot:
-            states = nn.functional.one_hot(states.long(), num_classes=self.state_dim[0]).float().squeeze()
-            next_states = nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
+            states = nn.functional.one_hot(
+                states.long(), num_classes=self.state_dim[0]).float().squeeze()
+            next_states = nn.functional.one_hot(
+                next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
 
-        q_target = self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
-        y_j = rewards + self.gamma * q_target * (1 - dones)          # target, if terminal then y_j = rewards
+        q_target = self.actor_target(next_states).detach().max(axis=1)[
+            0].unsqueeze(1)
+        # target, if terminal then y_j = rewards
+        y_j = rewards + self.gamma * q_target * (1 - dones)
         q_eval = self.actor(states).gather(1, actions.long())
 
         # loss backprop
@@ -129,8 +177,10 @@ class ILQL():
     def softUpdate(self):
         """Soft updates target network.
         """
-        for eval_param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
-            target_param.data.copy_(self.tau*eval_param.data + (1.0-self.tau)*target_param.data)
+        for eval_param, target_param in zip(
+                self.actor.parameters(), self.actor_target.parameters()):
+            target_param.data.copy_(
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data)
 
     def test(self, env, swap_channels=False, max_steps=500, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
@@ -170,19 +220,19 @@ class ILQL():
             index = self.index
 
         clone = type(self)(state_dim=self.state_dim,
-                            action_dim=self.action_dim,
-                            one_hot=self.one_hot,
-                            index=index, 
-                            net_config = self.net_config, 
-                            batch_size=self.batch_size,
-                            lr=self.lr,
-                            learn_step=self.learn_step,
-                            gamma=self.gamma,
-                            tau=self.tau,
-                            mutation=self.mut,
-                            device=self.device,
+                           action_dim=self.action_dim,
+                           one_hot=self.one_hot,
+                           index=index,
+                           net_config=self.net_config,
+                           batch_size=self.batch_size,
+                           lr=self.lr,
+                           learn_step=self.learn_step,
+                           gamma=self.gamma,
+                           tau=self.tau,
+                           mutation=self.mut,
+                           device=self.device,
                            )
-                           
+
         clone.actor = self.actor.clone().to(self.device)
         clone.actor_target = self.actor_target.clone().to(self.device)
         clone.optimizer = optim.Adam(clone.actor.parameters(), lr=clone.lr)
@@ -191,7 +241,7 @@ class ILQL():
         clone.scores = copy.deepcopy(self.scores)
 
         return clone
-    
+
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
@@ -199,24 +249,24 @@ class ILQL():
         :type path: string
         """
         torch.save({
-                    'actor_init_dict': self.actor.init_dict,
-                    'actor_state_dict': self.actor.state_dict(),
-                    'actor_target_init_dict': self.actor_target.init_dict,
-                    'actor_target_state_dict': self.actor_target.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'net_config': self.net_config,
-                    'batch_size': self.batch_size,
-                    'lr': self.lr,
-                    'learn_step': self.learn_step,
-                    'gamma': self.gamma,
-                    'tau': self.tau,
-                    'mutation': self.mut,
-                    'index': self.index, 
-                    'scores': self.scores,
-                    'fitness': self.fitness,
-                    'steps': self.steps,
-                    }, path)
-        
+            'actor_init_dict': self.actor.init_dict,
+            'actor_state_dict': self.actor.state_dict(),
+            'actor_target_init_dict': self.actor_target.init_dict,
+            'actor_target_state_dict': self.actor_target.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'net_config': self.net_config,
+            'batch_size': self.batch_size,
+            'lr': self.lr,
+            'learn_step': self.learn_step,
+            'gamma': self.gamma,
+            'tau': self.tau,
+            'mutation': self.mut,
+            'index': self.index,
+            'scores': self.scores,
+            'fitness': self.fitness,
+            'steps': self.steps,
+        }, path)
+
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
@@ -227,12 +277,15 @@ class ILQL():
         self.net_config = checkpoint['net_config']
         if self.net_config['arch'] == 'mlp':
             self.actor = EvolvableMLP(**checkpoint['actor_init_dict'])
-            self.actor_target = EvolvableMLP(**checkpoint['actor_target_init_dict'])
+            self.actor_target = EvolvableMLP(
+                **checkpoint['actor_target_init_dict'])
         elif self.net_config['arch'] == 'cnn':
             self.actor = EvolvableCNN(**checkpoint['actor_init_dict'])
-            self.actor_target = EvolvableCNN(**checkpoint['actor_target_init_dict'])
+            self.actor_target = EvolvableCNN(
+                **checkpoint['actor_target_init_dict'])
         self.actor.load_state_dict(checkpoint['actor_state_dict'])
-        self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+        self.actor_target.load_state_dict(
+            checkpoint['actor_target_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.batch_size = checkpoint['batch_size']
         self.lr = checkpoint['lr']
