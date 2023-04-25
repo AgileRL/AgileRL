@@ -40,6 +40,8 @@ Or install in development mode: (Recommended due to nascent nature of this libra
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -r requirements.txt
 ```
+If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>. 
+
 Demo:
 ```bash
 python demo.py
@@ -48,6 +50,7 @@ python demo.py
 ## Algorithms implemented (more coming soon!)
   * DQN
   * DDPG
+  * ILQL
 
 ## Train an agent
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
