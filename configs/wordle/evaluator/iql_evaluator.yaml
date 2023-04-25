@@ -1,0 +1,7 @@
+defaults:
+  - /env: wordle_env
+
+name: iql_evaluator
+verbose: true
+kind: greedy
+generation_kwargs: {}

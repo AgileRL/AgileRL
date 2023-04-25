@@ -1,0 +1,6 @@
+defaults:
+  - /policy@policy1: optimal_policy
+  - /policy@policy2: repeat_policy
+
+name: mixture_policy
+prob1: 0.5

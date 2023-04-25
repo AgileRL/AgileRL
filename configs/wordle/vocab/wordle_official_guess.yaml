@@ -1,0 +1,4 @@
+name: vocab
+vocab_path: data/wordle/word_lists/wordle_official_guess.txt
+cache_path: null
+fill_cache: true

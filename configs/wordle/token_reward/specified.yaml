@@ -1,0 +1,4 @@
+name: specified_token_reward
+token_file: data/wordle/vowel_penalty.json
+scale: 1.0
+shift: 0.0

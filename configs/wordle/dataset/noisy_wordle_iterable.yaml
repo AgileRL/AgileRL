@@ -1,0 +1,7 @@
+defaults:
+ - /vocab: wordle_official
+ - /policy: repeat_optimal_policy
+ - /token_reward: constant
+
+name: wordle_iterable_dataset
+max_len: null

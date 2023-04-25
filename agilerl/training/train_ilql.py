@@ -1,204 +1,167 @@
 from accelerate import Accelerator
-import numpy as np
-from tqdm import trange
+from collections import deque
+from functools import partial
+import json
+import os
+from tqdm import tqdm
 import wandb
-from datetime import datetime
+import torch
+from torch.utils.data.dataset import IterableDataset
+from torch.utils.data import DataLoader
+from agilerl.utils.load_objects import load_item
+from agilerl.utils.ilql_utils import convert_path, add_system_configs
+from agilerl.utils.log_utils import DistributeCombineLogs, label_logs
+from agilerl.utils.torch_utils import to
+from agilerl.data.rl_data import Iterable_RL_Dataset
+from agilerl.data.torch_datasets import GeneralDataset, GeneralIterDataset
 
-
-def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000,
-          max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1,
-          eps_decay=0.995, target=200., tournament=None, mutation=None,
-          checkpoint=None, checkpoint_path=None, wb=False, device='cpu'):
-    """The general training function. Returns trained population of agents and their
-    fitnesses.
-
-    :param env: The environment to train in. Can be vectorized.
-    :type env: Gym-style environment
-    :param env_name: Environment name
-    :type env_name: str
-    :param algo: RL algorithm name
-    :type algo: str
-    :param pop: Population of agents
-    :type pop: List[object]
-    :param memory: Experience Replay Buffer
-    :type memory: object
-    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
-    :type swap_channels: bool, optional
-    :param n_episodes: Maximum number of training episodes, defaults to 2000
-    :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
-    :type max_steps: int, optional
-    :param evo_epochs: Evolution frequency (episodes), defaults to 5
-    :type evo_epochs: int, optional
-    :param evo_loop: Number of evaluation episodes, defaults to 1
-    :type evo_loop: int, optional
-    :param eps_start: Maximum exploration - initial epsilon value, defaults to 1.0
-    :type eps_start: float, optional
-    :param eps_end: Minimum exploration - final epsilon value, defaults to 0.1
-    :type eps_end: float, optional
-    :param eps_decay: Epsilon decay per episode, defaults to 0.995
-    :type eps_decay: float, optional
-    :param target: Target score for early stopping, defaults to 200.
-    :type target: float, optional
-    :param tournament: Tournament selection object, defaults to None
-    :type tournament: object, optional
-    :param mutation: Mutation object, defaults to None
-    :type mutation: object, optional
-    :param checkpoint: Checkpoint frequency (episodes), defaults to None
-    :type checkpoint: int, optional
-    :param checkpoint_path: Location to save checkpoint, defaults to None
-    :type checkpoint_path: str, optional
-    :param wb: Weights & Biases tracking, defaults to False
-    :type wb: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+def train(cfg):
+    """The ILQL training function. 
     """
+    print('using config:', cfg)
+    train_cfg = cfg['train']
+    train_cfg['save_checkpoint_dir'] = convert_path(train_cfg['save_checkpoint_dir'])
+    train_cfg['optim_state_path'] = convert_path(train_cfg['optim_state_path'])
+    wandb_cfg = cfg['wandb']
     accelerator = Accelerator()
-    if wb:
+    system_cfg = add_system_configs(cfg, accelerator)
+    print('using device:', system_cfg['device'])
+    print('num processes:', system_cfg['num_processes'])
+    print('using fp16:', system_cfg['use_fp16'])
+    if not os.path.exists(train_cfg['save_checkpoint_dir']):
+        os.makedirs(train_cfg['save_checkpoint_dir'])
+    with open(os.path.join(train_cfg['save_checkpoint_dir'], 'config.json'), 'w') as f:
+        json.dump(cfg, f)
+
+    if wandb_cfg['use_wandb']:
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project="AgileRL",
-                name="{}-EvoHPO-{}-{}".format(env_name,
-                                              algo,
-                                              datetime.now().strftime("%m%d%Y%H%M%S")),
-                # track hyperparameters and run metadata
-                config={
-                    "algo": "Evo HPO {}".format(algo),
-                    "env": env_name,
-                }
-            )
+            wandb.init(project=wandb_cfg['wandb_project'], config=cfg)
         accelerator.wait_for_everyone()
 
-    save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
-        env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
+    raw_dataset_train = load_item(cfg['train_dataset'], system_cfg['device'])
+    raw_dataset_eval = load_item(cfg['eval_dataset'], system_cfg['device'])
+    if isinstance(raw_dataset_train, Iterable_RL_Dataset):
+        dataset_train = GeneralIterDataset(raw_dataset_train, 'cpu')
+    else:
+        dataset_train = GeneralDataset(raw_dataset_train, 'cpu')
+    if isinstance(raw_dataset_eval, Iterable_RL_Dataset):
+        dataset_eval = GeneralIterDataset(raw_dataset_eval, 'cpu')
+    else:
+        dataset_eval = GeneralDataset(raw_dataset_eval, 'cpu')
+    train_data_loader_kwargs = {'num_workers': train_cfg['dataloader_workers'], 
+                                'batch_size': cfg['model']['batch_size'], 
+                                'collate_fn': dataset_train.collate}
+    eval_data_loader_kwargs = {'num_workers': train_cfg['dataloader_workers'], 
+                               'batch_size': train_cfg['eval_bsize'], 
+                               'collate_fn': dataset_eval.collate}
+    if not isinstance(dataset_train, IterableDataset):
+        train_data_loader_kwargs['shuffle'] = True
+    if not isinstance(dataset_eval, IterableDataset):
+        eval_data_loader_kwargs['shuffle'] = True
+    data_loader = DataLoader(dataset_train, **train_data_loader_kwargs)
+    eval_data_loader = DataLoader(dataset_eval, **eval_data_loader_kwargs)
 
-    epsilon = eps_start
+    evaluator = None
+    if cfg['evaluator'] is not None:
+        evaluator = load_item(cfg['evaluator'], system_cfg['device'])
 
-    bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
-    pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
+    model = load_item(cfg['model'], system_cfg['device'])
+    model.train()
 
-    pop_fitnesses = []
-    total_steps = 0
+    if hasattr(model, 'param_groups'):
+        params = [{'params': frozenset().union(*list(map(lambda x: x.parameters(), p))), **f(train_cfg)} for p, f in model.param_groups]
+        model.optimizer = torch.optim.AdamW(
+            params, lr=model.lr, weight_decay=model.weight_decay)
+    optim = model.optimizer
+
+    if train_cfg['optim_state_path'] is not None and os.path.exists(train_cfg['optim_state_path']):
+        print(f'loading optimizer state from: {train_cfg["optim_state_path"]}')
+        optim.load_state_dict(torch.load(train_cfg['optim_state_path'], map_location=system_cfg['device']))
+        print('loaded.')
+    if isinstance(dataset_train, IterableDataset) and isinstance(dataset_eval, IterableDataset):
+        model, optim = accelerator.prepare(model, optim)
+    elif isinstance(dataset_train, IterableDataset):
+        model, optim, eval_data_loader = accelerator.prepare(model, optim, eval_data_loader)
+    elif isinstance(dataset_eval, IterableDataset):
+        model, optim, data_loader = accelerator.prepare(model, optim, data_loader)
+    else:
+        model, optim, data_loader, eval_data_loader = accelerator.prepare(model, optim, data_loader, eval_data_loader)
+
+    train_logs = DistributeCombineLogs(accelerator, use_wandb=wandb_cfg['use_wandb'])
+    eval_logs = DistributeCombineLogs(accelerator, use_wandb=wandb_cfg['use_wandb'])
+    step = 0
+    best_loss = float('inf')
+    saved_checkpoints = deque([])
+
+    # bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
+    # pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
+
 
     # RL training loop
-    for idx_epi in pbar:
-        for agent in pop:   # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
-
-            for idx_step in range(max_steps):
-                if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
-                # Get next action from agent
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(
-                    action)   # Act in environment
-
-                # Save experience to replay buffer
-                if swap_channels:
-                    memory.save2memoryVectEnvs(
-                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
-                else:
-                    memory.save2memoryVectEnvs(
-                        state, action, reward, next_state, done)
-
-                # Learn according to learning frequency
-                if memory.counter % agent.learn_step == 0 and len(
-                        memory) >= agent.batch_size:
-                    experiences = memory.sample(
-                        agent.batch_size)   # Sample replay buffer
-                    # Learn according to agent's RL algorithm
-                    agent.learn(experiences)
-
-                state = next_state
-                score += reward
-
-            agent.scores.append(score)
-
-            agent.steps[-1] += max_steps
-            total_steps += max_steps
-
-        # Update epsilon for exploration
-        epsilon = max(eps_end, epsilon * eps_decay)
-
-        # Now evolve if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=swap_channels,
-                    max_steps=max_steps,
-                    loop=evo_loop) for agent in pop]
-            pop_fitnesses.append(fitnesses)
-
-            mean_scores = np.mean([agent.scores[-20:]
-                                  for agent in pop], axis=1)
-
-            if wb:
-                wandb.log({"global_step": total_steps,
-                           "eval/mean_score": np.mean(mean_scores),
-                           "eval/mean_reward": np.mean(fitnesses),
-                           "eval/best_fitness": np.max(fitnesses)})
-
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
-
-            pbar.set_postfix_str(f'Fitness: {["%.2f"%fitness for fitness in fitnesses]}, 100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}, 100 score avgs: {["%.2f"%np.mean(agent.scores[-100:]) for agent in pop]}, agents: {[agent.index for agent in pop]}, steps: {[agent.steps[-1] for agent in pop]}, mutations: {[agent.mut for agent in pop]}')
-            pbar.update(0)
-
-            # Early stop if consistently reaches target
-            if np.all(np.greater([np.mean(agent.fitness[-100:])
-                      for agent in pop], target)) and idx_epi >= 100:
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
-
-            if tournament and mutation is not None:
-                # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
-                pop = mutation.mutation(pop)
-
-        # Save model checkpoint
-        if checkpoint is not None:
-            if (idx_epi + 1) % checkpoint == 0:
-                for i, agent in enumerate(pop):
-                    agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
-
-    if wb:
-        wandb.finish()
-    return pop, pop_fitnesses
-
-
-registry = {}
-cache = {}
-
-
-def register(name):
-    def add_f(f):
-        registry[name] = f
-        return f
-    return add_f
-
-
-def load_item(config, *args, verbose=True):
-    config = config.copy()
-    name = config.pop('name')
-    if name not in registry:
-        raise NotImplementedError
-    if 'cache_id' in config:
-        if (name, config['cache_id']) in cache:
-            if verbose:
-                print(f'loading from cache ({name}, {config["cache_id"]})')
-            return cache[(name, config['cache_id'])]
-    if verbose:
-        print(f'loading {name}: {config}')
-    item = registry[name](config, *args, verbose=verbose)
-    if 'cache_id' in config:
-        print(f'saving to cache ({name}, {config["cache_id"]})')
-        cache[(name, config['cache_id'])] = item
-    return item
+    for epoch in range(train_cfg['epochs']):
+        for items in tqdm(data_loader, disable=not accelerator.is_local_main_process):
+            items = to(items, system_cfg['device'])
+            loss, logs, postproc_fs = accelerator.unwrap_model(model).get_loss(items, **train_cfg['loss'])
+            accelerator.backward(loss / train_cfg['grad_accum_steps'])
+            train_logs.accum_logs(logs)
+            if (step + 1) % train_cfg['grad_accum_steps'] == 0:
+                optim.step()
+                optim.zero_grad()
+                if train_cfg['loss']['q_loss_weight'] != 0.0 or train_cfg['loss']['v_loss_weight'] != 0.0:
+                    accelerator.unwrap_model(model).soft_update()
+            if (train_cfg['hard_update_every'] is not None) and ((step + 1) % train_cfg['hard_update_every'] == 0):
+                accelerator.unwrap_model(model).hard_update()
+            if (step + 1) % train_cfg['log_every'] == 0:
+                train_logs.log(*postproc_fs, 
+                               partial(label_logs, label='train'), 
+                               iteration=step, epoch=epoch)
+            if (step + 1) % train_cfg['grad_accum_steps'] == 0:
+                train_logs.reset_logs()
+            if (step + 1) % train_cfg['eval_every'] == 0:
+                model.eval()
+                eval_logs.reset_logs()
+                with torch.no_grad():
+                    for i, eval_items in enumerate(eval_data_loader):
+                        eval_items = to(eval_items, system_cfg['device'])
+                        if i >= train_cfg['eval_batches']:
+                            break
+                        _, logs, postproc_fs = accelerator.unwrap_model(model).get_loss(eval_items, **train_cfg['loss'])
+                        if evaluator is not None:
+                            evaluator_logs = evaluator.evaluate(accelerator.unwrap_model(model), eval_items)
+                            if evaluator_logs is not None:
+                                logs['evaluation'] = evaluator_logs
+                        eval_logs.accum_logs(logs)
+                eval_label = 'eval'
+                eval_total_logs = eval_logs.log(*postproc_fs, 
+                                                partial(label_logs, label=eval_label), 
+                                                iteration=step, epoch=epoch)
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    if eval_total_logs[eval_label]['loss'] < best_loss:
+                        print('new best eval loss! Saving ...')
+                        if not os.path.exists(train_cfg['save_checkpoint_dir']):
+                            os.makedirs(train_cfg['save_checkpoint_dir'])
+                        torch.save(accelerator.unwrap_model(model).state_dict(),
+                                    os.path.join(train_cfg['save_checkpoint_dir'], 'model.pkl'))
+                        torch.save(optim.state_dict(), os.path.join(train_cfg['save_checkpoint_dir'], 'optim.pkl'))
+                        print('saved.')
+                        best_loss = eval_total_logs[eval_label]['loss']
+                accelerator.wait_for_everyone()
+                model.train()
+            if train_cfg['save_every'] is not None and (step + 1) % train_cfg['save_every'] == 0:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    print('saving checkpoint...')
+                    if not os.path.exists(train_cfg['save_checkpoint_dir']):
+                        os.makedirs(train_cfg['save_checkpoint_dir'])
+                    if (train_cfg['max_checkpoints'] is not None) and (len(saved_checkpoints) >= train_cfg['max_checkpoints']):
+                        os.system('rm -rf %s' % (saved_checkpoints.popleft()))
+                    torch.save(accelerator.unwrap_model(model).state_dict(),
+                                os.path.join(train_cfg['save_checkpoint_dir'], 'model_%d.pkl' % (step)))
+                    saved_checkpoints.append(os.path.join(train_cfg['save_checkpoint_dir'], 'model_%d.pkl' % (step)))
+                    print('saved.')
+                accelerator.wait_for_everyone()
+            step += 1
+            if train_cfg['max_steps'] is not None and step >= train_cfg['max_steps']:
+                return
