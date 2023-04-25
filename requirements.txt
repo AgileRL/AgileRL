@@ -6,7 +6,7 @@ hydra-core==1.3.2
 matplotlib==3.4.3
 numpy==1.24.2
 omegaconf==2.3.0
-redis==3.5.3
+redis==4.4.4
 termcolor==1.1.0
 torch==1.13.1 # 2.0.0
 tqdm==4.65.0
