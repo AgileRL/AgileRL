@@ -1,0 +1,7 @@
+defaults:
+  - /env: wordle_env
+
+name: bc_evaluator
+verbose: true
+kind: sample
+generation_kwargs: {}

@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import IterableDataset, Dataset
-from data.rl_data import List_RL_Dataset, Iterable_RL_Dataset
+from agilerl.data.rl_data import List_RL_Dataset, Iterable_RL_Dataset
 from typing import Union
 
 

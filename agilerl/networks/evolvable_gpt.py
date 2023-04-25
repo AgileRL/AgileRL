@@ -57,7 +57,7 @@ class EvolvableGPT(nn.Module):
             min_layers: int = 8,
             max_layers: int = 16,
             bias: bool = True,
-            stored_values=None,
+            stored_values = None,
             device='cpu'):
         super(EvolvableGPT, self).__init__()
 
@@ -157,6 +157,13 @@ class EvolvableGPT(nn.Module):
         return nn.ModuleDict(net_dict)
 
     def forward(self, idx, targets=None):
+        """Forward pass through evolvable GPT model.
+        
+        :param idxs: Input ids
+        :type idxs: torch.Tensor
+        :param targets: Target ids
+        :type targets: torch.Tensor
+        """
         device = idx.device
         b, t = idx.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
@@ -196,8 +203,8 @@ class EvolvableGPT(nn.Module):
         # model surgery to decrease the block size if necessary
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
         # but want to use a smaller block size for some smaller, simpler model
-        assert block_size <= self.config.block_size
-        self.config.block_size = block_size
+        assert block_size <= self.block_size
+        self.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(
             self.transformer.wpe.weight[:block_size])
         for block in self.transformer.h:
@@ -351,8 +358,7 @@ class EvolvableGPT(nn.Module):
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
-        cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        L, H, Q, T = self.n_layer, self.n_head, self.n_embd // self.n_head, self.block_size
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
@@ -372,7 +378,7 @@ class EvolvableGPT(nn.Module):
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(
-                1) <= self.config.block_size else idx[:, -self.config.block_size:]
+                1) <= self.block_size else idx[:, -self.block_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
@@ -766,12 +772,13 @@ class MLP(EvolvableMLP):
         return activation_functions[activation_names]()
 
 
-def new_gelu(x):
+class new_gelu(nn.Module):
     """
     Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
     Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
     """
-    return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi)
+    def forward(self, x):
+        return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi)
                       * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
