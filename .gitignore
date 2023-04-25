@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Saved models
+outputs/
+
+# Ruff
+.ruff_cache/
+
+# Large data files
+data/wordle/

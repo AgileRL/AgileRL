@@ -1,0 +1,43 @@
+# defaults:
+#  - /gpt2: gpt2_plain
+
+name: per_token_iql
+index: 0
+batch_size: 128
+lr: 1e-5
+alpha: 0.005
+beta: 0.0
+gamma: 0.99
+tau: 0.7
+mutation: null
+transition_weight: 0.0
+clip_weight: null
+value_max: null
+value_min: null
+detach_v: false
+detach_q: false
+detach_pi: false
+double_q: true
+per_token: true
+exp_weights: true
+dm_margin: 0.0
+cql_temp: 1.0
+weight_decay: 0.0
+net_config: {
+              'arch': 'gpt',
+              'vocab_size': 50257,
+              'n_embd': 768,
+              'n_head': 12,
+              'dim_feedfwd': 3072,
+              'block_size': 1024,
+              'activation': 'gelu',
+              'dropout': 0.1,
+              'layer_norm_eps': 1e-5,
+              'min_layers': 8,
+              'max_layers': 16,
+              'bias': True,
+            }
+load:
+  name: per_token_iql
+  checkpoint_path: null
+  strict_load: true

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
-from utils.cache import Cache
+from agilerl.utils.cache import Cache
 
 
 class Language_Observation(ABC):

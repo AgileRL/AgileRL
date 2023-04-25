@@ -1,0 +1,4 @@
+name: vocab
+vocab_path: data/wordle/word_lists/10k_words.txt
+cache_path: null
+fill_cache: true

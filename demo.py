@@ -1,4 +1,4 @@
-from agilerl.utils import makeVectEnvs, initialPopulation
+from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations

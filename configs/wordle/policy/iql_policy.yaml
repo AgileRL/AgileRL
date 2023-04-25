@@ -1,0 +1,6 @@
+defaults:
+  /model@iql_model: per_token_iql
+
+name: iql_policy
+kind: greedy
+generation_kwargs: {}

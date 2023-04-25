@@ -1,0 +1,22 @@
+defaults:
+ - policy: optimal_policy
+ - vocab: wordle_official
+
+vocab:
+  cache_path: data/wordle/vocab_cache_wordle_official.pkl
+  fill_cache: true
+
+policy:
+  cache_path: data/wordle/optimal_policy_cache_wordle_official.pkl
+  progress_bar: false
+  start_word_policy:
+    start_words: null
+
+n_trajectories: 100000
+reward_every: 4096
+load_data: null
+save_path: data/wordle/expert_wordle_mp_100k_test.pkl
+n_processes: 4
+policy_cache_save_path: data/wordle/optimal_policy_cache_wordle_official_test.pkl
+vocab_cache_save_path: data/wordle/vocab_cache_wordle_official_test.pkl
+dump_every: 1024
