@@ -1,0 +1,65 @@
+defaults:
+  - model: bc_lm
+  - dataset@train_dataset: human_dataset
+  - dataset@eval_dataset: human_dataset
+  - evaluator: bc_evaluator
+  - _self_
+
+train_dataset:
+  cache_id: d_train
+  file_path: data/wordle/random_human_tweet_data_200.json
+  use_true_word: false
+  index_file: data/wordle/human_train_idxs.json
+
+eval_dataset:
+  cache_id: d_eval
+  file_path: data/wordle/random_human_tweet_data_200.json
+  use_true_word: false
+  index_file: data/wordle/human_eval_idxs.json
+
+model:
+  transition_weight: 0.0
+  dataset:
+    name: wordle_human_dataset
+    cache_id: d_train
+  load:
+    checkpoint_path: null
+    strict_load: true
+
+evaluator:
+  env:
+    vocab:
+      name: vocab
+      vocab_path: data/wordle/word_lists/wordle_official_200.txt
+      cache_path: null
+      fill_cache: true
+  verbose: true
+  kind: sample
+  generation_kwargs:
+    temp: 1.0
+    num_generations: 1
+    max_generation_len: null 
+    top_k: null
+    top_p: null
+
+train:
+  save_checkpoint_dir: outputs/wordle_tweet_bc_test1/
+  optim_state_path: null
+  epochs: 1
+  dataloader_workers: 1
+  bsize: 64
+  grad_accum_steps: 1
+  log_every: 256
+  eval_every: 1024
+  save_every: 16384
+  max_checkpoints: 1
+  eval_bsize: 32
+  eval_batches: 1
+  lr: 1e-4
+  weight_decay: 0.01
+  max_steps: null
+  loss: {}
+
+wandb:
+  use_wandb: true
+  wandb_project: wordle_iql

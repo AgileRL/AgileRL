@@ -1,0 +1,22 @@
+defaults:
+ - /policy@cache_policy: optimal_policy
+ - /policy@random_policy: random_mixture_policy
+ - /vocab: wordle_official
+
+cache_policy:
+  progress_bar: true
+  cache_path: data/wordle/optimal_policy_cache_wordle_official.pkl
+
+random_policy:
+  vocab: null
+  prob_smart: 0.0
+
+vocab:
+  cache_path: data/wordle/vocab_cache_wordle_official.pkl
+
+cache_policy_mix_prob: 0.5
+print_every: 1
+dump_cache_every: 1024
+policy_cache_save_path: data/wordle/optimal_off_policy_cache_wordle_official.pkl
+vocab_cache_save_path: data/wordle/optimal_off_policy_vocab_cache_wordle_official.pkl
+

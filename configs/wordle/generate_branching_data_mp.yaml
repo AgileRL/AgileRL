@@ -1,0 +1,32 @@
+defaults:
+ - policy@expert_policy: optimal_policy
+ - policy@suboptimal_policy: wrong_policy
+ - vocab: wordle_official
+
+vocab:
+  cache_path: data/wordle/vocab_cache_wordle_official.pkl
+  fill_cache: true
+
+expert_policy:
+  cache_path: data/wordle/optimal_policy_cache_wordle_official.pkl
+  progress_bar: false
+  start_word_policy:
+    start_words: null
+
+suboptimal_policy:
+  vocab:
+    name: vocab
+    vocab_path: word_lists/wordle_official_guess.txt
+    cache_path: null
+    fill_cache: false
+
+n_trajectories: 20000
+reward_every: 4096
+load_data: null
+save_path: data/wordle/expert_wordle_branch_20k.pkl
+n_processes: 4
+expert_policy_cache_save_path: data/wordle/optimal_policy_cache_wordle_official.pkl
+suboptimal_policy_cache_save_path: null
+vocab_cache_save_path: data/wordle/vocab_cache_wordle_official_branch.pkl
+dump_every: 1024
+n_suboptimal: 1

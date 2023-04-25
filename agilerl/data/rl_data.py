@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import torch
-from data.language_environment import Language_Observation
-from data.tokenizer import Tokenizer
+from agilerl.data.language_environment import Language_Observation
+from agilerl.data.tokenizer import Tokenizer
 
 
 class TokenReward(ABC):

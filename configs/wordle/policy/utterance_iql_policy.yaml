@@ -1,0 +1,6 @@
+defaults:
+  /model@iql_model: per_utterance_iql
+
+name: utterance_iql_policy
+kind: sample
+generation_kwargs: {}

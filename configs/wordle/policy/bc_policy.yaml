@@ -1,0 +1,6 @@
+defaults:
+  /model@bc_lm: bc_lm
+
+name: bc_policy
+kind: sample
+generation_kwargs: {}

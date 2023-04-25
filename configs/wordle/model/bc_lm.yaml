@@ -1,0 +1,10 @@
+defaults:
+ - /gpt2: gpt2_plain
+
+name: bc_lm
+dataset: null
+transition_weight: 0.0
+load:
+  name: bc_lm
+  checkpoint_path: null
+  strict_load: true
