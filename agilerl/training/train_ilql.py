@@ -109,9 +109,9 @@ def train(cfg):
                 optim.step()
                 optim.zero_grad()
                 if train_cfg['loss']['q_loss_weight'] != 0.0 or train_cfg['loss']['v_loss_weight'] != 0.0:
-                    accelerator.unwrap_model(model).soft_update()
+                    accelerator.unwrap_model(model).softUpdate()
             if (train_cfg['hard_update_every'] is not None) and ((step + 1) % train_cfg['hard_update_every'] == 0):
-                accelerator.unwrap_model(model).hard_update()
+                accelerator.unwrap_model(model).hardUpdate()
             if (step + 1) % train_cfg['log_every'] == 0:
                 train_logs.log(*postproc_fs, 
                                partial(label_logs, label='train'), 

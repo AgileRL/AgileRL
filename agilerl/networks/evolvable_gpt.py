@@ -97,7 +97,7 @@ class EvolvableGPT(nn.Module):
                         p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+        # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
     def get_num_params(self, non_embedding=True):
         """Return the number of parameters in the model.
@@ -189,7 +189,9 @@ class EvolvableGPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+                logits.view(-1, logits.size(-1)), 
+                targets.view(-1).type(torch.LongTensor).to(self.device), 
+                ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last 
             # position

@@ -203,7 +203,7 @@ class ILQL(nn.Module):
             self.device)
         self.q = EvolvableMLP(
             num_inputs=net_config['n_embd'],
-            num_outputs=1,
+            num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[
                 net_config['n_embd'] * 2,
                 net_config['n_embd'] * 2],
@@ -211,7 +211,7 @@ class ILQL(nn.Module):
             self.device)
         self.target_q = EvolvableMLP(
             num_inputs=net_config['n_embd'],
-            num_outputs=1,
+            num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[
                 net_config['n_embd'] * 2,
                 net_config['n_embd'] * 2],
@@ -222,7 +222,7 @@ class ILQL(nn.Module):
         if self.double_q:
             self.q2 = EvolvableMLP(
                 num_inputs=net_config['n_embd'],
-                num_outputs=1,
+                num_outputs=self.dataset.tokenizer.num_tokens(),
                 hidden_size=[
                     net_config['n_embd'] * 2,
                     net_config['n_embd'] * 2],
@@ -230,7 +230,7 @@ class ILQL(nn.Module):
                 self.device)
             self.target_q2 = EvolvableMLP(
                 num_inputs=net_config['n_embd'],
-                num_outputs=1,
+                num_outputs=self.dataset.tokenizer.num_tokens(),
                 hidden_size=[
                     net_config['n_embd'] * 2,
                     net_config['n_embd'] * 2],
@@ -240,7 +240,7 @@ class ILQL(nn.Module):
 
         self.pi = EvolvableMLP(
             num_inputs=net_config['n_embd'],
-            num_outputs=1,
+            num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[
                 net_config['n_embd'] * 2,
                 net_config['n_embd'] * 2],
@@ -276,12 +276,12 @@ class ILQL(nn.Module):
         :type detach_full_policy: bool, optional
         """
         # Model forward passes
-        model_outputs, model_hidden_states = self.model(
+        model_outputs, model_hidden_states, model_loss = self.model(
             tokens, attn_mask)
         hidden_states = model_hidden_states[-1]
 
         with torch.no_grad():
-            target_outputs, target_hidden_states = self.actor_target(
+            target_outputs, target_hidden_states, target_loss = self.actor_target(
                 tokens, attn_mask)
         target_hidden_states = target_hidden_states[-1]
 
@@ -292,10 +292,10 @@ class ILQL(nn.Module):
         else:
             if detach_full_policy:
                 with torch.no_grad():
-                    policy_outputs, policy_hidden_states = self.actor(
+                    policy_outputs, policy_hidden_states, policy_loss = self.actor(
                         tokens, attn_mask)
             else:
-                policy_outputs, policy_hidden_states = self.actor(
+                policy_outputs, policy_hidden_states, policy_loss = self.actor(
                     tokens, attn_mask)
             policy_hidden_states = policy_hidden_states[-1]
 
@@ -326,7 +326,7 @@ class ILQL(nn.Module):
             target_qs = self.target_q(action_target_hidden_states)
             if self.double_q:
                 target_qs2 = self.target_q2(action_target_hidden_states)
-        if skip_policy_on_train and self.training and self.lm_policy is not None:
+        if skip_policy_on_train and self.training and self.actor is not None:
             logits = torch.zeros(
                 (policy_hidden_states.shape[0],
                  policy_hidden_states.shape[1],
@@ -424,18 +424,14 @@ class ILQL(nn.Module):
         if self.double_q:
             q1, q2 = qs
             b, t, d = q1.shape
-            return ((F.cross_entropy(q1.reshape(-1,
-                                                d) / self.cql_temp,
-                                     action_tokens.reshape(-1),
-                                     reduction='none').reshape(b,
-                                                               t) * (1 - terminals[:,
-                                                                                   :-1])) + (F.cross_entropy(q2.reshape(-1,
-                                                                                                                        d) / self.cql_temp,
-                                                                                                             action_tokens.reshape(-1),
-                                                                                                             reduction='none').reshape(b,
-                                                                                                                                       t) * (1 - terminals[:,
-                                                                                                                                                           :-1]))).sum() / max(n.item(),
-                                                                                                                                                                               1.0)
+            t1 = F.cross_entropy(q1.reshape(-1, d) / self.cql_temp,
+                                 action_tokens.reshape(-1),
+                                 reduction='none').reshape(b, t) * (1 - terminals[:,:-1])
+
+            t2 = F.cross_entropy(q2.reshape(-1, d) / self.cql_temp, 
+                                 action_tokens.reshape(-1), 
+                                 reduction='none').reshape(b, t) * (1 - terminals[:,:-1])
+            return ((t1) + (t2)).sum() / max(n.item(), 1.0)
         b, t, d = qs.shape
         return (F.cross_entropy(qs.reshape(-1, d) / self.cql_temp, action_tokens.reshape(-1),
                 reduction='none').reshape(b, t) * (1 - terminals[:, :-1])).sum() / max(n.item(), 1.0)
@@ -546,14 +542,14 @@ class ILQL(nn.Module):
 
         logs = {}
         transformer_logs = {}
-        transformer_logs['qv_transformer_logs'] = get_transformer_logs(
-            model_outputs['qv_model_outputs'].attentions, self.model, attn_mask)
-        if self.lm_policy is not None and (not (self.training and awac_weight == 0.0)):
-            transformer_logs['policy_transformer_logs'] = get_transformer_logs(
-                model_outputs['policy_model_outputs'].attentions, self.lm_policy, attn_mask)
-        if self.lm_target is not None:
-            transformer_logs['target_transformer_logs'] = get_transformer_logs(
-                model_outputs['target_model_outputs'].attentions, self.lm_target, attn_mask)
+        # transformer_logs['qv_transformer_logs'] = get_transformer_logs(
+        #     model_outputs['qv_model_outputs'].attentions, self.model, attn_mask)
+        # if self.actor is not None and (not (self.training and awac_weight == 0.0)):
+        #     transformer_logs['policy_transformer_logs'] = get_transformer_logs(
+        #         model_outputs['policy_model_outputs'].attentions, self.actor, attn_mask)
+        # if self.actor_target is not None:
+        #     transformer_logs['target_transformer_logs'] = get_transformer_logs(
+        #         model_outputs['target_model_outputs'].attentions, self.actor_target, attn_mask)
         n = (1 - terminals[:, :-1]).sum().item()
         rs_downstream = self.get_downstream_rs(rs, self.gamma)
         if mc_returns:
@@ -769,7 +765,7 @@ class ILQL(nn.Module):
                     self.target_q2.parameters(), self.q2.parameters()):
                 target_param.data.copy_(
                     self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data)
-        if self.lm_target is not None:
+        if self.actor_target is not None:
             for target_param, local_param in zip(
                     self.actor_target.parameters(), self.model.parameters()):
                 target_param.data.copy_(
@@ -959,9 +955,9 @@ class ILQL_Policy():
                                        prefix_embs=prefix_embs)['model_outputs']
         
         kvs = {'qv': model_outputs['qv_model_outputs'].past_key_values}
-        if self.iql_model.lm_target is not None:
+        if self.iql_model.actor_target is not None:
             kvs['target'] = model_outputs['target_model_outputs'].past_key_values
-        if self.iql_model.lm_policy is not None:
+        if self.iql_model.actor is not None:
             kvs['policy'] = model_outputs['policy_model_outputs'].past_key_values
         original_dialogue_lens = attn_mask.sum(dim=1)
         batch_indicator = torch.stack(beam_width*[torch.arange(0, bsize).to(device)], dim=1)
@@ -1037,8 +1033,8 @@ class ILQL_Policy():
             t += 1
             termination_mask *= ((t-dialogue_lens) < max_generation_len).int()
         
-        # self.iql_model.lm_target = temp_target
-        # self.iql_model.lm_policy = temp_policy
+        # self.iql_model.actor_target = temp_target
+        # self.iql_model.actor = temp_policy
         # self.iql_model.model = temp_model
         
         output_strs = [tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False) for i in range(n)]
@@ -1071,12 +1067,12 @@ class ILQL_Policy():
         assert include_logits or include_adv
         
         # swap out models so that only the relevent model is executed for speed purposes
-        # temp_target = self.iql_model.lm_target
-        # temp_policy = self.iql_model.lm_policy
+        # temp_target = self.iql_model.actor_target
+        # temp_policy = self.iql_model.actor
         # temp_model = self.iql_model.model
 
-        # self.iql_model.lm_target = temp_target
-        # self.iql_model.lm_policy = None
+        # self.iql_model.actor_target = temp_target
+        # self.iql_model.actor = None
         # self.iql_model.model = temp_policy
         
         tokenizer = self.iql_model.dataset.tokenizer
@@ -1095,9 +1091,9 @@ class ILQL_Policy():
                                        state_idxs, action_idxs, attn_mask,
                                        prefix_embs=prefix_embs)['model_outputs']
         kvs = {'qv': model_outputs['qv_model_outputs'].past_key_values}
-        if self.iql_model.lm_target is not None:
+        if self.iql_model.actor_target is not None:
             kvs['target'] = model_outputs['target_model_outputs'].past_key_values
-        if self.iql_model.lm_policy is not None:
+        if self.iql_model.actor is not None:
             kvs['policy'] = model_outputs['policy_model_outputs'].past_key_values
         dialogue_lens = attn_mask.sum(dim=1)
         tokens = pad_sequence(torch.repeat_interleave(tokens, num_generations, dim=0), max_length, tokenizer.pad_token_id, device, 1)
@@ -1164,8 +1160,8 @@ class ILQL_Policy():
             t += 1
             termination_mask *= ((t-dialogue_lens) < max_generation_len).int()
         
-        # self.iql_model.lm_target = temp_target
-        # self.iql_model.lm_policy = temp_policy
+        # self.iql_model.actor_target = temp_target
+        # self.iql_model.actor = temp_policy
         # self.iql_model.model = temp_model
 
         scores = ((advantages * rerank_advantage_weight) + (log_probs * rerank_log_prob_weight)).reshape(-1, num_generations)
