@@ -97,6 +97,105 @@ def train(cfg):
     # bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
     # pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
+from accelerate import Accelerator
+from collections import deque
+from functools import partial
+import json
+import os
+from tqdm import tqdm
+import wandb
+import torch
+from torch.utils.data.dataset import IterableDataset
+from torch.utils.data import DataLoader
+from agilerl.utils.load_objects import load_item
+from agilerl.utils.ilql_utils import convert_path, add_system_configs
+from agilerl.utils.log_utils import DistributeCombineLogs, label_logs
+from agilerl.utils.torch_utils import to
+from agilerl.data.rl_data import Iterable_RL_Dataset
+from agilerl.data.torch_datasets import GeneralDataset, GeneralIterDataset
+
+def train(cfg):
+    """The ILQL training function. 
+    """
+    print('using config:', cfg)
+    train_cfg = cfg['train']
+    train_cfg['save_checkpoint_dir'] = convert_path(train_cfg['save_checkpoint_dir'])
+    train_cfg['optim_state_path'] = convert_path(train_cfg['optim_state_path'])
+    wandb_cfg = cfg['wandb']
+    accelerator = Accelerator()
+    system_cfg = add_system_configs(cfg, accelerator)
+    print('using device:', system_cfg['device'])
+    print('num processes:', system_cfg['num_processes'])
+    print('using fp16:', system_cfg['use_fp16'])
+    if not os.path.exists(train_cfg['save_checkpoint_dir']):
+        os.makedirs(train_cfg['save_checkpoint_dir'])
+    with open(os.path.join(train_cfg['save_checkpoint_dir'], 'config.json'), 'w') as f:
+        json.dump(cfg, f)
+
+    if wandb_cfg['use_wandb']:
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            wandb.init(project=wandb_cfg['wandb_project'], config=cfg)
+        accelerator.wait_for_everyone()
+
+    raw_dataset_train = load_item(cfg['train_dataset'], system_cfg['device'])
+    raw_dataset_eval = load_item(cfg['eval_dataset'], system_cfg['device'])
+    if isinstance(raw_dataset_train, Iterable_RL_Dataset):
+        dataset_train = GeneralIterDataset(raw_dataset_train, 'cpu')
+    else:
+        dataset_train = GeneralDataset(raw_dataset_train, 'cpu')
+    if isinstance(raw_dataset_eval, Iterable_RL_Dataset):
+        dataset_eval = GeneralIterDataset(raw_dataset_eval, 'cpu')
+    else:
+        dataset_eval = GeneralDataset(raw_dataset_eval, 'cpu')
+    train_data_loader_kwargs = {'num_workers': train_cfg['dataloader_workers'], 
+                                'batch_size': cfg['model']['batch_size'], 
+                                'collate_fn': dataset_train.collate}
+    eval_data_loader_kwargs = {'num_workers': train_cfg['dataloader_workers'], 
+                               'batch_size': train_cfg['eval_bsize'], 
+                               'collate_fn': dataset_eval.collate}
+    if not isinstance(dataset_train, IterableDataset):
+        train_data_loader_kwargs['shuffle'] = True
+    if not isinstance(dataset_eval, IterableDataset):
+        eval_data_loader_kwargs['shuffle'] = True
+    data_loader = DataLoader(dataset_train, **train_data_loader_kwargs)
+    eval_data_loader = DataLoader(dataset_eval, **eval_data_loader_kwargs)
+
+    evaluator = None
+    if cfg['evaluator'] is not None:
+        evaluator = load_item(cfg['evaluator'], system_cfg['device'])
+
+    model = load_item(cfg['model'], system_cfg['device'])
+    model.train()
+
+    if hasattr(model, 'param_groups'):
+        params = [{'params': frozenset().union(*list(map(lambda x: x.parameters(), p))), **f(train_cfg)} for p, f in model.param_groups]
+        model.optimizer = torch.optim.AdamW(
+            params, lr=model.lr, weight_decay=model.weight_decay)
+    optim = model.optimizer
+
+    if train_cfg['optim_state_path'] is not None and os.path.exists(train_cfg['optim_state_path']):
+        print(f'loading optimizer state from: {train_cfg["optim_state_path"]}')
+        optim.load_state_dict(torch.load(train_cfg['optim_state_path'], map_location=system_cfg['device']))
+        print('loaded.')
+    if isinstance(dataset_train, IterableDataset) and isinstance(dataset_eval, IterableDataset):
+        model, optim = accelerator.prepare(model, optim)
+    elif isinstance(dataset_train, IterableDataset):
+        model, optim, eval_data_loader = accelerator.prepare(model, optim, eval_data_loader)
+    elif isinstance(dataset_eval, IterableDataset):
+        model, optim, data_loader = accelerator.prepare(model, optim, data_loader)
+    else:
+        model, optim, data_loader, eval_data_loader = accelerator.prepare(model, optim, data_loader, eval_data_loader)
+
+    train_logs = DistributeCombineLogs(accelerator, use_wandb=wandb_cfg['use_wandb'])
+    eval_logs = DistributeCombineLogs(accelerator, use_wandb=wandb_cfg['use_wandb'])
+    step = 0
+    best_loss = float('inf')
+    saved_checkpoints = deque([])
+
+    # bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
+    # pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
+
 
     # RL training loop
     for epoch in range(train_cfg['epochs']):
