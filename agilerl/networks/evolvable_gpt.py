@@ -97,7 +97,7 @@ class EvolvableGPT(nn.Module):
                         p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer))
 
         # report number of parameters
-        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+        # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
     def get_num_params(self, non_embedding=True):
         """Return the number of parameters in the model.
@@ -156,7 +156,7 @@ class EvolvableGPT(nn.Module):
         net_dict['ln_f'] = LayerNorm(self.n_embd, bias=self.bias)
         return nn.ModuleDict(net_dict)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx=None, tok_emb=None, targets=None, attn_mask=None, past_key_values=None, pos=None):
         """Forward pass through evolvable GPT model.
         
         :param idxs: Input ids
@@ -164,24 +164,45 @@ class EvolvableGPT(nn.Module):
         :param targets: Target ids
         :type targets: torch.Tensor
         """
-        device = idx.device
-        b, t = idx.size()
+        if idx is not None:
+            device = idx.device
+            t = idx.size(1)
+        else:
+            device = tok_emb.device
+            t = tok_emb.size(-2)
+        
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long,
-                           device=device).unsqueeze(0)  # shape (1, t)
 
+        presents = ()
         all_hidden_states = ()
+        if past_key_values is None:
+            past_length = 0
+            past_key_values = tuple([None] * self.n_layer)
+        else:
+            past_length = past_key_values[0][0].size(-2)
+
+        if pos is not None:
+            pos = pos.view(-1, t)
+        else:
+            pos = torch.arange(past_length, t+past_length, dtype=torch.long,
+                            device=device).unsqueeze(0)  # shape (1, t)
 
         # forward the GPT model itself
         # token embeddings of shape (b, t, n_embd)
-        tok_emb = self.transformer.wte(idx)
+        if tok_emb is None:
+            tok_emb = self.transformer.wte(idx)
         # position embeddings of shape (1, t, n_embd)
         pos_emb = self.transformer.wpe(pos)
         x = self.transformer.drop(tok_emb + pos_emb)
         all_hidden_states = all_hidden_states + (x,)
-        for block in self.transformer.h:
-            x = block(x)
+        for block, layer_past in zip(self.transformer.h, past_key_values):
+            torch.cuda.set_device(x.device)
+            # Ensure layer_past is on same device as hidden_states (might not be correct)
+            if layer_past is not None:
+                layer_past = tuple(past_state.to(x.device) for past_state in layer_past)
+            x, pres = block(x, attn_mask, layer_past)
             all_hidden_states = all_hidden_states + (x,)
+            presents = presents + (pres,)
         x = self.transformer.ln_f(x)
         all_hidden_states = all_hidden_states + (x,)
 
@@ -189,7 +210,9 @@ class EvolvableGPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+                logits.view(-1, logits.size(-1)), 
+                targets.view(-1).type(torch.LongTensor).to(self.device), 
+                ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last 
             # position
@@ -197,7 +220,7 @@ class EvolvableGPT(nn.Module):
             logits = self.lm_head(x[:, [-1], :])
             loss = None
 
-        return logits, all_hidden_states, loss
+        return logits, all_hidden_states, presents, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -677,7 +700,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(block_size, block_size))
                                  .view(1, 1, block_size, block_size))
 
-    def forward(self, x, attn_mask=None, is_causal=True):
+    def forward(self, x, attn_mask=None, layer_past=None, is_causal=True):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head
@@ -713,7 +736,14 @@ class CausalSelfAttention(nn.Module):
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y
+
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            k = torch.cat((past_key, k), dim=-2)
+            v = torch.cat((past_value, v), dim=-2)
+        present = (k, v)
+
+        return y, present
 
 
 class Block(nn.Module):
@@ -726,10 +756,11 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
         self.mlp = MLP(n_embd, dropout, hidden_size, activation)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, attn_mask=None, layer_past=None):
+        attn_outputs = self.attn(self.ln_1(x), attn_mask=attn_mask, layer_past=layer_past)
+        x = x + attn_outputs[0]
         x = x + self.mlp(self.ln_2(x))
-        return x
+        return x, attn_outputs[1]
 
 
 class MLP(EvolvableMLP):

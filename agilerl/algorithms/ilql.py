@@ -203,7 +203,7 @@ class ILQL(nn.Module):
             self.device)
         self.q = EvolvableMLP(
             num_inputs=net_config['n_embd'],
-            num_outputs=1,
+            num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[
                 net_config['n_embd'] * 2,
                 net_config['n_embd'] * 2],
@@ -211,7 +211,7 @@ class ILQL(nn.Module):
             self.device)
         self.target_q = EvolvableMLP(
             num_inputs=net_config['n_embd'],
-            num_outputs=1,
+            num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[
                 net_config['n_embd'] * 2,
                 net_config['n_embd'] * 2],
@@ -222,7 +222,7 @@ class ILQL(nn.Module):
         if self.double_q:
             self.q2 = EvolvableMLP(
                 num_inputs=net_config['n_embd'],
-                num_outputs=1,
+                num_outputs=self.dataset.tokenizer.num_tokens(),
                 hidden_size=[
                     net_config['n_embd'] * 2,
                     net_config['n_embd'] * 2],
@@ -230,7 +230,7 @@ class ILQL(nn.Module):
                 self.device)
             self.target_q2 = EvolvableMLP(
                 num_inputs=net_config['n_embd'],
-                num_outputs=1,
+                num_outputs=self.dataset.tokenizer.num_tokens(),
                 hidden_size=[
                     net_config['n_embd'] * 2,
                     net_config['n_embd'] * 2],
@@ -240,7 +240,7 @@ class ILQL(nn.Module):
 
         self.pi = EvolvableMLP(
             num_inputs=net_config['n_embd'],
-            num_outputs=1,
+            num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[
                 net_config['n_embd'] * 2,
                 net_config['n_embd'] * 2],
@@ -256,6 +256,9 @@ class ILQL(nn.Module):
                 action_idxs: torch.Tensor,
                 attn_mask: Optional[torch.Tensor] = None,
                 prefix_embs: Optional[torch.Tensor] = None,
+                prefix_attn_mask: Optional[torch.Tensor]=None,
+                remove_prefix_position_embs: bool=False,
+                qv_kwargs=None, policy_kwargs=None, target_kwargs=None,
                 skip_policy_on_train: bool = False,
                 detach_full_policy: bool = False):
         """Forward pass through transformers.
@@ -275,33 +278,64 @@ class ILQL(nn.Module):
         :param detach_full_policy: Use policy language model without gradients, defaults to False
         :type detach_full_policy: bool, optional
         """
+        if qv_kwargs is None:
+            qv_kwargs = {}
+        if target_kwargs is None:
+            target_kwargs = {}
+        if policy_kwargs is None:
+            policy_kwargs = {}
+        if prefix_embs is None:
+            prefix_embs = torch.empty((tokens.shape[0], 0, self.net_config['n_embd'])).to(self.device)
+            prefix_t = prefix_embs.shape[1]
+        else:
+            prefix_t = 0
+        set_pos_ids = prefix_attn_mask is not None
+        if prefix_attn_mask is not None and attn_mask is not None:
+            input_attn_mask = torch.cat((prefix_attn_mask, attn_mask), dim=1)
+        else:
+            input_attn_mask = None
+        position_ids = torch.cumsum(input_attn_mask, dim=1)-1 if set_pos_ids else None
+
+        target_prefix_embs = prefix_embs.clone()
+        policy_prefix_embs = prefix_embs.clone()
+
+        if remove_prefix_position_embs:
+            prefix_embs -= self.model.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])
+            target_prefix_embs -= self.actor_target.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])
+
+        input_embeddings = torch.cat((prefix_embs, self.model.transformer.wte(tokens)), dim=1)
+        target_input_embeddings = torch.cat((target_prefix_embs, self.actor_target.transformer.wte(tokens)), dim=1)
+
         # Model forward passes
-        model_outputs, model_hidden_states = self.model(
-            tokens, attn_mask)
-        hidden_states = model_hidden_states[-1]
+        model_outputs, model_hidden_states, model_past_key_values, model_loss = self.model(
+            tok_emb=input_embeddings, attn_mask=input_attn_mask, pos=position_ids, **qv_kwargs)
+        hidden_states = model_hidden_states[-1][:, prefix_t:, :]
 
         with torch.no_grad():
-            target_outputs, target_hidden_states = self.actor_target(
-                tokens, attn_mask)
-        target_hidden_states = target_hidden_states[-1]
+            target_outputs, target_hidden_states, target_past_key_values, target_loss = self.actor_target(
+                tok_emb=target_input_embeddings, attn_mask=input_attn_mask, pos=position_ids, **target_kwargs)
+        target_hidden_states = target_hidden_states[-1][:, prefix_t:, :]
 
         # Prepare policy inputs
         if skip_policy_on_train and self.training:
             policy_outputs = model_outputs
             policy_hidden_states = hidden_states
         else:
+            if remove_prefix_position_embs:
+                policy_prefix_embs -= self.actor.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])
+            policy_input_embeddings = torch.cat((policy_prefix_embs, self.actor.transformer.wte(tokens)), dim=1)
             if detach_full_policy:
                 with torch.no_grad():
-                    policy_outputs, policy_hidden_states = self.actor(
-                        tokens, attn_mask)
+                    policy_outputs, policy_hidden_states, policy_past_key_values, policy_loss = self.actor(
+                        tok_emb=policy_input_embeddings, attn_mask=input_attn_mask, pos=position_ids, **policy_kwargs)
             else:
-                policy_outputs, policy_hidden_states = self.actor(
-                    tokens, attn_mask)
-            policy_hidden_states = policy_hidden_states[-1]
+                policy_outputs, policy_hidden_states, policy_past_key_values, policy_loss = self.actor(
+                    tok_emb=policy_input_embeddings, attn_mask=input_attn_mask, pos=position_ids, **policy_kwargs)
+            policy_hidden_states = policy_hidden_states[-1][:, prefix_t:, :]
 
-        all_model_outputs = {'qv_model_outputs': model_outputs,
-                             'policy_model_outputs': target_outputs,
-                             'target_model_outputs': policy_outputs}
+        all_model_outputs = {'qv_model_outputs': {'past_key_values': model_past_key_values},
+                             'policy_model_outputs': {'past_key_values': policy_past_key_values},
+                             'target_model_outputs':  {'past_key_values': target_past_key_values}}
         all_hidden_states = {'qv_hidden_states': model_hidden_states,
                              'policy_hidden_states': target_hidden_states,
                              'target_hidden_states': policy_hidden_states}
@@ -326,7 +360,7 @@ class ILQL(nn.Module):
             target_qs = self.target_q(action_target_hidden_states)
             if self.double_q:
                 target_qs2 = self.target_q2(action_target_hidden_states)
-        if skip_policy_on_train and self.training and self.lm_policy is not None:
+        if skip_policy_on_train and self.training and self.actor is not None:
             logits = torch.zeros(
                 (policy_hidden_states.shape[0],
                  policy_hidden_states.shape[1],
@@ -424,18 +458,14 @@ class ILQL(nn.Module):
         if self.double_q:
             q1, q2 = qs
             b, t, d = q1.shape
-            return ((F.cross_entropy(q1.reshape(-1,
-                                                d) / self.cql_temp,
-                                     action_tokens.reshape(-1),
-                                     reduction='none').reshape(b,
-                                                               t) * (1 - terminals[:,
-                                                                                   :-1])) + (F.cross_entropy(q2.reshape(-1,
-                                                                                                                        d) / self.cql_temp,
-                                                                                                             action_tokens.reshape(-1),
-                                                                                                             reduction='none').reshape(b,
-                                                                                                                                       t) * (1 - terminals[:,
-                                                                                                                                                           :-1]))).sum() / max(n.item(),
-                                                                                                                                                                               1.0)
+            t1 = F.cross_entropy(q1.reshape(-1, d) / self.cql_temp,
+                                 action_tokens.reshape(-1),
+                                 reduction='none').reshape(b, t) * (1 - terminals[:,:-1])
+
+            t2 = F.cross_entropy(q2.reshape(-1, d) / self.cql_temp, 
+                                 action_tokens.reshape(-1), 
+                                 reduction='none').reshape(b, t) * (1 - terminals[:,:-1])
+            return ((t1) + (t2)).sum() / max(n.item(), 1.0)
         b, t, d = qs.shape
         return (F.cross_entropy(qs.reshape(-1, d) / self.cql_temp, action_tokens.reshape(-1),
                 reduction='none').reshape(b, t) * (1 - terminals[:, :-1])).sum() / max(n.item(), 1.0)
@@ -546,14 +576,14 @@ class ILQL(nn.Module):
 
         logs = {}
         transformer_logs = {}
-        transformer_logs['qv_transformer_logs'] = get_transformer_logs(
-            model_outputs['qv_model_outputs'].attentions, self.model, attn_mask)
-        if self.lm_policy is not None and (not (self.training and awac_weight == 0.0)):
-            transformer_logs['policy_transformer_logs'] = get_transformer_logs(
-                model_outputs['policy_model_outputs'].attentions, self.lm_policy, attn_mask)
-        if self.lm_target is not None:
-            transformer_logs['target_transformer_logs'] = get_transformer_logs(
-                model_outputs['target_model_outputs'].attentions, self.lm_target, attn_mask)
+        # transformer_logs['qv_transformer_logs'] = get_transformer_logs(
+        #     model_outputs['qv_model_outputs'].attentions, self.model, attn_mask)
+        # if self.actor is not None and (not (self.training and awac_weight == 0.0)):
+        #     transformer_logs['policy_transformer_logs'] = get_transformer_logs(
+        #         model_outputs['policy_model_outputs'].attentions, self.actor, attn_mask)
+        # if self.actor_target is not None:
+        #     transformer_logs['target_transformer_logs'] = get_transformer_logs(
+        #         model_outputs['target_model_outputs'].attentions, self.actor_target, attn_mask)
         n = (1 - terminals[:, :-1]).sum().item()
         rs_downstream = self.get_downstream_rs(rs, self.gamma)
         if mc_returns:
@@ -631,8 +661,7 @@ class ILQL(nn.Module):
             action_idxs = torch.full(
                 (tokens.shape[0], 1,), tokens.shape[1] - 1).long().to(self.device)
             trivial_value_query = True
-        self_outputs = self(tokens, attn_mask,
-                            state_idxs, action_idxs,
+        self_outputs = self(tokens, state_idxs, action_idxs, attn_mask,
                             prefix_embs, prefix_attn_mask,
                             remove_prefix_position_embs,
                             qv_kwargs, policy_kwargs, target_kwargs)
@@ -709,18 +738,15 @@ class ILQL(nn.Module):
         action_mask = (action_points.argmax(dim=1) >=
                        state_points.argmax(dim=1)).float()
         scores, model_outputs = self.score(tokens, None, None, None,
-                                           qv_kwargs={'use_cache': True},
-                                           policy_kwargs={'use_cache': True},
-                                           target_kwargs={'use_cache': True},
                                            beta=beta, exp_weights=exp_weights,
                                            clip_weight=clip_weight,
                                            logit_temp=logit_temp, logit_top_k=logit_top_k,
                                            logit_top_p=logit_top_p, include_logits=include_logits,
                                            include_advantage=include_advantage, action_mask=action_mask)
         return scores[:, -1, :], (
-            model_outputs['qv_model_outputs'].past_key_values,
-            model_outputs['policy_model_outputs'].past_key_values,
-            model_outputs['target_model_outputs'].past_key_values,
+            model_outputs['qv_model_outputs']['past_key_values'],
+            model_outputs['policy_model_outputs']['past_key_values'],
+            model_outputs['target_model_outputs']['past_key_values'],
             action_mask,
         )
 
@@ -740,20 +766,17 @@ class ILQL(nn.Module):
         action_mask += (tokens == self.dataset.tokenizer.eos_token_id).float()
         action_mask = (action_mask > 0.0).float()
         scores, model_outputs = self.score(tokens.unsqueeze(1), None, None, None,
-                                           qv_kwargs={'use_cache': True,
-                                                      'past_key_values': qv_kvs},
-                                           policy_kwargs={'use_cache': True,
-                                                          'past_key_values': policy_kvs},
-                                           target_kwargs={'use_cache': True,
-                                                          'past_key_values': target_kvs},
+                                           qv_kwargs={'past_key_values': qv_kvs},
+                                           policy_kwargs={'past_key_values': policy_kvs},
+                                           target_kwargs={'past_key_values': target_kvs},
                                            beta=beta, exp_weights=exp_weights, clip_weight=clip_weight,
                                            logit_temp=logit_temp, logit_top_k=logit_top_k,
                                            logit_top_p=logit_top_p, include_logits=include_logits,
                                            include_advantage=include_advantage, action_mask=action_mask)
         return scores.squeeze(1), (
-            model_outputs['qv_model_outputs'].past_key_values,
-            model_outputs['policy_model_outputs'].past_key_values,
-            model_outputs['target_model_outputs'].past_key_values,
+            model_outputs['qv_model_outputs']['past_key_values'],
+            model_outputs['policy_model_outputs']['past_key_values'],
+            model_outputs['target_model_outputs']['past_key_values'],
             action_mask,
         )
 
@@ -769,7 +792,7 @@ class ILQL(nn.Module):
                     self.target_q2.parameters(), self.q2.parameters()):
                 target_param.data.copy_(
                     self.alpha * local_param.data + (1.0 - self.alpha) * target_param.data)
-        if self.lm_target is not None:
+        if self.actor_target is not None:
             for target_param, local_param in zip(
                     self.actor_target.parameters(), self.model.parameters()):
                 target_param.data.copy_(
@@ -940,7 +963,9 @@ class ILQL_Policy():
                  temp=1.0, top_k=None, top_p=None, 
                  exp_adv=False, adv_weight=0.0, adv_clip=None, 
                  include_logits=True, include_adv=True, 
-                 prefix_embs: Optional[torch.Tensor]=None):
+                 prefix_embs: Optional[torch.Tensor]=None, 
+                 prefix_attn_mask: Optional[torch.Tensor]=None, 
+                 remove_prefix_position_embs: bool=False):
         
         tokenizer = self.iql_model.dataset.tokenizer
         max_length = self.iql_model.dataset.max_len
@@ -954,15 +979,15 @@ class ILQL_Policy():
             max_generation_len = max_length+1
         input_strs = [tokenizer.decode(tokens[i, :][:attn_mask[i, :].sum().long()].tolist(), clean_up_tokenization_spaces=False) for i in range(len(tokens))]
         prefix_t = 0 if prefix_embs is None else prefix_embs.shape[1]
-        model_outputs = self.iql_model(tokens, 
-                                       state_idxs, action_idxs, attn_mask,
-                                       prefix_embs=prefix_embs)['model_outputs']
+        model_outputs = self.iql_model(tokens, state_idxs, action_idxs, attn_mask,
+                                       prefix_embs=prefix_embs, prefix_attn_mask=prefix_attn_mask,
+                                       remove_prefix_position_embs=remove_prefix_position_embs)['model_outputs']
         
-        kvs = {'qv': model_outputs['qv_model_outputs'].past_key_values}
-        if self.iql_model.lm_target is not None:
-            kvs['target'] = model_outputs['target_model_outputs'].past_key_values
-        if self.iql_model.lm_policy is not None:
-            kvs['policy'] = model_outputs['policy_model_outputs'].past_key_values
+        kvs = {'qv': model_outputs['qv_model_outputs']['past_key_values']}
+        if self.iql_model.actor_target is not None:
+            kvs['target'] = model_outputs['target_model_outputs']['past_key_values']
+        if self.iql_model.actor is not None:
+            kvs['policy'] = model_outputs['policy_model_outputs']['past_key_values']
         original_dialogue_lens = attn_mask.sum(dim=1)
         batch_indicator = torch.stack(beam_width*[torch.arange(0, bsize).to(device)], dim=1)
 
@@ -981,8 +1006,8 @@ class ILQL_Policy():
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
-            # curr_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['qv'])
-            # curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
+            curr_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['qv'])
+            curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
             if 'target' in kvs:
                 map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['target'])
             if 'policy' in kvs:
@@ -990,7 +1015,10 @@ class ILQL_Policy():
             iql_outputs = self.iql_model(curr_token, 
                                          state_idxs_temp, 
                                          action_idxs_temp, 
-                                         None)
+                                         None,
+                                         qv_kwargs={'past_key_values': curr_kvs}, 
+                                         policy_kwargs={'past_key_values': curr_policy_kvs}, 
+                                         target_kwargs={'past_key_values': curr_target_kvs})
             model_outputs, logits = iql_outputs['model_outputs'], iql_outputs['logits']
             
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
@@ -1018,15 +1046,15 @@ class ILQL_Policy():
             logits = logits[(batch_indicator * beam_width + (top_k_ // vocab_size)).reshape(-1), :, :]
             logit_scores += torch.gather(torch.log(F.softmax(logits, dim=-1)).squeeze(1), dim=1, index=(top_k_.reshape(-1) % vocab_size).unsqueeze(1)).squeeze(1).reshape(-1, beam_width)
             tokens[:, t] = top_k_.reshape(-1) % vocab_size  # (batch*k,)
-            fixed_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], model_outputs['qv_model_outputs'].past_key_values)
+            fixed_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], model_outputs['qv_model_outputs']['past_key_values'])
             kvs['qv'] = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], kvs['qv'])
             kvs['qv'] = update_kvs(kvs['qv'], fixed_kvs, torch.arange(0, n).to(device), (t+prefix_t)-1)
             if 'target' in kvs:
-                fixed_target_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], model_outputs['target_model_outputs'].past_key_values)
+                fixed_target_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], model_outputs['target_model_outputs']['past_key_values'])
                 kvs['target'] = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], kvs['target'])
                 kvs['target'] = update_kvs(kvs['target'], fixed_target_kvs, torch.arange(0, n).to(device), (t+prefix_t)-1)
             if 'policy' in kvs:
-                fixed_policy_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], model_outputs['policy_model_outputs'].past_key_values)
+                fixed_policy_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], model_outputs['policy_model_outputs']['past_key_values'])
                 kvs['policy'] = map_all_kvs(lambda x: x[(batch_indicator * beam_width + torch.div(top_k_, vocab_size, rounding_mode='trunc')).reshape(-1), :, :, :], kvs['policy'])
                 kvs['policy'] = update_kvs(kvs['policy'], fixed_policy_kvs, torch.arange(0, n).to(device), (t+prefix_t)-1)
             termination_mask = termination_mask[(batch_indicator * beam_width + (top_k_ // vocab_size)).reshape(-1)]
@@ -1037,8 +1065,8 @@ class ILQL_Policy():
             t += 1
             termination_mask *= ((t-dialogue_lens) < max_generation_len).int()
         
-        # self.iql_model.lm_target = temp_target
-        # self.iql_model.lm_policy = temp_policy
+        # self.iql_model.actor_target = temp_target
+        # self.iql_model.actor = temp_policy
         # self.iql_model.model = temp_model
         
         output_strs = [tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False) for i in range(n)]
@@ -1071,12 +1099,12 @@ class ILQL_Policy():
         assert include_logits or include_adv
         
         # swap out models so that only the relevent model is executed for speed purposes
-        # temp_target = self.iql_model.lm_target
-        # temp_policy = self.iql_model.lm_policy
+        # temp_target = self.iql_model.actor_target
+        # temp_policy = self.iql_model.actor
         # temp_model = self.iql_model.model
 
-        # self.iql_model.lm_target = temp_target
-        # self.iql_model.lm_policy = None
+        # self.iql_model.actor_target = temp_target
+        # self.iql_model.actor = None
         # self.iql_model.model = temp_policy
         
         tokenizer = self.iql_model.dataset.tokenizer
@@ -1093,12 +1121,14 @@ class ILQL_Policy():
         prefix_t = 0 if prefix_embs is None else prefix_embs.shape[1]
         model_outputs = self.iql_model(tokens, 
                                        state_idxs, action_idxs, attn_mask,
-                                       prefix_embs=prefix_embs)['model_outputs']
-        kvs = {'qv': model_outputs['qv_model_outputs'].past_key_values}
-        if self.iql_model.lm_target is not None:
-            kvs['target'] = model_outputs['target_model_outputs'].past_key_values
-        if self.iql_model.lm_policy is not None:
-            kvs['policy'] = model_outputs['policy_model_outputs'].past_key_values
+                                       prefix_embs=prefix_embs, 
+                                       prefix_attn_mask=prefix_attn_mask, 
+                                       remove_prefix_position_embs=remove_prefix_position_embs)['model_outputs']
+        kvs = {'qv': model_outputs['qv_model_outputs']['past_key_values']}
+        if self.iql_model.actor_target is not None:
+            kvs['target'] = model_outputs['target_model_outputs']['past_key_values']
+        if self.iql_model.actor is not None:
+            kvs['policy'] = model_outputs['policy_model_outputs']['past_key_values']
         dialogue_lens = attn_mask.sum(dim=1)
         tokens = pad_sequence(torch.repeat_interleave(tokens, num_generations, dim=0), max_length, tokenizer.pad_token_id, device, 1)
         dialogue_lens = torch.repeat_interleave(dialogue_lens, num_generations, dim=0)
@@ -1116,13 +1146,16 @@ class ILQL_Policy():
         base_logits = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
-            # curr_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['qv'])
-            # curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
+            curr_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['qv'])
+            curr_target_kvs, curr_policy_kvs = curr_kvs, curr_kvs
             if 'target' in kvs:
                 map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['target'])
             if 'policy' in kvs:
                 map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], kvs['policy'])
-            iql_outputs = self.iql_model(curr_token, state_idxs_temp, action_idxs_temp, None)
+            iql_outputs = self.iql_model(curr_token, state_idxs_temp, action_idxs_temp, None,
+                                         qv_kwargs={'past_key_values': curr_kvs}, 
+                                         policy_kwargs={'past_key_values': curr_policy_kvs}, 
+                                         target_kwargs={'past_key_values': curr_target_kvs})
             model_outputs, logits = iql_outputs['model_outputs'], iql_outputs['logits']
             
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
@@ -1152,11 +1185,11 @@ class ILQL_Policy():
             qs_chosen = torch.gather(qs.squeeze(1), dim=1, index=new_tokens.unsqueeze(1)).squeeze(1)
             advantages += (qs_chosen - vs.squeeze(1))
             tokens[:, t] = new_tokens
-            kvs['qv'] = update_kvs(kvs['qv'], model_outputs['qv_model_outputs'].past_key_values, torch.arange(0, n).to(device), (t+prefix_t)-1)
+            kvs['qv'] = update_kvs(kvs['qv'], model_outputs['qv_model_outputs']['past_key_values'], torch.arange(0, n).to(device), (t+prefix_t)-1)
             if 'target' in kvs:
-                kvs['target'] = update_kvs(kvs['target'], model_outputs['target_model_outputs'].past_key_values, torch.arange(0, n).to(device), (t+prefix_t)-1)
+                kvs['target'] = update_kvs(kvs['target'], model_outputs['target_model_outputs']['past_key_values'], torch.arange(0, n).to(device), (t+prefix_t)-1)
             if 'policy' in kvs:
-                kvs['policy'] = update_kvs(kvs['policy'], model_outputs['policy_model_outputs'].past_key_values, torch.arange(0, n).to(device), (t+prefix_t)-1)
+                kvs['policy'] = update_kvs(kvs['policy'], model_outputs['policy_model_outputs']['past_key_values'], torch.arange(0, n).to(device), (t+prefix_t)-1)
             for idx in range(n):
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
                     termination_mask[idx] *= (1 - int(termination_condition(tokenizer.decode(tokens[idx, :].tolist(), 
@@ -1164,8 +1197,8 @@ class ILQL_Policy():
             t += 1
             termination_mask *= ((t-dialogue_lens) < max_generation_len).int()
         
-        # self.iql_model.lm_target = temp_target
-        # self.iql_model.lm_policy = temp_policy
+        # self.iql_model.actor_target = temp_target
+        # self.iql_model.actor = temp_policy
         # self.iql_model.model = temp_model
 
         scores = ((advantages * rerank_advantage_weight) + (log_probs * rerank_log_prob_weight)).reshape(-1, num_generations)
