@@ -206,9 +206,10 @@ class EvolvableGPT(nn.Module):
         x = self.transformer.ln_f(x)
         all_hidden_states = all_hidden_states + (x,)
 
+        logits = self.lm_head(x)
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            # logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), 
                 targets.view(-1).type(torch.LongTensor).to(self.device), 
@@ -217,7 +218,7 @@ class EvolvableGPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last 
             # position
             # note: using list [-1] to preserve the time dim
-            logits = self.lm_head(x[:, [-1], :])
+            # logits = self.lm_head(x[:, [-1], :])
             loss = None
 
         return logits, all_hidden_states, presents, loss

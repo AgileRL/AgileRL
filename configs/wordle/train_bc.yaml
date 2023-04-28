@@ -22,6 +22,21 @@ model:
   dataset:
     name: wordle_human_dataset
     cache_id: d_train
+  net_config: {
+                'arch': 'gpt',
+                'vocab_size': 35,
+                'n_layer': 12,
+                'n_embd': 768,
+                'n_head': 12,
+                'dim_feedfwd': 3072,
+                'block_size': 1024,
+                'activation': 'gelu',
+                'dropout': 0.1,
+                'layer_norm_eps': 1e-5,
+                'min_layers': 8,
+                'max_layers': 16,
+                'bias': True,
+              }
   load:
     checkpoint_path: null
     strict_load: true

@@ -1,5 +1,5 @@
-defaults:
- - /gpt2: gpt2_plain
+# defaults:
+#  - /gpt2: gpt2_plain
 
 name: bc_lm
 dataset: null

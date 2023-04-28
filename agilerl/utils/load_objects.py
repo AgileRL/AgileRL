@@ -1,5 +1,6 @@
 import json
 import torch
+from agilerl.algorithms.bc_lm import BC_LM, BC_Evaluator, BC_Policy
 from agilerl.algorithms.ilql import ILQL, ILQL_Policy, ILQL_Evaluator, TopAdvantageNGrams
 from agilerl.networks.evolvable_gpt import EvolvableGPT
 from agilerl.utils.ilql_utils import convert_path
@@ -42,7 +43,10 @@ def load_model(config, model, device, verbose=True):
     if config['checkpoint_path'] is not None:
         if verbose:
             print('loading %s state dict from: %s' % (config['name'], convert_path(config["checkpoint_path"])))
-        model.load_state_dict(torch.load(convert_path(config['checkpoint_path']), map_location='cpu'), strict=config['strict_load'])
+        chkpt_state_dict = torch.load(convert_path(config['checkpoint_path']), map_location='cpu')
+        print(chkpt_state_dict)
+        # model.load_state_dict(chkpt_state_dict, strict=config['strict_load'])
+        model.load_state_dict(chkpt_state_dict, strict=True)
         if verbose:
             print('loaded.')
     return model
@@ -62,6 +66,24 @@ def load_gpt2(config, verbose=True):
     if config['from_pretrained']:
         return EvolvableGPT.from_pretrained(config['gpt2_type'])
     return EvolvableGPT()
+
+@register('bc_lm')
+def load_bc_lm(config, device, verbose=True):
+    dataset = load_item(config['dataset'], device, verbose=verbose)
+    config.pop('dataset')
+    load_config = config.pop('load')
+    model = BC_LM(**config, dataset=dataset, device=device)
+    return load_model(load_config, model, device, verbose=verbose)
+
+@register('bc_policy')
+def load_bc_policy(config, device, verbose=True):
+    bc_lm = load_item(config['bc_lm'], device, verbose=verbose)
+    return BC_Policy(bc_lm, config['kind'], **config['generation_kwargs'])
+
+@register('bc_evaluator')
+def load_bc_evaluator(config, device, verbose=True):
+    env = load_item(config['env'], device, verbose=verbose)
+    return BC_Evaluator(env, config['env'], config['kind'], **config['generation_kwargs'])
 
 @register('per_token_iql')
 def load_per_token_iql(config, device, verbose=True):
