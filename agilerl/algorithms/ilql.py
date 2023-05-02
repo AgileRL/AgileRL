@@ -188,8 +188,7 @@ class ILQL(nn.Module):
             device=self.device).to(
             self.device)
 
-        self.actor.load_state_dict(self.model.state_dict())
-        self.actor_target.load_state_dict(self.model.state_dict())
+        self.copy_model_to_actor_target()
 
         # v and q networks
         self.v = EvolvableMLP(
@@ -248,6 +247,10 @@ class ILQL(nn.Module):
 
         self.optimizer = optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        
+    def copy_model_to_actor_target(self):
+        self.actor.load_state_dict(self.model.state_dict())
+        self.actor_target.load_state_dict(self.model.state_dict())
 
     def forward(self,
                 tokens: torch.Tensor,
@@ -319,6 +322,7 @@ class ILQL(nn.Module):
         if skip_policy_on_train and self.training:
             policy_outputs = model_outputs
             policy_hidden_states = hidden_states
+            policy_past_key_values = model_past_key_values
         else:
             if remove_prefix_position_embs:
                 policy_prefix_embs -= self.actor.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])

@@ -10,12 +10,14 @@ train_dataset:
   file_path: data/wordle/random_human_tweet_data_200.json
   use_true_word: false
   index_file: data/wordle/human_train_idxs.json
+  max_len: 1024
 
 eval_dataset:
   cache_id: d_eval
   file_path: data/wordle/random_human_tweet_data_200.json
   use_true_word: false
   index_file: data/wordle/human_eval_idxs.json
+  max_len: 1024
 
 model:
   transition_weight: 0.0
@@ -40,6 +42,10 @@ model:
   load:
     checkpoint_path: null
     strict_load: true
+    gpt_pretrained: false
+    gpt_model_type: gpt2
+    gpt_checkpoint_path: null
+
 
 evaluator:
   env:

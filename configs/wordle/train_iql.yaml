@@ -20,7 +20,7 @@ eval_dataset:
 model:
   name: per_token_iql
   index: 0
-  batch_size: 64
+  batch_size: 32
   lr: 1e-5
   alpha: 0.005
   beta: 0.0
@@ -45,7 +45,7 @@ model:
     cache_id: d_train
   net_config: {
                 'arch': 'gpt',
-                'vocab_size': 50257,
+                'vocab_size': 35,
                 'n_layer': 12,
                 'n_embd': 768,
                 'n_head': 12,
@@ -61,6 +61,9 @@ model:
   load:
     checkpoint_path: null
     strict_load: false
+    gpt_pretrained: true
+    gpt_model_type: gpt2
+    gpt_checkpoint_path: ../Implicit-Language-Q-Learning/outputs/wordle_tweet_bc_test1/model_327679.pkl
 
 evaluator:
   env:
@@ -93,7 +96,7 @@ train:
   dataloader_workers: 1
   grad_accum_steps: 16
   log_every: 256
-  eval_every: 1024
+  eval_every: 2 #1024
   save_every: 16384
   max_checkpoints: 1
   eval_bsize: 16
@@ -104,7 +107,7 @@ train:
   loss:
     v_loss_weight: 1.0
     q_loss_weight: 1.0
-    awac_weight: 1.0
+    awac_weight: 0.0
     cql_loss_weight: 1e-4
     dm_loss_weight: 0.0
     mc_returns: false
