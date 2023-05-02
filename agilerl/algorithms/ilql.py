@@ -13,6 +13,7 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_gpt import EvolvableGPT
 from agilerl.data.rl_data import DataPoint
 from agilerl.utils.sampling_utils import map_all_kvs, pad_sequence, update_kvs, process_logits, always_terminate
+from agilerl.utils.torch_utils import get_transformer_logs
 
 class ILQL(nn.Module):
     """The Implicit Language Q Learning algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf
@@ -188,8 +189,7 @@ class ILQL(nn.Module):
             device=self.device).to(
             self.device)
 
-        self.actor.load_state_dict(self.model.state_dict())
-        self.actor_target.load_state_dict(self.model.state_dict())
+        self.copy_model_to_actor_target()
 
         # v and q networks
         self.v = EvolvableMLP(
@@ -248,6 +248,10 @@ class ILQL(nn.Module):
 
         self.optimizer = optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        
+    def copy_model_to_actor_target(self):
+        self.actor.load_state_dict(self.model.state_dict())
+        self.actor_target.load_state_dict(self.model.state_dict())
 
     def forward(self,
                 tokens: torch.Tensor,
@@ -319,6 +323,7 @@ class ILQL(nn.Module):
         if skip_policy_on_train and self.training:
             policy_outputs = model_outputs
             policy_hidden_states = hidden_states
+            policy_past_key_values = model_past_key_values
         else:
             if remove_prefix_position_embs:
                 policy_prefix_embs -= self.actor.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])
@@ -566,7 +571,7 @@ class ILQL(nn.Module):
                                        skip_policy_on_train=(
                                            awac_weight == 0.0),
                                        )
-        tokens, attn_mask, _ = get_qvs_outputs[
+        tokens, attn_mask, model_outputs = get_qvs_outputs[
             'tokens'], get_qvs_outputs['attn_mask'], get_qvs_outputs['model_outputs']
         vs, qs = get_qvs_outputs['vs'], get_qvs_outputs['qs']
         vns, target_qs, rs = get_qvs_outputs['vns'], get_qvs_outputs['target_qs'], get_qvs_outputs['rs']

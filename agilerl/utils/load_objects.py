@@ -44,11 +44,17 @@ def load_model(config, model, device, verbose=True):
         if verbose:
             print('loading %s state dict from: %s' % (config['name'], convert_path(config["checkpoint_path"])))
         chkpt_state_dict = torch.load(convert_path(config['checkpoint_path']), map_location='cpu')
-        print(chkpt_state_dict)
-        # model.load_state_dict(chkpt_state_dict, strict=config['strict_load'])
-        model.load_state_dict(chkpt_state_dict, strict=True)
-        if verbose:
+        model.load_state_dict(chkpt_state_dict, strict=config['strict_load'])
+        if verbose: 
             print('loaded.')
+    elif config['gpt_pretrained']:
+        if verbose:
+            print('loading %s state dict from: %s' % (config['name'], convert_path(config["gpt_checkpoint_path"])))
+        pretrained_state_dict = convert_path(config['gpt_checkpoint_path'])
+        model.model = EvolvableGPT.from_pretrained(model_type=config['gpt_model_type'],
+                                                   override_args=model.net_config,
+                                                   custom_sd=pretrained_state_dict)
+        model.copy_model_to_actor_target()
     return model
 
 @register('constant_token_reward')
