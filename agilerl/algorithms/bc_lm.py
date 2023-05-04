@@ -61,7 +61,7 @@ class BC_LM(nn.Module):
             prefix_embs -= self.model.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])
         input_embeddings = torch.cat((prefix_embs, self.model.transformer.wte(tokens)), dim=1)
         
-        model_outputs, model_hidden_states, model_past_key_values, model_loss = self.model(tok_emb=input_embeddings, 
+        model_outputs, _, model_past_key_values, _ = self.model(tok_emb=input_embeddings, 
                                    attn_mask=input_attn_mask, 
                                    pos=position_ids, 
                                    **kwargs)
@@ -85,8 +85,7 @@ class BC_LM(nn.Module):
         losses = losses.reshape(tokens.shape[0], tokens.shape[1]-1)
         return (losses * w[:, :-1] * attn_mask[:, 1:]).sum() / attn_mask[:, 1:].sum()
 
-    def get_loss(self, 
-                 items):
+    def get_loss(self, items):
         prepared_inputs = self.prepare_inputs(items)
         tokens, attn_mask = prepared_inputs['tokens'], prepared_inputs['attn_mask']
         a_idx = prepared_inputs['action_idxs']
@@ -172,7 +171,7 @@ class BC_Policy():
             max_generation_len = max_length+1
         input_strs = [tokenizer.decode(tokens[i, :][:attn_mask[i, :].sum().long()].tolist(), clean_up_tokenization_spaces=False) for i in range(len(tokens))]
         prefix_t = 0 if prefix_embs is None else prefix_embs.shape[1]
-        logits, past_key_values = self.bc_lm(tokens, attn_mask, prefix_embs=prefix_embs, 
+        logits, past_key_values = self.bc_lm(tokens=tokens, attn_mask=attn_mask, prefix_embs=prefix_embs, 
                                    prefix_attn_mask=prefix_attn_mask, 
                                    remove_prefix_position_embs=remove_prefix_position_embs)
         dialogue_kvs = past_key_values
@@ -250,8 +249,7 @@ class BC_Policy():
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], dialogue_kvs)
-            transformer_outputs = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs)
-            logits = transformer_outputs.logits
+            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs)
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
             logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]] = logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]].masked_fill_(t < dialogue_lens, 1e7)
             scores = (torch.log(F.softmax(logits, dim=-1)).reshape(1, bsize, beam_width, -1).permute(3, 0, 1, 2) + curr_scores).permute(1, 2, 3, 0).reshape(1, bsize, -1)  # (time, batch, k*vocab)
@@ -259,7 +257,7 @@ class BC_Policy():
             curr_scores, top_k = torch.topk(scores[0, :, :], k=beam_width, dim=1)  # (batch, k), (batch, k)
             tokens = tokens[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :]
             tokens[:, t] = top_k.reshape(-1) % vocab_size  # (batch*k,)
-            fixed_dialogue_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :, :, :], transformer_outputs.past_key_values)
+            fixed_dialogue_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :, :, :], past_key_values)
             dialogue_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :, :, :], dialogue_kvs)
             dialogue_kvs = update_kvs(dialogue_kvs, fixed_dialogue_kvs, torch.arange(0, n).to(device), (t+prefix_t)-1)
             dialogue_lens = dialogue_lens[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1)]

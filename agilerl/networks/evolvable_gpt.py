@@ -707,6 +707,13 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C //
                    self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            k = torch.cat((past_key, k), dim=-2)
+            v = torch.cat((past_value, v), dim=-2)
+            
+        present = (k, v)
+
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) ->
         # (B, nh, T, T)
         if self.flash:
@@ -717,7 +724,7 @@ class CausalSelfAttention(nn.Module):
                 v,
                 attn_mask=attn_mask,
                 dropout_p=self.dropout if self.training else 0,
-                is_causal=is_causal)
+                is_causal=is_causal if self.training else False)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -730,12 +737,6 @@ class CausalSelfAttention(nn.Module):
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-
-        if layer_past is not None:
-            past_key, past_value = layer_past
-            k = torch.cat((past_key, k), dim=-2)
-            v = torch.cat((past_value, v), dim=-2)
-        present = (k, v)
 
         return y, present
 
@@ -751,10 +752,10 @@ class Block(nn.Module):
         self.mlp = MLP(n_embd, dropout, hidden_size, activation)
 
     def forward(self, x, attn_mask=None, layer_past=None):
-        attn_outputs = self.attn(self.ln_1(x), attn_mask=attn_mask, layer_past=layer_past)
-        x = x + attn_outputs[0]
+        attn_output, present = self.attn(self.ln_1(x), attn_mask=attn_mask, layer_past=layer_past)
+        x = x + attn_output
         x = x + self.mlp(self.ln_2(x))
-        return x, attn_outputs[1]
+        return x, present
 
 
 class MLP(EvolvableMLP):
