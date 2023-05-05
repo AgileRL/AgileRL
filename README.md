@@ -57,7 +57,7 @@ python demo.py
   * DDPG
   * ILQL
 
-## Train an agent
+## Train an agent on a Gym environment
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
 ```python
 INIT_HP = {
@@ -290,6 +290,25 @@ for idx_epi in range(max_episodes):
         # Tournament selection and population mutation
         elite, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
+```
+
+## Train an agent on a language environment (RLHF)
+We implement RLHF on Wordle, and use <a href="https://arxiv.org/pdf/2206.11871.pdf">ILQL</a> to finetune our model. To create your own language environment, 
+see https://github.com/Sea-Snell/Implicit-Language-Q-Learning.
+The <code>EvolvableGPT</code> class allows us to combine LLMs and transformer architectures with evolvable HPO, which can massively reduce the time taken to finetune 
+these expensive models. Due to the vast number of parameters and settings involved in training a Large Language Model (LLM) on human feedback, these are defined in 
+<code>configs</code>. 
+
+In order to finetune a model with RLHF, we need a trained model as a starting point. We can use behavioural cloning (BC, supervised learning) to build this first version of 
+the model. To train your own model from scratch:
+```bash
+python run_bc_lm.py
+```
+If you want to use pretrained model weights, these can be defined in <code>configs/wordle/train_bc.yaml</code> in <code>model: load:</code>.
+
+Similarly, to then run ILQL and perform RLHF on the BC model:
+```bash
+python run_ilql.py
 ```
 
 View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.
