@@ -11,3 +11,4 @@ termcolor==1.1.0
 torch==1.13.1 # 2.0.0
 tqdm==4.65.0
 transformers==4.23.1
+wandb==0.13.10
