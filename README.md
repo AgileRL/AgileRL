@@ -24,7 +24,15 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
 </p>
 <p align="center">AgileRL offers 10x faster hyperparameter optimization than SOTA.<br> Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.</p>
 
-### Benchmarks
+## Table of Contents
+  * [Benchmarks](#benchmarks)
+  * [Get Started](#get-started)
+  * [Algorithms implemented](#algorithms-implemented-more-coming-soon)
+  * [Train an agent on a Gym environment](#train-an-agent-on-a-gym-environment)
+    + [Custom Training Loop](#custom-training-loop)
+  * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
+
+## Benchmarks
 
 Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
 
