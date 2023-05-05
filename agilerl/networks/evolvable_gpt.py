@@ -523,7 +523,7 @@ class EvolvableGPT(nn.Module):
         # else:
         #     self.add_nodes()
 
-    def add_nodes(self, numb_new_nodes=None):
+    def add_node(self, numb_new_nodes=None):
         """Adds nodes to hidden layers of transformer.
 
         :param numb_new_nodes: Number of nodes to add to hidden layers, defaults to None
