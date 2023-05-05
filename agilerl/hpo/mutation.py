@@ -243,7 +243,7 @@ class Mutations():
         if self.arch == 'cnn':
             net_dict['mlp_activation'] = new_activation
             net_dict['cnn_activation'] = new_activation
-        else:   # mlp or bert
+        else:   # mlp, gpt or bert
             net_dict['activation'] = new_activation
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
@@ -394,7 +394,7 @@ class Mutations():
                     for offspring_critic in offspring_critics:
                         offspring_critic.remove_node(**node_dict)
 
-        else:   # mlp
+        else:   # mlp or gpt
             if rand_numb < self.new_layer_prob:
                 if self.rng.uniform(0, 1) < 0.5:
                     offspring_actor.add_layer()
@@ -451,5 +451,14 @@ class Mutations():
                     'target': 'critic_target',
                     'optimizer': 'critic_optimizer'
                 }]
+            }
+        elif algo == 'ILQL':
+            nets = {
+                'actor': {
+                    'eval': 'actor',
+                    'target': 'actor_target',
+                    'optimizer': 'optimizer'
+                },
+                'critics': []
             }
         return nets
