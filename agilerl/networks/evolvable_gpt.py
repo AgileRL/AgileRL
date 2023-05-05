@@ -156,7 +156,7 @@ class EvolvableGPT(nn.Module):
         net_dict['ln_f'] = LayerNorm(self.n_embd, bias=self.bias)
         return nn.ModuleDict(net_dict)
 
-    def forward(self, idx=None, tok_emb=None, targets=None, attn_mask=None, past_key_values=None, pos=None):
+    def forward(self, idx=None, tok_emb=None, targets=None, attn_mask=None, past_key_values=None, pos=None, is_casual=True):
         """Forward pass through evolvable GPT model.
         
         :param idxs: Input ids
@@ -200,7 +200,7 @@ class EvolvableGPT(nn.Module):
             # Ensure layer_past is on same device as hidden_states (might not be correct)
             if layer_past is not None:
                 layer_past = tuple(past_state.to(x.device) for past_state in layer_past)
-            x, pres = block(x, attn_mask, layer_past)
+            x, pres = block(x, attn_mask, layer_past, is_casual)
             all_hidden_states = all_hidden_states + (x,)
             presents = presents + (pres,)
         x = self.transformer.ln_f(x)
@@ -724,7 +724,7 @@ class CausalSelfAttention(nn.Module):
                 v,
                 attn_mask=attn_mask,
                 dropout_p=self.dropout if self.training else 0,
-                is_causal=is_causal if self.training else False)
+                is_causal=is_causal)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -751,8 +751,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
         self.mlp = MLP(n_embd, dropout, hidden_size, activation)
 
-    def forward(self, x, attn_mask=None, layer_past=None):
-        attn_output, present = self.attn(self.ln_1(x), attn_mask=attn_mask, layer_past=layer_past)
+    def forward(self, x, attn_mask=None, layer_past=None, is_casual=True):
+        attn_output, present = self.attn(self.ln_1(x), attn_mask=attn_mask, layer_past=layer_past, is_casual=is_casual)
         x = x + attn_output
         x = x + self.mlp(self.ln_2(x))
         return x, present
