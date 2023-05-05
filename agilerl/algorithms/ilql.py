@@ -998,7 +998,8 @@ class ILQL_Policy():
                                        state_idxs, action_idxs, attn_mask,
                                        prefix_embs=prefix_embs, 
                                        prefix_attn_mask=prefix_attn_mask, 
-                                       remove_prefix_position_embs=remove_prefix_position_embs)['model_outputs']
+                                       remove_prefix_position_embs=remove_prefix_position_embs,
+                                       is_causal=False)['model_outputs']
         kvs = {'qv': model_outputs['qv_model_outputs']['past_key_values']}
         if self.iql_model.actor_target is not None:
             kvs['target'] = model_outputs['target_model_outputs']['past_key_values']
@@ -1030,7 +1031,8 @@ class ILQL_Policy():
             iql_outputs = self.iql_model(curr_token, state_idxs_temp, action_idxs_temp, None,
                                          qv_kwargs={'past_key_values': curr_kvs}, 
                                          policy_kwargs={'past_key_values': curr_policy_kvs}, 
-                                         target_kwargs={'past_key_values': curr_target_kvs})
+                                         target_kwargs={'past_key_values': curr_target_kvs},
+                                         is_causal=False)
             model_outputs, logits = iql_outputs['model_outputs'], iql_outputs['logits']
             
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
@@ -1121,8 +1123,8 @@ class ILQL_Policy():
         prefix_t = 0 if prefix_embs is None else prefix_embs.shape[1]
         model_outputs = self.iql_model(tokens, state_idxs, action_idxs, attn_mask,
                                        prefix_embs=prefix_embs, prefix_attn_mask=prefix_attn_mask,
-                                       remove_prefix_position_embs=remove_prefix_position_embs)['model_outputs']
-        
+                                       remove_prefix_position_embs=remove_prefix_position_embs,
+                                       is_causal=False)['model_outputs']
         kvs = {'qv': model_outputs['qv_model_outputs']['past_key_values']}
         if self.iql_model.actor_target is not None:
             kvs['target'] = model_outputs['target_model_outputs']['past_key_values']
@@ -1158,7 +1160,8 @@ class ILQL_Policy():
                                          None,
                                          qv_kwargs={'past_key_values': curr_kvs}, 
                                          policy_kwargs={'past_key_values': curr_policy_kvs}, 
-                                         target_kwargs={'past_key_values': curr_target_kvs})
+                                         target_kwargs={'past_key_values': curr_target_kvs}, 
+                                         is_causal=False)
             model_outputs, logits = iql_outputs['model_outputs'], iql_outputs['logits']
             
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
