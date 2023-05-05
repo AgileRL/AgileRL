@@ -174,7 +174,7 @@ class BC_Policy():
         logits, past_key_values = self.bc_lm(tokens=tokens, attn_mask=attn_mask, prefix_embs=prefix_embs, 
                                    prefix_attn_mask=prefix_attn_mask, 
                                    remove_prefix_position_embs=remove_prefix_position_embs,
-                                   is_casual=False)
+                                   is_causal=False)
         dialogue_kvs = past_key_values
         dialogue_lens = attn_mask.sum(dim=1)
         tokens = pad_sequence(torch.repeat_interleave(tokens, num_generations, dim=0), max_length, tokenizer.pad_token_id, device, 1)
@@ -186,7 +186,7 @@ class BC_Policy():
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], dialogue_kvs)
-            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs, is_casual=False)
+            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False)
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
             logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]] = logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]].masked_fill_(t < dialogue_lens, 1e7)
             logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
@@ -238,7 +238,7 @@ class BC_Policy():
         logits, past_key_values = self.bc_lm(tokens, attn_mask, prefix_embs=prefix_embs, 
                                    prefix_attn_mask=prefix_attn_mask, 
                                    remove_prefix_position_embs=remove_prefix_position_embs,
-                                   is_casual=False)
+                                   is_causal=False)
         dialogue_kvs = past_key_values
         original_dialogue_lens = attn_mask.sum(dim=1)
         batch_indicator = torch.stack(beam_width*[torch.arange(0, bsize).to(device)], dim=1)
@@ -251,7 +251,7 @@ class BC_Policy():
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
             curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], dialogue_kvs)
-            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs, is_casual=False)
+            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False)
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
             logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]] = logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]].masked_fill_(t < dialogue_lens, 1e7)
             scores = (torch.log(F.softmax(logits, dim=-1)).reshape(1, bsize, beam_width, -1).permute(3, 0, 1, 2) + curr_scores).permute(1, 2, 3, 0).reshape(1, bsize, -1)  # (time, batch, k*vocab)

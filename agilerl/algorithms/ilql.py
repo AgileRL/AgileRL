@@ -13,7 +13,6 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_gpt import EvolvableGPT
 from agilerl.data.rl_data import DataPoint
 from agilerl.utils.sampling_utils import map_all_kvs, pad_sequence, update_kvs, process_logits, always_terminate
-from agilerl.utils.torch_utils import get_transformer_logs
 
 class ILQL(nn.Module):
     """The Implicit Language Q Learning algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf
@@ -571,7 +570,7 @@ class ILQL(nn.Module):
                                        skip_policy_on_train=(
                                            awac_weight == 0.0),
                                        )
-        tokens, attn_mask, model_outputs = get_qvs_outputs[
+        tokens, attn_mask, _ = get_qvs_outputs[
             'tokens'], get_qvs_outputs['attn_mask'], get_qvs_outputs['model_outputs']
         vs, qs = get_qvs_outputs['vs'], get_qvs_outputs['qs']
         vns, target_qs, rs = get_qvs_outputs['vns'], get_qvs_outputs['target_qs'], get_qvs_outputs['rs']
@@ -1000,7 +999,7 @@ class ILQL_Policy():
                                        prefix_embs=prefix_embs, 
                                        prefix_attn_mask=prefix_attn_mask, 
                                        remove_prefix_position_embs=remove_prefix_position_embs,
-                                       is_casual=False)['model_outputs']
+                                       is_causal=False)['model_outputs']
         kvs = {'qv': model_outputs['qv_model_outputs']['past_key_values']}
         if self.iql_model.actor_target is not None:
             kvs['target'] = model_outputs['target_model_outputs']['past_key_values']
@@ -1033,7 +1032,7 @@ class ILQL_Policy():
                                          qv_kwargs={'past_key_values': curr_kvs}, 
                                          policy_kwargs={'past_key_values': curr_policy_kvs}, 
                                          target_kwargs={'past_key_values': curr_target_kvs},
-                                         is_casual=False)
+                                         is_causal=False)
             model_outputs, logits = iql_outputs['model_outputs'], iql_outputs['logits']
             
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
@@ -1125,7 +1124,7 @@ class ILQL_Policy():
         model_outputs = self.iql_model(tokens, state_idxs, action_idxs, attn_mask,
                                        prefix_embs=prefix_embs, prefix_attn_mask=prefix_attn_mask,
                                        remove_prefix_position_embs=remove_prefix_position_embs,
-                                       is_casual=False)['model_outputs']
+                                       is_causal=False)['model_outputs']
         kvs = {'qv': model_outputs['qv_model_outputs']['past_key_values']}
         if self.iql_model.actor_target is not None:
             kvs['target'] = model_outputs['target_model_outputs']['past_key_values']
@@ -1162,7 +1161,7 @@ class ILQL_Policy():
                                          qv_kwargs={'past_key_values': curr_kvs}, 
                                          policy_kwargs={'past_key_values': curr_policy_kvs}, 
                                          target_kwargs={'past_key_values': curr_target_kvs}, 
-                                         is_casual=False)
+                                         is_causal=False)
             model_outputs, logits = iql_outputs['model_outputs'], iql_outputs['logits']
             
             logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
