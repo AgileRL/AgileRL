@@ -73,11 +73,11 @@ probabilities, and ``NET_CONFIG``, which defines the network architecture. For e
         'h_size': [32, 32], # Actor hidden size
     }
 
-First, use ``utils.initialPopulation()`` to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+First, use ``utils.utils.initialPopulation()`` to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 
 .. code-block:: python
 
-    from agilerl.utils import makeVectEnvs, initialPopulation
+    from agilerl.utils.utils import makeVectEnvs, initialPopulation
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
