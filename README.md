@@ -110,7 +110,7 @@ NET_CONFIG = {
 ```
 First, use <code>utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```python
-from agilerl.utils import makeVectEnvs, initialPopulation
+from agilerl.utils.utils import makeVectEnvs, initialPopulation
 import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -194,7 +194,7 @@ trained_pop, pop_fitnesses = train(env=env,                             # Gym-st
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```python
-from agilerl.utils import makeVectEnvs, initialPopulation
+from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
