@@ -28,7 +28,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils import makeVectEnvs, initialPopulation
+    from agilerl.utils.utils import makeVectEnvs, initialPopulation
     import torch
 
     NET_CONFIG = {
@@ -190,7 +190,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 .. code-block:: python
 
-    from agilerl.utils import makeVectEnvs, initialPopulation
+    from agilerl.utils.utils import makeVectEnvs, initialPopulation
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.hpo.mutation import Mutations
