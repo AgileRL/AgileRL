@@ -37,6 +37,7 @@ are more likely to remain present in the population. The sequence of evolution (
     }
 
     INIT_HP = {
+                'DOUBLE': True,         # Use double Q-learning
                 'BATCH_SIZE': 128,      # Batch size
                 'LR': 1e-3,             # Learning rate
                 'GAMMA': 0.99,          # Discount factor
@@ -204,6 +205,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                  }
 
     INIT_HP = {
+                'DOUBLE': True,         # Use double Q-learning
                 'BATCH_SIZE': 128,      # Batch size
                 'LR': 1e-3,             # Learning rate
                 'GAMMA': 0.99,          # Discount factor

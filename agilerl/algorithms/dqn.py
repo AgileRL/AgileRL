@@ -33,6 +33,8 @@ class DQN():
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
+    :param double: Use double Q-learning, defaults to False
+    :type double: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -54,6 +56,7 @@ class DQN():
             gamma=0.99,
             tau=1e-3,
             mutation=None,
+            double=False,
             device='cpu'):
         self.algo = 'DQN'
         self.state_dim = state_dim
@@ -72,6 +75,8 @@ class DQN():
         self.scores = []
         self.fitness = []
         self.steps = [0]
+
+        self.double = double
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
@@ -159,8 +164,12 @@ class DQN():
             next_states = nn.functional.one_hot(
                 next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
 
-        q_target = self.actor_target(next_states).detach().max(axis=1)[
-            0].unsqueeze(1)
+        if self.double: # Double Q-learning
+            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
+            q_target = self.actor(next_states).gather(dim=1, index=q_idx)
+        else:
+            q_target = self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+
         # target, if terminal then y_j = rewards
         y_j = rewards + self.gamma * q_target * (1 - dones)
         q_eval = self.actor(states).gather(1, actions.long())

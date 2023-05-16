@@ -71,6 +71,7 @@ Before starting training, there are some meta-hyperparameters and settings that 
 INIT_HP = {
     'ENV_NAME': 'LunarLander-v2',   # Gym environment name
     'ALGO': 'DQN',                  # Algorithm
+    'DOUBLE': True,                 # Use double Q-learning
     'CHANNELS_LAST': False,         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     'BATCH_SIZE': 256,              # Batch size
     'LR': 1e-3,                     # Learning rate
