@@ -12,6 +12,7 @@ if __name__ == '__main__':
     }
 
     INIT_HP = {
+        'DOUBLE': True,         # Use double Q-learning
         'BATCH_SIZE': 128,      # Batch size
         'LR': 1e-3,             # Learning rate
         'GAMMA': 0.99,          # Discount factor

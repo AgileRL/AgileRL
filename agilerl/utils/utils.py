@@ -51,6 +51,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 learn_step=INIT_HP['LEARN_STEP'],
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
+                double=INIT_HP['DOUBLE'],
                 device=device
             )
             population.append(agent)
