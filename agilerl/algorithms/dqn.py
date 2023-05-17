@@ -136,16 +136,15 @@ class DQN():
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
-        self.actor.eval()
-        with torch.no_grad():
-            action_values = self.actor(state)
-        self.actor.train()
-
         # epsilon-greedy
         if random.random() < epsilon:
-            action = np.random.randint(
-                0, self.action_dim, size=state.size()[0])
+            action = np.random.randint(0, self.action_dim, size=state.size()[0])
         else:
+            self.actor.eval()
+            with torch.no_grad():
+                action_values = self.actor(state)
+            self.actor.train()
+
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
         return action
