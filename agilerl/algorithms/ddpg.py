@@ -177,18 +177,18 @@ class DDPG():
                 state.long(), num_classes=self.state_dim[0]).float().squeeze()
 
         if len(state.size()) < 2:
-            state = state.unsqueeze(0)
-
-        self.actor.eval()
-        with torch.no_grad():
-            action_values = self.actor(state)
-        self.actor.train()
+            state = state.unsqueeze(0)       
 
         # epsilon-greedy
         if random.random() < epsilon:
             action = (np.random.rand(
                 state.size()[0], self.action_dim).astype('float32') - 0.5) * 2
         else:
+            self.actor.eval()
+            with torch.no_grad():
+                action_values = self.actor(state)
+            self.actor.train()
+
             action = action_values.cpu().data.numpy()
 
         return action
