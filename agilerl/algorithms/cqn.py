@@ -48,17 +48,17 @@ class CQN():
         index=0,
         net_config={
             'arch': 'mlp',
-            'h_size': [
-            64,
-            64]},
-            batch_size=64,
-            lr=1e-4,
-            learn_step=5,
-            gamma=0.99,
-            tau=1e-3,
-            mutation=None,
-            double=False,
-            device='cpu'):
+            'h_size': [64, 64]
+            },
+        batch_size=64,
+        lr=1e-4,
+        learn_step=5,
+        gamma=0.99,
+        tau=1e-3,
+        mutation=None,
+        double=False,
+        device='cpu'):
+        
         self.algo = 'CQN'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -120,7 +120,8 @@ class CQN():
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
-        """Returns the next action to take in the environment. Epsilon is the probability of taking a random action, used for exploration.
+        """Returns the next action to take in the environment. Epsilon is the 
+        probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
@@ -139,15 +140,13 @@ class CQN():
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = np.random.randint(0, self.action_dim, size=state.size()[0])
+            action = np.random.randint(0, self.action_dim, size=state.size()[0])[0]
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-
-            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
-
+            action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
         return action
 
     def learn(self, experiences):
@@ -218,6 +217,8 @@ class CQN():
                     action = self.getAction(state, epsilon=0)
                     state, reward, done, _, _ = env.step(action)
                     score += reward
+                    if done:
+                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

@@ -452,6 +452,15 @@ class Mutations():
                     'optimizer': 'critic_optimizer'
                 }]
             }
+        elif algo == 'CQN':
+            nets = {
+                'actor': {
+                    'eval': 'actor',
+                    'target': 'actor_target',
+                    'optimizer': 'optimizer'
+                },
+                'critics': []
+            }
         elif algo == 'ILQL':
             nets = {
                 'actor': {
