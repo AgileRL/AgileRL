@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
+from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ddpg import DDPG
 
@@ -70,6 +71,24 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 policy_freq=INIT_HP['POLICY_FREQ'],
+                device=device
+            )
+            population.append(agent)
+
+    elif algo == 'CQN':
+        for idx in range(population_size):
+            agent = CQN(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                index=idx,
+                net_config=net_config,
+                batch_size=INIT_HP['BATCH_SIZE'],
+                lr=INIT_HP['LR'],
+                learn_step=INIT_HP['LEARN_STEP'],
+                gamma=INIT_HP['GAMMA'],
+                tau=INIT_HP['TAU'],
+                double=INIT_HP['DOUBLE'],
                 device=device
             )
             population.append(agent)
