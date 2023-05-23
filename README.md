@@ -526,9 +526,9 @@ for i in range(dataset_length-1):
 for idx_epi in range(max_episodes):
     for agent in pop:   # Loop through population
         for idx_step in range(max_steps):
-                experiences = memory.sample(agent.batch_size)   # Sample replay buffer
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
+            experiences = memory.sample(agent.batch_size)   # Sample replay buffer
+            # Learn according to agent's RL algorithm
+            agent.learn(experiences)
 
     # Now evolve population if necessary
     if (idx_epi+1) % evo_epochs == 0:
