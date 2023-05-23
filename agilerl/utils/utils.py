@@ -11,7 +11,7 @@ def makeVectEnvs(env_name, num_envs=1):
 
     :param env_name: Gym environment name
     :type env_name: str
-    :param num_ens: Number of vectorized environments, defaults to 1
+    :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(

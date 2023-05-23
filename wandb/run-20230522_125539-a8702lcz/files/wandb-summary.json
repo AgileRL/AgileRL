@@ -1,0 +1,1 @@
+{"global_step": 540000, "eval/mean_reward": 65.0, "eval/best_fitness": 80.0, "_timestamp": 1684759403.4873176, "_runtime": 2863.853676557541, "_step": 8, "_wandb": {"runtime": 3030}}

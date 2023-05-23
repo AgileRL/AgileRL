@@ -1,0 +1,30 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.13.10
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    python_version: 3.9.7
+    start_time: 1684749514.163072
+    t:
+      1:
+      - 1
+      - 55
+      3:
+      - 13
+      - 16
+      - 23
+      4: 3.9.7
+      5: 0.13.10
+      8:
+      - 3
+      - 5
+algo:
+  desc: null
+  value: Evo HPO CQN
+env:
+  desc: null
+  value: CartPole-v1
