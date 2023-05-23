@@ -112,7 +112,7 @@ NET_CONFIG = {
     'h_size': [32, 32], # Actor hidden size
 }
 ```
-First, use <code>utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+First, use <code>utils.utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```python
 from agilerl.utils.utils import makeVectEnvs, initialPopulation
 import torch
@@ -350,7 +350,7 @@ NET_CONFIG = {
     'h_size': [32, 32], # Actor hidden size
 }
 ```
-First, use <code>utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+First, use <code>utils.utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```python
 from agilerl.utils.utils import initialPopulation
 import torch
