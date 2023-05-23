@@ -1,5 +1,11 @@
-Training
+Online Training
 =====
+
+In online reinforcement learning, an agent is able to gather data by directly interacting with its environment. It can then use this experience to learn from and 
+update its policy. To enable our agent to interact in this way, the agent needs to act either in the real world, or in a simulation.
+
+AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our 
+Evolutionary Hyperparameter Optimization algorithm.
 
 .. _evoHPO:
 

@@ -37,5 +37,6 @@ Contents
    :maxdepth: 3
 
    get_started/index
-   training/index
+   online_training/index
+   offline_training/index
    api/index
