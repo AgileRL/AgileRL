@@ -178,19 +178,19 @@ The easiest training loop implementation is to use our <code>training.train.trai
 ```python
 from agilerl.training.train import train
 
-trained_pop, pop_fitnesses = train(env=env,                             # Gym-style environment
-                                   env_name=INIT_HP['ENV_NAME'],        # Environment name
-                                   algo=INIT_HP['ALGO'],                # Algorithm
-                                   pop=agent_pop,                       # Population of agents
-                                   memory=memory,                       # Replay buffer
-                                   swap_channels=False,                 # Swap image channel from last to first
-                                   n_episodes=INIT_HP['EPISODES'],      # Max number of training episodes
-                                   evo_epochs=INIT_HP['EVO_EPOCHS'],    # Evolution frequency
-                                   evo_loop=1,                          # Number of evaluation episodes per agent
-                                   target=INIT_HP['TARGET_SCORE'],      # Target score for early stopping
-                                   tournament=tournament,               # Tournament selection object
-                                   mutation=mutations,                  # Mutations object
-                                   wb=INIT_HP['WANDB'],                 # Weights and Biases tracking
+trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+                                   env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                   algo=INIT_HP['ALGO'],                    # Algorithm
+                                   pop=agent_pop,                           # Population of agents
+                                   memory=memory,                           # Replay buffer
+                                   swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                   n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                   evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                   evo_loop=1,                              # Number of evaluation episodes per agent
+                                   target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                   tournament=tournament,                   # Tournament selection object
+                                   mutation=mutations,                      # Mutations object
+                                   wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
                                    device=torch.device("cuda"))
 ```
 
@@ -442,20 +442,20 @@ The easiest training loop implementation is to use our <code>training.train_offl
 ```python
 from agilerl.training.train_offline import train
 
-trained_pop, pop_fitnesses = train(env=env,                             # Gym-style environment
-                                   env_name=INIT_HP['ENV_NAME'],        # Environment name
-                                   dataset=dataset,                     # Offline dataset
-                                   algo=INIT_HP['ALGO'],                # Algorithm
-                                   pop=agent_pop,                       # Population of agents
-                                   memory=memory,                       # Replay buffer
-                                   swap_channels=False,                 # Swap image channel from last to first
-                                   n_episodes=INIT_HP['EPISODES'],      # Max number of training episodes
-                                   evo_epochs=INIT_HP['EVO_EPOCHS'],    # Evolution frequency
-                                   evo_loop=1,                          # Number of evaluation episodes per agent
-                                   target=INIT_HP['TARGET_SCORE'],      # Target score for early stopping
-                                   tournament=tournament,               # Tournament selection object
-                                   mutation=mutations,                  # Mutations object
-                                   wb=INIT_HP['WANDB'],                 # Weights and Biases tracking
+trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+                                   env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                   dataset=dataset,                         # Offline dataset
+                                   algo=INIT_HP['ALGO'],                    # Algorithm
+                                   pop=agent_pop,                           # Population of agents
+                                   memory=memory,                           # Replay buffer
+                                   swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                   n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                   evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                   evo_loop=1,                              # Number of evaluation episodes per agent
+                                   target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                   tournament=tournament,                   # Tournament selection object
+                                   mutation=mutations,                      # Mutations object
+                                   wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
                                    device=torch.device("cuda"))
 ```
 
