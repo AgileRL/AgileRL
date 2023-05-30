@@ -39,8 +39,24 @@ Example
 
   # Create environment and Experience Replay Buffer, and load dataset
   env = gym.make('CartPole-v1')
+  try:
+      state_dim = env.observation_space.n       # Discrete observation space
+      one_hot = True                            # Requires one-hot encoding
+  except Exception:
+      state_dim = env.observation_space.shape   # Continuous observation space
+      one_hot = False                           # Does not require one-hot encoding
+  try:
+      action_dim = env.action_space.n           # Discrete action space
+  except Exception:
+      action_dim = env.action_space.shape[0]    # Continuous action space
+
+  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+
+  if channels_last:
+      state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
   field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(action_dim=4, memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
   dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
 
   # Save transitions to replay buffer
@@ -48,7 +64,7 @@ Example
   for i in range(dataset_length-1):
       state = dataset['observations'][i]
       next_state = dataset['observations'][i+1]
-      if swap_channels:
+      if channels_last:
           state = np.moveaxis(state, [3], [1])
           next_state = np.moveaxis(next_state, [3], [1])
       action = dataset['actions'][i]
@@ -56,7 +72,7 @@ Example
       done = bool(dataset['terminals'][i])
       memory.save2memory(state, action, reward, next_state, done)
 
-  agent = CQN(states_dim=4, action_dim=2, one_hot=False)   # Create DQN agent
+  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)   # Create DQN agent
 
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
@@ -87,7 +103,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = CQN(states_dim=4, action_dim=2, one_hot=False, net_config=NET_CONFIG)   # Create DQN agent  
+  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=False, net_config=NET_CONFIG)   # Create DQN agent  
 
 Parameters
 ------------

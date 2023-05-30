@@ -177,19 +177,19 @@ easiest to use our training function, which returns a population of trained agen
     import gymnasium as gym
     import torch
 
-    trained_pop, pop_fitnesses = train(env=env,                     # Gym-style environment
-                                       env_name='LunarLander-v2',   # Environment name
-                                       algo='DQN',                  # Algorithm
-                                       pop=agent_pop,               # Population of agents
-                                       memory=memory,               # Replay buffer
-                                       swap_channels=False,         # Swap image channel from last to first
-                                       n_episodes=1000,             # Max number of training episodes
-                                       evo_epochs=20,               # Evolution frequency
-                                       evo_loop=1,                  # Number of evaluation episodes per agent
-                                       target=200.,                 # Target score for early stopping
-                                       tournament=tournament,       # Tournament selection object
-                                       mutation=mutations,          # Mutations object
-                                       wb=False,                    # Weights and Biases tracking
+    trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+                                       env_name='LunarLander-v2',               # Environment name
+                                       algo='DQN',                              # Algorithm
+                                       pop=agent_pop,                           # Population of agents
+                                       memory=memory,                           # Replay buffer
+                                       swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                       n_episodes=1000,                         # Max number of training episodes
+                                       evo_epochs=20,                           # Evolution frequency
+                                       evo_loop=1,                              # Number of evaluation episodes per agent
+                                       target=200.,                             # Target score for early stopping
+                                       tournament=tournament,                   # Tournament selection object
+                                       mutation=mutations,                      # Mutations object
+                                       wb=False,                                # Weights and Biases tracking
                                        device=torch.device("cuda"))
 
 
@@ -206,9 +206,9 @@ Alternatively, use a custom training loop. Combining all of the above:
     import torch
 
     NET_CONFIG = {
-                   'arch': 'mlp',       # Network architecture
-                   'h_size': [32, 32],  # Actor hidden size
-                 }
+                    'arch': 'mlp',       # Network architecture
+                    'h_size': [32, 32],  # Actor hidden size
+                }
 
     INIT_HP = {
                 'DOUBLE': True,         # Use double Q-learning
@@ -218,11 +218,27 @@ Alternatively, use a custom training loop. Combining all of the above:
                 'LEARN_STEP': 1,        # Learning frequency
                 'TAU': 1e-3,            # For soft update of target network parameters
                 'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-              }
+            }
+
+    env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
+
+    try:
+        state_dim = env.single_observation_space.n       # Discrete observation space
+        one_hot = True                                   # Requires one-hot encoding
+    except Exception:
+        state_dim = env.single_observation_space.shape   # Continuous observation space
+        one_hot = False                                  # Does not require one-hot encoding
+    try:
+        action_dim = env.single_action_space.n           # Discrete action space
+    except Exception:
+        action_dim = env.single_action_space.shape[0]    # Continuous action space
+
+    if INIT_HP['CHANNELS_LAST']:
+        state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     pop = initialPopulation(algo='DQN',             # Algorithm
-                            state_dim=(8,),         # State dimension
-                            action_dim=4,           # Action dimension
+                            state_dim=state_dim,    # State dimension
+                            action_dim=action_dim,  # Action dimension
                             one_hot=False,          # One-hot encoding
                             net_config=NET_CONFIG,  # Network configuration
                             INIT_HP=INIT_HP,        # Initial hyperparameters
@@ -230,7 +246,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=4,             # Number of agent actions
+    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
@@ -265,19 +281,24 @@ Alternatively, use a custom training loop. Combining all of the above:
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
-
     # TRAINING LOOP
     for idx_epi in range(max_episodes):
         for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
             for idx_step in range(max_steps):
+                if INIT_HP['CHANNELS_LAST']:
+                    state = np.moveaxis(state, [3], [1])
                 action = agent.getAction(state, epsilon)    # Get next action from agent
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
                 
                 # Save experience to replay buffer
-                memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                if INIT_HP['CHANNELS_LAST']:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+                else:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:

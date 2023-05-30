@@ -178,19 +178,19 @@ The easiest training loop implementation is to use our <code>training.train.trai
 ```python
 from agilerl.training.train import train
 
-trained_pop, pop_fitnesses = train(env=env,                             # Gym-style environment
-                                   env_name=INIT_HP['ENV_NAME'],        # Environment name
-                                   algo=INIT_HP['ALGO'],                # Algorithm
-                                   pop=agent_pop,                       # Population of agents
-                                   memory=memory,                       # Replay buffer
-                                   swap_channels=False,                 # Swap image channel from last to first
-                                   n_episodes=INIT_HP['EPISODES'],      # Max number of training episodes
-                                   evo_epochs=INIT_HP['EVO_EPOCHS'],    # Evolution frequency
-                                   evo_loop=1,                          # Number of evaluation episodes per agent
-                                   target=INIT_HP['TARGET_SCORE'],      # Target score for early stopping
-                                   tournament=tournament,               # Tournament selection object
-                                   mutation=mutations,                  # Mutations object
-                                   wb=INIT_HP['WANDB'],                 # Weights and Biases tracking
+trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+                                   env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                   algo=INIT_HP['ALGO'],                    # Algorithm
+                                   pop=agent_pop,                           # Population of agents
+                                   memory=memory,                           # Replay buffer
+                                   swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                   n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                   evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                   evo_loop=1,                              # Number of evaluation episodes per agent
+                                   target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                   tournament=tournament,                   # Tournament selection object
+                                   mutation=mutations,                      # Mutations object
+                                   wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
                                    device=torch.device("cuda"))
 ```
 
@@ -221,9 +221,25 @@ INIT_HP = {
             'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
           }
 
+env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
+
+try:
+    state_dim = env.single_observation_space.n       # Discrete observation space
+    one_hot = True                            # Requires one-hot encoding
+except Exception:
+    state_dim = env.single_observation_space.shape   # Continuous observation space
+    one_hot = False                           # Does not require one-hot encoding
+try:
+    action_dim = env.single_action_space.n           # Discrete action space
+except Exception:
+    action_dim = env.single_action_space.shape[0]    # Continuous action space
+
+if INIT_HP['CHANNELS_LAST']:
+    state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
 pop = initialPopulation(algo='DQN',             # Algorithm
-                        state_dim=(8,),         # State dimension
-                        action_dim=4,           # Action dimension
+                        state_dim=state_dim,    # State dimension
+                        action_dim=action_dim,  # Action dimension
                         one_hot=False,          # One-hot encoding
                         net_config=NET_CONFIG,  # Network configuration
                         INIT_HP=INIT_HP,        # Initial hyperparameters
@@ -231,7 +247,7 @@ pop = initialPopulation(algo='DQN',             # Algorithm
                         device=torch.device("cuda"))
 
 field_names = ["state", "action", "reward", "next_state", "done"]
-memory = ReplayBuffer(action_dim=4,             # Number of agent actions
+memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                       memory_size=10000,        # Max replay buffer size
                       field_names=field_names,  # Field names to store in memory
                       device=torch.device("cuda"))
@@ -266,19 +282,24 @@ epsilon = eps_start
 evo_epochs = 5      # Evolution frequency
 evo_loop = 1        # Number of evaluation episodes
 
-env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
-
 # TRAINING LOOP
 for idx_epi in range(max_episodes):
     for agent in pop:   # Loop through population
         state = env.reset()[0]  # Reset environment at start of episode
         score = 0
         for idx_step in range(max_steps):
+            if INIT_HP['CHANNELS_LAST']:
+                state = np.moveaxis(state, [3], [1])
             action = agent.getAction(state, epsilon)    # Get next action from agent
             next_state, reward, done, _, _ = env.step(action)   # Act in environment
             
             # Save experience to replay buffer
-            memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+            if INIT_HP['CHANNELS_LAST']:
+                memory.save2memoryVectEnvs(
+                    state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+            else:
+                memory.save2memoryVectEnvs(
+                    state, action, reward, next_state, done)
 
             # Learn according to learning frequency
             if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
@@ -421,20 +442,20 @@ The easiest training loop implementation is to use our <code>training.train_offl
 ```python
 from agilerl.training.train_offline import train
 
-trained_pop, pop_fitnesses = train(env=env,                             # Gym-style environment
-                                   env_name=INIT_HP['ENV_NAME'],        # Environment name
-                                   dataset=dataset,                     # Offline dataset
-                                   algo=INIT_HP['ALGO'],                # Algorithm
-                                   pop=agent_pop,                       # Population of agents
-                                   memory=memory,                       # Replay buffer
-                                   swap_channels=False,                 # Swap image channel from last to first
-                                   n_episodes=INIT_HP['EPISODES'],      # Max number of training episodes
-                                   evo_epochs=INIT_HP['EVO_EPOCHS'],    # Evolution frequency
-                                   evo_loop=1,                          # Number of evaluation episodes per agent
-                                   target=INIT_HP['TARGET_SCORE'],      # Target score for early stopping
-                                   tournament=tournament,               # Tournament selection object
-                                   mutation=mutations,                  # Mutations object
-                                   wb=INIT_HP['WANDB'],                 # Weights and Biases tracking
+trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+                                   env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                   dataset=dataset,                         # Offline dataset
+                                   algo=INIT_HP['ALGO'],                    # Algorithm
+                                   pop=agent_pop,                           # Population of agents
+                                   memory=memory,                           # Replay buffer
+                                   swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                   n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                   evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                   evo_loop=1,                              # Number of evaluation episodes per agent
+                                   target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                   tournament=tournament,                   # Tournament selection object
+                                   mutation=mutations,                      # Mutations object
+                                   wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
                                    device=torch.device("cuda"))
 ```
 
@@ -466,9 +487,26 @@ INIT_HP = {
             'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
           }
 
+env = gym.make('CartPole-v1')   # Create environment
+dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
+
+try:
+    state_dim = env.observation_space.n       # Discrete observation space
+    one_hot = True                            # Requires one-hot encoding
+except Exception:
+    state_dim = env.observation_space.shape   # Continuous observation space
+    one_hot = False                           # Does not require one-hot encoding
+try:
+    action_dim = env.action_space.n           # Discrete action space
+except Exception:
+    action_dim = env.action_space.shape[0]    # Continuous action space
+
+if INIT_HP['CHANNELS_LAST']:
+    state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
 pop = initialPopulation(algo='CQN',             # Algorithm
-                        state_dim=(4,),         # State dimension
-                        action_dim=2,           # Action dimension
+                        state_dim=state_dim,    # State dimension
+                        action_dim=action_dim,  # Action dimension
                         one_hot=False,          # One-hot encoding
                         net_config=NET_CONFIG,  # Network configuration
                         INIT_HP=INIT_HP,        # Initial hyperparameters
@@ -476,7 +514,7 @@ pop = initialPopulation(algo='CQN',             # Algorithm
                         device=torch.device("cuda"))
 
 field_names = ["state", "action", "reward", "next_state", "done"]
-memory = ReplayBuffer(action_dim=2,             # Number of agent actions
+memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                       memory_size=10000,        # Max replay buffer size
                       field_names=field_names,  # Field names to store in memory
                       device=torch.device("cuda"))
@@ -505,16 +543,12 @@ max_steps = 500     # Max steps per episode
 evo_epochs = 5      # Evolution frequency
 evo_loop = 1        # Number of evaluation episodes
 
-env = gym.make('CartPole-v1')   # Create environment
-
-dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
-
 # Save transitions to replay buffer
 dataset_length = dataset['rewards'].shape[0]
 for i in range(dataset_length-1):
     state = dataset['observations'][i]
     next_state = dataset['observations'][i+1]
-    if swap_channels:
+    if INIT_HP['CHANNELS_LAST']:
         state = np.moveaxis(state, [3], [1])
         next_state = np.moveaxis(next_state, [3], [1])
     action = dataset['actions'][i]
