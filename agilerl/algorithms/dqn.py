@@ -266,9 +266,10 @@ class DQN():
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
-        clone.actor, clone.actor_target = self.accelerator.prepare(actor, actor_target)
-        clone.optimizer = self.accelerator.prepare(optim.Adam(clone.actor.parameters(), 
-                                                              lr=clone.lr))
+        optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        clone.actor, clone.actor_target, clone.optimizer = self.accelerator.prepare(actor, 
+                                                                                    actor_target,
+                                                                                    optimizer)
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
         clone.scores = copy.deepcopy(self.scores)
