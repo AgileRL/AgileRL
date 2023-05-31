@@ -39,8 +39,6 @@ class DQN():
     :type mutation: str, optional
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
     """
 
     def __init__(

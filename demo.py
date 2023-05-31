@@ -29,7 +29,7 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
+    env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=8)   # Create environment
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
@@ -45,7 +45,7 @@ if __name__ == '__main__':
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     pop = initialPopulation(accelerator=accelerator,    # Accelerator
-                            algo='DQN',                 # Algorithm
+                            algo='DDPG',                 # Algorithm
                             state_dim=state_dim,        # State dimension
                             action_dim=action_dim,      # Action dimension
                             one_hot=False,              # One-hot encoding
