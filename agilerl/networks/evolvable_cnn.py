@@ -512,11 +512,11 @@ class EvolvableCNN(nn.Module):
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
         if numb_new_channels is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if self.channel_size[hidden_layer] + numb_new_nodes <= 256:  # HARD LIMIT
+        if self.channel_size[hidden_layer] + numb_new_channels <= 256:  # HARD LIMIT
 
-            self.channel_size[hidden_layer] += numb_new_nodes
+            self.channel_size[hidden_layer] += numb_new_channels
 
             self.recreate_nets()
 
