@@ -428,6 +428,7 @@ class EvolvableCNN(nn.Module):
         """Returns model information in dictionary.
         """
         initdict = {
+            "accelerator": self.accelerator,
             "input_shape": self.input_shape,
             "channel_size": self.channel_size,
             "kernal_size": self.kernal_size,

@@ -150,6 +150,7 @@ class DQN():
         else:
             self.actor.eval()
             with torch.no_grad():
+                state = state.to(self.accelerator.device)
                 action_values = self.actor(state)
             self.actor.train()
 
@@ -158,6 +159,16 @@ class DQN():
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
         return action
+    
+    def _squeeze_exp(self, experiences):
+        """Remove first dim created by dataloader.
+        
+        :param experiences: List of batched states, actions, rewards, next_states, 
+        dones in that order.
+        :type state: List[torch.Tensor[float]]
+        """
+        st, ac, re, ne, do = experiences
+        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
@@ -166,7 +177,7 @@ class DQN():
         dones in that order.
         :type state: List[torch.Tensor[float]]
         """
-        states, actions, rewards, next_states, dones = experiences
+        states, actions, rewards, next_states, dones = self._squeeze_exp(experiences)
 
         if self.one_hot:
             states = nn.functional.one_hot(
@@ -185,7 +196,6 @@ class DQN():
         q_eval = self.actor(states).gather(1, actions.long())
 
         # loss backprop
-        print(q_eval.shape, y_j.shape)
         loss = self.criterion(q_eval, y_j)
         self.optimizer.zero_grad()
         self.accelerator.backward(loss)

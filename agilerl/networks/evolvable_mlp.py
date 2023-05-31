@@ -203,6 +203,7 @@ class EvolvableMLP(nn.Module):
         """Returns model information in dictionary.
         """
         init_dict = {
+            "accelerator":self.accelerator,
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,

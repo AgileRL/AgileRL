@@ -51,7 +51,7 @@ if __name__ == '__main__':
                             one_hot=False,              # One-hot encoding
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
-                            population_size=6,          # Population size
+                            population_size=1,          # Population size
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -83,7 +83,7 @@ if __name__ == '__main__':
                           rand_seed=1)                          # Random seed
 
     max_episodes = 1000  # Max training episodes
-    max_steps = 500     # Max steps per episode
+    max_steps = 100     # Max steps per episode
 
     # Exploration params
     eps_start = 1.0     # Max exploration
@@ -104,7 +104,7 @@ if __name__ == '__main__':
             score = 0
             for idx_step in range(max_steps):
                 # Get next action from agent
-                action = agent.getAction(state, epsilon)
+                action = agent.getAction(state, epsilon=0)
                 next_state, reward, done, _, _ = env.step(
                     action)   # Act in environment
 
@@ -140,8 +140,7 @@ if __name__ == '__main__':
 
             print(f'Episode {idx_epi+1}/{max_episodes}')
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)

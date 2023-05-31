@@ -10,8 +10,7 @@ class ReplayDataset(IterableDataset):
     :param batch_size: Number of experiences to sample at a time, defaults to 256
     :type batch_size: int, optional
     """
-
-    def __init__(self, buffer, batch_size):
+    def __init__(self, buffer, batch_size=256):
         self.buffer = buffer
         self.batch_size = batch_size
 
