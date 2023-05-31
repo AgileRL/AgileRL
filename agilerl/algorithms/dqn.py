@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import accelerate
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 
