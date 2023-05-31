@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import accelerate
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 
@@ -41,6 +42,7 @@ class DQN():
 
     def __init__(
         self,
+        accelerator,
         state_dim,
         action_dim,
         one_hot,
@@ -56,8 +58,7 @@ class DQN():
             gamma=0.99,
             tau=1e-3,
             mutation=None,
-            double=False,
-            device='cpu'):
+            double=False):
         self.algo = 'DQN'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -69,7 +70,8 @@ class DQN():
         self.gamma = gamma
         self.tau = tau
         self.mut = mutation
-        self.device = device
+
+        self.accelerator = accelerator
 
         self.index = index
         self.scores = []
@@ -80,46 +82,46 @@ class DQN():
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
+            actor = EvolvableMLP(
+                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
-            self.actor_target = EvolvableMLP(
+                hidden_size=self.net_config['h_size'])
+            actor_target = EvolvableMLP(
+                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
+                hidden_size=self.net_config['h_size'])
+            self.actor, self.actor_target = accelerator.prepare(actor, actor_target)
             self.actor_target.load_state_dict(self.actor.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
-            self.actor = EvolvableCNN(
+            actor = EvolvableCNN(
+                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
-            self.actor_target = EvolvableCNN(
+                hidden_size=self.net_config['h_size'])
+            actor_target = EvolvableCNN(
+                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
+                hidden_size=self.net_config['h_size'])
+            self.actor, self.actor_target = accelerator.prepare(actor, actor_target)
             self.actor_target.load_state_dict(self.actor.state_dict())
 
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = accelerator.prepare(optim.Adam(self.actor.parameters(), 
+                                                        lr=self.lr))
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
-        """Returns the next action to take in the environment. Epsilon is the probability of taking a random action, used for exploration.
+        """Returns the next action to take in the environment. 
+        Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
@@ -127,7 +129,7 @@ class DQN():
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        state = torch.from_numpy(state).float().to(self.device)
+        state = torch.from_numpy(state).float()
 
         if self.one_hot:
             state = nn.functional.one_hot(
@@ -176,7 +178,7 @@ class DQN():
         # loss backprop
         loss = self.criterion(q_eval, y_j)
         self.optimizer.zero_grad()
-        loss.backward()
+        self.accelerator.backward(loss)
         self.optimizer.step()
 
         # soft update target network
@@ -227,7 +229,8 @@ class DQN():
         if index is None:
             index = self.index
 
-        clone = type(self)(state_dim=self.state_dim,
+        clone = type(self)(accelerator=self.accelerator,
+                           state_dim=self.state_dim,
                            action_dim=self.action_dim,
                            one_hot=self.one_hot,
                            index=index,
@@ -237,13 +240,14 @@ class DQN():
                            learn_step=self.learn_step,
                            gamma=self.gamma,
                            tau=self.tau,
-                           mutation=self.mut,
-                           device=self.device,
+                           mutation=self.mut
                            )
 
-        clone.actor = self.actor.clone().to(self.device)
-        clone.actor_target = self.actor_target.clone().to(self.device)
-        clone.optimizer = optim.Adam(clone.actor.parameters(), lr=clone.lr)
+        actor = self.actor.clone()
+        actor_target = self.actor_target.clone()
+        clone.actor, clone.actor_target = self.accelerator.prepare(actor, actor_target)
+        clone.optimizer = self.accelerator.prepare(optim.Adam(clone.actor.parameters(), 
+                                                              lr=clone.lr))
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
         clone.scores = copy.deepcopy(self.scores)

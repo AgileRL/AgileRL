@@ -26,12 +26,11 @@ class EvolvableMLP(nn.Module):
     :type output_vanish: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
     """
 
     def __init__(
             self,
+            accelerator,
             num_inputs: int,
             num_outputs: int,
             hidden_size: List[int],
@@ -39,8 +38,7 @@ class EvolvableMLP(nn.Module):
             output_activation=None,
             layer_norm=False,
             output_vanish=True,
-            stored_values=None,
-            device='cpu'):
+            stored_values=None):
         super(EvolvableMLP, self).__init__()
 
         self.num_inputs = num_inputs
@@ -50,7 +48,8 @@ class EvolvableMLP(nn.Module):
         self.layer_norm = layer_norm
         self.output_vanish = output_vanish
         self.hidden_size = hidden_size
-        self.device = device
+        
+        self.accelerator = accelerator
 
         self.net = self.create_net()
 
@@ -119,7 +118,7 @@ class EvolvableMLP(nn.Module):
         :type x: torch.Tensor() or np.array
         """
         if not isinstance(x, torch.Tensor):
-            x = torch.FloatTensor(np.array(x)).to(self.device)
+            x = torch.FloatTensor(np.array(x))
 
         for value in self.net:
             x = value(x)
@@ -146,7 +145,8 @@ class EvolvableMLP(nn.Module):
         return count
 
     def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened parameter vector.
+        """Returns current pytorch gradient in same order as genome's flattened 
+        parameter vector.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
         :type without_layer_norm: bool, optional
@@ -178,7 +178,8 @@ class EvolvableMLP(nn.Module):
         return copy.deepcopy(pvec)
 
     def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current neural network weights.
+        """Injects a flat vector of neural network parameters into the model's current 
+        neural network weights.
 
         :param pvec: Network weights
         :type pvec: np.array()
@@ -207,8 +208,7 @@ class EvolvableMLP(nn.Module):
             "hidden_size": self.hidden_size,
             "activation": self.activation,
             "output_activation": self.output_activation,
-            "layer_norm": self.layer_norm,
-            "device": self.device}
+            "layer_norm": self.layer_norm}
         return init_dict
 
     @property

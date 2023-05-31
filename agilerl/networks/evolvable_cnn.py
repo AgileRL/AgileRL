@@ -122,12 +122,11 @@ class EvolvableCNN(nn.Module):
     :type rainbow: bool, optional
     :param critic: CNN is a critic network, defaults to False
     :type critic: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
     """
 
     def __init__(
             self,
+            accelerator,
             input_shape: List[int],
             channel_size: List[int],
             kernal_size: List[int],
@@ -140,8 +139,7 @@ class EvolvableCNN(nn.Module):
             layer_norm=False,
             stored_values=None,
             rainbow=False,
-            critic=False,
-            device='cpu'):
+            critic=False):
 
         super(EvolvableCNN, self).__init__()
 
@@ -157,7 +155,8 @@ class EvolvableCNN(nn.Module):
         self.layer_norm = layer_norm
         self.rainbow = rainbow
         self.critic = critic
-        self.device = device
+        
+        self.accelerator = accelerator
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
@@ -264,7 +263,7 @@ class EvolvableCNN(nn.Module):
                 self.num_actions,
                 hidden_size=self.hidden_size,
                 name="advantage")
-            advantage_net.to(self.device)
+            advantage_net = self.accelerator.prepare(advantage_net)
         else:
             if self.critic:
                 value_net = self.create_mlp(
@@ -280,8 +279,7 @@ class EvolvableCNN(nn.Module):
                     name="value")
             advantage_net = None
 
-        feature_net.to(self.device)
-        value_net.to(self.device)
+        feature_net, value_net = self.accelerator.prepare(feature_net, value_net)
 
         return feature_net, value_net, advantage_net
 
@@ -355,7 +353,8 @@ class EvolvableCNN(nn.Module):
         return count
 
     def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened parameter vector.
+        """Returns current pytorch gradient in same order as genome's flattened 
+        parameter vector.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
         :type without_layer_norm: bool, optional
@@ -387,7 +386,8 @@ class EvolvableCNN(nn.Module):
         return copy.deepcopy(pvec)
 
     def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current neural network weights.
+        """Injects a flat vector of neural network parameters into the model's current 
+        neural network weights.
 
         :param pvec: Network weights
         :type pvec: np.array()
@@ -436,8 +436,7 @@ class EvolvableCNN(nn.Module):
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
             "layer_norm": self.layer_norm,
-            "critic": self.critic,
-            "device": self.device}
+            "critic": self.critic}
         return initdict
 
     def add_mlp_layer(self):
@@ -512,11 +511,11 @@ class EvolvableCNN(nn.Module):
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
         if numb_new_channels is None:
-            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if self.channel_size[hidden_layer] + numb_new_nodes <= 256:  # HARD LIMIT
+        if self.channel_size[hidden_layer] + numb_new_channels <= 256:  # HARD LIMIT
 
-            self.channel_size[hidden_layer] += numb_new_nodes
+            self.channel_size[hidden_layer] += numb_new_channels
 
             self.recreate_nets()
 
