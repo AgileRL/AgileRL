@@ -19,11 +19,13 @@ class DDPG():
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
-    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
+    :param index: Index to keep track of object instance during tournament selection 
+    and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
+    :param batch_size: Size of batched sample from replay buffer for learning, 
+    defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
@@ -35,7 +37,8 @@ class DDPG():
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
+    :param policy_freq: Frequency of target network updates compared to policy network, 
+    defaults to 2
     :type policy_freq: int, optional
     """
 
@@ -57,8 +60,7 @@ class DDPG():
             gamma=0.99,
             tau=1e-3,
             mutation=None,
-            policy_freq=2,
-            device='cpu'):
+            policy_freq=2):
         self.algo = 'DDPG'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -236,7 +238,7 @@ class DDPG():
             q_value = self.critic(states, actions)
 
         next_actions = self.actor_target(next_states)
-        noise = actions.data.normal_(0, policy_noise).to(self.device)
+        noise = actions.data.normal_(0, policy_noise)
         noise = noise.clamp(-noise_clip, noise_clip)
         next_actions = (next_actions + noise)
 
@@ -285,11 +287,13 @@ class DDPG():
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+        :param swap_channels: Swap image channels dimension from last to first 
+        [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/epsiodes to complete. The returned score 
+        is the mean over these tests. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():
@@ -301,7 +305,7 @@ class DDPG():
                     if swap_channels:
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
-                    state, reward, done, _, _ = env.step(action)
+                    state, reward, done, trunc, info = env.step(action)
                     score += reward
                 rewards.append(score)
         mean_fit = np.mean(rewards)
@@ -311,7 +315,8 @@ class DDPG():
     def clone(self, index=None):
         """Returns cloned agent identical to self.
 
-        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
+        :param index: Index to keep track of agent for tournament selection and 
+        mutation, defaults to None
         :type index: int, optional
         """
         if index is None:

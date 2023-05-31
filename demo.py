@@ -19,7 +19,8 @@ if __name__ == '__main__':
     }
 
     INIT_HP = {
-        'DOUBLE': True,         # Use double Q-learning
+        'POPULATION_SIZE': 2,   # Population size
+        'DOUBLE': True,         # Use double Q-learning in DQN or CQN
         'BATCH_SIZE': 128,      # Batch size
         'LR': 1e-3,             # Learning rate
         'GAMMA': 0.99,          # Discount factor
@@ -52,7 +53,7 @@ if __name__ == '__main__':
                             one_hot=False,              # One-hot encoding
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
-                            population_size=1,          # Population size
+                            population_size=INIT_HP['POPULATION_SIZE'],# Population size
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -65,7 +66,7 @@ if __name__ == '__main__':
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
-                                     population_size=6,  # Population size
+                                     population_size=INIT_HP['POPULATION_SIZE'],  # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
 
     mutations = Mutations(accelerator=accelerator,              # Accelerator
@@ -105,7 +106,7 @@ if __name__ == '__main__':
             score = 0
             for idx_step in range(max_steps):
                 # Get next action from agent
-                action = agent.getAction(state, epsilon=0)
+                action = agent.getAction(state, epsilon)
                 next_state, reward, done, _, _ = env.step(
                     action)   # Act in environment
 
