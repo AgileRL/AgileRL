@@ -53,7 +53,7 @@ class EvolvableMLP(nn.Module):
         
         self.accelerator = accelerator
 
-        self.net = self.create_net()
+        self.net = self.accelerator.prepare(self.create_net())
 
         if stored_values is not None:
             self.inject_parameters(
@@ -121,9 +121,7 @@ class EvolvableMLP(nn.Module):
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
-
-        for value in self.net:
-            x = value(x)
+        x = self.net(x)
         return x
 
     def get_model_dict(self):

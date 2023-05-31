@@ -1,10 +1,13 @@
 from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.replay_data import ReplayDataset
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from accelerate import Accelerator
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 if __name__ == '__main__':
 
@@ -55,6 +58,9 @@ if __name__ == '__main__':
     memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names)  # Field names to store in memory
+    replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
+    replay_dataloader = DataLoader(replay_dataset)
+    replay_dataloader = accelerator.prepare(replay_dataloader)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -89,11 +95,10 @@ if __name__ == '__main__':
     evo_loop = 1        # Number of evaluation episodes
 
     print('===== AgileRL Demo =====')
-    print('Verbose off. Add a progress bar to view training progress more frequently.')
     print('Training...')
 
     # TRAINING LOOP
-    for idx_epi in range(max_episodes):
+    for idx_epi in tqdm(range(max_episodes)):
         for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
@@ -110,8 +115,9 @@ if __name__ == '__main__':
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(
                         memory) >= agent.batch_size:
-                    experiences = memory.sample(
-                        agent.batch_size)  # Sample replay buffer
+                    # Sample dataloader
+                    replay_dataset.batch_size = agent.batch_size
+                    experiences = next(iter(replay_dataloader))
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 

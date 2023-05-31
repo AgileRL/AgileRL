@@ -95,8 +95,7 @@ class DQN():
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'])
-            self.actor, self.actor_target = accelerator.prepare(actor, actor_target)
-            self.actor_target.load_state_dict(self.actor.state_dict())
+            actor_target.load_state_dict(actor.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
             actor = EvolvableCNN(
@@ -115,11 +114,14 @@ class DQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'])
-            self.actor, self.actor_target = accelerator.prepare(actor, actor_target)
-            self.actor_target.load_state_dict(self.actor.state_dict())
+            actor_target.load_state_dict(actor.state_dict())
 
-        self.optimizer = accelerator.prepare(optim.Adam(self.actor.parameters(), 
-                                                        lr=self.lr))
+        optimizer = optim.Adam(actor.parameters(), lr=self.lr)
+
+        self.actor, self.actor_target, self.optimizer = accelerator.prepare(actor, 
+                                                                            actor_target, 
+                                                                            optimizer)
+
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
@@ -151,6 +153,8 @@ class DQN():
                 action_values = self.actor(state)
             self.actor.train()
 
+            action_values = self.accelerator.gather_for_metrics(action_values)
+
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
         return action
@@ -181,6 +185,7 @@ class DQN():
         q_eval = self.actor(states).gather(1, actions.long())
 
         # loss backprop
+        print(q_eval.shape, y_j.shape)
         loss = self.criterion(q_eval, y_j)
         self.optimizer.zero_grad()
         self.accelerator.backward(loss)

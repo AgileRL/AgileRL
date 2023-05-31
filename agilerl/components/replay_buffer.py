@@ -13,13 +13,16 @@ class ReplayBuffer():
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
     """
 
-    def __init__(self, action_dim, memory_size, field_names):
+    def __init__(self, action_dim, memory_size, field_names, device='cpu'):
         self.n_actions = action_dim
         self.memory = deque(maxlen=memory_size)
         self.experience = namedtuple("Experience", field_names=field_names)
         self.counter = 0    # update cycle counter
+        self.device = device
 
     def __len__(self):
         return len(self.memory)
@@ -37,15 +40,15 @@ class ReplayBuffer():
         experiences = random.sample(self.memory, k=batch_size)
 
         states = torch.from_numpy(np.stack(
-            [e.state for e in experiences if e is not None], axis=0))
+            [e.state for e in experiences if e is not None], axis=0)).to(self.device)
         actions = torch.from_numpy(
-            np.vstack([e.action for e in experiences if e is not None]))
+            np.vstack([e.action for e in experiences if e is not None])).to(self.device)
         rewards = torch.from_numpy(np.vstack(
-            [e.reward for e in experiences if e is not None])).float()
+            [e.reward for e in experiences if e is not None])).float().to(self.device)
         next_states = torch.from_numpy(np.stack(
-            [e.next_state for e in experiences if e is not None], axis=0)).float()
+            [e.next_state for e in experiences if e is not None], axis=0)).float().to(self.device)
         dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(
-            np.uint8)).float()
+            np.uint8)).float().to(self.device)
 
         return (states, actions, rewards, next_states, dones)
 
