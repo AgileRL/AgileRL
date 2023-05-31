@@ -87,12 +87,12 @@ First, use ``utils.utils.initialPopulation()`` to create a list of agents - our 
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
-    except:
+    except Exception:
         state_dim = env.single_observation_space.shape      # Continuous observation space
         one_hot = False                                     # Does not require one-hot encoding
     try:
         action_dim = env.single_action_space.n             # Discrete action space
-    except:
+    except Exception:
         action_dim = env.single_action_space.shape[0]      # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:

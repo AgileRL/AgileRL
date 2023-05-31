@@ -22,6 +22,20 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
+    try:
+        state_dim = env.single_observation_space.n          # Discrete observation space
+        one_hot = True                                      # Requires one-hot encoding
+    except Exception:
+        state_dim = env.single_observation_space.shape      # Continuous observation space
+        one_hot = False                                     # Does not require one-hot encoding
+    try:
+        action_dim = env.single_action_space.n             # Discrete action space
+    except Exception:
+        action_dim = env.single_action_space.shape[0]      # Continuous action space
+
+    if INIT_HP['CHANNELS_LAST']:
+        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
     pop = initialPopulation(algo='DQN',             # Algorithm
                             state_dim=(8,),            # State dimension
                             action_dim=4,           # Action dimension
