@@ -152,16 +152,16 @@ class DDPG():
                 critic=True)
             critic_target.load_state_dict(critic.state_dict())
 
-        actor_optimizer = optim.Adam(actor.parameters(), lr=self.lr)
-        critic_optimizer = optim.Adam(critic.parameters(), lr=self.lr)
+        self.actor_optimizer_type = optim.Adam(actor.parameters(), lr=self.lr)
+        self.critic_optimizer_type = optim.Adam(critic.parameters(), lr=self.lr)
 
         self.actor, self.actor_target, self.critic, self.critic_target, \
         self.actor_optimizer, self.critic_optimizer = accelerator.prepare(actor,
                                                                           actor_target,
                                                                           critic,
                                                                           critic_target,
-                                                                          actor_optimizer,
-                                                                          critic_optimizer)
+                                                                          self.actor_optimizer_type,
+                                                                          self.critic_optimizer_type)
 
         self.criterion = nn.MSELoss()
 

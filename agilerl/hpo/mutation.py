@@ -179,15 +179,17 @@ class Mutations():
             actor_opt = getattr(individual, self.algo['actor']['optimizer'])
             net_params = getattr(
                 individual, self.algo['actor']['eval']).parameters()
-            setattr(individual, self.algo['actor']['optimizer'], type(
-                actor_opt)(net_params, lr=individual.lr))
+            setattr(individual, self.algo['actor']['optimizer'], 
+                    self.accelerator.prepare(type(actor_opt)(net_params, 
+                                                             lr=individual.lr)))
 
             # If algorithm has critics, reinitialise their optimizers too
             for critic in self.algo['critics']:
                 critic_opt = getattr(individual, critic['optimizer'])
                 net_params = getattr(individual, critic['eval']).parameters()
-                setattr(individual, critic['optimizer'], type(
-                    critic_opt)(net_params, lr=individual.lr))
+                setattr(individual, critic['optimizer'], 
+                    self.accelerator.prepare(type(critic_opt)(net_params, 
+                                                             lr=individual.lr)))
             individual.mut = 'lr'
 
         elif mutate_param == 'learn_step':
@@ -435,7 +437,7 @@ class Mutations():
                 'actor': {
                     'eval': 'actor',
                     'target': 'actor_target',
-                    'optimizer': 'optimizer'
+                    'optimizer': 'optimizer_type'
                 },
                 'critics': []
             }
@@ -444,12 +446,12 @@ class Mutations():
                 'actor': {
                     'eval': 'actor',
                     'target': 'actor_target',
-                    'optimizer': 'actor_optimizer'
+                    'optimizer': 'actor_optimizer_type'
                 },
                 'critics': [{
                     'eval': 'critic',
                     'target': 'critic_target',
-                    'optimizer': 'critic_optimizer'
+                    'optimizer': 'critic_optimizer_type'
                 }]
             }
         elif algo == 'CQN':
@@ -457,7 +459,7 @@ class Mutations():
                 'actor': {
                     'eval': 'actor',
                     'target': 'actor_target',
-                    'optimizer': 'optimizer'
+                    'optimizer': 'optimizer_type'
                 },
                 'critics': []
             }

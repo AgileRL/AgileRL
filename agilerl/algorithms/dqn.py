@@ -114,11 +114,11 @@ class DQN():
                 hidden_size=self.net_config['h_size'])
             actor_target.load_state_dict(actor.state_dict())
 
-        optimizer = optim.Adam(actor.parameters(), lr=self.lr)
+        self.optimizer_type = optim.Adam(actor.parameters(), lr=self.lr)
 
         self.actor, self.actor_target, self.optimizer = accelerator.prepare(actor, 
                                                                             actor_target, 
-                                                                            optimizer)
+                                                                            self.optimizer_type)
 
         self.criterion = nn.MSELoss()
 

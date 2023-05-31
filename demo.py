@@ -19,7 +19,7 @@ if __name__ == '__main__':
     }
 
     INIT_HP = {
-        'POPULATION_SIZE': 2,   # Population size
+        'POPULATION_SIZE': 4,   # Population size
         'DOUBLE': True,         # Use double Q-learning in DQN or CQN
         'BATCH_SIZE': 128,      # Batch size
         'LR': 1e-3,             # Learning rate
@@ -31,7 +31,7 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=8)   # Create environment
+    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
@@ -47,13 +47,13 @@ if __name__ == '__main__':
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     pop = initialPopulation(accelerator=accelerator,    # Accelerator
-                            algo='DDPG',                 # Algorithm
+                            algo='DQN',                 # Algorithm
                             state_dim=state_dim,        # State dimension
                             action_dim=action_dim,      # Action dimension
                             one_hot=False,              # One-hot encoding
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
-                            population_size=INIT_HP['POPULATION_SIZE'],# Population size
+                            population_size=INIT_HP['POPULATION_SIZE'], # Population size
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -85,7 +85,7 @@ if __name__ == '__main__':
                           rand_seed=1)                          # Random seed
 
     max_episodes = 1000  # Max training episodes
-    max_steps = 100     # Max steps per episode
+    max_steps = 500     # Max steps per episode
 
     # Exploration params
     eps_start = 1.0     # Max exploration

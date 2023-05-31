@@ -12,6 +12,8 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 class CQN():
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
 
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     :param state_dim: State observation dimension
     :type state_dim: int
     :param action_dim: Action dimension
@@ -42,6 +44,7 @@ class CQN():
 
     def __init__(
         self,
+        accelerator,
         state_dim,
         action_dim,
         one_hot,
@@ -70,7 +73,8 @@ class CQN():
         self.gamma = gamma
         self.tau = tau
         self.mut = mutation
-        self.device = device
+        
+        self.accelerator = accelerator
 
         self.index = index
         self.scores = []
@@ -81,42 +85,43 @@ class CQN():
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
+            actor = EvolvableMLP(
+                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
-            self.actor_target = EvolvableMLP(
+                hidden_size=self.net_config['h_size'])
+            actor_target = EvolvableMLP(
+                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
-            self.actor_target.load_state_dict(self.actor.state_dict())
+                hidden_size=self.net_config['h_size'])
+            actor_target.load_state_dict(actor.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
-            self.actor = EvolvableCNN(
+            actor = EvolvableCNN(
+                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
-            self.actor_target = EvolvableCNN(
+                hidden_size=self.net_config['h_size'])
+            actor_target = EvolvableCNN(
+                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
-            self.actor_target.load_state_dict(self.actor.state_dict())
+                hidden_size=self.net_config['h_size'])
+            actor_target.load_state_dict(actor.state_dict())
 
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer_type = optim.Adam(actor.parameters(), lr=self.lr)
+
+        self.actor, self.actor_target, self.optimizer = accelerator.prepare(actor, 
+                                                                            actor_target, 
+                                                                            self.optimizer_type)
+
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
@@ -129,7 +134,7 @@ class CQN():
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        state = torch.from_numpy(state).float().to(self.device)
+        state = torch.from_numpy(state).float()
 
         if self.one_hot:
             state = nn.functional.one_hot(
@@ -144,8 +149,10 @@ class CQN():
         else:
             self.actor.eval()
             with torch.no_grad():
+                state = state.to(self.accelerator.device)
                 action_values = self.actor(state)
             self.actor.train()
+            action_values = self.accelerator.gather_for_metrics(action_values)
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
         return action
 
