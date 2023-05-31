@@ -10,6 +10,8 @@ import torch.nn as nn
 class EvolvableMLP(nn.Module):
     """The Evolvable Multi-layer Perceptron class.
 
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     :param num_inputs: Input layer dimension
     :type num_inputs: int
     :param num_outputs: Output layer dimension

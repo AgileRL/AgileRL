@@ -11,6 +11,8 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 class DQN():
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     :param state_dim: State observation dimension
     :type state_dim: int
     :param action_dim: Action dimension

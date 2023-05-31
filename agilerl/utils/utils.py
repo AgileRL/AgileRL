@@ -18,10 +18,12 @@ def makeVectEnvs(env_name, num_envs=1):
         [lambda: gym.make(env_name) for i in range(num_envs)])
 
 
-def initialPopulation(algo, state_dim, action_dim, one_hot,
+def initialPopulation(accelerator, algo, state_dim, action_dim, one_hot,
                       net_config, INIT_HP, population_size=1, device='cpu'):
     """Returns population of identical agents.
 
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     :param algo: RL algorithm
     :type algo: str
     :param state_dim: State observation dimension
@@ -42,6 +44,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
     if algo == 'DQN':
         for idx in range(population_size):
             agent = DQN(
+                accelerator=accelerator,
                 state_dim=state_dim,
                 action_dim=action_dim,
                 one_hot=one_hot,
@@ -52,8 +55,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 learn_step=INIT_HP['LEARN_STEP'],
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
-                double=INIT_HP['DOUBLE'],
-                device=device
+                double=INIT_HP['DOUBLE']
             )
             population.append(agent)
 

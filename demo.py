@@ -2,10 +2,14 @@ from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from accelerate import Accelerator
 import numpy as np
 import torch
 
 if __name__ == '__main__':
+
+    accelerator = Accelerator()
+
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size
@@ -22,6 +26,7 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
+    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
@@ -36,27 +41,28 @@ if __name__ == '__main__':
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(algo='DQN',             # Algorithm
-                            state_dim=(8,),            # State dimension
-                            action_dim=4,           # Action dimension
-                            one_hot=False,          # One-hot encoding
-                            net_config=NET_CONFIG,  # Network configuration
-                            INIT_HP=INIT_HP,        # Initial hyperparameters
-                            population_size=6,      # Population size
+    pop = initialPopulation(accelerator=accelerator,    # Accelerator
+                            algo='DQN',                 # Algorithm
+                            state_dim=state_dim,        # State dimension
+                            action_dim=action_dim,      # Action dimension
+                            one_hot=False,              # One-hot encoding
+                            net_config=NET_CONFIG,      # Network configuration
+                            INIT_HP=INIT_HP,            # Initial hyperparameters
+                            population_size=6,          # Population size
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=4,             # Number of agent actions
+    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
-                          field_names=field_names,  # Field names to store in memory
-                          device=torch.device("cuda"))
+                          field_names=field_names)  # Field names to store in memory
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
                                      population_size=6,  # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
 
-    mutations = Mutations(algo='DQN',                           # Algorithm
+    mutations = Mutations(accelerator=accelerator,              # Accelerator
+                          algo='DQN',                           # Algorithm
                           no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
@@ -68,8 +74,7 @@ if __name__ == '__main__':
                           mutation_sd=0.1,                      # Mutation strength
                           # Network architecture
                           arch=NET_CONFIG['arch'],
-                          rand_seed=1,                          # Random seed
-                          device=torch.device("cuda"))
+                          rand_seed=1)                          # Random seed
 
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
@@ -82,8 +87,6 @@ if __name__ == '__main__':
 
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
-
-    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
 
     print('===== AgileRL Demo =====')
     print('Verbose off. Add a progress bar to view training progress more frequently.')

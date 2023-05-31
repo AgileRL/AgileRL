@@ -96,6 +96,8 @@ class NoisyLinear(nn.Module):
 class EvolvableCNN(nn.Module):
     """The Evolvable Convolutional Neural Network class.
 
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     :param input_shape: Input shape
     :type input_shape: List[int]
     :param channel_size: CNN channel size
