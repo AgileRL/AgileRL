@@ -15,12 +15,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
-    except BaseException:
+    except Exception:
         state_dim = env.single_observation_space.shape
         one_hot = False
     try:
         action_dim = env.single_action_space.n
-    except BaseException:
+    except Exception:
         action_dim = env.single_action_space.shape[0]
 
     if INIT_HP['CHANNELS_LAST']:
