@@ -25,6 +25,7 @@ if __name__ == '__main__':
         'GAMMA': 0.99,          # Discount factor
         'LEARN_STEP': 1,        # Learning frequency
         'TAU': 1e-3,            # For soft update of target network parameters
+        'POLICY_FREQ': 2,       # DDPG target network update frequency vs policy network
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False
     }
