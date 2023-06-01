@@ -43,26 +43,10 @@ class DQN():
     :type accelerator: Hugging Face accelerate.Accelerator()
     """
 
-    def __init__(
-        self,
-        state_dim,
-        action_dim,
-        one_hot,
-        index=0,
-        net_config={
-            'arch': 'mlp',
-            'h_size': [
-            64,
-            64]},
-            batch_size=64,
-            lr=1e-4,
-            learn_step=5,
-            gamma=0.99,
-            tau=1e-3,
-            mutation=None,
-            double=False,
-            device='cpu',
-            accelerator=None):
+    def __init__(self, state_dim, action_dim, one_hot, index=0, 
+                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
+                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, double=False, 
+                 device='cpu', accelerator=None):
         self.algo = 'DQN'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -91,13 +75,13 @@ class DQN():
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
-                accelerator=accelerator)
+                accelerator=self.accelerator)
             actor_target = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
-                accelerator=accelerator)
+                accelerator=self.accelerator)
             actor_target.load_state_dict(actor.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
@@ -109,7 +93,7 @@ class DQN():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
-                accelerator=accelerator)
+                accelerator=self.accelerator)
             actor_target = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=action_dim,
@@ -118,7 +102,7 @@ class DQN():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
-                accelerator=accelerator)
+                accelerator=self.accelerator)
             actor_target.load_state_dict(actor.state_dict())
 
         self.optimizer_type = optim.Adam(actor.parameters(), lr=self.lr)

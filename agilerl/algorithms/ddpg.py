@@ -11,8 +11,6 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 class DDPG():
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
-    :param accelerator: Accelerator for distributed computing
-    :type accelerator: Hugging Face accelerate.Accelerator()
     :param state_dim: State observation dimension
     :type state_dim: int
     :param action_dim: Action dimension
@@ -40,27 +38,16 @@ class DDPG():
     :param policy_freq: Frequency of target network updates compared to policy network, 
     defaults to 2
     :type policy_freq: int, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     """
 
-    def __init__(
-        self,
-        accelerator,
-        state_dim,
-        action_dim,
-        one_hot,
-        index=0,
-        net_config={
-            'arch': 'mlp',
-            'h_size': [
-            64,
-            64]},
-            batch_size=64,
-            lr=1e-4,
-            learn_step=5,
-            gamma=0.99,
-            tau=1e-3,
-            mutation=None,
-            policy_freq=2):
+    def __init__(self, state_dim, action_dim, one_hot, index=0, 
+                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
+                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, 
+                 device='cpu', accelerator=None):
         self.algo = 'DDPG'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -73,7 +60,7 @@ class DDPG():
         self.tau = tau
         self.mut = mutation
         self.policy_freq = policy_freq
-        
+        self.device = device
         self.accelerator = accelerator
 
         self.index = index
@@ -84,54 +71,59 @@ class DDPG():
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
             actor = EvolvableMLP(
-                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
-                output_activation='tanh')
+                output_activation='tanh',
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target = EvolvableMLP(
-                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
-                output_activation='tanh')
+                output_activation='tanh',
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target.load_state_dict(actor.state_dict())
 
             critic = EvolvableMLP(
-                accelerator=accelerator,
                 num_inputs=state_dim[0] + action_dim,
                 num_outputs=1,
-                hidden_size=self.net_config['h_size'])
+                hidden_size=self.net_config['h_size'],
+                device=self.device,
+                accelerator=self.accelerator)
             critic_target = EvolvableMLP(
-                accelerator=accelerator,
                 num_inputs=state_dim[0] + action_dim,
                 num_outputs=1,
-                hidden_size=self.net_config['h_size'])
+                hidden_size=self.net_config['h_size'],
+                device=self.device,
+                accelerator=self.accelerator)
             critic_target.load_state_dict(critic.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
             actor = EvolvableCNN(
-                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
-                mlp_activation='tanh')
+                mlp_activation='tanh',
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target = EvolvableCNN(
-                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
-                mlp_activation='tanh')
+                mlp_activation='tanh',
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target.load_state_dict(actor.state_dict())
 
             critic = EvolvableCNN(
-                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
@@ -139,9 +131,10 @@ class DDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 mlp_activation='tanh',
-                critic=True)
+                critic=True,
+                device=self.device,
+                accelerator=self.accelerator)
             critic_target = EvolvableCNN(
-                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
@@ -149,19 +142,29 @@ class DDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 mlp_activation='tanh',
-                critic=True)
+                critic=True,
+                device=self.device,
+                accelerator=self.accelerator)
             critic_target.load_state_dict(critic.state_dict())
 
         self.actor_optimizer_type = optim.Adam(actor.parameters(), lr=self.lr)
         self.critic_optimizer_type = optim.Adam(critic.parameters(), lr=self.lr)
 
-        self.actor, self.actor_target, self.critic, self.critic_target, \
-        self.actor_optimizer, self.critic_optimizer = accelerator.prepare(actor,
-                                                                          actor_target,
-                                                                          critic,
-                                                                          critic_target,
-                                                                          self.actor_optimizer_type,
-                                                                          self.critic_optimizer_type)
+        if self.accelerator is not None:
+            self.actor, self.actor_target, self.critic, self.critic_target, \
+            self.actor_optimizer, self.critic_optimizer = accelerator.prepare(actor,
+                                                                            actor_target,
+                                                                            critic,
+                                                                            critic_target,
+                                                                            self.actor_optimizer_type,
+                                                                            self.critic_optimizer_type)
+        else:
+            self.actor = actor.to(self.device)
+            self.actor_target = actor_target.to(self.device)
+            self.critic = critic.to(self.device)
+            self.critic_target = critic_target.to(self.device)
+            self.actor_optimizer = self.actor_optimizer_type
+            self.critic_optimizer = self.critic_optimizer_type
 
         self.criterion = nn.MSELoss()
 
@@ -177,6 +180,8 @@ class DDPG():
         :type epsilon: float, optional
         """
         state = torch.from_numpy(state).float()
+        if self.accelerator is None:
+            state = state.to(self.device)
 
         if self.one_hot:
             state = nn.functional.one_hot(
@@ -192,11 +197,14 @@ class DDPG():
         else:
             self.actor.eval()
             with torch.no_grad():
-                state = state.to(self.accelerator.device)
+                if self.accelerator is not None:
+                    state = state.to(self.accelerator.device)
                 action_values = self.actor(state)
             self.actor.train()
 
-            action_values = self.accelerator.gather_for_metrics(action_values)
+            if self.accelerator is not None:
+                action_values = self.accelerator.gather_for_metrics(action_values)
+
             action = action_values.cpu().data.numpy()
 
         return action
@@ -223,7 +231,11 @@ class DDPG():
         to 0.2
         :type policy_noise: float, optional
         """
-        states, actions, rewards, next_states, dones = self._squeeze_exp(experiences)
+        if self.accelerator is not None:
+            states, actions, rewards, next_states, dones = self._squeeze_exp(
+                experiences)
+        else:
+            states, actions, rewards, next_states, dones = experiences
 
         if self.one_hot:
             states = nn.functional.one_hot(
@@ -254,7 +266,10 @@ class DDPG():
 
         # critic loss backprop
         self.critic_optimizer.zero_grad()
-        self.accelerator.backward(critic_loss)
+        if self.accelerator is not None:
+            self.accelerator.backward(critic_loss)
+        else:
+            critic_loss.backward()
         self.critic_optimizer.step()
 
         # update actor and targets every policy_freq episodes
@@ -269,7 +284,10 @@ class DDPG():
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()
-            self.accelerator.backward(actor_loss)
+            if self.accelerator is not None:
+                self.accelerator.backward(actor_loss)
+            else:
+                actor_loss.backward()
             self.actor_optimizer.step()
 
             self.softUpdate(self.actor, self.actor_target)
@@ -322,8 +340,7 @@ class DDPG():
         if index is None:
             index = self.index
 
-        clone = type(self)(accelerator=self.accelerator,
-                           state_dim=self.state_dim,
+        clone = type(self)(state_dim=self.state_dim,
                            action_dim=self.action_dim,
                            one_hot=self.one_hot,
                            index=index,
@@ -334,8 +351,9 @@ class DDPG():
                            gamma=self.gamma,
                            tau=self.tau,
                            mutation=self.mut,
-                           policy_freq=self.policy_freq
-                           )
+                           policy_freq=self.policy_freq,
+                           device=self.device,
+                           accelerator=self.accelerator)
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
@@ -344,13 +362,21 @@ class DDPG():
         actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
         critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr)
 
-        clone.actor, clone.actor_target, clone.critic, clone.critic_target, \
-        clone.actor_optimizer, clone.critic_optimizer = self.accelerator.prepare(actor,
-                                                                          actor_target,
-                                                                          critic,
-                                                                          critic_target,
-                                                                          actor_optimizer,
-                                                                          critic_optimizer)
+        if self.accelerator is not None:
+            clone.actor, clone.actor_target, clone.critic, clone.critic_target, \
+            clone.actor_optimizer, clone.critic_optimizer = self.accelerator.prepare(actor,
+                                                                            actor_target,
+                                                                            critic,
+                                                                            critic_target,
+                                                                            actor_optimizer,
+                                                                            critic_optimizer)
+        else:
+            clone.actor = actor.to(self.device)
+            clone.actor_target = actor_target.to(self.device)
+            clone.critic = critic.to(self.device)
+            clone.critic_target = critic_target.to(self.device)
+            clone.actor_optimizer = actor_optimizer
+            clone.critic_optimizer = critic_optimizer
 
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
