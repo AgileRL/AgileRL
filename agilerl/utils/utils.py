@@ -56,7 +56,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 double=INIT_HP['DOUBLE'],
-                device=INIT_HP['DEVICE'],
+                device=device,
                 accelerator=accelerator
             )
             population.append(agent)
@@ -75,7 +75,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 policy_freq=INIT_HP['POLICY_FREQ'],
-                device=INIT_HP['DEVICE'],
+                device=device,
                 accelerator=accelerator
             )
             population.append(agent)
@@ -94,7 +94,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 double=INIT_HP['DOUBLE'],
-                device=INIT_HP['DEVICE'],
+                device=device,
                 accelerator=accelerator
             )
             population.append(agent)
