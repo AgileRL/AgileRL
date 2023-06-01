@@ -1,76 +1,48 @@
 from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.components.replay_data import ReplayDataset
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from accelerate import Accelerator
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 if __name__ == '__main__':
-
-    accelerator = Accelerator()
-
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size
     }
 
     INIT_HP = {
-        'POPULATION_SIZE': 4,   # Population size
-        'DOUBLE': True,         # Use double Q-learning in DQN or CQN
+        'DOUBLE': True,         # Use double Q-learning
         'BATCH_SIZE': 128,      # Batch size
         'LR': 1e-3,             # Learning rate
         'GAMMA': 0.99,          # Discount factor
         'LEARN_STEP': 1,        # Learning frequency
         'TAU': 1e-3,            # For soft update of target network parameters
-        'POLICY_FREQ': 2,       # DDPG target network update frequency vs policy network
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False
     }
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
-    try:
-        state_dim = env.single_observation_space.n          # Discrete observation space
-        one_hot = True                                      # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape      # Continuous observation space
-        one_hot = False                                     # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n             # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]      # Continuous action space
-
-    if INIT_HP['CHANNELS_LAST']:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
-
-    pop = initialPopulation(accelerator=accelerator,    # Accelerator
-                            algo='DQN',                 # Algorithm
-                            state_dim=state_dim,        # State dimension
-                            action_dim=action_dim,      # Action dimension
-                            one_hot=False,              # One-hot encoding
-                            net_config=NET_CONFIG,      # Network configuration
-                            INIT_HP=INIT_HP,            # Initial hyperparameters
-                            population_size=INIT_HP['POPULATION_SIZE'], # Population size
+    pop = initialPopulation(algo='DQN',             # Algorithm
+                            state_dim=(8,),            # State dimension
+                            action_dim=4,           # Action dimension
+                            one_hot=False,          # One-hot encoding
+                            net_config=NET_CONFIG,  # Network configuration
+                            INIT_HP=INIT_HP,        # Initial hyperparameters
+                            population_size=6,      # Population size
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
+    memory = ReplayBuffer(action_dim=4,             # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
-                          field_names=field_names)  # Field names to store in memory
-    replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
-    replay_dataloader = DataLoader(replay_dataset)
-    replay_dataloader = accelerator.prepare(replay_dataloader)
+                          field_names=field_names,  # Field names to store in memory
+                          device=torch.device("cuda"))
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
-                                     population_size=INIT_HP['POPULATION_SIZE'],  # Population size
+                                     population_size=6,  # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
 
-    mutations = Mutations(accelerator=accelerator,              # Accelerator
-                          algo='DQN',                           # Algorithm
+    mutations = Mutations(algo='DQN',                           # Algorithm
                           no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
@@ -82,7 +54,8 @@ if __name__ == '__main__':
                           mutation_sd=0.1,                      # Mutation strength
                           # Network architecture
                           arch=NET_CONFIG['arch'],
-                          rand_seed=1)                          # Random seed
+                          rand_seed=1,                          # Random seed
+                          device=torch.device("cuda"))
 
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
@@ -96,11 +69,14 @@ if __name__ == '__main__':
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
+    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
+
     print('===== AgileRL Demo =====')
+    print('Verbose off. Add a progress bar to view training progress more frequently.')
     print('Training...')
 
     # TRAINING LOOP
-    for idx_epi in tqdm(range(max_episodes)):
+    for idx_epi in range(max_episodes):
         for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
@@ -117,9 +93,8 @@ if __name__ == '__main__':
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(
                         memory) >= agent.batch_size:
-                    # Sample dataloader
-                    replay_dataset.batch_size = agent.batch_size
-                    experiences = next(iter(replay_dataloader))
+                    experiences = memory.sample(
+                        agent.batch_size)  # Sample replay buffer
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 
@@ -142,7 +117,8 @@ if __name__ == '__main__':
 
             print(f'Episode {idx_epi+1}/{max_episodes}')
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            print(
+                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
