@@ -23,8 +23,6 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                       accelerator=None):
     """Returns population of identical agents.
 
-    :param accelerator: Accelerator for distributed computing
-    :type accelerator: Hugging Face accelerate.Accelerator()
     :param algo: RL algorithm
     :type algo: str
     :param state_dim: State observation dimension
@@ -39,6 +37,8 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
     :type population_size: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     """
     population = []
 
