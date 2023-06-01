@@ -18,8 +18,9 @@ def makeVectEnvs(env_name, num_envs=1):
         [lambda: gym.make(env_name) for i in range(num_envs)])
 
 
-def initialPopulation(accelerator, algo, state_dim, action_dim, one_hot,
-                      net_config, INIT_HP, population_size=1, device='cpu'):
+def initialPopulation(algo, state_dim, action_dim, one_hot,
+                      net_config, INIT_HP, population_size=1, device='cpu', 
+                      accelerator=None):
     """Returns population of identical agents.
 
     :param accelerator: Accelerator for distributed computing
