@@ -44,7 +44,7 @@ class DQN():
     """
 
     def __init__(self, state_dim, action_dim, one_hot, index=0, 
-                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
+                 net_config={'arch': 'mlp', 'h_size':[64,64]}, batch_size=64, lr=1e-4, 
                  learn_step=5, gamma=0.99, tau=1e-3, mutation=None, double=False, 
                  device='cpu', accelerator=None):
         self.algo = 'DQN'

@@ -12,8 +12,6 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 class CQN():
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
 
-    :param accelerator: Accelerator for distributed computing
-    :type accelerator: Hugging Face accelerate.Accelerator()
     :param state_dim: State observation dimension
     :type state_dim: int
     :param action_dim: Action dimension
@@ -40,27 +38,16 @@ class CQN():
     :type mutation: str, optional
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     """
 
-    def __init__(
-        self,
-        accelerator,
-        state_dim,
-        action_dim,
-        one_hot,
-        index=0,
-        net_config={
-            'arch': 'mlp',
-            'h_size': [64, 64]
-            },
-        batch_size=64,
-        lr=1e-4,
-        learn_step=5,
-        gamma=0.99,
-        tau=1e-3,
-        mutation=None,
-        double=False):
-        
+    def __init__(self, state_dim, action_dim, one_hot, index=0, 
+                 net_config={'arch': 'mlp', 'h_size':[64, 64]}, batch_size=64, lr=1e-4,
+                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, double=False,
+                 device='cpu', accelerator=None):
         self.algo = 'CQN'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -72,7 +59,7 @@ class CQN():
         self.gamma = gamma
         self.tau = tau
         self.mut = mutation
-        
+        self.device = device
         self.accelerator = accelerator
 
         self.index = index
@@ -85,41 +72,50 @@ class CQN():
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
             actor = EvolvableMLP(
-                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'])
+                hidden_size=self.net_config['h_size'],
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target = EvolvableMLP(
-                accelerator=accelerator,
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'])
+                hidden_size=self.net_config['h_size'],
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target.load_state_dict(actor.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
             actor = EvolvableCNN(
-                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'])
+                hidden_size=self.net_config['h_size'],
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target = EvolvableCNN(
-                accelerator=accelerator,
                 input_shape=state_dim,
                 num_actions=action_dim,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'])
+                hidden_size=self.net_config['h_size'],
+                device=self.device,
+                accelerator=self.accelerator)
             actor_target.load_state_dict(actor.state_dict())
 
         self.optimizer_type = optim.Adam(actor.parameters(), lr=self.lr)
 
-        self.actor, self.actor_target, self.optimizer = accelerator.prepare(actor, 
+        if self.accelerator is not None:
+            self.actor, self.actor_target, self.optimizer = accelerator.prepare(actor, 
                                                                             actor_target, 
                                                                             self.optimizer_type)
+        else:
+            self.actor = actor.to(self.device)
+            self.actor_target = actor_target.to(self.device)
+            self.optimizer = self.optimizer_type
 
         self.criterion = nn.MSELoss()
 
@@ -135,6 +131,8 @@ class CQN():
         :type epsilon: float, optional
         """
         state = torch.from_numpy(state).float()
+        if self.accelerator is None:
+            state = state.to(self.device)
 
         if self.one_hot:
             state = nn.functional.one_hot(
@@ -152,7 +150,10 @@ class CQN():
                 state = state.to(self.accelerator.device)
                 action_values = self.actor(state)
             self.actor.train()
-            action_values = self.accelerator.gather_for_metrics(action_values)
+
+            if self.accelerator is not None:
+                action_values = self.accelerator.gather_for_metrics(action_values)
+
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
         return action
     
@@ -173,7 +174,11 @@ class CQN():
         dones in that order.
         :type state: List[torch.Tensor[float]]
         """
-        states, actions, rewards, next_states, dones = self._squeeze_exp(experiences)
+        if self.accelerator is not None:
+            states, actions, rewards, next_states, dones = self._squeeze_exp(
+                experiences)
+        else:
+            states, actions, rewards, next_states, dones = experiences
 
         if self.one_hot:
             states = nn.functional.one_hot(
@@ -197,7 +202,10 @@ class CQN():
         loss = self.criterion(q_eval, q_target)
         q1_loss = cql1_loss + 0.5 * loss
         self.optimizer.zero_grad()
-        self.accelerator.backward(q1_loss)
+        if self.accelerator is not None:
+            self.accelerator.backward(q1_loss)
+        else:
+            q1_loss.backward()
         clip_grad_norm_(self.actor.parameters(), 1)
         self.optimizer.step()
 
@@ -254,8 +262,7 @@ class CQN():
         if index is None:
             index = self.index
 
-        clone = type(self)(accelerator=self.accelerator,
-                           state_dim=self.state_dim,
+        clone = type(self)(state_dim=self.state_dim,
                            action_dim=self.action_dim,
                            one_hot=self.one_hot,
                            index=index,
@@ -265,15 +272,22 @@ class CQN():
                            learn_step=self.learn_step,
                            gamma=self.gamma,
                            tau=self.tau,
-                           mutation=self.mut
-                           )
+                           mutation=self.mut,
+                           device=self.device,
+                           accelerator=self.accelerator)
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        clone.actor, clone.actor_target, clone.optimizer = self.accelerator.prepare(actor, 
+        if self.accelerator is not None:
+            clone.actor, clone.actor_target, clone.optimizer = self.accelerator.prepare(
+                                                                                    actor, 
                                                                                     actor_target,
                                                                                     optimizer)
+        else:
+            clone.actor = actor.to(self.device)
+            clone.actor_target = actor_target.to(self.device)
+            clone.optimizer = optimizer
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
         clone.scores = copy.deepcopy(self.scores)
