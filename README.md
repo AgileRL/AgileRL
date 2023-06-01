@@ -59,7 +59,7 @@ If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.goog
 
 Demo:
 ```bash
-python demo.py
+python demo_online.py
 ```
 
 ## Algorithms implemented (more coming soon!)
