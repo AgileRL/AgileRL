@@ -10,8 +10,6 @@ import torch.nn as nn
 class EvolvableMLP(nn.Module):
     """The Evolvable Multi-layer Perceptron class.
 
-    :param accelerator: Accelerator for distributed computing
-    :type accelerator: Hugging Face accelerate.Accelerator()
     :param num_inputs: Input layer dimension
     :type num_inputs: int
     :param num_outputs: Output layer dimension
@@ -28,11 +26,14 @@ class EvolvableMLP(nn.Module):
     :type output_vanish: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     """
 
     def __init__(
             self,
-            accelerator,
             num_inputs: int,
             num_outputs: int,
             hidden_size: List[int],
@@ -40,7 +41,9 @@ class EvolvableMLP(nn.Module):
             output_activation=None,
             layer_norm=False,
             output_vanish=True,
-            stored_values=None):
+            stored_values=None,
+            device='cpu',
+            accelerator=None):
         super(EvolvableMLP, self).__init__()
 
         self.num_inputs = num_inputs
@@ -50,10 +53,10 @@ class EvolvableMLP(nn.Module):
         self.layer_norm = layer_norm
         self.output_vanish = output_vanish
         self.hidden_size = hidden_size
-        
+        self.device = device
         self.accelerator = accelerator
 
-        self.net = self.accelerator.prepare(self.create_net())
+        self.net = self.create_net()
 
         if stored_values is not None:
             self.inject_parameters(
@@ -110,8 +113,15 @@ class EvolvableMLP(nn.Module):
         if self.output_activation is not None:
             net_dict["activation_output"] = self.get_activation(
                 self.output_activation)
+            
+        net = nn.Sequential(net_dict)
+            
+        if self.accelerator is not None:
+            net = self.accelerator.prepare(net)
+        else:
+            net = net.to(self.device)
 
-        return nn.Sequential(net_dict)
+        return net
 
     def forward(self, x):
         """Returns output of neural network.
@@ -121,6 +131,8 @@ class EvolvableMLP(nn.Module):
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
+            if self.accelerator is None:
+                x = x.to(self.device)
         x = self.net(x)
         return x
 
@@ -203,13 +215,14 @@ class EvolvableMLP(nn.Module):
         """Returns model information in dictionary.
         """
         init_dict = {
-            "accelerator":self.accelerator,
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,
             "activation": self.activation,
             "output_activation": self.output_activation,
-            "layer_norm": self.layer_norm}
+            "layer_norm": self.layer_norm,
+            "device": self.device,
+            "accelerator":self.accelerator}
         return init_dict
 
     @property

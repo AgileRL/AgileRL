@@ -96,8 +96,6 @@ class NoisyLinear(nn.Module):
 class EvolvableCNN(nn.Module):
     """The Evolvable Convolutional Neural Network class.
 
-    :param accelerator: Accelerator for distributed computing
-    :type accelerator: Hugging Face accelerate.Accelerator()
     :param input_shape: Input shape
     :type input_shape: List[int]
     :param channel_size: CNN channel size
@@ -124,11 +122,14 @@ class EvolvableCNN(nn.Module):
     :type rainbow: bool, optional
     :param critic: CNN is a critic network, defaults to False
     :type critic: bool, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing
+    :type accelerator: Hugging Face accelerate.Accelerator()
     """
 
     def __init__(
             self,
-            accelerator,
             input_shape: List[int],
             channel_size: List[int],
             kernal_size: List[int],
@@ -141,7 +142,9 @@ class EvolvableCNN(nn.Module):
             layer_norm=False,
             stored_values=None,
             rainbow=False,
-            critic=False):
+            critic=False,
+            device='cpu',
+            accelerator=None):
 
         super(EvolvableCNN, self).__init__()
 
@@ -157,12 +160,12 @@ class EvolvableCNN(nn.Module):
         self.layer_norm = layer_norm
         self.rainbow = rainbow
         self.critic = critic
-        
+        self.device = device
         self.accelerator = accelerator
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
-
+        
         if stored_values is not None:
             self.inject_parameters(
                 pvec=stored_values, without_layer_norm=False)
@@ -265,7 +268,13 @@ class EvolvableCNN(nn.Module):
                 self.num_actions,
                 hidden_size=self.hidden_size,
                 name="advantage")
-            advantage_net = self.accelerator.prepare(advantage_net)
+            if self.accelerator is not None:
+                feature_net, value_net, advantage_net \
+                    = self.accelerator.prepare(feature_net, value_net, advantage_net)
+            else:
+                self.feature_net, self.value_net, self.advantage_net \
+                    = feature_net.to(self.device), value_net.to(self.device), \
+                        advantage_net.to(self.device)
         else:
             if self.critic:
                 value_net = self.create_mlp(
@@ -280,8 +289,11 @@ class EvolvableCNN(nn.Module):
                     hidden_size=self.hidden_size,
                     name="value")
             advantage_net = None
-
-        feature_net, value_net = self.accelerator.prepare(feature_net, value_net)
+            if self.accelerator is not None:
+                feature_net, value_net = self.accelerator.prepare(feature_net, value_net)
+            else:
+                self.feature_net, self.value_net, = feature_net.to(self.device), \
+                    value_net.to(self.device)
 
         return feature_net, value_net, advantage_net
 
@@ -428,7 +440,6 @@ class EvolvableCNN(nn.Module):
         """Returns model information in dictionary.
         """
         initdict = {
-            "accelerator": self.accelerator,
             "input_shape": self.input_shape,
             "channel_size": self.channel_size,
             "kernal_size": self.kernal_size,
@@ -439,7 +450,9 @@ class EvolvableCNN(nn.Module):
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
             "layer_norm": self.layer_norm,
-            "critic": self.critic}
+            "critic": self.critic,
+            "device": self.device,
+            "accelerator": self.accelerator}
         return initdict
 
     def add_mlp_layer(self):
