@@ -44,7 +44,6 @@ def initialPopulation(accelerator, algo, state_dim, action_dim, one_hot,
     if algo == 'DQN':
         for idx in range(population_size):
             agent = DQN(
-                accelerator=accelerator,
                 state_dim=state_dim,
                 action_dim=action_dim,
                 one_hot=one_hot,
@@ -55,14 +54,15 @@ def initialPopulation(accelerator, algo, state_dim, action_dim, one_hot,
                 learn_step=INIT_HP['LEARN_STEP'],
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
-                double=INIT_HP['DOUBLE']
+                double=INIT_HP['DOUBLE'],
+                device=INIT_HP['DEVICE'],
+                accelerator=accelerator
             )
             population.append(agent)
 
     elif algo == 'DDPG':
         for idx in range(population_size):
             agent = DDPG(
-                accelerator=accelerator,
                 state_dim=state_dim,
                 action_dim=action_dim,
                 one_hot=one_hot,
@@ -73,7 +73,9 @@ def initialPopulation(accelerator, algo, state_dim, action_dim, one_hot,
                 learn_step=INIT_HP['LEARN_STEP'],
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
-                policy_freq=INIT_HP['POLICY_FREQ']
+                policy_freq=INIT_HP['POLICY_FREQ'],
+                device=INIT_HP['DEVICE'],
+                accelerator=accelerator
             )
             population.append(agent)
 
@@ -91,7 +93,8 @@ def initialPopulation(accelerator, algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 double=INIT_HP['DOUBLE'],
-                device=device
+                device=INIT_HP['DEVICE'],
+                accelerator=accelerator
             )
             population.append(agent)
 
