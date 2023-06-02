@@ -55,7 +55,7 @@ if __name__ == '__main__':
     pop = initialPopulation(algo='CQN',                 # Algorithm
                             state_dim=state_dim,        # State dimension
                             action_dim=action_dim,      # Action dimension
-                            one_hot=False,              # One-hot encoding
+                            one_hot=one_hot,              # One-hot encoding
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
                             population_size=INIT_HP['POPULATION_SIZE'], # Population size
