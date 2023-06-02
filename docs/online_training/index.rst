@@ -189,8 +189,7 @@ easiest to use our training function, which returns a population of trained agen
                                        target=200.,                             # Target score for early stopping
                                        tournament=tournament,                   # Tournament selection object
                                        mutation=mutations,                      # Mutations object
-                                       wb=False,                                # Weights and Biases tracking
-                                       device=torch.device("cuda"))
+                                       wb=False)                                # Weights and Biases tracking
 
 
 Alternatively, use a custom training loop. Combining all of the above:

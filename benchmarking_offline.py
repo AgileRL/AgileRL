@@ -74,8 +74,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                        target=INIT_HP['TARGET_SCORE'],
                                        tournament=tournament,
                                        mutation=mutations,
-                                       wb=INIT_HP['WANDB'],
-                                       device=device)
+                                       wb=INIT_HP['WANDB'])
 
     printHyperparams(trained_pop)
     # plotPopulationScore(trained_pop)

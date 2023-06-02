@@ -158,8 +158,7 @@ The easiest training loop implementation is to use our ``training.train()`` func
                                        target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
                                        tournament=tournament,                   # Tournament selection object
                                        mutation=mutations,                      # Mutations object
-                                       wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                       device=torch.device("cuda"))
+                                       wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
 
 Quickstart: Training an offline RL agent
 ----------------
@@ -302,5 +301,4 @@ The easiest training loop implementation is to use our ``training.train_offline.
                                        target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
                                        tournament=tournament,                   # Tournament selection object
                                        mutation=mutations,                      # Mutations object
-                                       wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                       device=torch.device("cuda"))
+                                       wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
