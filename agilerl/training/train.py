@@ -2,30 +2,17 @@ import numpy as np
 from tqdm import trange
 import wandb
 from datetime import datetime
+from torch.utils.data import DataLoader
+from agilerl.components.replay_data import ReplayDataset
+from agilerl.components.sampler import Sampler
 
 
-def train(
-        env,
-        env_name,
-        algo,
-        pop,
-        memory,
-        swap_channels=False,
-        n_episodes=2000,
-        max_steps=500,
-        evo_epochs=5,
-        evo_loop=1,
-        eps_start=1.0,
-        eps_end=0.1,
-        eps_decay=0.995,
-        target=200.,
-        tournament=None,
-        mutation=None,
-        checkpoint=None,
-        checkpoint_path=None,
-        wb=False,
-        device='cpu'):
-    """The general training function. Returns trained population of agents and their fitnesses.
+def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000, 
+          max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, 
+          eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
+          checkpoint_path=None, wb=False, accelerator=None):
+    """The general online RL training function. Returns trained population of agents 
+    and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.
     :type env: Gym-style environment
@@ -37,11 +24,13 @@ def train(
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first 
+    [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
+    :param max_steps: Maximum number of steps in environment per episode, defaults to 
+    500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -65,8 +54,8 @@ def train(
     :type checkpoint_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
     if wb:
         wandb.init(
@@ -83,6 +72,17 @@ def train(
 
     save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
+    
+    if accelerator is not None:
+        # Create dataloader from replay buffer
+        replay_dataset = ReplayDataset(memory, pop[0].batch_size)
+        replay_dataloader = DataLoader(replay_dataset)
+        replay_dataloader = accelerator.prepare(replay_dataloader)
+        sampler = Sampler(distributed=True, 
+                          dataset=replay_dataset, 
+                          dataloader=replay_dataloader)
+    else:
+        sampler = Sampler(distributed=False, memory=memory)
 
     epsilon = eps_start
 
@@ -117,8 +117,8 @@ def train(
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(
                         memory) >= agent.batch_size:
-                    experiences = memory.sample(
-                        agent.batch_size)   # Sample replay buffer
+                    # Sample replay buffer
+                    experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 
