@@ -4,6 +4,8 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from accelerate import Accelerator
+import gymnasium as gym
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -31,22 +33,24 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
+    env = gym.make('CartPole-v1')   # Create environment
+    dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
+    
     try:
-        state_dim = env.single_observation_space.n          # Discrete observation space
-        one_hot = True                                      # Requires one-hot encoding
+        state_dim = env.observation_space.n       # Discrete observation space
+        one_hot = True                            # Requires one-hot encoding
     except Exception:
-        state_dim = env.single_observation_space.shape      # Continuous observation space
-        one_hot = False                                     # Does not require one-hot encoding
+        state_dim = env.observation_space.shape   # Continuous observation space
+        one_hot = False                           # Does not require one-hot encoding
     try:
-        action_dim = env.single_action_space.n             # Discrete action space
+        action_dim = env.action_space.n           # Discrete action space
     except Exception:
-        action_dim = env.single_action_space.shape[0]      # Continuous action space
+        action_dim = env.action_space.shape[0]    # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(algo='DQN',                 # Algorithm
+    pop = initialPopulation(algo='CQN',                 # Algorithm
                             state_dim=state_dim,        # State dimension
                             action_dim=action_dim,      # Action dimension
                             one_hot=False,              # One-hot encoding
@@ -59,6 +63,21 @@ if __name__ == '__main__':
     memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names)  # Field names to store in memory
+    
+    # Save transitions to replay buffer
+    dataset_length = dataset['rewards'].shape[0]
+    for i in range(dataset_length-1):
+        state = dataset['observations'][i]
+        next_state = dataset['observations'][i+1]
+        if INIT_HP['CHANNELS_LAST']:
+            state = np.moveaxis(state, [3], [1])
+            next_state = np.moveaxis(next_state, [3], [1])
+        action = dataset['actions'][i]
+        reward = dataset['rewards'][i]
+        done = bool(dataset['terminals'][i])
+        memory.save2memory(state, action, reward, next_state, done)
+    
+    # Create dataloader from replay buffer
     replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
     replay_dataloader = DataLoader(replay_dataset)
     replay_dataloader = accelerator.prepare(replay_dataloader)
@@ -68,29 +87,21 @@ if __name__ == '__main__':
                                      population_size=INIT_HP['POPULATION_SIZE'],  # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
 
-    mutations = Mutations(algo='DQN',                           # Algorithm
+    mutations = Mutations(algo='CQN',                           # Algorithm
                           no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
                           parameters=0.2,                       # Network parameters mutation
                           activation=0,                         # Activation layer mutation
                           rl_hp=0.2,                            # Learning HP mutation
-                          # Learning HPs to choose from
-                          rl_hp_selection=['lr', 'batch_size'],
+                          rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
                           mutation_sd=0.1,                      # Mutation strength
-                          # Network architecture
-                          arch=NET_CONFIG['arch'],
+                          arch=NET_CONFIG['arch'],              # Network architecture
                           rand_seed=1,                          # Random seed
                           accelerator=accelerator)              # Accelerator)
 
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
-
-    # Exploration params
-    eps_start = 1.0     # Max exploration
-    eps_end = 0.1       # Min exploration
-    eps_decay = 0.995   # Decay per episode
-    epsilon = eps_start
 
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
@@ -101,32 +112,12 @@ if __name__ == '__main__':
     # TRAINING LOOP
     for idx_epi in tqdm(range(max_episodes)):
         for agent in pop:   # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
             for idx_step in range(max_steps):
-                # Get next action from agent
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(
-                    action)   # Act in environment
-
-                # Save experience to replay buffer
-                memory.save2memoryVectEnvs(
-                    state, action, reward, next_state, done)
-
-                # Learn according to learning frequency
-                if memory.counter % agent.learn_step == 0 and len(
-                        memory) >= agent.batch_size:
-                    # Sample dataloader
-                    replay_dataset.batch_size = agent.batch_size
-                    experiences = next(iter(replay_dataloader))
-                    # Learn according to agent's RL algorithm
-                    agent.learn(experiences)
-
-                state = next_state
-                score += reward
-
-        # Update epsilon for exploration
-        epsilon = max(eps_end, epsilon * eps_decay)
+                # Sample dataloader
+                replay_dataset.batch_size = agent.batch_size
+                experiences = next(iter(replay_dataloader))
+                # Learn according to agent's RL algorithm
+                agent.learn(experiences)
 
         # Now evolve population if necessary
         if (idx_epi + 1) % evo_epochs == 0:
@@ -135,7 +126,7 @@ if __name__ == '__main__':
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=False,
+                    swap_channels=INIT_HP['CHANNELS_LAST'],
                     max_steps=max_steps,
                     loop=evo_loop) for agent in pop]
 
