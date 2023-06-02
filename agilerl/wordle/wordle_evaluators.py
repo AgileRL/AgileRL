@@ -40,15 +40,21 @@ class Action_Ranking_Evaluator():
             obs = WordleObservation(WordleGame(s, self.vocab.update_vocab(s), list(a)))
             expert_state, _, _ = obs.game.next(random.choice(self.expert_actions[self.hashable_state((s, a,))]))
             non_expert_state, _, _ = obs.game.next(random.choice(self.non_expert_actions[self.hashable_state((s, a,))]))
-            expert_datapoint = DataPoint.from_obs(WordleObservation(expert_state), self.branching_data.token_reward, self.branching_data.tokenizer)
-            non_expert_datapoint = DataPoint.from_obs(WordleObservation(non_expert_state), self.branching_data.token_reward, self.branching_data.tokenizer)
+            expert_datapoint = DataPoint.from_obs(WordleObservation(expert_state), self.branching_data.token_reward, 
+                                                  self.branching_data.tokenizer)
+            non_expert_datapoint = DataPoint.from_obs(WordleObservation(non_expert_state), 
+                                                      self.branching_data.token_reward, self.branching_data.tokenizer)
             iql_outputs = model.get_qvs([expert_datapoint, non_expert_datapoint])
             qs, target_qs, terminals = iql_outputs['qs'], iql_outputs['target_qs'], iql_outputs['terminals']
             for i in range(N_CHARS+1):
-                total_correct[i] += int(qs[0, (1 - terminals[0, :-1]).sum()-1-i] > qs[1, (1 - terminals[1, :-1]).sum()-1-i])
-                total_correct_target[i] += int(target_qs[0, (1 - terminals[0, :-1]).sum()-1-i] > target_qs[1, (1 - terminals[1, :-1]).sum()-1-i])
+                total_correct[i] += int(qs[0, 
+                                           (1 - terminals[0, :-1]).sum()-1-i] > qs[1, 
+                                                                                   (1 - terminals[1, :-1]).sum()-1-i])
+                total_correct_target[i] += int(
+                    target_qs[0, (1 - terminals[0, :-1]).sum()-1-i] > target_qs[1, (1 - terminals[1, :-1]).sum()-1-i])
             total += 1
-        return {**{('q_rank_acc_-%d' % (i+1)): (total_correct[i] / total, total) for i in range(N_CHARS+1)}, **{('q_target_rank_acc_-%d' % (i+1)): (total_correct_target[i] / total, total) for i in range(N_CHARS+1)}}
+        return {**{('q_rank_acc_-%d' % (i+1)): (total_correct[i] / total, total) for i in range(N_CHARS+1)}, **{
+            ('q_target_rank_acc_-%d' % (i+1)): (total_correct_target[i] / total, total) for i in range(N_CHARS+1)}}
 
 class Action_Ranking_Evaluator_Adversarial():
     def __init__(self, adversarial_data: WordleListDataset) -> None:
@@ -93,13 +99,19 @@ class Action_Ranking_Evaluator_Adversarial():
             initial_suboptimal_a = random.choice(self.suboptimal_actions[self.hashable_state((initial_s, initial_a,))])
             initial_expert_state, _, _ = initial_obs.game.next(initial_expert_a)
             initial_suboptimal_state, _, _ = initial_obs.game.next(initial_suboptimal_a)
-            initial_expert_datapoint = DataPoint.from_obs(WordleObservation(initial_expert_state), self.adversarial_data.tokenizer, self.adversarial_data.token_reward)
-            initial_suboptimal_datapoint = DataPoint.from_obs(WordleObservation(initial_suboptimal_state), self.adversarial_data.tokenizer, self.adversarial_data.token_reward)
+            initial_expert_datapoint = DataPoint.from_obs(WordleObservation(initial_expert_state), 
+                                                          self.adversarial_data.tokenizer, 
+                                                          self.adversarial_data.token_reward)
+            initial_suboptimal_datapoint = DataPoint.from_obs(WordleObservation(initial_suboptimal_state), 
+                                                              self.adversarial_data.tokenizer, 
+                                                              self.adversarial_data.token_reward)
             iql_outputs = model.get_qvs([initial_expert_datapoint, initial_suboptimal_datapoint])
             qs, target_qs, terminals = iql_outputs['qs'], iql_outputs['target_qs'], iql_outputs['terminals']
             for i in range(N_CHARS+1):
-                initial_total_correct[i] += int(qs[0, (1 - terminals[0, :-1]).sum()-1-i] > qs[1, (1 - terminals[1, :-1]).sum()-1-i])
-                initial_total_correct_target[i] += int(target_qs[0, (1 - terminals[0, :-1]).sum()-1-i] > target_qs[1, (1 - terminals[1, :-1]).sum()-1-i])
+                initial_total_correct[i] += int(qs[0, (1 - terminals[0, :-1]).sum()-1-i] > qs[1, (
+                    1 - terminals[1, :-1]).sum()-1-i])
+                initial_total_correct_target[i] += int(
+                    target_qs[0, (1 - terminals[0, :-1]).sum()-1-i] > target_qs[1, (1 - terminals[1, :-1]).sum()-1-i])
             
             branch_s, branch_a = random.choice(self.branch_states)
             branch_obs = WordleObservation(WordleGame(branch_s, self.vocab.update_vocab(branch_s), list(branch_a)))
@@ -107,17 +119,27 @@ class Action_Ranking_Evaluator_Adversarial():
             branch_adversarial_a = random.choice(self.adversarial_actions[self.hashable_state((branch_s, branch_a,))])
             branch_expert_state, _, _ = branch_obs.game.next(branch_expert_a)
             branch_adversarial_state, _, _ = branch_obs.game.next(branch_adversarial_a)
-            branch_expert_datapoint = DataPoint.from_obs(WordleObservation(branch_expert_state), self.adversarial_data.tokenizer, self.adversarial_data.token_reward)
-            branch_adversarial_datapoint = DataPoint.from_obs(WordleObservation(branch_adversarial_state), self.adversarial_data.tokenizer, self.adversarial_data.token_reward)
+            branch_expert_datapoint = DataPoint.from_obs(WordleObservation(branch_expert_state), 
+                                                         self.adversarial_data.tokenizer, 
+                                                         self.adversarial_data.token_reward)
+            branch_adversarial_datapoint = DataPoint.from_obs(WordleObservation(branch_adversarial_state), 
+                                                              self.adversarial_data.tokenizer, 
+                                                              self.adversarial_data.token_reward)
             iql_outputs = model.get_qvs([branch_expert_datapoint, branch_adversarial_datapoint])
             qs, target_qs, terminals = iql_outputs['qs'], iql_outputs['target_qs'], iql_outputs['terminals']
             for i in range(N_CHARS+1):
-                branch_total_correct[i] += int(qs[0, (1 - terminals[0, :-1]).sum()-1-i] > qs[1, (1 - terminals[1, :-1]).sum()-1-i])
-                branch_total_correct_target[i] += int(target_qs[0, (1 - terminals[0, :-1]).sum()-1-i] > target_qs[1, (1 - terminals[1, :-1]).sum()-1-i])
+                branch_total_correct[i] += int(
+                    qs[0, (1 - terminals[0, :-1]).sum()-1-i] > qs[1, (1 - terminals[1, :-1]).sum()-1-i])
+                branch_total_correct_target[i] += int(
+                    target_qs[0, (1 - terminals[0, :-1]).sum()-1-i] > target_qs[1, (1 - terminals[1, :-1]).sum()-1-i])
             total += 1
         return {
-                **{('initial_q_rank_acc_-%d' % (i+1)): (initial_total_correct[i] / total, total) for i in range(N_CHARS+1)}, 
-                **{('initial_q_target_rank_acc_-%d' % (i+1)): (initial_total_correct_target[i] / total, total) for i in range(N_CHARS+1)}, 
-                **{('branch_q_rank_acc_-%d' % (i+1)): (branch_total_correct[i] / total, total) for i in range(N_CHARS+1)}, 
-                **{('branch_q_target_rank_acc_-%d' % (i+1)): (branch_total_correct_target[i] / total, total) for i in range(N_CHARS+1)}, 
+                **{('initial_q_rank_acc_-%d' % (i+1)): (
+                    initial_total_correct[i] / total, total) for i in range(N_CHARS+1)}, 
+                **{('initial_q_target_rank_acc_-%d' % (i+1)): (
+                    initial_total_correct_target[i] / total, total) for i in range(N_CHARS+1)}, 
+                **{('branch_q_rank_acc_-%d' % (i+1)): (
+                    branch_total_correct[i] / total, total) for i in range(N_CHARS+1)}, 
+                **{('branch_q_target_rank_acc_-%d' % (i+1)): (
+                    branch_total_correct_target[i] / total, total) for i in range(N_CHARS+1)}, 
                }

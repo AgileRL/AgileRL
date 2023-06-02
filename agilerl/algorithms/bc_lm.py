@@ -6,7 +6,8 @@ import numpy as np
 from agilerl.networks.evolvable_gpt import EvolvableGPT
 from agilerl.data.rl_data import DataPoint, RL_Dataset
 from agilerl.data.language_environment import Language_Observation, interact_environment
-from agilerl.utils.sampling_utils import process_logits, pad_sequence, map_all_kvs, update_kvs, always_terminate
+from agilerl.utils.sampling_utils import process_logits, pad_sequence, map_all_kvs, \
+    update_kvs, always_terminate
 
 class BC_LM(nn.Module):
     def __init__(self, 
@@ -58,10 +59,13 @@ class BC_LM(nn.Module):
             input_attn_mask = None
         position_ids = torch.cumsum(input_attn_mask, dim=1)-1 if set_pos_ids else None
         if remove_prefix_position_embs:
-            prefix_embs -= self.model.transformer.wpe(position_ids[:, :prefix_embs.shape[1]])
-        input_embeddings = torch.cat((prefix_embs, self.model.transformer.wte(tokens)), dim=1)
+            prefix_embs -= self.model.transformer.wpe(
+                position_ids[:, :prefix_embs.shape[1]])
+        input_embeddings = torch.cat((prefix_embs, self.model.transformer.wte(tokens)), 
+                                     dim=1)
         
-        model_outputs, _, model_past_key_values, _ = self.model(tok_emb=input_embeddings, 
+        model_outputs, _, model_past_key_values, _ = self.model(
+                                   tok_emb=input_embeddings, 
                                    attn_mask=input_attn_mask, 
                                    pos=position_ids, 
                                    **kwargs)
@@ -76,12 +80,17 @@ class BC_LM(nn.Module):
         else:
             n = torch.argmax(action_idxs, dim=1)+1
         for i in range(tokens.shape[0]):
-            weights[i] = torch.scatter(weights[i], dim=0, index=action_idxs[i, :n[i]], src=torch.full((n[i].item(),), 1.0).to(self.device))
+            weights[i] = torch.scatter(weights[i], 
+                                       dim=0, 
+                                       index=action_idxs[i, :n[i]], 
+                                       src=torch.full((n[i].item(),), 
+                                                      1.0).to(self.device))
         return weights
     
     def awac_loss(self, tokens, attn_mask, logits, w):
         w = w.detach()
-        losses = F.cross_entropy(logits[:, :-1, :].reshape(-1, logits.shape[-1]), tokens[:, 1:].reshape(-1), reduction='none')
+        losses = F.cross_entropy(logits[:, :-1, :].reshape(-1, logits.shape[-1]), 
+                                 tokens[:, 1:].reshape(-1), reduction='none')
         losses = losses.reshape(tokens.shape[0], tokens.shape[1]-1)
         return (losses * w[:, :-1] * attn_mask[:, 1:]).sum() / attn_mask[:, 1:].sum()
 
@@ -169,52 +178,75 @@ class BC_Policy():
         n = bsize * num_generations
         if max_generation_len is None:
             max_generation_len = max_length+1
-        input_strs = [tokenizer.decode(tokens[i, :][:attn_mask[i, :].sum().long()].tolist(), clean_up_tokenization_spaces=False) for i in range(len(tokens))]
+        input_strs = [tokenizer.decode(
+            tokens[i, :][:attn_mask[i, :].sum().long()].tolist(), 
+            clean_up_tokenization_spaces=False) for i in range(len(tokens))]
         prefix_t = 0 if prefix_embs is None else prefix_embs.shape[1]
-        logits, past_key_values = self.bc_lm(tokens=tokens, attn_mask=attn_mask, prefix_embs=prefix_embs, 
+        logits, past_key_values = self.bc_lm(tokens=tokens, 
+                                   attn_mask=attn_mask, 
+                                   prefix_embs=prefix_embs, 
                                    prefix_attn_mask=prefix_attn_mask, 
                                    remove_prefix_position_embs=remove_prefix_position_embs,
                                    is_causal=False)
         dialogue_kvs = past_key_values
         dialogue_lens = attn_mask.sum(dim=1)
-        tokens = pad_sequence(torch.repeat_interleave(tokens, num_generations, dim=0), max_length, tokenizer.pad_token_id, device, 1)
+        tokens = pad_sequence(torch.repeat_interleave(tokens, num_generations, dim=0), 
+                              max_length, tokenizer.pad_token_id, device, 1)
         dialogue_lens = torch.repeat_interleave(dialogue_lens, num_generations, dim=0)
-        dialogue_kvs = map_all_kvs(lambda x: pad_sequence(torch.repeat_interleave(x, num_generations, dim=0), max_length, 0.0, device, 2), dialogue_kvs)
+        dialogue_kvs = map_all_kvs(lambda x: pad_sequence(
+            torch.repeat_interleave(x, num_generations, dim=0), 
+            max_length, 0.0, device, 2), dialogue_kvs)
         log_probs = torch.full((dialogue_lens.shape[0],), 0.0).to(device)
         termination_mask = torch.full((dialogue_lens.shape[0],), 1).to(device)
         t = torch.min(dialogue_lens).int()
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
-            curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], dialogue_kvs)
-            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False)
-            logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
-            logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]] = logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]].masked_fill_(t < dialogue_lens, 1e7)
+            curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], 
+                                            dialogue_kvs)
+            logits, past_key_values = self.bc_lm(curr_token, None, 
+                                                 past_key_values=curr_dialogue_kvs, 
+                                                 is_causal=False)
+            logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, 
+                                                               float('-inf'), 1e7)
+            logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), 
+                   tokens[:, t]] = logits[torch.arange(0, n).to(device), 
+                                          torch.full((n,), 0).to(device), 
+                                          tokens[:, t]].masked_fill_(t < dialogue_lens, 
+                                                                     1e7)
             logits = process_logits(logits, temp=temp, top_k=top_k, top_p=top_p)
             cat_dist = torch.distributions.categorical.Categorical(logits=logits[:, 0])
             new_tokens = cat_dist.sample()
             log_probs += cat_dist.log_prob(new_tokens)
             tokens[:, t] = new_tokens
-            dialogue_kvs = update_kvs(dialogue_kvs, past_key_values, torch.arange(0, n).to(device), (t+prefix_t)-1)
+            dialogue_kvs = update_kvs(dialogue_kvs, past_key_values, 
+                                      torch.arange(0, n).to(device), (t+prefix_t)-1)
             for idx in range(n):
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
-                    termination_mask[idx] *= (1 - int(termination_condition(tokenizer.decode(tokens[idx, :].tolist(), 
-                                                                                             clean_up_tokenization_spaces=False))))
+                    termination_mask[idx] *= (1 - int(termination_condition(
+                        tokenizer.decode(tokens[idx, :].tolist(), 
+                                         clean_up_tokenization_spaces=False))))
             t += 1
             termination_mask *= ((t-dialogue_lens) < max_generation_len).int()
     
-        output_strs = [tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False) for i in range(len(tokens))]
+        output_strs = [tokenizer.decode(
+            tokens[i, :].tolist(),
+            clean_up_tokenization_spaces=False) for i in range(len(tokens))]
         processed_outputs = []
         for i in range(len(input_strs)):
             temp_outputs = []
             for x in range(num_generations):
-                processed_str = output_strs[i*num_generations+x][len(input_strs[i]):].strip()
+                processed_str = output_strs[i*num_generations+x][len(
+                    input_strs[i]):].strip()
                 if tokenizer.id_to_token(tokenizer.pad_token_id) in processed_str:
-                    processed_str = processed_str[:processed_str.find(tokenizer.id_to_token(tokenizer.pad_token_id))].strip()
+                    processed_str = processed_str[:processed_str.find(
+                        tokenizer.id_to_token(tokenizer.pad_token_id))].strip()
                 if tokenizer.id_to_token(tokenizer.eoa_token_id) in processed_str:
-                    processed_str = processed_str[:processed_str.find(tokenizer.id_to_token(tokenizer.eoa_token_id))].strip()
+                    processed_str = processed_str[:processed_str.find(
+                        tokenizer.id_to_token(tokenizer.eoa_token_id))].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
-        return list(zip(input_strs, processed_outputs)), log_probs.reshape(-1, num_generations)
+        return list(zip(input_strs, processed_outputs)), log_probs.reshape(-1, 
+                                                                           num_generations)
     
     def beam_raw(self, 
                  tokens: torch.Tensor, attn_mask: torch.Tensor, 
@@ -233,53 +265,87 @@ class BC_Policy():
         n = bsize * beam_width
         if max_generation_len is None:
             max_generation_len = max_length+1
-        input_strs = [tokenizer.decode(tokens[i, :][:attn_mask[i, :].sum().long()].tolist(), clean_up_tokenization_spaces=False) for i in range(len(tokens))]
+        input_strs = [tokenizer.decode(
+            tokens[i, :][:attn_mask[i, :].sum().long()].tolist(), 
+            clean_up_tokenization_spaces=False) for i in range(len(tokens))]
         prefix_t = 0 if prefix_embs is None else prefix_embs.shape[1]
-        logits, past_key_values = self.bc_lm(tokens, attn_mask, prefix_embs=prefix_embs, 
+        logits, past_key_values = self.bc_lm(tokens, attn_mask, 
+                                             prefix_embs=prefix_embs, 
                                    prefix_attn_mask=prefix_attn_mask, 
                                    remove_prefix_position_embs=remove_prefix_position_embs,
                                    is_causal=False)
         dialogue_kvs = past_key_values
         original_dialogue_lens = attn_mask.sum(dim=1)
-        batch_indicator = torch.stack(beam_width*[torch.arange(0, bsize).to(device)], dim=1)
-        tokens = pad_sequence(torch.repeat_interleave(tokens, beam_width, dim=0), max_length, tokenizer.pad_token_id, device, 1)
-        dialogue_lens = torch.repeat_interleave(original_dialogue_lens, beam_width, dim=0)
-        dialogue_kvs = map_all_kvs(lambda x: pad_sequence(torch.repeat_interleave(x, beam_width, dim=0), max_length, 0.0, device, 2), dialogue_kvs)
+        batch_indicator = torch.stack(beam_width*[torch.arange(0, bsize).to(device)], 
+                                      dim=1)
+        tokens = pad_sequence(torch.repeat_interleave(tokens, beam_width, dim=0), 
+                              max_length, tokenizer.pad_token_id, device, 1)
+        dialogue_lens = torch.repeat_interleave(original_dialogue_lens, beam_width, 
+                                                dim=0)
+        dialogue_kvs = map_all_kvs(
+            lambda x: pad_sequence(
+            torch.repeat_interleave(x, beam_width, dim=0), max_length, 
+            0.0, device, 2), dialogue_kvs)
         curr_scores = torch.zeros(bsize, beam_width).to(device)  # (batch, k)
         termination_mask = torch.full((n,), 1).to(device)
         t = torch.min(dialogue_lens).int()
         while termination_mask.sum() > 0 and (t+prefix_t) < max_length:
             curr_token = tokens[:, t-1].unsqueeze(1)
-            curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], dialogue_kvs)
-            logits, past_key_values = self.bc_lm(curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False)
-            logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, float('-inf'), 1e7)
-            logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]] = logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), tokens[:, t]].masked_fill_(t < dialogue_lens, 1e7)
-            scores = (torch.log(F.softmax(logits, dim=-1)).reshape(1, bsize, beam_width, -1).permute(3, 0, 1, 2) + curr_scores).permute(1, 2, 3, 0).reshape(1, bsize, -1)  # (time, batch, k*vocab)
-            scores[0, :, vocab_size:] = scores[0, :, vocab_size:].masked_fill_((t == original_dialogue_lens).unsqueeze(1).repeat(1, scores.shape[2]-vocab_size), float('-inf'))
-            curr_scores, top_k = torch.topk(scores[0, :, :], k=beam_width, dim=1)  # (batch, k), (batch, k)
-            tokens = tokens[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :]
+            curr_dialogue_kvs = map_all_kvs(lambda x: x[:,:,:(t+prefix_t)-1,:], 
+                                            dialogue_kvs)
+            logits, past_key_values = self.bc_lm(
+                curr_token, None, past_key_values=curr_dialogue_kvs, is_causal=False)
+            logits[:, 0, tokenizer.pad_token_id] = torch.where(termination_mask == 1, 
+                                                               float('-inf'), 1e7)
+            logits[torch.arange(0, n).to(device), torch.full((n,), 0).to(device), 
+                   tokens[:, t]] = logits[torch.arange(0, n).to(device), 
+                                          torch.full((n,), 0).to(
+                device), tokens[:, t]].masked_fill_(t < dialogue_lens, 1e7)
+            scores = (torch.log(F.softmax(logits, dim=-1)).reshape(
+                1, bsize, beam_width, -1).permute(
+                3, 0, 1, 2) + curr_scores).permute(1, 2, 3, 0).reshape(
+                1, bsize, -1)  # (time, batch, k*vocab)
+            scores[0, :, vocab_size:] = scores[0, :, vocab_size:].masked_fill_(
+                (t == original_dialogue_lens).unsqueeze(1).repeat(
+                1, scores.shape[2]-vocab_size), float('-inf'))
+            curr_scores, top_k = torch.topk(
+                scores[0, :, :], k=beam_width, dim=1)  # (batch, k), (batch, k)
+            tokens = tokens[(
+                batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :]
             tokens[:, t] = top_k.reshape(-1) % vocab_size  # (batch*k,)
-            fixed_dialogue_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :, :, :], past_key_values)
-            dialogue_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1), :, :, :], dialogue_kvs)
-            dialogue_kvs = update_kvs(dialogue_kvs, fixed_dialogue_kvs, torch.arange(0, n).to(device), (t+prefix_t)-1)
-            dialogue_lens = dialogue_lens[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1)]
-            termination_mask = termination_mask[(batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1)]
+            fixed_dialogue_kvs = map_all_kvs(
+                lambda x: x[(
+                batch_indicator * beam_width + (top_k // vocab_size)).reshape(
+                -1), :, :, :], past_key_values)
+            dialogue_kvs = map_all_kvs(lambda x: x[(batch_indicator * beam_width + (
+                top_k // vocab_size)).reshape(-1), :, :, :], dialogue_kvs)
+            dialogue_kvs = update_kvs(
+                dialogue_kvs, fixed_dialogue_kvs, torch.arange(0, n).to(
+                device), (t+prefix_t)-1)
+            dialogue_lens = dialogue_lens[(
+                batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1)]
+            termination_mask = termination_mask[(
+                batch_indicator * beam_width + (top_k // vocab_size)).reshape(-1)]
             for idx in range(n):
                 if tokens[idx, t] == tokenizer.eoa_token_id and t >= dialogue_lens[idx]:
-                    termination_mask[idx] *= (1 - int(termination_condition(tokenizer.decode(tokens[idx, :].tolist(),
-                                                                                             clean_up_tokenization_spaces=False))))
+                    termination_mask[idx] *= (1 - int(termination_condition(
+                        tokenizer.decode(tokens[idx, :].tolist(), 
+                                         clean_up_tokenization_spaces=False))))
             t += 1
             termination_mask *= ((t-dialogue_lens) < max_generation_len).int()
-        output_strs = [tokenizer.decode(tokens[i, :].tolist(), clean_up_tokenization_spaces=False) for i in range(n)]
+        output_strs = [tokenizer.decode(tokens[i, :].tolist(),
+                                 clean_up_tokenization_spaces=False) for i in range(n)]
         processed_outputs = []
         for i in range(len(input_strs)):
             temp_outputs = []
             for x in range(beam_width):
                 processed_str = output_strs[i*beam_width+x][len(input_strs[i]):].strip()
                 if tokenizer.id_to_token(tokenizer.pad_token_id) in processed_str:
-                    processed_str = processed_str[:processed_str.find(tokenizer.id_to_token(tokenizer.pad_token_id))].strip()
+                    processed_str = processed_str[:processed_str.find(
+                        tokenizer.id_to_token(tokenizer.pad_token_id))].strip()
                 if tokenizer.id_to_token(tokenizer.eoa_token_id) in processed_str:
-                    processed_str = processed_str[:processed_str.find(tokenizer.id_to_token(tokenizer.eoa_token_id))].strip()
+                    processed_str = processed_str[:processed_str.find(
+                        tokenizer.id_to_token(tokenizer.eoa_token_id))].strip()
                 temp_outputs.append(processed_str)
             processed_outputs.append(temp_outputs)
         return list(zip(input_strs, processed_outputs)), curr_scores
@@ -300,9 +366,13 @@ class BC_Policy():
         return generations, probs
     
     def act(self, obs: Language_Observation) -> str:
-        item = DataPoint.from_obs(obs, self.bc_lm.dataset.tokenizer, self.bc_lm.dataset.token_reward)
-        generations, probs = self.generate([item], always_terminate, **self.generation_kwargs)
-        sorted_outputs = list(zip(*sorted(zip(generations[0][1], probs[0]), key=lambda x: -x[1])))[0]
+        item = DataPoint.from_obs(obs, 
+                                  self.bc_lm.dataset.tokenizer, 
+                                  self.bc_lm.dataset.token_reward)
+        generations, probs = self.generate([item], always_terminate, 
+                                           **self.generation_kwargs)
+        sorted_outputs = list(zip(*sorted(zip(
+            generations[0][1], probs[0]), key=lambda x: -x[1])))[0]
         return sorted_outputs[0]
     
     def train(self):
@@ -328,7 +398,9 @@ class BC_Evaluator():
         for i in range(n):
             result, sequence = interact_environment(self.env, policy, None)
             env_reward = sum(map(lambda x: x[2], sequence))
-            token_reward = sum(DataPoint.get_token_reward(result, model.dataset.tokenizer, model.dataset.token_reward))
+            token_reward = sum(DataPoint.get_token_reward(result, 
+                                                          model.dataset.tokenizer, 
+                                                          model.dataset.token_reward))
             total_env_reward += env_reward
             total_token_reward += token_reward
             if self.verbose:
@@ -339,7 +411,8 @@ class BC_Evaluator():
                 print('avg token reward:', total_token_reward / (i + 1))
                 print('avg env reward:', total_env_reward / (i + 1))
                 print('='*25)
-        return {'token_reward': (total_token_reward / n, n), 'env_reward': (total_env_reward / n, n)}
+        return {'token_reward':(total_token_reward/n,n),
+                'env_reward':(total_env_reward/n,n)}
 
 def to(item: Any, device: torch.device):
     return map_pytree(lambda x: torch.tensor(x).to(device), item)

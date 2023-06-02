@@ -158,7 +158,16 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
 
-            pbar.set_postfix_str(f'Fitness: {["%.2f"%fitness for fitness in fitnesses]}, 100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}, 100 score avgs: {["%.2f"%np.mean(agent.scores[-100:]) for agent in pop]}, agents: {[agent.index for agent in pop]}, steps: {[agent.steps[-1] for agent in pop]}, mutations: {[agent.mut for agent in pop]}')
+            fitness = ["%.2f"%fitness for fitness in fitnesses]
+            avg_fitness = ["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]
+            avg_score = ["%.2f"%np.mean(agent.scores[-100:]) for agent in pop]
+            agents = [agent.index for agent in pop]
+            num_steps = [agent.steps[-1] for agent in pop]
+            muts = [agent.mut for agent in pop]
+            perf_info = f'Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}'
+            pop_info = f'Agents: {agents}, Steps: {num_steps}, Mutations: {muts}' 
+            pbar_string = perf_info + ', ' + pop_info
+            pbar.set_postfix_str(pbar_string)
             pbar.update(0)
 
             # Early stop if consistently reaches target

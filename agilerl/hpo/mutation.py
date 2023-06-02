@@ -5,7 +5,8 @@ import fastrand
 class Mutations():
     """The Mutations class for evolutionary hyperparameter optimization.
 
-    :param algo: RL algorithm used. Use str e.g. 'DQN' if using AgileRL implementation of algorithm, or provide a dict with names of agent networks
+    :param algo: RL algorithm used. Use str e.g. 'DQN' if using AgileRL implementation of algorithm, or provide a dict 
+    with names of agent networks
     :type algo: str or dict
     :param no_mutation: Relative probability of no mutation
     :type no_mutation: float

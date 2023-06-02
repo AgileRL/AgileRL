@@ -26,13 +26,11 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param swap_channels: Swap image channels dimension from last to first 
-    [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 
-    500
+    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -141,7 +139,16 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
 
-            pbar.set_postfix_str(f'Fitness: {["%.2f"%fitness for fitness in fitnesses]}, 100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}, agents: {[agent.index for agent in pop]}, steps: {[agent.steps[-1] for agent in pop]}, mutations: {[agent.mut for agent in pop]}')
+            fitness = ["%.2f"%fitness for fitness in fitnesses]
+            avg_fitness = ["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]
+            avg_score = ["%.2f"%np.mean(agent.scores[-100:]) for agent in pop]
+            agents = [agent.index for agent in pop]
+            num_steps = [agent.steps[-1] for agent in pop]
+            muts = [agent.mut for agent in pop]
+            perf_info = f'Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}'
+            pop_info = f'Agents: {agents}, Steps: {num_steps}, Mutations: {muts}'
+            pbar_string = perf_info + ', ' + pop_info
+            pbar.set_postfix_str(pbar_string)
             pbar.update(0)
 
             # Early stop if consistently reaches target
