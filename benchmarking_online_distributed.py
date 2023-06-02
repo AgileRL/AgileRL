@@ -1,5 +1,4 @@
 from accelerate import Accelerator
-import torch
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
