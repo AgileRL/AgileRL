@@ -319,7 +319,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         if (idx_epi+1) % evo_epochs == 0:
             
             # Evaluate population
-            fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
+            fitnesses = [agent.test(env, swap_channels=INIT_HP['CHANNELS_LAST'], max_steps=max_steps, loop=evo_loop) for agent in pop]
 
             print(f'Episode {idx_epi+1}/{max_episodes}')
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
