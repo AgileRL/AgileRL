@@ -10,7 +10,7 @@ from tqdm import trange
 
 if __name__ == '__main__':
 
-    print('===== AgileRL Demo =====')
+    print('===== AgileRL Online Distributed Demo =====')
 
     print('Loading accelerator...')
     accelerator = Accelerator()

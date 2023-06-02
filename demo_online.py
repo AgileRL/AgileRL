@@ -4,8 +4,12 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 import numpy as np
 import torch
+from tqdm import trange
 
 if __name__ == '__main__':
+
+    print('===== AgileRL Online Demo =====')
+
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size
@@ -71,12 +75,10 @@ if __name__ == '__main__':
 
     env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
 
-    print('===== AgileRL Demo =====')
-    print('Verbose off. Add a progress bar to view training progress more frequently.')
     print('Training...')
 
     # TRAINING LOOP
-    for idx_epi in range(max_episodes):
+    for idx_epi in trange(max_episodes):
         for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
