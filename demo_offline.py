@@ -1,14 +1,16 @@
-from agilerl.utils.utils import makeVectEnvs, initialPopulation
+from agilerl.utils.utils import initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+import gymnasium as gym
+import h5py
 import numpy as np
 import torch
 from tqdm import trange
 
 if __name__ == '__main__':
 
-    print('===== AgileRL Online Demo =====')
+    print('===== AgileRL Offline Demo =====')
 
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
@@ -27,17 +29,19 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
+    env = gym.make('CartPole-v1')   # Create environment
+    dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
+
     try:
-        state_dim = env.single_observation_space.n          # Discrete observation space
+        state_dim = env.observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
     except Exception:
-        state_dim = env.single_observation_space.shape      # Continuous observation space
+        state_dim = env.observation_space.shape      # Continuous observation space
         one_hot = False                                     # Does not require one-hot encoding
     try:
-        action_dim = env.single_action_space.n             # Discrete action space
+        action_dim = env.action_space.n             # Discrete action space
     except Exception:
-        action_dim = env.single_action_space.shape[0]      # Continuous action space
+        action_dim = env.action_space.shape[0]      # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
@@ -50,12 +54,26 @@ if __name__ == '__main__':
                             INIT_HP=INIT_HP,            # Initial hyperparameters
                             population_size=INIT_HP['POPULATION_SIZE'], # Population size
                             device=torch.device("cuda"))
-
+    
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
+    
+    print('Filling replay buffer with dataset...')
+    # Save transitions to replay buffer
+    dataset_length = dataset['rewards'].shape[0]
+    for i in trange(dataset_length-1):
+        state = dataset['observations'][i]
+        next_state = dataset['observations'][i+1]
+        if INIT_HP['CHANNELS_LAST']:
+            state = np.moveaxis(state, [3], [1])
+            next_state = np.moveaxis(next_state, [3], [1])
+        action = dataset['actions'][i]
+        reward = dataset['rewards'][i]
+        done = bool(dataset['terminals'][i])
+        memory.save2memory(state, action, reward, next_state, done)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -78,12 +96,6 @@ if __name__ == '__main__':
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
 
-    # Exploration params
-    eps_start = 1.0     # Max exploration
-    eps_end = 0.1       # Min exploration
-    eps_decay = 0.995   # Decay per episode
-    epsilon = eps_start
-
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
@@ -92,35 +104,12 @@ if __name__ == '__main__':
     # TRAINING LOOP
     for idx_epi in trange(max_episodes):
         for agent in pop:   # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
             for idx_step in range(max_steps):
-                # Get next action from agent
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(
-                    action)   # Act in environment
-
-                # Save experience to replay buffer
-                memory.save2memoryVectEnvs(
-                    state, action, reward, next_state, done)
-
-                # Learn according to learning frequency
-                if memory.counter % agent.learn_step == 0 and len(
-                        memory) >= agent.batch_size:
-                    experiences = memory.sample(
-                        agent.batch_size)  # Sample replay buffer
-                    # Learn according to agent's RL algorithm
-                    agent.learn(experiences)
-
-                state = next_state
-                score += reward
-
-        # Update epsilon for exploration
-        epsilon = max(eps_end, epsilon * eps_decay)
+                experiences = memory.sample(agent.batch_size)  # Sample replay buffer
+                agent.learn(experiences) # Learn according to agent's RL algorithm
 
         # Now evolve population if necessary
         if (idx_epi + 1) % evo_epochs == 0:
-
             # Evaluate population
             fitnesses = [
                 agent.test(

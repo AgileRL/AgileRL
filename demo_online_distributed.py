@@ -51,7 +51,7 @@ if __name__ == '__main__':
     pop = initialPopulation(algo='DQN',                 # Algorithm
                             state_dim=state_dim,        # State dimension
                             action_dim=action_dim,      # Action dimension
-                            one_hot=False,              # One-hot encoding
+                            one_hot=one_hot,            # One-hot encoding
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
                             population_size=INIT_HP['POPULATION_SIZE'], # Population size
@@ -77,11 +77,9 @@ if __name__ == '__main__':
                           parameters=0.2,                       # Network parameters mutation
                           activation=0,                         # Activation layer mutation
                           rl_hp=0.2,                            # Learning HP mutation
-                          # Learning HPs to choose from
-                          rl_hp_selection=['lr', 'batch_size'],
+                          rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
                           mutation_sd=0.1,                      # Mutation strength
-                          # Network architecture
-                          arch=NET_CONFIG['arch'],
+                          arch=NET_CONFIG['arch'],              # Network architecture
                           rand_seed=1,                          # Random seed
                           accelerator=accelerator)              # Accelerator)
 
