@@ -1,4 +1,4 @@
-from agilerl.utils.utils import makeVectEnvs, initialPopulation
+from agilerl.utils.utils import initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.hpo.tournament import TournamentSelection
@@ -7,7 +7,6 @@ from accelerate import Accelerator
 import gymnasium as gym
 import h5py
 import numpy as np
-import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
