@@ -5,12 +5,14 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from accelerate import Accelerator
 import numpy as np
-import torch
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm import trange
 
 if __name__ == '__main__':
 
+    print('===== AgileRL Demo =====')
+
+    print('Loading accelerator...')
     accelerator = Accelerator()
 
     NET_CONFIG = {
@@ -95,11 +97,10 @@ if __name__ == '__main__':
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    print('===== AgileRL Demo =====')
     print('Training...')
 
     # TRAINING LOOP
-    for idx_epi in tqdm(range(max_episodes)):
+    for idx_epi in trange(max_episodes):
         for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
