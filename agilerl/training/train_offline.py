@@ -78,9 +78,10 @@ def train(
     save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
     
-    print('Loading buffer...')
+    print('Filling replay buffer with dataset...')
+    # Save transitions to replay buffer
     dataset_length = dataset['rewards'].shape[0]
-    # for i in range(dataset_length):
+    # for i in trange(dataset_length-1):
     #     state = dataset['observations'][i]
     #     next_state = dataset['next_observations'][i]
     #     if swap_channels:
@@ -90,7 +91,7 @@ def train(
     #     reward = dataset['rewards'][i]
     #     done = bool(dataset['terminals'][i])
     #     memory.save2memory(state, action, next_state, reward, done)
-    for i in range(dataset_length-1):
+    for i in trange(dataset_length-1):
         state = dataset['observations'][i]
         next_state = dataset['observations'][i+1]
         if swap_channels:
@@ -109,6 +110,7 @@ def train(
     total_steps = 0
 
     # RL training loop
+    print('Training...')
     for idx_epi in pbar:
         for agent in pop:   # Loop through population
             for idx_step in range(max_steps):

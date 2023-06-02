@@ -8,10 +8,13 @@ import gymnasium as gym
 import h5py
 import numpy as np
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm import trange
 
 if __name__ == '__main__':
 
+    print('===== AgileRL Demo =====')
+    
+    print('Loading accelerator...')
     accelerator = Accelerator()
 
     NET_CONFIG = {
@@ -63,9 +66,10 @@ if __name__ == '__main__':
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names)  # Field names to store in memory
     
+    print('Filling replay buffer with dataset...')
     # Save transitions to replay buffer
     dataset_length = dataset['rewards'].shape[0]
-    for i in range(dataset_length-1):
+    for i in trange(dataset_length-1):
         state = dataset['observations'][i]
         next_state = dataset['observations'][i+1]
         if INIT_HP['CHANNELS_LAST']:
@@ -105,11 +109,10 @@ if __name__ == '__main__':
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    print('===== AgileRL Demo =====')
     print('Training...')
 
     # TRAINING LOOP
-    for idx_epi in tqdm(range(max_episodes)):
+    for idx_epi in trange(max_episodes):
         for agent in pop:   # Loop through population
             for idx_step in range(max_steps):
                 # Sample dataloader
