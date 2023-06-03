@@ -140,13 +140,13 @@ class CQN():
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = np.random.randint(0, self.action_dim, size=state.size()[0])[0]
+            action = np.random.randint(0, self.action_dim, size=state.size()[0])
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-            action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
+            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
         return action
 
     def learn(self, experiences):
