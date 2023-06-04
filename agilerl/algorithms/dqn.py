@@ -102,6 +102,7 @@ class DQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 device=self.device).to(
                 self.device)
             self.actor_target = EvolvableCNN(
@@ -111,6 +112,7 @@ class DQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 device=self.device).to(
                 self.device)
             self.actor_target.load_state_dict(self.actor.state_dict())

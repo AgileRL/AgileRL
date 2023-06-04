@@ -141,6 +141,7 @@ class EvolvableCNN(nn.Module):
             stored_values=None,
             rainbow=False,
             critic=False,
+            normalize=True,
             device='cpu'):
 
         super(EvolvableCNN, self).__init__()
@@ -158,6 +159,7 @@ class EvolvableCNN(nn.Module):
         self.rainbow = rainbow
         self.critic = critic
         self.device = device
+        self.normalize = normalize
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
@@ -308,7 +310,8 @@ class EvolvableCNN(nn.Module):
             x = torch.FloatTensor(x)
 
         batch_size = x.size(0)
-        x = x / 255.
+        if self.normalize:
+            x = x / 255.
 
         x = self.feature_net(x)
         x = x.reshape(batch_size, -1)

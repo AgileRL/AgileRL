@@ -141,20 +141,19 @@ agent_pop = initialPopulation(algo=INIT_HP['ALGO'],                 # Algorithm
                               net_config=NET_CONFIG,                # Network configuration
                               INIT_HP=INIT_HP,                      # Initial hyperparameters
                               population_size=INIT_HP['POP_SIZE'],  # Population size
-                              device=torch.device("cuda"))
+                              device=device)
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 ```python
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-import torch
 
 field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(action_dim=action_dim,                # Number of agent actions
                       memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
                       field_names=field_names,              # Field names to store in memory
-                      device=torch.device("cuda"))
+                      device=device)
 
 tournament = TournamentSelection(tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
                                  elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
@@ -172,7 +171,7 @@ mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Al
                       mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
                       arch=NET_CONFIG['arch'],                              # Network architecture
                       rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
-                      device=torch.device("cuda"))
+                      device=device)
 ```
 The easiest training loop implementation is to use our <code>training.train.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
 ```python
@@ -191,7 +190,7 @@ trained_pop, pop_fitnesses = train(env=env,                                 # Gy
                                    tournament=tournament,                   # Tournament selection object
                                    mutation=mutations,                      # Mutations object
                                    wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                   device=torch.device("cuda"))
+                                   device=device)
 ```
 
 ### Custom Online Training Loop
@@ -221,6 +220,8 @@ INIT_HP = {
             'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
           }
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 env = makeVectEnvs('LunarLander-v2', num_envs=16)   # Create environment
 
 try:
@@ -244,13 +245,13 @@ pop = initialPopulation(algo='DQN',             # Algorithm
                         net_config=NET_CONFIG,  # Network configuration
                         INIT_HP=INIT_HP,        # Initial hyperparameters
                         population_size=6,      # Population size
-                        device=torch.device("cuda"))
+                        device=device)
 
 field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                       memory_size=10000,        # Max replay buffer size
                       field_names=field_names,  # Field names to store in memory
-                      device=torch.device("cuda"))
+                      device=device)
 
 tournament = TournamentSelection(tournament_size=2, # Tournament selection size
                                  elitism=True,      # Elitism in tournament selection
@@ -268,7 +269,7 @@ mutations = Mutations(algo='DQN',                           # Algorithm
                       mutation_sd=0.1,                      # Mutation strength
                       arch=NET_CONFIG['arch'],              # Network architecture
                       rand_seed=1,                          # Random seed
-                      device=torch.device("cuda"))
+                      device=device)
 
 max_episodes = 1000 # Max training episodes
 max_steps = 500     # Max steps per episode
@@ -405,7 +406,7 @@ agent_pop = initialPopulation(algo=INIT_HP['ALGO'],                 # Algorithm
                               net_config=NET_CONFIG,                # Network configuration
                               INIT_HP=INIT_HP,                      # Initial hyperparameters
                               population_size=INIT_HP['POP_SIZE'],  # Population size
-                              device=torch.device("cuda"))
+                              device=device)
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 ```python
@@ -418,7 +419,7 @@ field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(action_dim=action_dim,                # Number of agent actions
                       memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
                       field_names=field_names,              # Field names to store in memory
-                      device=torch.device("cuda"))
+                      device=device)
 
 tournament = TournamentSelection(tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
                                  elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
@@ -436,7 +437,7 @@ mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Al
                       mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
                       arch=NET_CONFIG['arch'],                              # Network architecture
                       rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
-                      device=torch.device("cuda"))
+                      device=device)
 ```
 The easiest training loop implementation is to use our <code>training.train_offline.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
 ```python
@@ -456,7 +457,7 @@ trained_pop, pop_fitnesses = train(env=env,                                 # Gy
                                    tournament=tournament,                   # Tournament selection object
                                    mutation=mutations,                      # Mutations object
                                    wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                   device=torch.device("cuda"))
+                                   device=device)
 ```
 
 ### Custom Offline Training Loop
@@ -487,6 +488,8 @@ INIT_HP = {
             'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
           }
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 env = gym.make('CartPole-v1')   # Create environment
 dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
 
@@ -511,13 +514,13 @@ pop = initialPopulation(algo='CQN',             # Algorithm
                         net_config=NET_CONFIG,  # Network configuration
                         INIT_HP=INIT_HP,        # Initial hyperparameters
                         population_size=6,      # Population size
-                        device=torch.device("cuda"))
+                        device=device)
 
 field_names = ["state", "action", "reward", "next_state", "done"]
 memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                       memory_size=10000,        # Max replay buffer size
                       field_names=field_names,  # Field names to store in memory
-                      device=torch.device("cuda"))
+                      device=device)
 
 tournament = TournamentSelection(tournament_size=2, # Tournament selection size
                                  elitism=True,      # Elitism in tournament selection
@@ -535,7 +538,7 @@ mutations = Mutations(algo='CQN',                           # Algorithm
                       mutation_sd=0.1,                      # Mutation strength
                       arch=NET_CONFIG['arch'],              # Network architecture
                       rand_seed=1,                          # Random seed
-                      device=torch.device("cuda"))
+                      device=device)
 
 max_episodes = 1000 # Max training episodes
 max_steps = 500     # Max steps per episode

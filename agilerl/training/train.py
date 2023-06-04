@@ -2,7 +2,7 @@ import numpy as np
 from tqdm import trange
 import wandb
 from datetime import datetime
-
+import gymnasium as gym
 
 def train(
         env,
@@ -80,6 +80,10 @@ def train(
                 "env": env_name,
             }
         )
+    
+    if not isinstance(env,gym.vector.vector_env.VectorEnv):
+        env=gym.vector.AsyncVectorEnv([lambda: env])
+        print("Environment not wrapped, automatically wrapped.")
 
     save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))

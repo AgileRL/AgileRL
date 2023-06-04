@@ -117,6 +117,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 device=self.device).to(
                 self.device)
@@ -127,6 +128,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 device=self.device).to(
                 self.device)
@@ -139,6 +141,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
                 device=self.device).to(
@@ -150,6 +153,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
                 device=self.device).to(
