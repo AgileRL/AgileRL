@@ -78,7 +78,7 @@ if __name__ == '__main__':
         reward = dataset['rewards'][i]
         done = bool(dataset['terminals'][i])
         # Save experience to replay buffer
-        memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+        memory.save2memory(state, action, reward, next_state, done)
     
     # Create dataloader from replay buffer
     replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])

@@ -303,7 +303,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         reward = dataset['rewards'][i]
         done = bool(dataset['terminals'][i])
         # Save experience to replay buffer
-        memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+        memory.save2memory(state, action, reward, next_state, done)
 
     # TRAINING LOOP
     for idx_epi in trange(max_episodes):
