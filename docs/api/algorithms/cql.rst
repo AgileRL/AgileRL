@@ -98,7 +98,8 @@ Or for a CNN:
         'h_size': [128],    # Network hidden size
         'c_size': [32, 32], # CNN channel size
         'k_size': [8, 4],   # CNN kernel size
-        's_size': [4, 2]    # CNN stride size
+        's_size': [4, 2],   # CNN stride size
+        'normalize': True   # Normalize image from range [0,255] to [0,1]
     }
 
 .. code-block:: python

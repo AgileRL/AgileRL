@@ -103,6 +103,7 @@ class CQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 device=self.device).to(
                 self.device)
             self.actor_target = EvolvableCNN(
@@ -112,6 +113,7 @@ class CQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 device=self.device).to(
                 self.device)
             self.actor_target.load_state_dict(self.actor.state_dict())
@@ -140,13 +142,13 @@ class CQN():
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = np.random.randint(0, self.action_dim, size=state.size()[0])[0]
+            action = np.random.randint(0, self.action_dim, size=state.size()[0])
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-            action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
+            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
         return action
 
     def learn(self, experiences):
