@@ -5,6 +5,9 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train import train
 
+import os
+os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
+
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print('============ AgileRL ============')

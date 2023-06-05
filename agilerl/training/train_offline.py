@@ -89,7 +89,8 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
         action = dataset['actions'][i]
         reward = dataset['rewards'][i]
         done = bool(dataset['terminals'][i])
-        memory.save2memory(state, action, reward, next_state, done)
+        # Save experience to replay buffer
+        memory.save2memoryVectEnvs(state, action, reward, next_state, done)
     print('Loaded buffer.')
 
     if accelerator is not None:

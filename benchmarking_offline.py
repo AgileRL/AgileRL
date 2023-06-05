@@ -1,10 +1,9 @@
 import torch
-import gymnasium as gym
 import h5py
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.utils.utils import initialPopulation, printHyperparams
+from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train_offline import train
 
 
@@ -13,17 +12,17 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print('============ AgileRL ============')
     print(f'DEVICE: {device}')
 
-    env = gym.make(INIT_HP['ENV_NAME'])
+    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=1)
     try:
-        state_dim = env.observation_space.n
+        state_dim = env.single_observation_space.n
         one_hot = True
     except Exception:
-        state_dim = env.observation_space.shape
+        state_dim = env.single_observation_space.shape
         one_hot = False
     try:
-        action_dim = env.action_space.n
+        action_dim = env.single_action_space.n
     except Exception:
-        action_dim = env.action_space.shape[0]
+        action_dim = env.single_action_space.shape[0]
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])

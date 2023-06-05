@@ -1,10 +1,9 @@
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from accelerate import Accelerator
-import gymnasium as gym
 import h5py
 import numpy as np
 from torch.utils.data import DataLoader
@@ -35,19 +34,19 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    env = gym.make('CartPole-v1')   # Create environment
+    env = makeVectEnvs('CartPole-v1', num_envs=1)   # Create environment
     dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
     
     try:
-        state_dim = env.observation_space.n       # Discrete observation space
-        one_hot = True                            # Requires one-hot encoding
+        state_dim = env.single_observation_space.n          # Discrete observation space
+        one_hot = True                                      # Requires one-hot encoding
     except Exception:
-        state_dim = env.observation_space.shape   # Continuous observation space
-        one_hot = False                           # Does not require one-hot encoding
+        state_dim = env.single_observation_space.shape      # Continuous observation space
+        one_hot = False                                     # Does not require one-hot encoding
     try:
-        action_dim = env.action_space.n           # Discrete action space
+        action_dim = env.single_action_space.n             # Discrete action space
     except Exception:
-        action_dim = env.action_space.shape[0]    # Continuous action space
+        action_dim = env.single_action_space.shape[0]      # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
@@ -78,7 +77,8 @@ if __name__ == '__main__':
         action = dataset['actions'][i]
         reward = dataset['rewards'][i]
         done = bool(dataset['terminals'][i])
-        memory.save2memory(state, action, reward, next_state, done)
+        # Save experience to replay buffer
+        memory.save2memoryVectEnvs(state, action, reward, next_state, done)
     
     # Create dataloader from replay buffer
     replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])

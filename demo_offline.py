@@ -1,8 +1,7 @@
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-import gymnasium as gym
 import h5py
 import numpy as np
 import torch
@@ -11,6 +10,8 @@ from tqdm import trange
 if __name__ == '__main__':
 
     print('===== AgileRL Offline Demo =====')
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
@@ -29,37 +30,37 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    env = gym.make('CartPole-v1')   # Create environment
+    env = makeVectEnvs('CartPole-v1', num_envs=1)   # Create environment
     dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
 
     try:
-        state_dim = env.observation_space.n          # Discrete observation space
+        state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
     except Exception:
-        state_dim = env.observation_space.shape      # Continuous observation space
+        state_dim = env.single_observation_space.shape      # Continuous observation space
         one_hot = False                                     # Does not require one-hot encoding
     try:
-        action_dim = env.action_space.n             # Discrete action space
+        action_dim = env.single_action_space.n             # Discrete action space
     except Exception:
-        action_dim = env.action_space.shape[0]      # Continuous action space
+        action_dim = env.single_action_space.shape[0]      # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(algo='DQN',                 # Algorithm
+    pop = initialPopulation(algo='CQN',                 # Algorithm
                             state_dim=state_dim,        # State dimension
                             action_dim=action_dim,      # Action dimension
                             one_hot=one_hot,            # One-hot encoding
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
                             population_size=INIT_HP['POPULATION_SIZE'], # Population size
-                            device=torch.device("cuda"))
+                            device=device)
     
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
-                          device=torch.device("cuda"))
+                          device=device)
     
     print('Filling replay buffer with dataset...')
     # Save transitions to replay buffer
@@ -73,14 +74,15 @@ if __name__ == '__main__':
         action = dataset['actions'][i]
         reward = dataset['rewards'][i]
         done = bool(dataset['terminals'][i])
-        memory.save2memory(state, action, reward, next_state, done)
+        # Save experience to replay buffer
+        memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
                                      population_size=6,  # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
 
-    mutations = Mutations(algo='DQN',                           # Algorithm
+    mutations = Mutations(algo='CQN',                           # Algorithm
                           no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
@@ -91,7 +93,7 @@ if __name__ == '__main__':
                           mutation_sd=0.1,                      # Mutation strength
                           arch=NET_CONFIG['arch'],              # Network architecture
                           rand_seed=1,                          # Random seed
-                          device=torch.device("cuda"))
+                          device=device)
 
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
