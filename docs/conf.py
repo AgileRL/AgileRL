@@ -35,7 +35,6 @@ templates_path = ['_templates']
 
 html_theme = 'furo'
 html_static_path = ['_static']
-html_logo = "https://user-images.githubusercontent.com/47857277/223126514-8b3131a2-1fde-4a6e-bb93-e12eb45af785.png"
 html_theme_options = {
     "sidebar_hide_name": True,
     "light_logo": "logo_teal.png",
