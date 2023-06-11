@@ -81,8 +81,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == '__main__':
     INIT_HP = {
-        'ENV_NAME': 'LunarLander-v2',   # Gym environment name
-        'ALGO': 'DDPG',                  # Algorithm
+        'ENV_NAME': 'LunarLanderContinuous-v2',   # Gym environment name
+        'ALGO': 'TD3',                  # Algorithm
         #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
@@ -100,7 +100,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': False                   # Log with Weights and Biases
+        'WANDB': True                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
