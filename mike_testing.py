@@ -102,7 +102,6 @@ if __name__ == '__main__':
     # TRAINING LOOP
     for idx_epi in range(max_episodes):
         for agent in pop:   # Loop through population
-            print('hello from line 105')
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
             for idx_step in range(max_steps):
@@ -125,7 +124,6 @@ if __name__ == '__main__':
 
                 state = next_state
                 score += reward
-            print(score)
         # Update epsilon for exploration
         epsilon = max(eps_end, epsilon * eps_decay)
 
