@@ -1,49 +1,73 @@
+import gymnasium as gym
+import torch
 from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+
 import numpy as np
-import torch
 
 if __name__ == '__main__':
+    # 1. Device agnostic code
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # 2. Create environment and vectorise
+    env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=4)
+
+    # 3. Set-up state_dim and action_dim variables
+    try:
+        state_dim = env.single_observation_space.n          # Discrete observation space
+        one_hot = True                                      # Requires one-hot encoding
+    except:
+        state_dim = env.single_observation_space.shape      # Continuous observation space
+        one_hot = False                                     # Does not require one-hot encoding
+    try:
+        action_dim = env.single_action_space.n              # Discrete action space
+    except:
+        action_dim = env.single_action_space.shape[0]       # Continuous action space
+
+    # 4. Set-up the hyperparameters and network configuration
+    # Refer to utils.utils.initialPopulation for algo + relevant HPs
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size
     }
-
     INIT_HP = {
-        'DOUBLE': True,         # Use double Q-learning
         'BATCH_SIZE': 128,      # Batch size
         'LR': 1e-3,             # Learning rate
         'GAMMA': 0.99,          # Discount factor
         'LEARN_STEP': 1,        # Learning frequency
         'TAU': 1e-3,            # For soft update of target network parameters
+        'POLICY_FREQ':2,
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False
     }
-
-    pop = initialPopulation(algo='DDPG',             # Algorithm
-                            state_dim=(8,),            # State dimension
-                            action_dim=4,           # Action dimension
-                            one_hot=False,          # One-hot encoding
+    
+    # 5. Create a population of DDPG algos
+    pop = initialPopulation(algo='TD3',            # Algorithm
+                            state_dim=state_dim,    # State dimension
+                            action_dim=action_dim,  # Action dimension
+                            one_hot=one_hot,        # One-hot encoding
                             net_config=NET_CONFIG,  # Network configuration
                             INIT_HP=INIT_HP,        # Initial hyperparameters
-                            population_size=6,      # Population size
-                            device=torch.device(device))
+                            population_size=3,      # Population size
+                            device=torch.device(device))    
 
+    # 6. Create the replay buffer
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=4,             # Number of agent actions
+    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
-                          device=torch.device(device))
-
-    tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
+                          device=torch.device(device))  
+    
+    # 7. Create a tournament object
+    tournament = TournamentSelection(tournament_size=2, # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
-                                     population_size=6,  # Population size
+                                     population_size=3, # Population size
                                      evo_step=1)        # Evaluate using last N fitness scores
-
-    mutations = Mutations(algo='DQN',                           # Algorithm
+    
+    # 8. Create a mutations object
+    mutations = Mutations(algo='TD3',                           # Algorithm
                           no_mutation=0.4,                      # No mutation
                           architecture=0.2,                     # Architecture mutation
                           new_layer_prob=0.2,                   # New layer mutation
@@ -58,7 +82,8 @@ if __name__ == '__main__':
                           rand_seed=1,                          # Random seed
                           device=torch.device(device))
 
-    max_episodes = 1000  # Max training episodes
+    # 9 . Train the sucker 
+    max_episodes = 100  # Max training episodes
     max_steps = 500     # Max steps per episode
 
     # Exploration params
@@ -70,8 +95,6 @@ if __name__ == '__main__':
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    env = makeVectEnvs('LunarLander-v2', num_envs=8)   # Create environment
-
     print('===== AgileRL Demo =====')
     print('Verbose off. Add a progress bar to view training progress more frequently.')
     print('Training...')
@@ -79,6 +102,7 @@ if __name__ == '__main__':
     # TRAINING LOOP
     for idx_epi in range(max_episodes):
         for agent in pop:   # Loop through population
+            print('hello from line 105')
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
             for idx_step in range(max_steps):
@@ -101,13 +125,12 @@ if __name__ == '__main__':
 
                 state = next_state
                 score += reward
-
+            print(score)
         # Update epsilon for exploration
         epsilon = max(eps_end, epsilon * eps_decay)
 
         # Now evolve population if necessary
         if (idx_epi + 1) % evo_epochs == 0:
-
             # Evaluate population
             fitnesses = [
                 agent.test(
@@ -124,3 +147,6 @@ if __name__ == '__main__':
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+
+
+

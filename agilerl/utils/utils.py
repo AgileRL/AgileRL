@@ -93,6 +93,24 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
             )
             population.append(agent)
 
+    elif algo == 'TD3':
+        for idx in range(population_size):
+            agent = DDPG(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                index=idx,
+                net_config=net_config,
+                batch_size=INIT_HP['BATCH_SIZE'],
+                lr=INIT_HP['LR'],
+                learn_step=INIT_HP['LEARN_STEP'],
+                gamma=INIT_HP['GAMMA'],
+                tau=INIT_HP['TAU'],
+                policy_freq=INIT_HP['POLICY_FREQ'],
+                device=device
+            )
+            population.append(agent)
+
     return population
 
 

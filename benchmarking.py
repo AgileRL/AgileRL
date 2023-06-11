@@ -82,8 +82,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'LunarLander-v2',   # Gym environment name
-        'ALGO': 'DQN',                  # Algorithm
-        'DOUBLE': True,                 # Use double Q-learning
+        'ALGO': 'DDPG',                  # Algorithm
+        #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
@@ -94,12 +94,13 @@ if __name__ == '__main__':
         'MEMORY_SIZE': 10000,           # Max memory buffer size
         'LEARN_STEP': 1,                # Learning frequency
         'TAU': 1e-3,                    # For soft update of target parameters
+        'POLICY_FREQ': 3,
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': False                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities

@@ -470,4 +470,21 @@ class Mutations():
                 },
                 'critics': []
             }
+        elif algo == 'TD3':
+            nets = {
+                'actor': {
+                    'eval': 'actor',
+                    'target': 'actor_target',
+                    'optimizer': 'actor_optimizer'
+                },
+                'critics': [{
+                    'eval': 'critic_1',
+                    'target': 'critic_target_1',
+                    'optimizer': 'critic_1_optimizer'
+                },{
+                    'eval': 'critic_2',
+                    'target': 'critic_target_2',
+                    'optimizer': 'critic_1_optimizer'
+                }]
+            }
         return nets
