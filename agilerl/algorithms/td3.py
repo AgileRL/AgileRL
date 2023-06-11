@@ -298,10 +298,12 @@ class TD3():
         elif self.net_config['arch'] == 'cnn':
             q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
             q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
+
+
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
         # Why is there no 'dones' incoroporated here
-        y_j = rewards + (self.gamma * q_value_next_state).detach()
+        y_j = rewards + ((1- dones)*self.gamma * q_value_next_state).detach()
 
         # Loss equation needs to be updated to account for two q_values from two critics
         critic_loss = self.criterion(q_value_1, y_j) + self.criterion(q_value_2, y_j) 

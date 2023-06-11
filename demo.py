@@ -23,8 +23,8 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False
     }
 
-    pop = initialPopulation(algo='DDPG',             # Algorithm
-                            state_dim=(8,),            # State dimension
+    pop = initialPopulation(algo='DQN',             # Algorithm
+                            state_dim=(8,),         # State dimension
                             action_dim=4,           # Action dimension
                             one_hot=False,          # One-hot encoding
                             net_config=NET_CONFIG,  # Network configuration
