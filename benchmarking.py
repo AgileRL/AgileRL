@@ -88,7 +88,7 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 2000,               # Max no. episodes
+        'EPISODES': 200,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
