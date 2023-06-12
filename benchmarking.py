@@ -85,13 +85,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'LunarLanderContinuous-v2',   # Gym environment name
-        'ALGO': 'TD3v2',                  # Algorithm
+        'ALGO': 'TD3',                  # Algorithm
         #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 2,               # Max no. episodes
+        'EPISODES': 400,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
@@ -103,7 +103,7 @@ if __name__ == '__main__':
         'POP_SIZE': 1,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': True                  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
