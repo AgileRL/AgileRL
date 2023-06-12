@@ -82,7 +82,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'LunarLanderContinuous-v2',   # Gym environment name
-        'ALGO': 'DDPG',                  # Algorithm
+        'ALGO': 'TD3',                  # Algorithm
         #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
