@@ -12,6 +12,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print(f'DEVICE: {device}')
 
     env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
+    max_action = float(env.single_action_space.high[0])
+    print(max_action)
+    INIT_HP["MAX_ACTION"] = max_action
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -68,7 +71,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                        evo_loop=1,
                                        target=INIT_HP['TARGET_SCORE'],
                                        tournament=tournament,
-                                       mutation=mutations,
+                                       mutation=None,#mutations,
                                        wb=INIT_HP['WANDB'],
                                        device=device)
 
@@ -82,13 +85,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'LunarLanderContinuous-v2',   # Gym environment name
-        'ALGO': 'TD3',                  # Algorithm
+        'ALGO': 'TD3v2',                  # Algorithm
         #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 200,               # Max no. episodes
+        'EPISODES': 2,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
@@ -97,7 +100,7 @@ if __name__ == '__main__':
         'POLICY_FREQ': 3,
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
-        'POP_SIZE': 2,                  # Population size
+        'POP_SIZE': 1,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
         'WANDB': True                   # Log with Weights and Biases
