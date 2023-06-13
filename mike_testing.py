@@ -189,11 +189,12 @@ def agent_test():
                 net_config=NET_CONFIG,
                 batch_size=100,
                 tau=0.005,
-                lr = 0.001)
+                lr = 0.001,
+                device=torch.device(device))
     
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        action_dim, 100000, field_names=field_names, device=device)
+        action_dim, 100000, field_names=field_names, device=torch.device(device))
 
     np.random.seed(0)
     score_history = []
