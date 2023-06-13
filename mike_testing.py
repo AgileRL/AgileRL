@@ -4,7 +4,7 @@ from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.algorithms.td3 import TD3, TD3v2
+from agilerl.algorithms.td3 import TD3
 from agilerl.algorithms.ddpg import DDPG
 
 import numpy as np
@@ -181,7 +181,7 @@ def agent_test():
       'h_size': [400, 300]  # Network hidden size
     }
 
-    agent = TD3v2(state_dim=state_dim,
+    agent = TD3(state_dim=state_dim,
                 action_dim=action_dim,
                 one_hot=False,
                 max_action=max_action,
