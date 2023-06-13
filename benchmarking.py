@@ -91,12 +91,12 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 100,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 200,               # Max no. episodes
+        'EPISODES': 1000,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
         'LEARN_STEP': 1,                # Learning frequency
-        'TAU': 1e-3,                    # For soft update of target parameters
+        'TAU': 5e-3,                    # For soft update of target parameters
         'POLICY_FREQ': 3,
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection

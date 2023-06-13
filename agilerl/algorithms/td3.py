@@ -60,7 +60,7 @@ class TD3():
             lr=1e-4,
             learn_step=5,
             gamma=0.99,
-            tau=0.001,
+            tau=0.005,
             mutation=None,
             policy_freq=2,
             device='cpu'):
@@ -370,6 +370,8 @@ class TD3():
         clone = type(self)(state_dim=self.state_dim,
                            action_dim=self.action_dim,
                            one_hot=self.one_hot,
+                           max_action=self.max_action,
+                           expl_noise=self.expl_noise,
                            index=index,
                            net_config=self.net_config,
                            batch_size=self.batch_size,
@@ -431,6 +433,8 @@ class TD3():
             'gamma': self.gamma,
             'tau': self.tau,
             'mutation': self.mut,
+            'max_action':self.max_action,
+            'expl_noise':self.expl_noise,
             'index': self.index,
             'scores': self.scores,
             'fitness': self.fitness,
@@ -487,6 +491,8 @@ class TD3():
         self.gamma = checkpoint['gamma']
         self.tau = checkpoint['tau']
         self.mut = checkpoint['mutation']
+        self.max_action = checkpoint['max_action']
+        self.expl_noise = checkpoint['expl_noise']
         self.index = checkpoint['index']
         self.scores = checkpoint['scores']
         self.fitness = checkpoint['fitness']
