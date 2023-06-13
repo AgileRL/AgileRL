@@ -4,7 +4,7 @@ from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.algorithms.td3 import TD3
+from agilerl.algorithms.td3 import TD3, TD3v2
 from agilerl.algorithms.ddpg import DDPG
 
 import numpy as np
@@ -162,6 +162,8 @@ def tournament_test():
 def agent_test():
     env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=4)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    max_action = float(env.single_action_space.high[0])
+
 
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
@@ -176,15 +178,17 @@ def agent_test():
 
     NET_CONFIG = {
       'arch': 'mlp',      # Network architecture
-      'h_size': [64, 64]  # Network hidden size
+      'h_size': [400, 300]  # Network hidden size
     }
 
-    agent = TD3(state_dim=state_dim,
+    agent = TD3v2(state_dim=state_dim,
                 action_dim=action_dim,
                 one_hot=False,
+                max_action=max_action,
                 index=0,
                 net_config=NET_CONFIG,
-                batch_size=64,
+                batch_size=100,
+                tau=0.005,
                 lr = 0.001)
     
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -192,22 +196,18 @@ def agent_test():
         action_dim, 100000, field_names=field_names, device=device)
 
     np.random.seed(0)
-    best_score = env.reward_range[0]
     score_history = []
     episodes = 1000
     for i in range(episodes):
+        done = [False]
         score = 0
         state = env.reset()[0]
 
-        for idx_step in range(500):
+        while not done[0]:
             action = agent.getAction(state)
-            next_state, reward, done, _, _ = env.step(
-                    action)   # Act in environment
-
-            
-            memory.save2memoryVectEnvs(
-                    state, action, reward, next_state, done)
-
+            next_state, reward, done, _, _ = env.step(action)
+            memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                    
             # Learn according to learning frequency
             if memory.counter % agent.learn_step == 0 and len(
                     memory) >= agent.batch_size:

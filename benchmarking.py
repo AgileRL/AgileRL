@@ -85,13 +85,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'LunarLanderContinuous-v2',   # Gym environment name
-        'ALGO': 'TD3',                  # Algorithm
+        'ALGO': 'DDPG',                  # Algorithm
         #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 400,               # Max no. episodes
+        'EPISODES': 500,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size

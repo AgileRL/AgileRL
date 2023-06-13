@@ -555,7 +555,7 @@ class TD3v2():
             lr=1e-4,
             learn_step=5,
             gamma=0.99,
-            tau=1e-3,
+            tau=0.001,
             mutation=None,
             policy_freq=2,
             device='cpu'):
