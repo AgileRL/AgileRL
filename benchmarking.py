@@ -71,7 +71,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                        evo_loop=1,
                                        target=INIT_HP['TARGET_SCORE'],
                                        tournament=tournament,
-                                       mutation=None,#mutations,
+                                       mutation=mutations,
                                        wb=INIT_HP['WANDB'],
                                        device=device)
 
@@ -89,18 +89,18 @@ if __name__ == '__main__':
         #'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
-        'BATCH_SIZE': 100,              # Batch size
+        'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
         'EPISODES': 1000,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
         'LEARN_STEP': 1,                # Learning frequency
-        'TAU': 5e-3,                    # For soft update of target parameters
+        'TAU': 1e-3,                    # For soft update of target parameters
         'POLICY_FREQ': 3,
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
-        'POP_SIZE': 1,                  # Population size
+        'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
         'WANDB': True                  # Log with Weights and Biases
@@ -121,7 +121,7 @@ if __name__ == '__main__':
 
     NET_CONFIG = {
         'arch': 'mlp',      # Network architecture
-        'h_size': [400, 300],    # Actor hidden size
+        'h_size': [32, 32],    # Actor hidden size
     }
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
