@@ -12,8 +12,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print(f'DEVICE: {device}')
 
     env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
-    max_action = float(env.single_action_space.high[0])
-    INIT_HP["MAX_ACTION"] = max_action
 
     try:
         state_dim = env.single_observation_space.n
@@ -28,6 +26,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
+    if INIT_HP['ALGO'] == 'TD3':
+        max_action = float(env.single_action_space.high[0])
+        INIT_HP["MAX_ACTION"] = max_action
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
