@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 if __name__ == '__main__':
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size

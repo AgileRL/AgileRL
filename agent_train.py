@@ -23,7 +23,7 @@ def plot_learning_curve(x, scores):
 
 def agent_test():
     env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=4)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     max_action = float(env.single_action_space.high[0])
 
 
