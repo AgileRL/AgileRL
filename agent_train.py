@@ -1,11 +1,7 @@
-import gymnasium as gym
 import torch
-from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.hpo.mutation import Mutations
 from agilerl.algorithms.td3 import TD3
-from agilerl.algorithms.ddpg import DDPG
+from agilerl.utils.utils import makeVectEnvs
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,12 +26,12 @@ def agent_test():
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
-    except:
+    except BaseException:
         state_dim = env.single_observation_space.shape      # Continuous observation space
         one_hot = False                                     # Does not require one-hot encoding
     try:
         action_dim = env.single_action_space.n              # Discrete action space
-    except:
+    except BaseException:
         action_dim = env.single_action_space.shape[0]       # Continuous action space
 
     NET_CONFIG = {
@@ -45,7 +41,7 @@ def agent_test():
 
     agent = TD3(state_dim=state_dim,
                 action_dim=action_dim,
-                one_hot=False,
+                one_hot=one_hot,
                 max_action=max_action,
                 index=0,
                 net_config=NET_CONFIG,

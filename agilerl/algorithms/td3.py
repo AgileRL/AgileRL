@@ -9,7 +9,7 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 
 class TD3():
     ### Change the documentation
-    """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
+    """The TD3 algorithm class. DDPG paper: https://arxiv.org/abs/1802.09477 
 
     :param state_dim: State observation dimension
     :type state_dim: int
