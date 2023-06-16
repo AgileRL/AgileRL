@@ -99,7 +99,6 @@ if __name__ == '__main__':
         'MEMORY_SIZE': 10000,           # Max memory buffer size
         'LEARN_STEP': 1,                # Learning frequency
         'TAU': 1e-3,                    # For soft update of target parameters
-        'POLICY_FREQ': 3,
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
         'POP_SIZE': 6,                  # Population size
