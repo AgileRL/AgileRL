@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 if __name__ == '__main__':
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size
@@ -23,19 +24,19 @@ if __name__ == '__main__':
     }
 
     pop = initialPopulation(algo='DQN',             # Algorithm
-                            state_dim=(8,),            # State dimension
+                            state_dim=(8,),         # State dimension
                             action_dim=4,           # Action dimension
                             one_hot=False,          # One-hot encoding
                             net_config=NET_CONFIG,  # Network configuration
                             INIT_HP=INIT_HP,        # Initial hyperparameters
                             population_size=6,      # Population size
-                            device=torch.device("cuda"))
+                            device=torch.device(device))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(action_dim=4,             # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
-                          device=torch.device("cuda"))
+                          device=torch.device(device))
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -55,7 +56,7 @@ if __name__ == '__main__':
                           # Network architecture
                           arch=NET_CONFIG['arch'],
                           rand_seed=1,                          # Random seed
-                          device=torch.device("cuda"))
+                          device=torch.device(device))
 
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode

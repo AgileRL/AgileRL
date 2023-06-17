@@ -154,6 +154,7 @@ def train(
 
             if wb:
                 wandb.log({"global_step": total_steps,
+                           "episode": idx_epi + 1,
                            "eval/mean_score": np.mean(mean_scores),
                            "eval/mean_reward": np.mean(fitnesses),
                            "eval/best_fitness": np.max(fitnesses)})

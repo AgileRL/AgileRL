@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ddpg import DDPG
-
+from agilerl.algorithms.td3 import TD3
 
 def makeVectEnvs(env_name, num_envs=1):
     """Returns async-vectorized gym environments.
@@ -89,6 +89,25 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 double=INIT_HP['DOUBLE'],
+                device=device
+            )
+            population.append(agent)
+
+    elif algo == 'TD3':
+        for idx in range(population_size):
+            agent = TD3(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                max_action=INIT_HP['MAX_ACTION'],
+                index=idx,
+                net_config=net_config,
+                batch_size=INIT_HP['BATCH_SIZE'],
+                lr=INIT_HP['LR'],
+                learn_step=INIT_HP['LEARN_STEP'],
+                gamma=INIT_HP['GAMMA'],
+                tau=INIT_HP['TAU'],
+                policy_freq=INIT_HP['POLICY_FREQ'],
                 device=device
             )
             population.append(agent)

@@ -209,6 +209,10 @@ class Mutations():
         if individual.algo == 'DDPG':   # Needs to stay tanh for DDPG continuous actions
             individual.mut = 'None'
             return individual
+        
+        if individual.algo == 'TD3':   # Needs to stay tanh for TD3 continuous actions
+            individual.mut = 'None'
+            return individual
 
         # Mutate network activation layer
         offspring_actor = getattr(individual, self.algo['actor']['eval'])
@@ -469,5 +473,22 @@ class Mutations():
                     'optimizer': 'optimizer'
                 },
                 'critics': []
+            }
+        elif algo == 'TD3':
+            nets = {
+                'actor': {
+                    'eval': 'actor',
+                    'target': 'actor_target',
+                    'optimizer': 'actor_optimizer'
+                },
+                'critics': [{
+                    'eval': 'critic_1',
+                    'target': 'critic_target_1',
+                    'optimizer': 'critic_1_optimizer'
+                },{
+                    'eval': 'critic_2',
+                    'target': 'critic_target_2',
+                    'optimizer': 'critic_2_optimizer'
+                }]
             }
         return nets

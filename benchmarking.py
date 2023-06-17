@@ -12,6 +12,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print(f'DEVICE: {device}')
 
     env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
+
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -25,6 +26,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
+    if INIT_HP['ALGO'] == 'TD3':
+        max_action = float(env.single_action_space.high[0])
+        INIT_HP["MAX_ACTION"] = max_action
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -88,7 +93,7 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 2000,               # Max no. episodes
+        'EPISODES': 1000,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
@@ -99,7 +104,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': True                  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
