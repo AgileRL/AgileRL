@@ -1,20 +1,24 @@
 from agilerl.utils.utils import makeVectEnvs, initialPopulation
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
+from agilerl.components.sampler import Sampler
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from accelerate import Accelerator
 import h5py
 import numpy as np
+import os
 from torch.utils.data import DataLoader
 from tqdm import trange
 
 if __name__ == '__main__':
 
-    print('===== AgileRL Offline Distributed Demo =====')
-    
-    print('Loading accelerator...')
     accelerator = Accelerator()
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print('===== AgileRL Offline Distributed Demo =====')
+    accelerator.wait_for_everyone()
 
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
@@ -82,8 +86,11 @@ if __name__ == '__main__':
     
     # Create dataloader from replay buffer
     replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
-    replay_dataloader = DataLoader(replay_dataset)
+    replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)
+    sampler = Sampler(distributed=True, 
+                      dataset=replay_dataset, 
+                      dataloader=replay_dataloader)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -109,15 +116,21 @@ if __name__ == '__main__':
     evo_epochs = 5      # Evolution frequency
     evo_loop = 1        # Number of evaluation episodes
 
-    print('Training...')
+    accel_temp_models_path = 'models/{}'.format('CartPole-v1')
+    if accelerator.is_main_process:
+        if not os.path.exists(accel_temp_models_path):
+            os.makedirs(accel_temp_models_path)
+
+    print(f'\nDistributed training on {accelerator.device}...')
 
     # TRAINING LOOP
     for idx_epi in trange(max_episodes):
+        if accelerator is not None:
+            accelerator.wait_for_everyone() 
         for agent in pop:   # Loop through population
             for idx_step in range(max_steps):
                 # Sample dataloader
-                replay_dataset.batch_size = agent.batch_size
-                experiences = next(iter(replay_dataloader))
+                experiences = sampler.sample(agent.batch_size)
                 # Learn according to agent's RL algorithm
                 agent.learn(experiences)
 
@@ -137,5 +150,19 @@ if __name__ == '__main__':
             print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
             # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
+            accelerator.wait_for_everyone()
+            for model in pop:
+                model.unwrap_models()
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                elite, pop = tournament.select(pop)
+                pop = mutations.mutation(pop)
+                for pop_i, model in enumerate(pop):
+                    model.saveCheckpoint(f'{accel_temp_models_path}/CQN_{pop_i}.pt')
+            accelerator.wait_for_everyone()
+            if not accelerator.is_main_process:
+                for pop_i, model in enumerate(pop):
+                    model.loadCheckpoint(f'{accel_temp_models_path}/CQN_{pop_i}.pt')
+            accelerator.wait_for_everyone()
+            for model in pop:
+                model.wrap_models()
