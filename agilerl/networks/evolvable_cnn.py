@@ -289,9 +289,7 @@ class EvolvableCNN(nn.Module):
                     hidden_size=self.hidden_size,
                     name="value")
             advantage_net = None
-            if self.accelerator is not None:
-                feature_net, value_net = self.accelerator.prepare(feature_net, value_net)
-            else:
+            if self.accelerator is None:
                 self.feature_net, self.value_net, = feature_net.to(self.device), \
                     value_net.to(self.device)
 

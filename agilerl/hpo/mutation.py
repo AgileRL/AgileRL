@@ -112,14 +112,8 @@ class Mutations():
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
 
-            # if self.accelerator is not None:
-            #     individual.unwrap_models()
-
             # Call mutation function for each individual
             individual = mutation(individual)
-
-            # if self.accelerator is not None:
-            #     individual.wrap_models()
 
             offspring_actor = getattr(individual, self.algo['actor']['eval'])
 

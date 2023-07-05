@@ -162,8 +162,6 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
-        accelerator.wait_for_everyone()
-
         # Update epsilon for exploration
         epsilon = max(eps_end, epsilon * eps_decay)
 

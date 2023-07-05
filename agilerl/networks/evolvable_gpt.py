@@ -41,6 +41,8 @@ class EvolvableGPT(nn.Module):
     :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
 
     def __init__(
@@ -58,7 +60,8 @@ class EvolvableGPT(nn.Module):
             max_layers: int = 16,
             bias: bool = True,
             stored_values = None,
-            device='cpu'):
+            device='cpu',
+            accelerator=None):
         super(EvolvableGPT, self).__init__()
 
         self.n_layer = n_layer
@@ -73,8 +76,8 @@ class EvolvableGPT(nn.Module):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.bias = bias
-
         self.device = device
+        self.accelerator = accelerator
 
         self.transformer = self.create_net()
         self.transformer_keys = list(self.transformer.keys())

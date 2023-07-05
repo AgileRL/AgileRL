@@ -1,10 +1,10 @@
 import random
 import copy
+import dill
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import dill
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 
@@ -42,6 +42,8 @@ class DQN():
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :type wrap: bool, optional
     """
 
     def __init__(self, state_dim, action_dim, one_hot, index=0, 
@@ -109,10 +111,9 @@ class DQN():
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         if self.accelerator is not None:
+            self.optimizer = self.optimizer_type
             if wrap:
-                self.wrap_models()
-            else:
-                self.optimizer = self.optimizer_type
+                self.wrap_models()       
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
@@ -150,12 +151,6 @@ class DQN():
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-
-            # if self.accelerator is not None:
-            #     print(action_values)
-            #     action_values = self.accelerator.gather_for_metrics(action_values)
-            #     print(action_values)
-            #     print(a)
 
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
@@ -271,17 +266,18 @@ class DQN():
                            accelerator=self.accelerator,
                            wrap=wrap)
 
-        if self.accelerator is not None:
-            self.unwrap_models()
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        clone.optimizer_type = optimizer
         if self.accelerator is not None:
             if wrap:
                 clone.actor, clone.actor_target, clone.optimizer = self.accelerator.prepare(
                                                                                         actor, 
                                                                                         actor_target,
                                                                                         optimizer)
+            else:
+                clone.actor, clone.actor_target, clone.optimizer = actor, actor_target, optimizer
         else:
             clone.actor = actor.to(self.device)
             clone.actor_target = actor_target.to(self.device)
@@ -296,7 +292,7 @@ class DQN():
         if self.accelerator is not None:
             self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(self.actor, 
                                                                             self.actor_target, 
-                                                                            self.optimizer_type)
+                                                                            self.optimizer)
     
     def unwrap_models(self):
         if self.accelerator is not None:
