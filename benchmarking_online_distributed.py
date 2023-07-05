@@ -15,7 +15,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         print('============ AgileRL Distributed ============')
     accelerator.wait_for_everyone()
 
-    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=4)
+    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
