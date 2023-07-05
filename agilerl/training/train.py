@@ -124,10 +124,6 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
     pop_fitnesses = []
     total_steps = 0
 
-
-    #############
-    max_steps=5
-
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
