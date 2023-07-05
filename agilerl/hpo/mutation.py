@@ -112,8 +112,14 @@ class Mutations():
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
 
+            # if self.accelerator is not None:
+            #     individual.unwrap_models()
+
             # Call mutation function for each individual
             individual = mutation(individual)
+
+            # if self.accelerator is not None:
+            #     individual.wrap_models()
 
             offspring_actor = getattr(individual, self.algo['actor']['eval'])
 
@@ -122,8 +128,7 @@ class Mutations():
             ind_target = type(offspring_actor)(**offspring_actor.init_dict)
             ind_target.load_state_dict(offspring_actor.state_dict())
             if self.accelerator is not None:
-                setattr(individual, self.algo['actor']['target'], 
-                        self.accelerator.prepare(ind_target))
+                setattr(individual, self.algo['actor']['target'], ind_target)
             else:
                 setattr(individual, self.algo['actor']['target'], 
                         ind_target.to(self.device))
@@ -136,8 +141,7 @@ class Mutations():
                     **offspring_critic.init_dict)
                 ind_target.load_state_dict(offspring_critic.state_dict())
                 if self.accelerator is not None:
-                    setattr(individual, critic['target'],
-                            self.accelerator.prepare(ind_target))
+                    setattr(individual, critic['target'], ind_target)
                 else:
                     setattr(individual, critic['target'],
                             ind_target.to(self.device))
@@ -181,8 +185,7 @@ class Mutations():
             if self.accelerator is not None:
                 setattr(individual, 
                         self.algo['actor']['optimizer'].replace('_type', ''), 
-                        self.accelerator.prepare(type(actor_opt)(net_params, 
-                                                                lr=individual.lr)))
+                        type(actor_opt)(net_params, lr=individual.lr))
             else:
                 setattr(individual, 
                         self.algo['actor']['optimizer'].replace('_type', ''), 
@@ -195,8 +198,7 @@ class Mutations():
                 if self.accelerator is not None:
                     setattr(individual, 
                             critic['optimizer'].replace('_type', ''), 
-                            self.accelerator.prepare(type(critic_opt)(net_params, 
-                                                                    lr=individual.lr)))
+                            type(critic_opt)(net_params, lr=individual.lr))
                 else:
                     setattr(individual, 
                             critic['optimizer'].replace('_type', ''), 
@@ -229,7 +231,7 @@ class Mutations():
             offspring_actor)   # Mutate activation function
         if self.accelerator is not None:
             setattr(individual, self.algo['actor']
-                    ['eval'], self.accelerator.prepare(offspring_actor))
+                    ['eval'], offspring_actor)
         else:
             setattr(individual, self.algo['actor']
                     ['eval'], offspring_actor.to(self.device))
@@ -239,8 +241,7 @@ class Mutations():
             offspring_critic = getattr(individual, critic['eval'])
             offspring_critic = self._permutate_activation(offspring_critic)
             if self.accelerator is not None:
-                setattr(individual, critic['eval'],
-                        self.accelerator.prepare(offspring_critic))
+                setattr(individual, critic['eval'], offspring_critic)
             else:
                 setattr(individual, critic['eval'],
                         offspring_critic.to(self.device))
@@ -270,9 +271,7 @@ class Mutations():
         new_network.load_state_dict(network.state_dict())
         network = new_network
 
-        if self.accelerator is not None:
-            network = self.accelerator.prepare(network)
-        else:
+        if self.accelerator is None:
             network = network.to(self.device)
 
         return network
@@ -288,8 +287,7 @@ class Mutations():
         offspring_actor = self.classic_parameter_mutation(
             offspring_actor)  # Network parameter mutation function
         if self.accelerator is not None:
-            setattr(individual, self.algo['actor']
-                    ['eval'], self.accelerator.prepare(offspring_actor))
+            setattr(individual, self.algo['actor']['eval'], offspring_actor)
         else:
             setattr(individual, self.algo['actor']
                     ['eval'], offspring_actor.to(self.device))
@@ -353,9 +351,7 @@ class Mutations():
                 W[ind_dim1, ind_dim2] = self.regularize_weight(
                     W[ind_dim1, ind_dim2].item(), 1000000)
         
-        if self.accelerator is not None:
-            network = self.accelerator.prepare(network)
-        else:
+        if self.accelerator is None:
             network = network.to(self.device)
 
         return network
@@ -451,15 +447,13 @@ class Mutations():
                         offspring_critic.remove_node(**node_dict)
 
         if self.accelerator is not None:
-            setattr(individual, self.algo['actor']
-                    ['eval'], self.accelerator.prepare(offspring_actor))
+            setattr(individual, self.algo['actor']['eval'], offspring_actor)
         else:
             setattr(individual, self.algo['actor']
                     ['eval'], offspring_actor.to(self.device))
         for offspring_critic, critic in zip(offspring_critics, self.algo['critics']):
             if self.accelerator is not None:
-                setattr(individual, critic['eval'],
-                        self.accelerator.prepare(offspring_critic))
+                setattr(individual, critic['eval'], offspring_critic)
             else:
                 setattr(individual, critic['eval'],
                         offspring_critic.to(self.device))

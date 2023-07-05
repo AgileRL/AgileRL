@@ -197,8 +197,6 @@ class DDPG():
         else:
             self.actor.eval()
             with torch.no_grad():
-                if self.accelerator is not None:
-                    state = state.to(self.accelerator.device)
                 action_values = self.actor(state)
             self.actor.train()
 

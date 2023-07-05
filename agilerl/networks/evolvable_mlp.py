@@ -116,9 +116,7 @@ class EvolvableMLP(nn.Module):
             
         net = nn.Sequential(net_dict)
             
-        if self.accelerator is not None:
-            net = self.accelerator.prepare(net)
-        else:
+        if self.accelerator is None:
             net = net.to(self.device)
 
         return net

@@ -5,13 +5,17 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train import train
 
+
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
-    print('============ AgileRL ============')
     
-    print('Loading accelerator...')
     accelerator = Accelerator()
 
-    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print('============ AgileRL Distributed ============')
+    accelerator.wait_for_everyone()
+
+    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=4)
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -82,7 +86,7 @@ if __name__ == '__main__':
         'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
-        'BATCH_SIZE': 256,              # Batch size
+        'BATCH_SIZE': 2,                # Batch size
         'LR': 1e-3,                     # Learning rate
         'EPISODES': 2000,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
@@ -92,10 +96,10 @@ if __name__ == '__main__':
         'TAU': 1e-3,                    # For soft update of target parameters
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
-        'POP_SIZE': 6,                  # Population size
+        'POP_SIZE': 2,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': False #True                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
