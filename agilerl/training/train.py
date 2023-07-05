@@ -111,9 +111,9 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
     epsilon = eps_start
 
     if accelerator is not None:
-        print(f'Distributed training on {accelerator.device}...')
+        print(f'\nDistributed training on {accelerator.device}...')
     else:
-        print(f'Training...')
+        print(f'\nTraining...')
 
     bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
     if accelerator is not None:
@@ -127,7 +127,7 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
-            accelerator.wait_for_everyone()        
+            accelerator.wait_for_everyone()   
         for agent in pop:   # Loop through population            
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
@@ -243,8 +243,15 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
         # Save model checkpoint
         if checkpoint is not None:
             if (idx_epi + 1) % checkpoint == 0:
-                for i, agent in enumerate(pop):
-                    agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                    if not accelerator.is_main_process:
+                        for i, agent in enumerate(pop):
+                            agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                    accelerator.wait_for_everyone()
+                else:
+                    for i, agent in enumerate(pop):
+                        agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
 
     if wb:
         if accelerator is not None:
