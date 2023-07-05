@@ -8,10 +8,13 @@ from agilerl.training.train_offline import train
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
-    print('============ AgileRL ============')
     
-    print('Loading accelerator...')
     accelerator = Accelerator()
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print('============ AgileRL Distributed ============')
+    accelerator.wait_for_everyone()
 
     env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=1)
     try:

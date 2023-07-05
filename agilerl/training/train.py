@@ -103,8 +103,7 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
         replay_dataloader = accelerator.prepare(replay_dataloader)
         sampler = Sampler(distributed=True, 
                           dataset=replay_dataset, 
-                          dataloader=replay_dataloader,
-                          accelerator=accelerator)
+                          dataloader=replay_dataloader)
     else:
         sampler = Sampler(distributed=False, memory=memory)
 
