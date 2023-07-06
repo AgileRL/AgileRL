@@ -53,17 +53,33 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
     :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
     if wb:
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project="AgileRL",
-            name="{}-EvoHPO-{}-{}".format(env_name, algo,
-                                          datetime.now().strftime("%m%d%Y%H%M%S")),
-            # track hyperparameters and run metadata
-            config={
-                "algo": "Evo HPO {}".format(algo),
-                "env": env_name,
-            }
-        )
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                wandb.init(
+                    # set the wandb project where this run will be logged
+                    project="AgileRL",
+                    name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                                                datetime.now().strftime("%m%d%Y%H%M%S")),
+                    # track hyperparameters and run metadata
+                    config={
+                        "algo": "Evo HPO {}".format(algo),
+                        "env": env_name,
+                    }
+                )
+            accelerator.wait_for_everyone()
+        else:
+            wandb.init(
+                    # set the wandb project where this run will be logged
+                    project="AgileRL",
+                    name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                                                datetime.now().strftime("%m%d%Y%H%M%S")),
+                    # track hyperparameters and run metadata
+                    config={
+                        "algo": "Evo HPO {}".format(algo),
+                        "env": env_name,
+                    }
+                )
 
     if accelerator is not None:
         accel_temp_models_path = 'models/{}'.format(env_name)
@@ -104,7 +120,12 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
         done = bool(dataset['terminals'][i])
         # Save experience to replay buffer
         memory.save2memory(state, action, reward, next_state, done)
-    print('Loaded buffer.')
+    if accelerator is not None:
+        if accelerator.is_main_process:
+            print('Loaded buffer.')
+        accelerator.wait_for_everyone()
+    else:
+        print('Loaded buffer.')
 
     if accelerator is not None:
         # Create dataloader from replay buffer
