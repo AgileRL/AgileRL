@@ -144,6 +144,33 @@ class Mutations():
 
         return mutated_population
 
+    def reinit_opt(self, individual):
+        # Reinitialise optimizer
+        actor_opt = getattr(individual, self.algo['actor']['optimizer'])
+        net_params = getattr(
+            individual, self.algo['actor']['eval']).parameters()
+        if self.accelerator is not None:
+            setattr(individual, 
+                    self.algo['actor']['optimizer'].replace('_type', ''), 
+                    type(actor_opt)(net_params, lr=individual.lr))
+        else:
+            setattr(individual, 
+                    self.algo['actor']['optimizer'].replace('_type', ''), 
+                    type(actor_opt)(net_params, lr=individual.lr))
+
+        # If algorithm has critics, reinitialise their optimizers too
+        for critic in self.algo['critics']:
+            critic_opt = getattr(individual, critic['optimizer'])
+            net_params = getattr(individual, critic['eval']).parameters()
+            if self.accelerator is not None:
+                setattr(individual, 
+                        critic['optimizer'].replace('_type', ''), 
+                        type(critic_opt)(net_params, lr=individual.lr))
+            else:
+                setattr(individual, 
+                        critic['optimizer'].replace('_type', ''), 
+                        type(critic_opt)(net_params, lr=individual.lr))
+
     def rl_hyperparam_mutation(self, individual):
         """Returns individual from population with RL hyperparameter mutation.
 
@@ -173,30 +200,7 @@ class Mutations():
                 individual.lr = min(0.005, max(0.00001, individual.lr * 0.8))
 
             # Reinitialise optimizer if new learning rate
-            actor_opt = getattr(individual, self.algo['actor']['optimizer'])
-            net_params = getattr(
-                individual, self.algo['actor']['eval']).parameters()
-            if self.accelerator is not None:
-                setattr(individual, 
-                        self.algo['actor']['optimizer'].replace('_type', ''), 
-                        type(actor_opt)(net_params, lr=individual.lr))
-            else:
-                setattr(individual, 
-                        self.algo['actor']['optimizer'].replace('_type', ''), 
-                        type(actor_opt)(net_params, lr=individual.lr))
-
-            # If algorithm has critics, reinitialise their optimizers too
-            for critic in self.algo['critics']:
-                critic_opt = getattr(individual, critic['optimizer'])
-                net_params = getattr(individual, critic['eval']).parameters()
-                if self.accelerator is not None:
-                    setattr(individual, 
-                            critic['optimizer'].replace('_type', ''), 
-                            type(critic_opt)(net_params, lr=individual.lr))
-                else:
-                    setattr(individual, 
-                            critic['optimizer'].replace('_type', ''), 
-                            type(critic_opt)(net_params, lr=individual.lr))
+            self.reinit_opt(individual)
             individual.mut = 'lr'
 
         elif mutate_param == 'learn_step':
@@ -452,6 +456,7 @@ class Mutations():
                 setattr(individual, critic['eval'],
                         offspring_critic.to(self.device))
 
+        self.reinit_opt(individual) # Reinitialise optimizer
         individual.mut = 'arch'
         return individual
 
