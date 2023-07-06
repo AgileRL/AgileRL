@@ -122,6 +122,8 @@ class EvolvableCNN(nn.Module):
     :type rainbow: bool, optional
     :param critic: CNN is a critic network, defaults to False
     :type critic: bool, optional
+    :param normalize: Normalize CNN inputs, defaults to True
+    :type normalize: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -143,6 +145,7 @@ class EvolvableCNN(nn.Module):
             stored_values=None,
             rainbow=False,
             critic=False,
+            normalize=True,
             device='cpu',
             accelerator=None):
 
@@ -160,6 +163,7 @@ class EvolvableCNN(nn.Module):
         self.layer_norm = layer_norm
         self.rainbow = rainbow
         self.critic = critic
+        self.normalize = normalize
         self.device = device
         self.accelerator = accelerator
 
@@ -167,8 +171,7 @@ class EvolvableCNN(nn.Module):
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
         
         if stored_values is not None:
-            self.inject_parameters(
-                pvec=stored_values, without_layer_norm=False)
+            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -318,7 +321,9 @@ class EvolvableCNN(nn.Module):
             x = torch.FloatTensor(x)
 
         batch_size = x.size(0)
-        x = x / 255.
+        
+        if self.normalize:
+            x = x / 255.
 
         x = self.feature_net(x)
         x = x.reshape(batch_size, -1)
