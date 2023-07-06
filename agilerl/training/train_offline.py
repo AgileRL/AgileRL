@@ -74,7 +74,13 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
     save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
     
-    print('Filling replay buffer with dataset...')
+    if accelerator is not None:
+        if accelerator.is_main_process:
+            print('Filling replay buffer with dataset...')
+        accelerator.wait_for_everyone()
+    else:
+        print('Filling replay buffer with dataset...')
+
     # Save transitions to replay buffer
     dataset_length = dataset['rewards'].shape[0]
     # for i in trange(dataset_length-1):
