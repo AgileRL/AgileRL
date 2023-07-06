@@ -269,7 +269,8 @@ class CQN():
                            tau=self.tau,
                            mutation=self.mut,
                            device=self.device,
-                           accelerator=self.accelerator)
+                           accelerator=self.accelerator,
+                           wrap=wrap)
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
