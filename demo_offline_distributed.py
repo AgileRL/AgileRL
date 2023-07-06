@@ -72,9 +72,10 @@ if __name__ == '__main__':
     if accelerator.is_main_process:
         print('Filling replay buffer with dataset...')
     accelerator.wait_for_everyone()
-    
+
     # Save transitions to replay buffer
     dataset_length = dataset['rewards'].shape[0]
+    
     for i in trange(dataset_length-1):
         state = dataset['observations'][i]
         next_state = dataset['observations'][i+1]
