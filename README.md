@@ -61,6 +61,10 @@ Demo:
 ```bash
 python demo_online.py
 ```
+or to demo distributed training:
+```bash
+python demo_online_distributed.py
+```
 
 ## Algorithms implemented (more coming soon!)
   * DQN
