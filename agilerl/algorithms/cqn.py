@@ -345,11 +345,12 @@ class CQN():
         elif self.net_config['arch'] == 'cnn':
             self.actor = EvolvableCNN(**checkpoint['actor_init_dict'])
             self.actor_target = EvolvableCNN(**checkpoint['actor_target_init_dict'])
+        self.lr = checkpoint['lr']
+        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint['actor_state_dict'])
         self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.batch_size = checkpoint['batch_size']
-        self.lr = checkpoint['lr']
         self.learn_step = checkpoint['learn_step']
         self.gamma = checkpoint['gamma']
         self.tau = checkpoint['tau']

@@ -452,6 +452,9 @@ class DDPG():
             self.actor_target = EvolvableCNN(**checkpoint['actor_target_init_dict'])
             self.critic = EvolvableCNN(**checkpoint['critic_init_dict'])
             self.critic_target = EvolvableCNN(**checkpoint['critic_target_init_dict'])
+        self.lr = checkpoint['lr']
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint['actor_state_dict'])
         self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
         self.critic.load_state_dict(checkpoint['critic_state_dict'])
@@ -459,7 +462,6 @@ class DDPG():
         self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
         self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
         self.batch_size = checkpoint['batch_size']
-        self.lr = checkpoint['lr']
         self.learn_step = checkpoint['learn_step']
         self.gamma = checkpoint['gamma']
         self.tau = checkpoint['tau']
