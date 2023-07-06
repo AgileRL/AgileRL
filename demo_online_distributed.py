@@ -70,8 +70,7 @@ if __name__ == '__main__':
     replay_dataloader = accelerator.prepare(replay_dataloader)
     sampler = Sampler(distributed=True, 
                       dataset=replay_dataset, 
-                      dataloader=replay_dataloader,
-                      accelerator=accelerator)
+                      dataloader=replay_dataloader)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -151,9 +150,10 @@ if __name__ == '__main__':
                     max_steps=max_steps,
                     loop=evo_loop) for agent in pop]
 
-            print(f'Episode {idx_epi+1}/{max_episodes}')
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            if accelerator.is_main_process:
+                print(f'Episode {idx_epi+1}/{max_episodes}')
+                print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+                print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
             # Tournament selection and population mutation
             accelerator.wait_for_everyone()

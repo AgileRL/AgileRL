@@ -69,7 +69,10 @@ if __name__ == '__main__':
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names)  # Field names to store in memory
     
-    print('Filling replay buffer with dataset...')
+    if accelerator.is_main_process:
+        print('Filling replay buffer with dataset...')
+    accelerator.wait_for_everyone()
+    
     # Save transitions to replay buffer
     dataset_length = dataset['rewards'].shape[0]
     for i in trange(dataset_length-1):
@@ -145,9 +148,10 @@ if __name__ == '__main__':
                     max_steps=max_steps,
                     loop=evo_loop) for agent in pop]
 
-            print(f'Episode {idx_epi+1}/{max_episodes}')
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            if accelerator.is_main_process:
+                print(f'Episode {idx_epi+1}/{max_episodes}')
+                print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+                print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
             # Tournament selection and population mutation
             accelerator.wait_for_everyone()
