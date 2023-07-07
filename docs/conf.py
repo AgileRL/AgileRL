@@ -33,14 +33,19 @@ templates_path = ['_templates']
 
 # -- Options for HTML output
 
-html_theme = 'sphinx_rtd_theme'
+html_theme = 'furo'
 html_static_path = ['_static']
-html_logo = "https://user-images.githubusercontent.com/47857277/223126514-8b3131a2-1fde-4a6e-bb93-e12eb45af785.png"
 html_theme_options = {
-    'logo_only': False,
-    'display_version': False,
-    'navigation_depth': 3,
-    "collapse_navigation": False
+    "sidebar_hide_name": True,
+    "light_logo": "logo_teal.png",
+    "dark_logo": "logo_white.png",
+    "source_repository": "https://github.com/AgileRL/AgileRL/",
+    "source_branch": "main",
+    "source_directory": "docs/",
+    "light_css_variables": {
+        "color-brand-primary": "#41a5a5",
+        "color-brand-content": "#41a5a5",
+    },
 }
 
 # -- Options for EPUB output

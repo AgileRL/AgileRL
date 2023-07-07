@@ -1,9 +1,10 @@
-Deep Q-Learning (DQN)
-=====================
+Twin Delayed Deep Deterministic Policy Gradient (TD3)
+=========================================
 
-DQN is an extension of Q-learning that makes use of a replay buffer and target network to improve learning stability.
+TD3 is an extension of DDPG that addresses overestimation bias by introducing an extra 
+critic network, delayed actor network updates, and action noise regularization.
 
-* DQN paper: https://arxiv.org/abs/1312.5602
+* TD3 paper: https://arxiv.org/abs/1802.09477
 
 Can I use it?
 ------------
@@ -16,10 +17,10 @@ Can I use it?
      - Action
      - Observation
    * - Discrete
-     - ✔️
+     - ❌
      - ✔️
    * - Continuous
-     - ❌
+     - ✔️
      - ✔️
 
 Example
@@ -30,10 +31,11 @@ Example
   import gymnasium as gym
   from agilerl.utils import makeVectEnvs
   from agilerl.components.replay_buffer import ReplayBuffer
-  from agilerl.algorithms.dqn import DQN
+  from agilerl.algorithms.td3 import TD3
 
   # Create environment and Experience Replay Buffer
-  env = makeVectEnvs('LunarLander-v2', num_envs=1)
+  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=1)
+  max_action = float(env.single_action_space.high[0])
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
@@ -53,7 +55,7 @@ Example
   field_names = ["state", "action", "reward", "next_state", "done"]
   memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
 
-  agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DQN agent
+  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, max_action=max_action)   # Create TD3 agent
 
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
@@ -73,7 +75,7 @@ Example
           experiences = memory.sample(agent.batch_size) # Sample replay buffer
           agent.learn(experiences)    # Learn according to agent's RL algorithm
 
-To configure the network architecture, pass a dict to the DQN ``net_config`` field. For an MLP, this can be as simple as:
+To configure the network architecture, pass a dict to the TD3 ``net_config`` field. For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -97,11 +99,11 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent  
+  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create DQN agent  
 
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.dqn.DQN
+.. autoclass:: agilerl.algorithms.td3.TD3
   :members:
   :inherited-members:

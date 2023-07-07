@@ -111,6 +111,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 device=self.device,
                 accelerator=self.accelerator)
@@ -121,6 +122,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 device=self.device,
                 accelerator=self.accelerator)
@@ -133,6 +135,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
                 device=self.device,
@@ -144,6 +147,7 @@ class DDPG():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
                 device=self.device,
@@ -249,9 +253,9 @@ class DDPG():
             next_input_combined = torch.cat([next_states, next_actions], 1)
             q_value_next_state = self.critic_target(next_input_combined)
         elif self.net_config['arch'] == 'cnn':
-            q_value_next_state = self.critic(next_states, next_actions)
+            q_value_next_state = self.critic_target(next_states, next_actions) # Was previously self.critic so have updated to self.critic_target
 
-        y_j = rewards + (self.gamma * q_value_next_state).detach()
+        y_j = rewards + ((1-dones)*self.gamma * q_value_next_state).detach() # Added in the (1 - dones)
 
         critic_loss = self.criterion(q_value, y_j)
 

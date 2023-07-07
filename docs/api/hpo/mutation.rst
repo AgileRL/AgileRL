@@ -21,6 +21,8 @@ Tournament selection and mutation should be applied sequentially to fully evolve
   from agilerl.hpo.mutation import Mutations
   import torch
 
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
   mutations = Mutations(algo='DQN',                           # Algorithm
                         no_mutation=0.4,                      # No mutation
                         architecture=0.2,                     # Architecture mutation
@@ -32,7 +34,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
                         mutation_sd=0.1,                      # Mutation strength
                         arch=NET_CONFIG['arch'],              # Network architecture
                         rand_seed=1,                          # Random seed
-                        device=torch.device("cuda"))
+                        device=device)
 
 
 Parameters

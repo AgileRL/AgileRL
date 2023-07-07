@@ -96,6 +96,7 @@ class CQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 device=self.device,
                 accelerator=self.accelerator)
             self.actor_target = EvolvableCNN(
@@ -105,6 +106,7 @@ class CQN():
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
+                normalize=self.net_config['normalize'],
                 device=self.device,
                 accelerator=self.accelerator)
             self.actor_target.load_state_dict(self.actor.state_dict())
@@ -152,8 +154,7 @@ class CQN():
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-
-            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
+            action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
         return action
     
     def _squeeze_exp(self, experiences):

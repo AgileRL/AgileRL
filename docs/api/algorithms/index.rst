@@ -6,6 +6,7 @@ Reinforcement learning algorithms implemented: (More coming soon!)
     * DDPG
     * DQN
     * ILQL
+    * TD3
 
 We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
 
@@ -16,3 +17,4 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
    ddpg
    dqn
    ilql
+   td3
