@@ -253,9 +253,9 @@ class DDPG():
             next_input_combined = torch.cat([next_states, next_actions], 1)
             q_value_next_state = self.critic_target(next_input_combined)
         elif self.net_config['arch'] == 'cnn':
-            q_value_next_state = self.critic_target(next_states, next_actions) # Was previously self.critic so have updated to self.critic_target
+            q_value_next_state = self.critic_target(next_states, next_actions)
 
-        y_j = rewards + ((1-dones)*self.gamma * q_value_next_state).detach() # Added in the (1 - dones)
+        y_j = rewards + ((1-dones)*self.gamma * q_value_next_state).detach()
 
         critic_loss = self.criterion(q_value, y_j)
 
