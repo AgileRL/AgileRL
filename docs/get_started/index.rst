@@ -87,12 +87,12 @@ First, use ``utils.utils.initialPopulation()`` to create a list of agents - our 
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
-    except:
+    except Exception:
         state_dim = env.single_observation_space.shape      # Continuous observation space
         one_hot = False                                     # Does not require one-hot encoding
     try:
         action_dim = env.single_action_space.n             # Discrete action space
-    except:
+    except Exception:
         action_dim = env.single_action_space.shape[0]      # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
@@ -158,8 +158,7 @@ The easiest training loop implementation is to use our ``training.train()`` func
                                        target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
                                        tournament=tournament,                   # Tournament selection object
                                        mutation=mutations,                      # Mutations object
-                                       wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                       device=torch.device("cuda"))
+                                       wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
 
 Quickstart: Training an offline RL agent
 ----------------
@@ -217,24 +216,24 @@ First, use ``utils.utils.initialPopulation`` to create a list of agents - our po
 
 .. code-block:: python
 
-    from agilerl.utils.utils import initialPopulation
+    from agilerl.utils.utils import makeVectEnvs, initialPopulation
     import torch
     import h5py
     import gymnasium as gym
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    env = gym.make(INIT_HP['ENV_NAME'])
+    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=1)
     try:
-        state_dim = env.observation_space.n       # Discrete observation space
-        one_hot = True                            # Requires one-hot encoding
+        state_dim = env.single_observation_space.n          # Discrete observation space
+        one_hot = True                                      # Requires one-hot encoding
     except Exception:
-        state_dim = env.observation_space.shape   # Continuous observation space
-        one_hot = False                           # Does not require one-hot encoding
+        state_dim = env.single_observation_space.shape      # Continuous observation space
+        one_hot = False                                     # Does not require one-hot encoding
     try:
-        action_dim = env.action_space.n           # Discrete action space
+        action_dim = env.single_action_space.n             # Discrete action space
     except Exception:
-        action_dim = env.action_space.shape[0]    # Continuous action space
+        action_dim = env.single_action_space.shape[0]      # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
@@ -302,5 +301,4 @@ The easiest training loop implementation is to use our ``training.train_offline.
                                        target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
                                        tournament=tournament,                   # Tournament selection object
                                        mutation=mutations,                      # Mutations object
-                                       wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                       device=torch.device("cuda"))
+                                       wb=INIT_HP['WANDB'])                     # Weights and Biases tracking

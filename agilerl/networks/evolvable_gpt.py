@@ -41,6 +41,8 @@ class EvolvableGPT(nn.Module):
     :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
 
     def __init__(
@@ -58,7 +60,8 @@ class EvolvableGPT(nn.Module):
             max_layers: int = 16,
             bias: bool = True,
             stored_values = None,
-            device='cpu'):
+            device='cpu',
+            accelerator=None):
         super(EvolvableGPT, self).__init__()
 
         self.n_layer = n_layer
@@ -73,8 +76,8 @@ class EvolvableGPT(nn.Module):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.bias = bias
-
         self.device = device
+        self.accelerator = accelerator
 
         self.transformer = self.create_net()
         self.transformer_keys = list(self.transformer.keys())
@@ -156,7 +159,8 @@ class EvolvableGPT(nn.Module):
         net_dict['ln_f'] = LayerNorm(self.n_embd, bias=self.bias)
         return nn.ModuleDict(net_dict)
 
-    def forward(self, idx=None, tok_emb=None, targets=None, attn_mask=None, past_key_values=None, pos=None, is_causal=True):
+    def forward(self, idx=None, tok_emb=None, targets=None, attn_mask=None, past_key_values=None, pos=None, 
+                is_causal=True):
         """Forward pass through evolvable GPT model.
         
         :param idxs: Input ids
@@ -350,7 +354,8 @@ class EvolvableGPT(nn.Module):
         union_params = decay | no_decay
         assert len(
             inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
-        assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
+        assert len(
+            param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
             % (str(param_dict.keys() - union_params), )
 
         # create the pytorch optimizer object
@@ -809,7 +814,8 @@ class new_gelu(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """The positional embedding class. Converts tensor of input indices into corresponding tensor of position embeddings."""
+    """The positional embedding class. 
+    Converts tensor of input indices into corresponding tensor of position embeddings."""
 
     def __init__(self, max_positions: int, emb_size):
         super(PositionalEncoding, self).__init__()

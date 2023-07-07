@@ -5,19 +5,21 @@ import random
 
 
 class ReplayBuffer():
-    """The Experience Replay Buffer class. Used to store experiences and allow off-policy learning.
+    """The Experience Replay Buffer class. Used to store experiences and allow 
+    off-policy learning.
 
     :param n_actions: Action dimension
     :type n_actions: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
-    :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
+    :param field_names: Field names for experience named tuple, 
+    e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
     :type device: str, optional
     """
 
-    def __init__(self, action_dim, memory_size, field_names, device='cpu'):
+    def __init__(self, action_dim, memory_size, field_names, device=None):
         self.n_actions = action_dim
         self.memory = deque(maxlen=memory_size)
         self.experience = namedtuple("Experience", field_names=field_names)
@@ -40,15 +42,20 @@ class ReplayBuffer():
         experiences = random.sample(self.memory, k=batch_size)
 
         states = torch.from_numpy(np.stack(
-            [e.state for e in experiences if e is not None], axis=0)).to(self.device)
+            [e.state for e in experiences if e is not None], axis=0))
         actions = torch.from_numpy(
-            np.vstack([e.action for e in experiences if e is not None])).to(self.device)
+            np.vstack([e.action for e in experiences if e is not None]))
         rewards = torch.from_numpy(np.vstack(
-            [e.reward for e in experiences if e is not None])).float().to(self.device)
+            [e.reward for e in experiences if e is not None])).float()
         next_states = torch.from_numpy(np.stack(
-            [e.next_state for e in experiences if e is not None], axis=0)).float().to(self.device)
+            [e.next_state for e in experiences if e is not None], axis=0)).float()
         dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(
-            np.uint8)).float().to(self.device)
+            np.uint8)).float()
+        
+        if self.device is not None:
+            states, actions, rewards, next_states, dones = states.to(self.device), \
+                actions.to(self.device), rewards.to(self.device), \
+                    next_states.to(self.device), dones.to(self.device)
 
         return (states, actions, rewards, next_states, dones)
 

@@ -18,25 +18,32 @@ def serve_class(ModelCls):
     class WrappedModel:
         def __init__(self, *args, **kwargs):
             self.r = redis.Redis(host=Config.redis_host, port=Config.redis_port, db=Config.redis_db)
-            self.Q = initalize_server(self, super().__getattribute__('r'), cache_cls, args, kwargs)
+            self.Q = initalize_server(self, super().__getattribute__(
+                'r'), cache_cls, args, kwargs)
         
         def __getattribute__(self, name):
-            return partial(build_method(name, super().__getattribute__('r'), super().__getattribute__('Q')), self)
+            return partial(build_method(name, super().__getattribute__(
+                'r'), super().__getattribute__('Q')), self)
     
         def __call__(self, *args, **kwargs):
-            return build_method('__call__',  super().__getattribute__('r'), super().__getattribute__('Q'))(self, *args, **kwargs)
+            return build_method('__call__',  super().__getattribute__(
+                'r'), super().__getattribute__('Q'))(self, *args, **kwargs)
         
         def __getitem__(self, key):
-            return build_method('__getitem__',  super().__getattribute__('r'), super().__getattribute__('Q'))(self, key)
+            return build_method('__getitem__',  super().__getattribute__(
+                'r'), super().__getattribute__('Q'))(self, key)
         
         def __setitem__(self, key, value):
-            return build_method('__setitem__',  super().__getattribute__('r'), super().__getattribute__('Q'))(self, key, value)
+            return build_method('__setitem__',  super().__getattribute__(
+                'r'), super().__getattribute__('Q'))(self, key, value)
         
         def __contains__(self, key):
-            return build_method('__contains__',  super().__getattribute__('r'), super().__getattribute__('Q'))(self, key)
+            return build_method('__contains__',  super().__getattribute__(
+                'r'), super().__getattribute__('Q'))(self, key)
         
         def __len__(self):
-            return build_method('__len__',  super().__getattribute__('r'), super().__getattribute__('Q'))(self)
+            return build_method('__len__',  super().__getattribute__(
+                'r'), super().__getattribute__('Q'))(self)
     return WrappedModel
 
 def build_method(method, r, Q):

@@ -69,7 +69,8 @@ def train(cfg):
     model.train()
 
     if hasattr(model, 'param_groups'):
-        params = [{'params': frozenset().union(*list(map(lambda x: x.parameters(), p))), **f(train_cfg)} for p, f in model.param_groups]
+        params = [{'params': frozenset().union(*list(map(
+            lambda x: x.parameters(), p))), **f(train_cfg)} for p, f in model.param_groups]
     else:
         params = model.parameters()
     optim = torch.optim.AdamW(params, lr=train_cfg['lr'], weight_decay=train_cfg['weight_decay'])
@@ -143,7 +144,8 @@ def train(cfg):
                     print('saving checkpoint...')
                     if not os.path.exists(train_cfg['save_checkpoint_dir']):
                         os.makedirs(train_cfg['save_checkpoint_dir'])
-                    if (train_cfg['max_checkpoints'] is not None) and (len(saved_checkpoints) >= train_cfg['max_checkpoints']):
+                    if (train_cfg['max_checkpoints'] is not None) and (len(
+                        saved_checkpoints) >= train_cfg['max_checkpoints']):
                         os.system('rm -rf %s' % (saved_checkpoints.popleft()))
                     torch.save(accelerator.unwrap_model(model).state_dict(),
                                 os.path.join(train_cfg['save_checkpoint_dir'], 'model_%d.pkl' % (step)))

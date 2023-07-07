@@ -40,11 +40,12 @@ class TournamentSelection():
 
         max_id = max([ind.index for ind in population])
 
-        elite = copy.deepcopy([population[np.argsort(rank)[-1]]][0])
+        model = population[np.argsort(rank)[-1]]
+        elite = copy.deepcopy(model)
 
         new_population = []
         if self.elitism:  # keep top agent in population
-            new_population.append(elite.clone())
+            new_population.append(elite.clone(wrap=False))
             selection_size = self.population_size - 1
         else:
             selection_size = self.population_size
@@ -53,7 +54,7 @@ class TournamentSelection():
         for idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
-            new_individual = actor_parent.clone(max_id)
+            new_individual = actor_parent.clone(max_id, wrap=False)
             new_population.append(new_individual)
 
         return elite, new_population

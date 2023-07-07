@@ -186,7 +186,8 @@ class WordleGame:
             return None
         word = self.vocab.get_random_word_filtered()
         new_state = self.state.transition_state(action, word)
-        new_mdp = WordleGame(new_state, self.vocab.update_vocab(new_state), action_history=self.action_history+[action])
+        new_mdp = WordleGame(new_state, self.vocab.update_vocab(new_state), 
+        action_history=self.action_history+[action])
         return new_mdp, new_mdp.reward(), new_mdp.is_terminal()
     
     def all_next(self, action: str):
@@ -197,7 +198,9 @@ class WordleGame:
         new_states = defaultdict(list)
         for word in self.vocab.filtered_vocab:
             new_states[self.state.transition_state(action, word)].append(word)
-        return [(WordleGame(new_state, self.vocab.update_vocab(new_state), action_history=self.action_history+[words[0]]), len(words)) for new_state, words in new_states.items()]
+        return [(WordleGame(new_state, self.vocab.update_vocab(new_state), 
+                            action_history=self.action_history+[words[0]]), 
+                            len(words)) for new_state, words in new_states.items()]
     
     def __str__(self):
         all_action_strs = []

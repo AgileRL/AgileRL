@@ -28,6 +28,8 @@ class EvolvableMLP(nn.Module):
     :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
 
     def __init__(
@@ -40,7 +42,8 @@ class EvolvableMLP(nn.Module):
             layer_norm=False,
             output_vanish=True,
             stored_values=None,
-            device='cpu'):
+            device='cpu',
+            accelerator=None):
         super(EvolvableMLP, self).__init__()
 
         self.num_inputs = num_inputs
@@ -51,6 +54,7 @@ class EvolvableMLP(nn.Module):
         self.output_vanish = output_vanish
         self.hidden_size = hidden_size
         self.device = device
+        self.accelerator = accelerator
 
         self.net = self.create_net()
 
@@ -109,8 +113,13 @@ class EvolvableMLP(nn.Module):
         if self.output_activation is not None:
             net_dict["activation_output"] = self.get_activation(
                 self.output_activation)
+            
+        net = nn.Sequential(net_dict)
+            
+        if self.accelerator is None:
+            net = net.to(self.device)
 
-        return nn.Sequential(net_dict)
+        return net
 
     def forward(self, x):
         """Returns output of neural network.
@@ -119,10 +128,10 @@ class EvolvableMLP(nn.Module):
         :type x: torch.Tensor() or np.array
         """
         if not isinstance(x, torch.Tensor):
-            x = torch.FloatTensor(np.array(x)).to(self.device)
-
-        for value in self.net:
-            x = value(x)
+            x = torch.FloatTensor(np.array(x))
+            if self.accelerator is None:
+                x = x.to(self.device)
+        x = self.net(x)
         return x
 
     def get_model_dict(self):
@@ -146,7 +155,8 @@ class EvolvableMLP(nn.Module):
         return count
 
     def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened parameter vector.
+        """Returns current pytorch gradient in same order as genome's flattened 
+        parameter vector.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
         :type without_layer_norm: bool, optional
@@ -178,7 +188,8 @@ class EvolvableMLP(nn.Module):
         return copy.deepcopy(pvec)
 
     def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current neural network weights.
+        """Injects a flat vector of neural network parameters into the model's current 
+        neural network weights.
 
         :param pvec: Network weights
         :type pvec: np.array()
@@ -208,7 +219,8 @@ class EvolvableMLP(nn.Module):
             "activation": self.activation,
             "output_activation": self.output_activation,
             "layer_norm": self.layer_norm,
-            "device": self.device}
+            "device": self.device,
+            "accelerator":self.accelerator}
         return init_dict
 
     @property
@@ -277,9 +289,11 @@ class EvolvableMLP(nn.Module):
     def remove_node(self, hidden_layer=None, numb_new_nodes=None):
         """Removes nodes from hidden layer of neural network.
 
-        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
+        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to 
+        None
         :type hidden_layer: int, optional
-        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
+        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to 
+        None
         :type numb_new_nodes: int, optional
         """
         if hidden_layer is None:

@@ -1,29 +1,19 @@
 import numpy as np
+import os
 from tqdm import trange
 import wandb
 from datetime import datetime
+from torch.utils.data import DataLoader
+from agilerl.components.replay_data import ReplayDataset
+from agilerl.components.sampler import Sampler
 
 
-def train(
-        env,
-        env_name,
-        dataset,
-        algo,
-        pop,
-        memory,
-        swap_channels=False,
-        n_episodes=2000,
-        max_steps=500,
-        evo_epochs=5,
-        evo_loop=1,
-        target=200.,
-        tournament=None,
-        mutation=None,
-        checkpoint=None,
-        checkpoint_path=None,
-        wb=False,
-        device='cpu'):
-    """The general offline RL training function. Returns trained population of agents and their fitnesses.
+def train(env, env_name, dataset, algo, pop, memory, swap_channels=False, 
+          n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, target=200., 
+          tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, 
+          wb=False, accelerator=None):
+    """The general offline RL training function. Returns trained population of agents 
+    and their fitnesses.
 
     :param env: The environment to train in
     :type env: Gym-style environment
@@ -59,28 +49,57 @@ def train(
     :type checkpoint_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
     if wb:
-        wandb.init(
-            # set the wandb project where this run will be logged
-            project="AgileRL",
-            name="{}-EvoHPO-{}-{}".format(env_name, algo,
-                                          datetime.now().strftime("%m%d%Y%H%M%S")),
-            # track hyperparameters and run metadata
-            config={
-                "algo": "Evo HPO {}".format(algo),
-                "env": env_name,
-            }
-        )
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                wandb.init(
+                    # set the wandb project where this run will be logged
+                    project="AgileRL",
+                    name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                                                datetime.now().strftime("%m%d%Y%H%M%S")),
+                    # track hyperparameters and run metadata
+                    config={
+                        "algo": "Evo HPO {}".format(algo),
+                        "env": env_name,
+                    }
+                )
+            accelerator.wait_for_everyone()
+        else:
+            wandb.init(
+                    # set the wandb project where this run will be logged
+                    project="AgileRL",
+                    name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                                                datetime.now().strftime("%m%d%Y%H%M%S")),
+                    # track hyperparameters and run metadata
+                    config={
+                        "algo": "Evo HPO {}".format(algo),
+                        "env": env_name,
+                    }
+                )
+
+    if accelerator is not None:
+        accel_temp_models_path = 'models/{}'.format(env_name)
+        if accelerator.is_main_process:
+            if not os.path.exists(accel_temp_models_path):
+                os.makedirs(accel_temp_models_path)
 
     save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
     
-    print('Loading buffer...')
+    if accelerator is not None:
+        if accelerator.is_main_process:
+            print('Filling replay buffer with dataset...')
+        accelerator.wait_for_everyone()
+    else:
+        print('Filling replay buffer with dataset...')
+
+    # Save transitions to replay buffer
     dataset_length = dataset['rewards'].shape[0]
-    # for i in range(dataset_length):
+    # for i in trange(dataset_length-1):
     #     state = dataset['observations'][i]
     #     next_state = dataset['next_observations'][i]
     #     if swap_channels:
@@ -90,7 +109,7 @@ def train(
     #     reward = dataset['rewards'][i]
     #     done = bool(dataset['terminals'][i])
     #     memory.save2memory(state, action, next_state, reward, done)
-    for i in range(dataset_length-1):
+    for i in trange(dataset_length-1):
         state = dataset['observations'][i]
         next_state = dataset['observations'][i+1]
         if swap_channels:
@@ -99,20 +118,48 @@ def train(
         action = dataset['actions'][i]
         reward = dataset['rewards'][i]
         done = bool(dataset['terminals'][i])
+        # Save experience to replay buffer
         memory.save2memory(state, action, reward, next_state, done)
-    print('Loaded buffer.')
+    if accelerator is not None:
+        if accelerator.is_main_process:
+            print('Loaded buffer.')
+        accelerator.wait_for_everyone()
+    else:
+        print('Loaded buffer.')
+
+    if accelerator is not None:
+        # Create dataloader from replay buffer
+        replay_dataset = ReplayDataset(memory, pop[0].batch_size)
+        replay_dataloader = DataLoader(replay_dataset, batch_size=None)
+        replay_dataloader = accelerator.prepare(replay_dataloader)
+        sampler = Sampler(distributed=True, 
+                          dataset=replay_dataset, 
+                          dataloader=replay_dataloader)
+    else:
+        sampler = Sampler(distributed=False, memory=memory)
+    
+    if accelerator is not None:
+        print(f'\nDistributed training on {accelerator.device}...')
+    else:
+        print('\nTraining...')
 
     bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
-    pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
+    if accelerator is not None:
+        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True, 
+                      disable=not accelerator.is_local_main_process)
+    else:
+        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
     pop_fitnesses = []
     total_steps = 0
 
     # RL training loop
     for idx_epi in pbar:
+        if accelerator is not None:
+            accelerator.wait_for_everyone() 
         for agent in pop:   # Loop through population
             for idx_step in range(max_steps):
-                experiences = memory.sample(agent.batch_size)   # Sample replay buffer
+                experiences = sampler.sample(agent.batch_size)   # Sample replay buffer
                 # Learn according to agent's RL algorithm
                 agent.learn(experiences)
 
@@ -129,15 +176,32 @@ def train(
             pop_fitnesses.append(fitnesses)
 
             if wb:
-                wandb.log({"global_step": total_steps,
-                           "eval/mean_reward": np.mean(fitnesses),
-                           "eval/best_fitness": np.max(fitnesses)})
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        wandb.log({"global_step": total_steps*accelerator.state.num_processes,
+                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/best_fitness": np.max(fitnesses)})
+                    accelerator.wait_for_everyone()
+                else:
+                    wandb.log({"global_step": total_steps,
+                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/best_fitness": np.max(fitnesses)})
 
             # Update step counter
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
 
-            pbar.set_postfix_str(f'Fitness: {["%.2f"%fitness for fitness in fitnesses]}, 100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}, agents: {[agent.index for agent in pop]}, steps: {[agent.steps[-1] for agent in pop]}, mutations: {[agent.mut for agent in pop]}')
+            fitness = ["%.2f"%fitness for fitness in fitnesses]
+            avg_fitness = ["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]
+            avg_score = ["%.2f"%np.mean(agent.scores[-100:]) for agent in pop]
+            agents = [agent.index for agent in pop]
+            num_steps = [agent.steps[-1] for agent in pop]
+            muts = [agent.mut for agent in pop]
+            perf_info = f'Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}'
+            pop_info = f'Agents: {agents}, Steps: {num_steps}, Mutations: {muts}'
+            pbar_string = perf_info + ', ' + pop_info
+            pbar.set_postfix_str(pbar_string)
             pbar.update(0)
 
             # Early stop if consistently reaches target
@@ -147,17 +211,49 @@ def train(
                     wandb.finish()
                 return pop, pop_fitnesses
 
+            # Tournament selection and population mutation
             if tournament and mutation is not None:
-                # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
-                pop = mutation.mutation(pop)
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                    for model in pop:
+                        model.unwrap_models()
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        elite, pop = tournament.select(pop)
+                        pop = mutation.mutation(pop)
+                        for pop_i, model in enumerate(pop):
+                            model.saveCheckpoint(f'{accel_temp_models_path}/{algo}_{pop_i}.pt')
+                    accelerator.wait_for_everyone()
+                    if not accelerator.is_main_process:
+                        for pop_i, model in enumerate(pop):
+                            model.loadCheckpoint(f'{accel_temp_models_path}/{algo}_{pop_i}.pt')
+                    accelerator.wait_for_everyone()
+                    for model in pop:
+                        model.wrap_models()
+                else:
+                    elite, pop = tournament.select(pop)
+                    pop = mutation.mutation(pop)
 
         # Save model checkpoint
         if checkpoint is not None:
             if (idx_epi + 1) % checkpoint == 0:
-                for i, agent in enumerate(pop):
-                    agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                if accelerator is not None:
+                    accelerator.wait_for_everyone()
+                    if not accelerator.is_main_process:
+                        for i, agent in enumerate(pop):
+                            agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                    accelerator.wait_for_everyone()
+                else:
+                    for i, agent in enumerate(pop):
+                        agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
 
     if wb:
-        wandb.finish()
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                wandb.finish()
+            accelerator.wait_for_everyone()
+        else:
+            wandb.finish()
+            
     return pop, pop_fitnesses

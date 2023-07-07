@@ -36,7 +36,8 @@ class EvolvableBERT(nn.Module):
     :type activation: str, optional
     :param layer_norm_eps: Epsilon value in layer normalization components, defaults to 1e-5
     :type layer_norm_eps: float, optional
-    :param batch_first: Input and output tensor order. If True, (batch, seq, feature). If False, (seq, batch, feature). Defaults to False
+    :param batch_first: Input and output tensor order. If True, (batch, seq, feature). If False, (seq, batch, feature). 
+    Defaults to False
     :type batch_first: bool, optional
     :param norm_first: Perform LayerNorm before other attention and feedforward operations, defaults to False
     :type norm_first: bool, optional
@@ -177,7 +178,8 @@ class EvolvableBERT(nn.Module):
         return nn.ModuleDict(encoder_dict), nn.ModuleDict(decoder_dict)
 
     def generate_square_subsequent_mask(self, sz):
-        """Returns a square mask for the sequence that prevents the model from looking into the future words when making predictions.
+        """Returns a square mask for the sequence that prevents the model from looking into the future words when 
+        making predictions.
         The masked positions are filled with float('-inf'). Unmasked positions are filled with float(0.0).
 
         :param sz: Size of mask to generate
@@ -247,7 +249,8 @@ class EvolvableBERT(nn.Module):
         :type tgt_key_padding_mask: torch.Tensor, optional
         :param memory_key_padding_mask: Tensor mask for memory keys per batch, defaults to None
         :type memory_key_padding_mask: torch.Tensor, optional
-        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
+        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product 
+        attention, defaults to False
         :type is_causal: bool, optional
         """
         encoder_output, encoder_hidden_states = self.encode(
@@ -270,7 +273,8 @@ class EvolvableBERT(nn.Module):
         :type src_mask: torch.Tensor, optional
         :param src_key_padding_mask: Tensor mask for src keys per batch, defaults to None
         :type src_key_padding_mask: torch.Tensor, optional
-        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
+        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product 
+        attention, defaults to False
         :type is_causal: bool, optional
         """
         if self.end2end:
@@ -289,7 +293,8 @@ class EvolvableBERT(nn.Module):
         str_first_layer = "self.net[0]"
         src_key_padding_mask_for_layers = src_key_padding_mask
         encoder_output, convert_to_nested, src_key_padding_mask_for_layers = self.check_encoder_sparsity_fast_path(
-            src, encoder_output, first_layer, str_first_layer, src_mask, src_key_padding_mask, src_key_padding_mask_for_layers)
+            src, encoder_output, first_layer, str_first_layer, 
+            src_mask, src_key_padding_mask, src_key_padding_mask_for_layers)
 
         # Prevent type refinement
         make_causal = (is_causal is True)
@@ -449,7 +454,7 @@ class EvolvableBERT(nn.Module):
                 why_not_sparsity_fast_path = "src is neither CUDA nor CPU"
             elif torch.is_grad_enabled() and any(x.requires_grad for x in tensor_args):
                 why_not_sparsity_fast_path = (
-                    "grad is enabled and at least one of query or the input/output projection weights or biases requires_grad")
+                    "grad is enabled and at least one of query or the i/o projection weights or biases requires_grad")
 
             if (not why_not_sparsity_fast_path) and (src_key_padding_mask is not None):
                 convert_to_nested = True
@@ -773,7 +778,8 @@ def _canonical_mask(mask, mask_name, other_type, other_name,
 
 
 class PositionalEncoder(nn.Module):
-    """The Positional Encoder class. Adds positional encoding to the token embedding to introduce a notion of word order.
+    """The Positional Encoder class. 
+    Adds positional encoding to the token embedding to introduce a notion of word order.
 
     :param emb_size: Number of expected features
     :type emb_size: int
@@ -806,7 +812,8 @@ class PositionalEncoder(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """The positional embedding class. Converts tensor of input indices into corresponding tensor of position embeddings."""
+    """The positional embedding class. 
+    Converts tensor of input indices into corresponding tensor of position embeddings."""
 
     def __init__(self, max_positions: int, emb_size):
         super(PositionalEncoding, self).__init__()
