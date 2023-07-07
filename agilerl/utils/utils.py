@@ -114,7 +114,8 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
                 policy_freq=INIT_HP['POLICY_FREQ'],
-                device=device
+                device=device,
+                accelerator=accelerator
             )
             population.append(agent)
 
