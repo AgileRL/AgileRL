@@ -321,7 +321,9 @@ class EvolvableCNN(nn.Module):
             x = torch.FloatTensor(x)
 
         batch_size = x.size(0)
-        x = x / 255.
+        
+        if self.normalize:
+            x = x / 255.
 
         x = self.feature_net(x)
         x = x.reshape(batch_size, -1)
