@@ -223,7 +223,8 @@ class TD3():
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
-        """Returns the next action to take in the environment, noise is added to aid exploration. Epsilon is the probability of taking a random action, used for exploration.
+        """Returns the next action to take in the environment, noise is added to aid exploration. 
+        Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -351,7 +352,8 @@ class TD3():
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. 
+        Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():
