@@ -175,7 +175,7 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        wandb.log({"global_step": total_steps,
+                        wandb.log({"global_step": total_steps*accelerator.state.num_processes,
                                 "eval/mean_reward": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     accelerator.wait_for_everyone()

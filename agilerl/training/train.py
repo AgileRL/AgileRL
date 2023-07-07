@@ -182,7 +182,7 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        wandb.log({"global_step": total_steps,
+                        wandb.log({"global_step": total_steps*accelerator.state.num_processes,
                                 "eval/mean_score": np.mean(mean_scores),
                                 "eval/mean_reward": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
