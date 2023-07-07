@@ -11,6 +11,9 @@
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
+**_NEW: AgileRL now supports distributed training with HuggingFace Accelerate!<br>
+Train even faster by taking full advantage of your entire compute stack._**
+
 </div>
 
 This is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
@@ -33,6 +36,7 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
   * [Train an agent on data (Offline)](#train-an-agent-on-data-offline)
     + [Custom Offline Training Loop](#custom-offline-training-loop)
   * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
+  * [Distributed training](#distributed-training)
 
 ## Benchmarks
 
@@ -63,7 +67,7 @@ python demo_online.py
 ```
 or to demo distributed training:
 ```bash
-python demo_online_distributed.py
+accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
 ```
 
 ## Algorithms implemented (more coming soon!)
@@ -71,6 +75,7 @@ python demo_online_distributed.py
   * DDPG
   * CQL
   * ILQL
+  * TD3
 
 ## Train an agent on a Gym environment (Online)
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
@@ -601,5 +606,22 @@ Similarly, to then run ILQL and perform RLHF on the BC model:
 ```bash
 python run_ilql.py
 ```
+
+## Distributed training
+AgileRL can also be used for distributed training if you have multiple devices you want to take advantage of. We use the HuggingFace 
+<a href="https://github.com/huggingface/accelerate">Accelerate</a> library to implement this in an open manner, without hiding behind too many layers of abstraction. 
+This should make implementations simple, but also highly customisable, by continuing to expose the PyTorch training loop beneath it all.
+
+To launch distributed training scripts in bash, use <code>accelerate launch</code>. To customise the distributed training properties, specify the key <code>--config_file</code>. An example 
+config file has been provided at <code>configs/accelerate/accelerate.yaml</code>.
+
+Putting this all together, launching a distributed training script can be done as follows:
+```bash
+accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
+```
+
+There are some key considerations to bear in mind when implementing a distributed training run:
+  * If you only want to execute something once, rather than repeating it for each process, e.g printing a statement, logging to W&B, then use <code>if accelerator.is_main_process:</code>.
+  * Training happens in parallel on each device, meaning that steps in a RL environment happen on each device too. In order to count the number of global training steps taken, you must multiply the number of steps you have taken on a singular device by the number of devices (assuming they are equal). If you want to use distributed training to train more quickly, and normally you would train for 100,000 steps on one device, you can now train for just 25,000 steps if using four devices.
 
 View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.
