@@ -76,7 +76,6 @@ accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_d
   * CQL
   * ILQL
   * TD3
-  * TD3
 
 ## Train an agent on a Gym environment (Online)
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
