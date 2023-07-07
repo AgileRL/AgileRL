@@ -112,11 +112,12 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
     if accelerator is not None:
         print(f'\nDistributed training on {accelerator.device}...')
     else:
-        print(f'\nTraining...')
+        print('\nTraining...')
 
     bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
     if accelerator is not None:
-        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True, disable=not accelerator.is_local_main_process)
+        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True, 
+                      disable=not accelerator.is_local_main_process)
     else:
         pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
