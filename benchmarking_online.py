@@ -103,7 +103,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': True                  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities

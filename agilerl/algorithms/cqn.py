@@ -154,7 +154,7 @@ class CQN():
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-            action = np.argmax(action_values.cpu().data.numpy(), axis=1)[0]
+            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
         return action
     
     def _squeeze_exp(self, experiences):
