@@ -9,8 +9,10 @@ To launch distributed training scripts in bash, use ``accelerate launch``. To cu
 config file has been provided at ``configs/accelerate/accelerate.yaml``.
 
 Putting this all together, launching a distributed training script can be done as follows:
+
 .. code-block:: bash
-accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
+
+  accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
 
 
 There are some key considerations to bear in mind when implementing a distributed training run:
