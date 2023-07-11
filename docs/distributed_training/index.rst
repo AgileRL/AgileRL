@@ -20,6 +20,7 @@ There are some key considerations to bear in mind when implementing a distribute
 Example distributed training loop:
 
 .. code-block:: python
+
     from agilerl.utils.utils import makeVectEnvs, initialPopulation
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.components.replay_data import ReplayDataset
