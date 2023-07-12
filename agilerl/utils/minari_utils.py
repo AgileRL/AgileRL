@@ -43,6 +43,8 @@ def MinariToAgileBuffer(dataset_id,memory):
             terminal = episode['terminations'][num_steps]
             
             memory.save2memory(observation, action, reward, next_observation, terminal)
+    
+    return memory
 
 def MinariToAgileDataset(dataset_id):
     

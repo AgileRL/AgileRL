@@ -116,7 +116,7 @@ def train(
     if minari_dataset_id:
         print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
         
-        MinariToAgileBuffer(minari_dataset_id,memory)
+        memory = MinariToAgileBuffer(minari_dataset_id,memory)
         
         print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
     
