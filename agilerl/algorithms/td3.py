@@ -9,7 +9,6 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 
 class TD3():
-    ### Change the documentation
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
 
     :param state_dim: State observation dimension
@@ -352,8 +351,7 @@ class TD3():
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. 
-        Defaults to 3
+        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():

@@ -25,13 +25,11 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param swap_channels: Swap image channels dimension from last to first 
-    [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 
-    500
+    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
