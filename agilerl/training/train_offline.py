@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import trange
 import wandb
 from datetime import datetime
+from agilerl.utils.minari_utils import MinariToAgileBuffer
 
 
 def train(
@@ -22,7 +23,8 @@ def train(
         checkpoint=None,
         checkpoint_path=None,
         wb=False,
-        device='cpu'):
+        device='cpu',
+        minari_dataset_id=None):
     """The general offline RL training function. Returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
@@ -78,29 +80,37 @@ def train(
     save_path = checkpoint_path.split('.pt')[0] if checkpoint_path is not None else "{}-EvoHPO-{}-{}".format(
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
     
-    print('Loading buffer...')
-    dataset_length = dataset['rewards'].shape[0]
-    # for i in range(dataset_length):
-    #     state = dataset['observations'][i]
-    #     next_state = dataset['next_observations'][i]
-    #     if swap_channels:
-    #         state = np.moveaxis(state, [3], [1])
-    #         next_state = np.moveaxis(next_state, [3], [1])
-    #     action = dataset['actions'][i]
-    #     reward = dataset['rewards'][i]
-    #     done = bool(dataset['terminals'][i])
-    #     memory.save2memory(state, action, next_state, reward, done)
-    for i in range(dataset_length-1):
-        state = dataset['observations'][i]
-        next_state = dataset['observations'][i+1]
-        if swap_channels:
-            state = np.moveaxis(state, [3], [1])
-            next_state = np.moveaxis(next_state, [3], [1])
-        action = dataset['actions'][i]
-        reward = dataset['rewards'][i]
-        done = bool(dataset['terminals'][i])
-        memory.save2memory(state, action, reward, next_state, done)
-    print('Loaded buffer.')
+    if minari_dataset_id:
+        print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
+        
+        MinariToAgileBuffer(minari_dataset_id,memory)
+        
+        print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
+    
+    else:
+        print('Loading buffer...')
+        dataset_length = dataset['rewards'].shape[0]
+        # for i in range(dataset_length):
+        #     state = dataset['observations'][i]
+        #     next_state = dataset['next_observations'][i]
+        #     if swap_channels:
+        #         state = np.moveaxis(state, [3], [1])
+        #         next_state = np.moveaxis(next_state, [3], [1])
+        #     action = dataset['actions'][i]
+        #     reward = dataset['rewards'][i]
+        #     done = bool(dataset['terminals'][i])
+        #     memory.save2memory(state, action, next_state, reward, done)
+        for i in range(dataset_length-1):
+            state = dataset['observations'][i]
+            next_state = dataset['observations'][i+1]
+            if swap_channels:
+                state = np.moveaxis(state, [3], [1])
+                next_state = np.moveaxis(next_state, [3], [1])
+            action = dataset['actions'][i]
+            reward = dataset['rewards'][i]
+            done = bool(dataset['terminals'][i])
+            memory.save2memory(state, action, reward, next_state, done)
+        print('Loaded buffer.')
 
     bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
     pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
