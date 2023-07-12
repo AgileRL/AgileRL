@@ -12,8 +12,7 @@ class ReplayBuffer():
     :type n_actions: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
-    :param field_names: Field names for experience named tuple, 
-    e.g. ['state', 'action', 'reward']
+    :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
     :type device: str, optional

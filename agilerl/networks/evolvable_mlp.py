@@ -289,11 +289,9 @@ class EvolvableMLP(nn.Module):
     def remove_node(self, hidden_layer=None, numb_new_nodes=None):
         """Removes nodes from hidden layer of neural network.
 
-        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to 
-        None
+        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
         :type hidden_layer: int, optional
-        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to 
-        None
+        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
         :type numb_new_nodes: int, optional
         """
         if hidden_layer is None:
