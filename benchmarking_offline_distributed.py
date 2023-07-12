@@ -1,4 +1,4 @@
-import torch
+from accelerate import Accelerator
 import h5py
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
@@ -8,9 +8,13 @@ from agilerl.training.train_offline import train
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print('============ AgileRL ============')
-    print(f'DEVICE: {device}')
+    
+    accelerator = Accelerator()
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print('============ AgileRL Distributed ============')
+    accelerator.wait_for_everyone()
 
     env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=1)
     try:
@@ -31,7 +35,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        action_dim, INIT_HP['MEMORY_SIZE'], field_names=field_names, device=device)
+        action_dim, INIT_HP['MEMORY_SIZE'], field_names=field_names)
     tournament = TournamentSelection(
         INIT_HP['TOURN_SIZE'],
         INIT_HP['ELITISM'],
@@ -48,7 +52,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                           mutation_sd=MUTATION_PARAMS['MUT_SD'],
                           arch=NET_CONFIG['arch'],
                           rand_seed=MUTATION_PARAMS['RAND_SEED'],
-                          device=device)
+                          accelerator=accelerator)
 
     agent_pop = initialPopulation(
         INIT_HP['ALGO'],
@@ -58,7 +62,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         NET_CONFIG,
         INIT_HP,
         INIT_HP['POP_SIZE'],
-        device=device)
+        accelerator=accelerator)
 
     trained_pop, pop_fitnesses = train(env,
                                        INIT_HP['ENV_NAME'],
@@ -73,14 +77,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                        target=INIT_HP['TARGET_SCORE'],
                                        tournament=tournament,
                                        mutation=mutations,
-                                       wb=INIT_HP['WANDB'])
+                                       wb=INIT_HP['WANDB'],
+                                       accelerator=accelerator)
 
     printHyperparams(trained_pop)
     # plotPopulationScore(trained_pop)
-
-    if str(device) == "cuda":
-        torch.cuda.empty_cache()
-
 
 if __name__ == '__main__':
     INIT_HP = {

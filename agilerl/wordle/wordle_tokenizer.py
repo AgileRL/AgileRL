@@ -3,7 +3,8 @@ from agilerl.data.tokenizer import Tokenizer
 
 class WordleTokenizer(Tokenizer):
     def __init__(self):
-        self.special_vocab = ['<g>', '<b>', '<y>', '<|pad|>', '</a>', '</s>', '<s>', '<a>', '</eod>']
+        self.special_vocab = ['<g>', '<b>', '<y>', '<|pad|>', '</a>', '</s>', '<s>', 
+                              '<a>', '</eod>']
         self.vocab = list('abcdefghijklmnopqrstuvwxyz') + self.special_vocab
         self.t2i = {w: i for i, w in enumerate(self.vocab)}
         super().__init__(self.token_to_id('<|pad|>'), 
@@ -17,7 +18,10 @@ class WordleTokenizer(Tokenizer):
         if isinstance(str_, str):
             special_idxs = []
             for special_char in self.special_vocab:
-                special_idxs += list(map(lambda x: (x.start(), x.end(), self.token_to_id(special_char)), re.finditer(re.escape(special_char), str_)))
+                special_idxs += list(map(lambda x: (x.start(), x.end(), 
+                                                    self.token_to_id(special_char)), 
+                                                    re.finditer(re.escape(special_char), 
+                                                                str_)))
             special_idxs.sort(key=lambda x: x[0])
             tokens = []
             curr = 0
@@ -30,7 +34,9 @@ class WordleTokenizer(Tokenizer):
         elif isinstance(str_, list):
             tokens, pads = zip(*[self.encode(item) for item in str_])
             max_len = max(map(len, tokens))
-            return [list(item)+([self.pad_token_id]*(max_len-len(item))) for item in tokens], [list(item)+([0]*(max_len-len(item))) for item in pads]
+            return [list(item)+([self.pad_token_id]*(max_len-len(
+                item))) for item in tokens], [list(item)+([0]*(max_len-len(
+                item))) for item in pads]
         else:
             raise ValueError('str_ must be a string or a list of strings')
     

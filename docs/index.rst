@@ -39,4 +39,5 @@ Contents
    get_started/index
    online_training/index
    offline_training/index
+   distributed_training/index
    api/index

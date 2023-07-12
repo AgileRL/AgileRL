@@ -122,8 +122,12 @@ class EvolvableCNN(nn.Module):
     :type rainbow: bool, optional
     :param critic: CNN is a critic network, defaults to False
     :type critic: bool, optional
+    :param normalize: Normalize CNN inputs, defaults to True
+    :type normalize: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
 
     def __init__(
@@ -142,7 +146,8 @@ class EvolvableCNN(nn.Module):
             rainbow=False,
             critic=False,
             normalize=True,
-            device='cpu'):
+            device='cpu',
+            accelerator=None):
 
         super(EvolvableCNN, self).__init__()
 
@@ -158,15 +163,15 @@ class EvolvableCNN(nn.Module):
         self.layer_norm = layer_norm
         self.rainbow = rainbow
         self.critic = critic
-        self.device = device
         self.normalize = normalize
+        self.device = device
+        self.accelerator = accelerator
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
-
+        
         if stored_values is not None:
-            self.inject_parameters(
-                pvec=stored_values, without_layer_norm=False)
+            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -266,7 +271,13 @@ class EvolvableCNN(nn.Module):
                 self.num_actions,
                 hidden_size=self.hidden_size,
                 name="advantage")
-            advantage_net.to(self.device)
+            if self.accelerator is not None:
+                feature_net, value_net, advantage_net \
+                    = self.accelerator.prepare(feature_net, value_net, advantage_net)
+            else:
+                self.feature_net, self.value_net, self.advantage_net \
+                    = feature_net.to(self.device), value_net.to(self.device), \
+                        advantage_net.to(self.device)
         else:
             if self.critic:
                 value_net = self.create_mlp(
@@ -281,9 +292,9 @@ class EvolvableCNN(nn.Module):
                     hidden_size=self.hidden_size,
                     name="value")
             advantage_net = None
-
-        feature_net.to(self.device)
-        value_net.to(self.device)
+            if self.accelerator is None:
+                self.feature_net, self.value_net, = feature_net.to(self.device), \
+                    value_net.to(self.device)
 
         return feature_net, value_net, advantage_net
 
@@ -310,6 +321,7 @@ class EvolvableCNN(nn.Module):
             x = torch.FloatTensor(x)
 
         batch_size = x.size(0)
+        
         if self.normalize:
             x = x / 255.
 
@@ -358,7 +370,8 @@ class EvolvableCNN(nn.Module):
         return count
 
     def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened parameter vector.
+        """Returns current pytorch gradient in same order as genome's flattened 
+        parameter vector.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
         :type without_layer_norm: bool, optional
@@ -390,7 +403,8 @@ class EvolvableCNN(nn.Module):
         return copy.deepcopy(pvec)
 
     def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current neural network weights.
+        """Injects a flat vector of neural network parameters into the model's current 
+        neural network weights.
 
         :param pvec: Network weights
         :type pvec: np.array()
@@ -440,7 +454,8 @@ class EvolvableCNN(nn.Module):
             "cnn_activation": self.cnn_activation,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
-            "device": self.device}
+            "device": self.device,
+            "accelerator": self.accelerator}
         return initdict
 
     def add_mlp_layer(self):

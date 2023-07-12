@@ -44,10 +44,12 @@ def convert_old_ad_model(model_path, dataset, multiple_transformers=False):
     w = torch.load(model_path, map_location='cpu')
     embs = w['model.transformer.wte.weight']
     if embs.shape[0] < dataset.tokenizer.num_tokens():
-        w['model.transformer.wte.weight'] = torch.cat((embs, torch.zeros(dataset.tokenizer.num_tokens()-embs.shape[0], embs.shape[1])), dim=0)
+        w['model.transformer.wte.weight'] = torch.cat((embs, torch.zeros(dataset.tokenizer.num_tokens()-embs.shape[0], 
+                                                                         embs.shape[1])), dim=0)
     head = w['model.lm_head.weight']
     if head.shape[0] < dataset.tokenizer.num_tokens():
-        w['model.lm_head.weight'] = torch.cat((head, torch.zeros(dataset.tokenizer.num_tokens()-head.shape[0], head.shape[1])), dim=0)
+        w['model.lm_head.weight'] = torch.cat((head, torch.zeros(dataset.tokenizer.num_tokens()-head.shape[0], 
+                                                                 head.shape[1])), dim=0)
     if multiple_transformers:
         for k, v in list(w.items()):
             if k.startswith('model.'):

@@ -35,8 +35,10 @@ class WordleListDataset(List_RL_Dataset):
             vocab = Vocabulary.from_file(convert_path(d['vocab_path']))
             if d['vocab_cache_path'] is not None:
                 vocab.cache.load(convert_path(d['vocab_cache_path']))
-        wordle_items = [WordleObservation(WordleGame(item['state'], vocab.update_vocab(item['state']), item['actions'])) for item in tqdm(d['state_actions'])]
-        meta = [{**item['meta'], 'self': wordle_items[i]} if 'meta' in item else {'self': wordle_items[i]} for i, item in enumerate(d['state_actions'])]
+        wordle_items = [WordleObservation(WordleGame(item['state'], vocab.update_vocab(
+            item['state']), item['actions'])) for item in tqdm(d['state_actions'])]
+        meta = [{**item['meta'], 'self': wordle_items[i]} if 'meta' in item else {
+            'self': wordle_items[i]} for i, item in enumerate(d['state_actions'])]
         return WordleListDataset(list(zip(wordle_items, meta)), max_len, token_reward)
     
 class WordleIterableDataset(Iterable_RL_Dataset):
@@ -51,7 +53,8 @@ class WordleIterableDataset(Iterable_RL_Dataset):
         self.env = WordleEnvironment(vocab)
 
     def sample_item(self):
-        return DataPoint.from_obs(interact_environment(self.env, self.policy, None)[0], self.tokenizer, self.token_reward, None)
+        return DataPoint.from_obs(interact_environment(self.env, self.policy, None)[0], self.tokenizer, 
+                                  self.token_reward, None)
 
 class WordleHumanDataset(Iterable_RL_Dataset):
     def __init__(self, 
@@ -80,7 +83,8 @@ class WordleHumanDataset(Iterable_RL_Dataset):
             while True:
                 actions = []
                 for transition in game:
-                    if transition not in self.transitions[true_word] or len(self.transitions[true_word][transition]) == 0:
+                    if transition not in self.transitions[true_word] or len(
+                        self.transitions[true_word][transition]) == 0:
                         break
                     actions.append(random.choice(self.transitions[true_word][transition]))
                 if len(actions) == len(game):
@@ -93,7 +97,8 @@ class WordleHumanDataset(Iterable_RL_Dataset):
                 true_word = random.choice(word_choices)
                 actions = []
                 for transition in game:
-                    if transition not in self.transitions[true_word] or len(self.transitions[true_word][transition]) == 0:
+                    if transition not in self.transitions[true_word] or len(
+                        self.transitions[true_word][transition]) == 0:
                         break
                     actions.append(random.choice(self.transitions[true_word][transition]))
                 if len(actions) == len(game):

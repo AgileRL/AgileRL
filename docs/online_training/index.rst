@@ -56,12 +56,12 @@ are more likely to remain present in the population. The sequence of evolution (
     try:
         state_dim = env.single_observation_space.n          # Discrete observation space
         one_hot = True                                      # Requires one-hot encoding
-    except:
+    except Exception:
         state_dim = env.single_observation_space.shape      # Continuous observation space
         one_hot = False                                     # Does not require one-hot encoding
     try:
         action_dim = env.single_action_space.n              # Discrete action space
-    except:
+    except Exception:
         action_dim = env.single_action_space.shape[0]       # Continuous action space
 
     if INIT_HP['CHANNELS_LAST']:
@@ -189,8 +189,7 @@ easiest to use our training function, which returns a population of trained agen
                                        target=200.,                             # Target score for early stopping
                                        tournament=tournament,                   # Tournament selection object
                                        mutation=mutations,                      # Mutations object
-                                       wb=False,                                # Weights and Biases tracking
-                                       device=torch.device("cuda"))
+                                       wb=False)                                # Weights and Biases tracking
 
 
 Alternatively, use a custom training loop. Combining all of the above:
@@ -239,7 +238,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     pop = initialPopulation(algo='DQN',             # Algorithm
                             state_dim=state_dim,    # State dimension
                             action_dim=action_dim,  # Action dimension
-                            one_hot=False,          # One-hot encoding
+                            one_hot=one_hot,        # One-hot encoding
                             net_config=NET_CONFIG,  # Network configuration
                             INIT_HP=INIT_HP,        # Initial hyperparameters
                             population_size=6,      # Population size

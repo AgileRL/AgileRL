@@ -1,10 +1,9 @@
 import torch
-import h5py
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
-from agilerl.training.train_offline import train
+from agilerl.training.train import train
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -12,7 +11,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print('============ AgileRL ============')
     print(f'DEVICE: {device}')
 
-    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=1)
+    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=16)
+
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -27,7 +27,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     if INIT_HP['CHANNELS_LAST']:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    dataset = h5py.File(INIT_HP['DATASET'], 'r')
+    if INIT_HP['ALGO'] == 'TD3':
+        max_action = float(env.single_action_space.high[0])
+        INIT_HP["MAX_ACTION"] = max_action
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -62,7 +64,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     trained_pop, pop_fitnesses = train(env,
                                        INIT_HP['ENV_NAME'],
-                                       dataset,
                                        INIT_HP['ALGO'],
                                        agent_pop,
                                        memory=memory,
@@ -84,15 +85,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == '__main__':
     INIT_HP = {
-        'ENV_NAME': 'CartPole-v1',      # Gym environment name
-        'DATASET': 'data/cartpole/cartpole_random_v1.1.0.h5', # Offline RL dataset
-        'ALGO': 'CQN',                  # Algorithm
+        'ENV_NAME': 'LunarLander-v2',   # Gym environment name
+        'ALGO': 'DQN',                  # Algorithm
         'DOUBLE': True,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,              # Batch size
         'LR': 1e-3,                     # Learning rate
-        'EPISODES': 2000,               # Max no. episodes
+        'EPISODES': 1000,               # Max no. episodes
         'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.99,                  # Discount factor
         'MEMORY_SIZE': 10000,           # Max memory buffer size
@@ -103,7 +103,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': True                  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities

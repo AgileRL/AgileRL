@@ -3,7 +3,8 @@ import torch.nn.functional as F
 import numpy as np
 
 def select_batch_idxs(x, idxs):
-    return torch.gather(x, dim=0, index=idxs.repeat(*x.shape[1:], 1).permute(len(x.shape) - 1, *list(range(len(x.shape) - 1))))
+    return torch.gather(x, dim=0, 
+                        index=idxs.repeat(*x.shape[1:], 1).permute(len(x.shape) - 1, *list(range(len(x.shape) - 1))))
 
 def map_all_kvs(f, kvs):
     return tuple([tuple(map(f, items)) for items in kvs])
@@ -12,7 +13,8 @@ def map_decoder_kvs(f, kvs):
     return tuple([(tuple(map(f, items[:2])) + tuple(items[2:])) for items in kvs])
 
 def pad_sequence(seq, to_len, val, device, dim):
-    return torch.cat((seq, torch.full((*seq.shape[:dim], to_len - seq.shape[dim], *seq.shape[dim + 1:]), val).to(device)), dim=dim)
+    return torch.cat((seq, torch.full(
+        (*seq.shape[:dim], to_len - seq.shape[dim], *seq.shape[dim + 1:]), val).to(device)), dim=dim)
 
 def update_kvs(kvs, updated_kvs, lens_chosen, idx):
     for i, layer in enumerate(kvs):

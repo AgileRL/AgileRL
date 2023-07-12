@@ -1,5 +1,6 @@
 import random
 import copy
+import dill
 import numpy as np
 import torch
 import torch.nn as nn
@@ -37,27 +38,16 @@ class DDPG():
     :type policy_freq: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :param wrap: Wrap models for distributed training upon creation, defaults to True
+    :type wrap: bool, optional
     """
 
-    def __init__(
-        self,
-        state_dim,
-        action_dim,
-        one_hot,
-        index=0,
-        net_config={
-            'arch': 'mlp',
-            'h_size': [
-            64,
-            64]},
-            batch_size=64,
-            lr=1e-4,
-            learn_step=5,
-            gamma=0.99,
-            tau=1e-3,
-            mutation=None,
-            policy_freq=2,
-            device='cpu'):
+    def __init__(self, state_dim, action_dim, one_hot, index=0, 
+                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
+                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, 
+                 device='cpu', accelerator=None, wrap=True):
         self.algo = 'DDPG'
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -71,6 +61,7 @@ class DDPG():
         self.mut = mutation
         self.policy_freq = policy_freq
         self.device = device
+        self.accelerator = accelerator
 
         self.index = index
         self.scores = []
@@ -84,29 +75,29 @@ class DDPG():
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
                 output_activation='tanh',
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.actor_target = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
                 output_activation='tanh',
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.actor_target.load_state_dict(self.actor.state_dict())
 
             self.critic = EvolvableMLP(
                 num_inputs=state_dim[0] + action_dim,
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.critic_target = EvolvableMLP(
                 num_inputs=state_dim[0] + action_dim,
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.critic_target.load_state_dict(self.critic.state_dict())
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
@@ -119,8 +110,8 @@ class DDPG():
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.actor_target = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=action_dim,
@@ -130,8 +121,8 @@ class DDPG():
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.actor_target.load_state_dict(self.actor.state_dict())
 
             self.critic = EvolvableCNN(
@@ -144,8 +135,8 @@ class DDPG():
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.critic_target = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=action_dim,
@@ -156,17 +147,31 @@ class DDPG():
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
-                device=self.device).to(
-                self.device)
+                device=self.device,
+                accelerator=self.accelerator)
             self.critic_target.load_state_dict(self.critic.state_dict())
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_optimizer = optim.Adam(
-            self.critic.parameters(), lr=self.lr)
+        self.actor_optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.critic_optimizer_type = optim.Adam(self.critic.parameters(), lr=self.lr)
+
+        if self.accelerator is not None:
+            self.actor_optimizer = self.actor_optimizer_type
+            self.critic_optimizer = self.critic_optimizer_type
+            if wrap:
+                self.wrap_models()          
+        else:
+            self.actor = self.actor.to(self.device)
+            self.actor_target = self.actor_target.to(self.device)
+            self.critic = self.critic.to(self.device)
+            self.critic_target = self.critic_target.to(self.device)
+            self.actor_optimizer = self.actor_optimizer_type
+            self.critic_optimizer = self.critic_optimizer_type
+
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
-        """Returns the next action to take in the environment. Epsilon is the probability of taking a random action, used for exploration.
+        """Returns the next action to take in the environment. 
+        Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -174,7 +179,9 @@ class DDPG():
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        state = torch.from_numpy(state).float().to(self.device)
+        state = torch.from_numpy(state).float()
+        if self.accelerator is None:
+            state = state.to(self.device)
 
         if self.one_hot:
             state = nn.functional.one_hot(
@@ -196,6 +203,15 @@ class DDPG():
             action = action_values.cpu().data.numpy()
 
         return action
+    
+    def _squeeze_exp(self, experiences):
+        """Remove first dim created by dataloader.
+        
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
+        :type state: List[torch.Tensor[float]]
+        """
+        st, ac, re, ne, do = experiences
+        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
@@ -222,7 +238,7 @@ class DDPG():
             q_value = self.critic(states, actions)
 
         next_actions = self.actor_target(next_states)
-        noise = actions.data.normal_(0, policy_noise).to(self.device)
+        noise = actions.data.normal_(0, policy_noise)
         noise = noise.clamp(-noise_clip, noise_clip)
         next_actions = (next_actions + noise)
 
@@ -230,15 +246,18 @@ class DDPG():
             next_input_combined = torch.cat([next_states, next_actions], 1)
             q_value_next_state = self.critic_target(next_input_combined)
         elif self.net_config['arch'] == 'cnn':
-            q_value_next_state = self.critic_target(next_states, next_actions) # Was previously self.critic so have updated to self.critic_target
+            q_value_next_state = self.critic_target(next_states, next_actions)
 
-        y_j = rewards + ((1-dones)*self.gamma * q_value_next_state).detach() # Added in the (1 - dones)
+        y_j = rewards + ((1-dones)*self.gamma * q_value_next_state).detach()
 
         critic_loss = self.criterion(q_value, y_j)
 
         # critic loss backprop
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
+        if self.accelerator is not None:
+            self.accelerator.backward(critic_loss)
+        else:
+            critic_loss.backward()
         self.critic_optimizer.step()
 
         # update actor and targets every policy_freq episodes
@@ -253,7 +272,10 @@ class DDPG():
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()
-            actor_loss.backward()
+            if self.accelerator is not None:
+                self.accelerator.backward(actor_loss)
+            else:
+                actor_loss.backward()
             self.actor_optimizer.step()
 
             self.softUpdate(self.actor, self.actor_target)
@@ -275,7 +297,7 @@ class DDPG():
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():
@@ -287,14 +309,14 @@ class DDPG():
                     if swap_channels:
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
-                    state, reward, done, _, _ = env.step(action)
+                    state, reward, done, trunc, info = env.step(action)
                     score += reward
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
 
-    def clone(self, index=None):
+    def clone(self, index=None, wrap=True):
         """Returns cloned agent identical to self.
 
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
@@ -316,23 +338,65 @@ class DDPG():
                            mutation=self.mut,
                            policy_freq=self.policy_freq,
                            device=self.device,
-                           )
+                           accelerator=self.accelerator,
+                           wrap=wrap)
+        
+        if self.accelerator is not None:
+            self.unwrap_models()
+        actor = self.actor.clone()
+        actor_target = self.actor_target.clone()
+        critic = self.critic.clone()
+        critic_target = self.critic_target.clone()
+        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr)
+        clone.actor_optimizer_type = actor_optimizer
+        clone.critic_optimizer_type = critic_optimizer
 
-        clone.actor = self.actor.clone().to(self.device)
-        clone.actor_target = self.actor_target.clone().to(self.device)
-        clone.critic = self.critic.clone().to(self.device)
-        clone.critic_target = self.critic_target.clone().to(self.device)
-
-        clone.actor_optimizer = optim.Adam(
-            clone.actor.parameters(), lr=clone.lr)
-        clone.critic_optimizer = optim.Adam(
-            clone.critic.parameters(), lr=clone.lr)
+        if self.accelerator is not None:
+            if wrap:
+                clone.actor, clone.actor_target, clone.critic, clone.critic_target, \
+                clone.actor_optimizer, clone.critic_optimizer = self.accelerator.prepare(actor,
+                                                                                actor_target,
+                                                                                critic,
+                                                                                critic_target,
+                                                                                actor_optimizer,
+                                                                                critic_optimizer)
+            else:
+                clone.actor, clone.actor_target, clone.critic, clone.critic_target, \
+                clone.actor_optimizer, clone.critic_optimizer = actor, actor_target, critic, \
+                critic_target, actor_optimizer, critic_optimizer
+        else:
+            clone.actor = actor.to(self.device)
+            clone.actor_target = actor_target.to(self.device)
+            clone.critic = critic.to(self.device)
+            clone.critic_target = critic_target.to(self.device)
+            clone.actor_optimizer = actor_optimizer
+            clone.critic_optimizer = critic_optimizer
 
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
         clone.scores = copy.deepcopy(self.scores)
 
         return clone
+
+    def wrap_models(self):
+        if self.accelerator is not None:
+            self.actor, self.actor_target, self.critic, self.critic_target, \
+            self.actor_optimizer, self.critic_optimizer = self.accelerator.prepare(self.actor,
+                                                                            self.actor_target,
+                                                                            self.critic,
+                                                                            self.critic_target,
+                                                                            self.actor_optimizer_type,
+                                                                            self.critic_optimizer_type)
+    
+    def unwrap_models(self):
+        if self.accelerator is not None:
+            self.actor = self.accelerator.unwrap_model(self.actor)
+            self.actor_target = self.accelerator.unwrap_model(self.actor_target)
+            self.critic = self.accelerator.unwrap_model(self.critic)
+            self.critic_target = self.accelerator.unwrap_model(self.critic_target)
+            self.actor_optimizer = self.accelerator.unwrap_model(self.actor_optimizer)
+            self.critic_optimizer = self.accelerator.unwrap_model(self.critic_optimizer)
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
@@ -362,7 +426,7 @@ class DDPG():
             'scores': self.scores,
             'fitness': self.fitness,
             'steps': self.steps,
-        }, path)
+        }, path, pickle_module=dill)
 
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
@@ -370,34 +434,28 @@ class DDPG():
         :param path: Location to load checkpoint from
         :type path: string
         """
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint['net_config']
         if self.net_config['arch'] == 'mlp':
             self.actor = EvolvableMLP(**checkpoint['actor_init_dict'])
-            self.actor_target = EvolvableMLP(
-                **checkpoint['actor_target_init_dict'])
+            self.actor_target = EvolvableMLP(**checkpoint['actor_target_init_dict'])
             self.critic = EvolvableMLP(**checkpoint['critic_init_dict'])
-            self.critic_target = EvolvableMLP(
-                **checkpoint['critic_target_init_dict'])
+            self.critic_target = EvolvableMLP(**checkpoint['critic_target_init_dict'])
         elif self.net_config['arch'] == 'cnn':
             self.actor = EvolvableCNN(**checkpoint['actor_init_dict'])
-            self.actor_target = EvolvableCNN(
-                **checkpoint['actor_target_init_dict'])
+            self.actor_target = EvolvableCNN(**checkpoint['actor_target_init_dict'])
             self.critic = EvolvableCNN(**checkpoint['critic_init_dict'])
-            self.critic_target = EvolvableCNN(
-                **checkpoint['critic_target_init_dict'])
-        self.actor.load_state_dict(checkpoint['actor_state_dict'])
-        self.actor_target.load_state_dict(
-            checkpoint['actor_target_state_dict'])
-        self.critic.load_state_dict(checkpoint['critic_state_dict'])
-        self.critic_target.load_state_dict(
-            checkpoint['critic_target_state_dict'])
-        self.actor_optimizer.load_state_dict(
-            checkpoint['actor_optimizer_state_dict'])
-        self.critic_optimizer.load_state_dict(
-            checkpoint['critic_optimizer_state_dict'])
-        self.batch_size = checkpoint['batch_size']
+            self.critic_target = EvolvableCNN(**checkpoint['critic_target_init_dict'])
         self.lr = checkpoint['lr']
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
+        self.actor.load_state_dict(checkpoint['actor_state_dict'])
+        self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+        self.critic.load_state_dict(checkpoint['critic_state_dict'])
+        self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
+        self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
+        self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
+        self.batch_size = checkpoint['batch_size']
         self.learn_step = checkpoint['learn_step']
         self.gamma = checkpoint['gamma']
         self.tau = checkpoint['tau']
