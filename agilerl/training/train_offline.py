@@ -9,26 +9,10 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train(
-        env,
-        env_name,
-        dataset,
-        algo,
-        pop,
-        memory,
-        swap_channels=False,
-        n_episodes=2000,
-        max_steps=500,
-        evo_epochs=5,
-        evo_loop=1,
-        target=200.,
-        tournament=None,
-        mutation=None,
-        checkpoint=None,
-        checkpoint_path=None,
-        wb=False,
-        accelerator=None,
-        minari_dataset_id=None):
+def train(env, env_name, dataset, algo, pop, memory, swap_channels=False, 
+          n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, target=200., 
+          tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, 
+          wb=False, accelerator=None, minari_dataset_id=None):
     """The general offline RL training function. Returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
