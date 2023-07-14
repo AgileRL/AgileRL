@@ -30,9 +30,9 @@ def load_minari_dataset(dataset_id, accelerator=None):
     
     
 
-def MinariToAgileBuffer(dataset_id,memory):
+def MinariToAgileBuffer(dataset_id, memory, accelerator=None):
     
-    minari_dataset = load_minari_dataset(dataset_id)
+    minari_dataset = load_minari_dataset(dataset_id, accelerator)
     
     for episode in minari_dataset.keys():
         episode = minari_dataset[episode]
