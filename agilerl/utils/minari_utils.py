@@ -1,12 +1,8 @@
 import os
 import minari
 from minari.storage.hosting import download_dataset
-from minari.storage.local import load_dataset
 from minari.storage.datasets_root_dir import get_dataset_path
-from collections import deque
 import h5py
-from agilerl.components.replay_buffer import ReplayBuffer
-import torch
 
 
 def load_minari_dataset(dataset_id):
