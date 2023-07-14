@@ -5,16 +5,23 @@ from minari.storage.datasets_root_dir import get_dataset_path
 import h5py
 
 
-def load_minari_dataset(dataset_id):
+def load_minari_dataset(dataset_id, accelerator=None):
     
     if dataset_id not in list(minari.list_remote_datasets().keys()):
-        raise KeyError("Enter a Valid Minari Dataset ID. check https://minari.farama.org/ for more details.")
+        raise KeyError("Enter a valid Minari Dataset ID. check https://minari.farama.org/ for more details.")
         
     file_path = get_dataset_path(dataset_id)
     
     if os.path.exists(file_path):
-        print("download dataset: ", dataset_id)
-        download_dataset(dataset_id)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                print("download dataset: ", dataset_id)
+                download_dataset(dataset_id)
+            accelerator.wait_for_everyone()
+        else:
+            print("download dataset: ", dataset_id)
+            download_dataset(dataset_id)
     
     data_path = os.path.join(file_path, "data", "main_data.hdf5")
     minari_dataset = h5py.File(data_path, 'r')
