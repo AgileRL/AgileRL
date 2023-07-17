@@ -1,6 +1,7 @@
 import os
 import minari
 from minari.storage.hosting import download_dataset
+from minari.storage.local import load_dataset
 from minari.storage.datasets_root_dir import get_dataset_path
 import h5py
 
@@ -11,8 +12,8 @@ def load_minari_dataset(dataset_id, accelerator=None):
         raise KeyError("Enter a valid Minari Dataset ID. check https://minari.farama.org/ for more details.")
         
     file_path = get_dataset_path(dataset_id)
-    
-    if os.path.exists(file_path):
+
+    if not os.path.exists(file_path):
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -23,8 +24,7 @@ def load_minari_dataset(dataset_id, accelerator=None):
             print("download dataset: ", dataset_id)
             download_dataset(dataset_id)
     
-    data_path = os.path.join(file_path, "data", "main_data.hdf5")
-    minari_dataset = h5py.File(data_path, 'r')
+    minari_dataset = load_dataset(dataset_id)
     
     return minari_dataset
     
@@ -34,16 +34,15 @@ def MinariToAgileBuffer(dataset_id, memory, accelerator=None):
     
     minari_dataset = load_minari_dataset(dataset_id, accelerator)
     
-    for episode in minari_dataset.keys():
-        episode = minari_dataset[episode]
+    for episode in minari_dataset.iterate_episodes():
         
-        for num_steps in range(0, len(episode['rewards'])):
+        for num_steps in range(0, len(episode.rewards)):
             
-            observation = episode['observations'][num_steps]
-            next_observation = episode['observations'][num_steps+1]
-            action = episode['actions'][num_steps]
-            reward = episode['rewards'][num_steps]
-            terminal = episode['terminations'][num_steps]
+            observation = episode.observations[num_steps]
+            next_observation = episode.observations[num_steps+1]
+            action = episode.actions[num_steps]
+            reward = episode.rewards[num_steps]
+            terminal = episode.terminations[num_steps]
             
             memory.save2memory(observation, action, reward, next_observation, terminal)
     
@@ -59,14 +58,13 @@ def MinariToAgileDataset(dataset_id):
 
     minari_dataset = load_minari_dataset(dataset_id)
     
-    for episode in minari_dataset.keys():
-        episode = minari_dataset[episode]
+    for episode in minari_dataset.iterate_episodes():
         
-        observations.extend(episode['observations'][:-1])
-        next_observations.extend(episode['observations'][1:])
-        actions.extend(episode['actions'][:])
-        rewards.extend(episode['rewards'][:])
-        terminals.extend(episode['terminations'][:])
+        observations.extend(episode.observations[:-1])
+        next_observations.extend(episode.observations[1:])
+        actions.extend(episode.actions[:])
+        rewards.extend(episode.rewards[:])
+        terminals.extend(episode.terminations[:])
 
     agile_dataset_id = dataset_id + "_agile" 
     
