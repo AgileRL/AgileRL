@@ -12,7 +12,7 @@ from agilerl.components.sampler import Sampler
 def train(env, env_name, dataset, algo, pop, memory, swap_channels=False, 
           n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, target=200., 
           tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, 
-          wb=False, accelerator=None, minari_dataset_id=None):
+          wb=False, accelerator=None, minari_dataset_id=None, remote=False):
     """The general offline RL training function. Returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
@@ -100,7 +100,7 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
     if minari_dataset_id:
         print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
         
-        memory = MinariToAgileBuffer(minari_dataset_id, memory, accelerator)
+        memory = MinariToAgileBuffer(minari_dataset_id, memory, accelerator,remote)
         
         print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
     

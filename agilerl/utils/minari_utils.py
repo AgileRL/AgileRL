@@ -6,23 +6,28 @@ from minari.storage.datasets_root_dir import get_dataset_path
 import h5py
 
 
-def load_minari_dataset(dataset_id, accelerator=None):
+
+def load_minari_dataset(dataset_id, accelerator=None, remote=False):
     
-    if dataset_id not in list(minari.list_remote_datasets().keys()):
-        raise KeyError("Enter a valid Minari Dataset ID. check https://minari.farama.org/ for more details.")
+    if remote:    
+        if dataset_id not in list(minari.list_remote_datasets().keys()):
+            raise KeyError("Enter a valid remote Minari Dataset ID. check https://minari.farama.org/ for more details.")
         
     file_path = get_dataset_path(dataset_id)
 
     if not os.path.exists(file_path):
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
+        if remote:
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    print("download dataset: ", dataset_id)
+                    download_dataset(dataset_id)
+                accelerator.wait_for_everyone()
+            else:
                 print("download dataset: ", dataset_id)
                 download_dataset(dataset_id)
-            accelerator.wait_for_everyone()
         else:
-            print("download dataset: ", dataset_id)
-            download_dataset(dataset_id)
+            raise FileNotFoundError(f"No local Dataset found for dataset id {dataset_id}. check https://minari.farama.org/ for more details on remote dataset. For loading a remote dataset assign remote=True")
     
     minari_dataset = load_dataset(dataset_id)
     
@@ -30,9 +35,9 @@ def load_minari_dataset(dataset_id, accelerator=None):
     
     
 
-def MinariToAgileBuffer(dataset_id, memory, accelerator=None):
+def MinariToAgileBuffer(dataset_id, memory, accelerator=None, remote=False):
     
-    minari_dataset = load_minari_dataset(dataset_id, accelerator)
+    minari_dataset = load_minari_dataset(dataset_id, accelerator, remote)
     
     for episode in minari_dataset.iterate_episodes():
         
@@ -48,7 +53,7 @@ def MinariToAgileBuffer(dataset_id, memory, accelerator=None):
     
     return memory
 
-def MinariToAgileDataset(dataset_id):
+def MinariToAgileDataset(dataset_id, remote=False):
     
     observations = []
     next_observations = []
@@ -56,7 +61,7 @@ def MinariToAgileDataset(dataset_id):
     rewards = []
     terminals = []
 
-    minari_dataset = load_minari_dataset(dataset_id)
+    minari_dataset = load_minari_dataset(dataset_id, remote)
     
     for episode in minari_dataset.iterate_episodes():
         
