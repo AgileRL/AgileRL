@@ -65,6 +65,7 @@ def agent_test():
         done = [False]
         score = 0
         state = env.reset()[0]
+        print(f"{state=}")
 
         while not done[0]:
             action = agent.getAction(state)

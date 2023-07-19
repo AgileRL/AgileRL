@@ -46,13 +46,13 @@ class MADDPG():
     :type wrap: bool, optional
     """
 
-    def __init__(self, state_dim, action_dim, one_hot, n_agents, index=0, 
+    def __init__(self, state_dims, action_dims, one_hot, n_agents, index=0, 
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
                  learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, 
                  device='cpu', accelerator=None, wrap=True):
         self.algo = 'MADDPG'
-        self.state_dim = state_dim
-        self.action_dim = action_dim
+        self.state_dims = state_dims
+        self.action_dims = action_dims
         self.one_hot = one_hot
         self.n_agents = n_agents
         self.net_config = net_config
@@ -78,20 +78,20 @@ class MADDPG():
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
             self.actors = [EvolvableMLP(
-                num_inputs=state_dim[0],
+                num_inputs=state_dim,
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
                 output_activation='tanh',
                 device=self.device,
-                accelerator=self.accelerator) for i in range(self.n_agents)]
+                accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
+                num_inputs=state_dim + action_dim*self.n_agents,
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
-                accelerator=self.accelerator) for i in range(self.n_agents)]
+                accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.critic_targets = copy.deepcopy(self.critics)
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
@@ -105,12 +105,12 @@ class MADDPG():
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 device=self.device,
-                accelerator=self.accelerator) for i in range(self.n_agents)]
+                accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableCNN(
                 input_shape=state_dim,
-                num_actions=action_dim,
+                num_actions=action_dim*self.n_agents,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
@@ -119,7 +119,7 @@ class MADDPG():
                 mlp_activation='tanh',
                 critic=True,
                 device=self.device,
-                accelerator=self.accelerator) for i in range(self.n_agents)]
+                accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.critic_targets = copy.deepcopy(self.critics)
 
         self.actor_optimizer_types = [optim.Adam(actor.parameters(), lr=self.lr) for actor in self.actors]
@@ -150,7 +150,8 @@ class MADDPG():
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        states = torch.from_numpy(states).float()
+        states = [torch.from_numpy(state).float() for state in states[0].values()]
+        print(states)
         if self.accelerator is None:
             states = states.to(self.device)
 
