@@ -2,7 +2,6 @@ import torch
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.algorithms.td3 import TD3
 from agilerl.utils.utils import makeVectEnvs
-
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -38,6 +37,11 @@ def agent_test():
       'arch': 'mlp',      # Network architecture
       'h_size': [400, 300]  # Network hidden size
     }
+    print(f"THIS IS THE OBSERVATION SPACE: {env.single_observation_space}")
+    print(f"THESE ARE THE OBSERVATION DIMS: {env.single_observation_space.shape}")
+
+    print(f"THIS IS THE ACTION SPACE: {env.single_action_space}")
+    print(f"THESE IS THE ACTION DIMS: {env.single_action_space.shape[0]}")
 
     agent = TD3(state_dim=state_dim,
                 action_dim=action_dim,

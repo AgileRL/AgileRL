@@ -71,6 +71,10 @@ class MADDPG():
         self.fitness = []
         self.steps = [0]
 
+        ####
+        # May need to make adjsutment here to create multiple agents with different dims
+        # We now have action_dims = 
+
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
             self.actors = [EvolvableMLP(
