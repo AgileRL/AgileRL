@@ -65,10 +65,11 @@ if __name__ == "__main__":
     epsilon_end = 0.1
     epsilon_decay = 0.995
     episode_rewards = {agent_id: np.zeros(episodes) for agent_id in env.agents}
-    memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx]) for idx, agent_id in enumerate(env.agents)}
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx], memory_size=100_000, 
+                        field_names=field_names) for idx, agent_id in enumerate(env.agents)}
 
     for ep in range(episodes):
-        print(f"Episode: {ep}")
         state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
         
@@ -100,6 +101,9 @@ if __name__ == "__main__":
             maddpg_agent.learn(experiences) 
             state = next_state
 
+        # Update epsilon
+        epsilon = max(epsilon_end, epsilon * epsilon_decay)
+
         # Episode finishes 
         for agent_id, r in agent_reward.items():
             episode_rewards[agent_id][ep] = r
@@ -110,12 +114,11 @@ if __name__ == "__main__":
             for agent_id, r in agent_reward.items():
                 message = f"| {agent_id}: {r:.4f}"
                 sum_reward += r
-            print(----------f"Episode: {ep + 1}"----------)
+            print(f"----------Episode: {ep + 1}----------")
             print(message)
             print(f"Total reward: {sum_reward}")
 
-
-        epsilon = max(epsilon_end, epsilon * epsilon_decay)
+        
 
 
         # for agent in env.agent_iter():
