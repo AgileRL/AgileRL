@@ -24,7 +24,7 @@ if __name__ == "__main__":
     action_dims = [env.action_space(agent).shape[0] for agent in env.agents]
     # [state_agent_1, state_agent_2, ..., state_agent_n]
     state_dims = [env.observation_space(agent).shape for agent in env.agents]
-    print(action_dims, state_dims[0][0])
+    agent_ids = [agent_id for agent_id in env.agents]
     one_hot = False 
     index=0
     net_config={'arch': 'mlp', 'h_size': [64,64]}
@@ -44,6 +44,7 @@ if __name__ == "__main__":
                    action_dims=action_dims,
                    one_hot=one_hot,
                    n_agents=n_agents,
+                   agent_ids=agent_ids,
                    index=index,
                    environment=env,
                    net_config=net_config,
@@ -67,12 +68,12 @@ if __name__ == "__main__":
     episode_rewards = {agent_id: np.zeros(episodes) for agent_id in env.agents}
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx], memory_size=100_000, 
-                        field_names=field_names) for idx, agent_id in enumerate(env.agents)}
+                        field_names=field_names, device=device) for idx, agent_id in enumerate(env.agents)}
 
     for ep in range(episodes):
+        print("------------------new episode-----------------------")
         state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
-        
         while env.agents:
             step += 1
             action = maddpg_agent.getAction(state, epsilon)
@@ -92,13 +93,16 @@ if __name__ == "__main__":
             for agent_id, memory in memory_dict.items():
                 if memory.counter % maddpg_agent.learn_step == 0 and len(
                     memory) >= maddpg_agent.batch_size:
-                    state[agent_id] = memory.sample(batch_size)
-                    action[agent_id] = memory.sample(batch_size)
-                    reward[agent_id] = memory.sample(batch_size)
-                    next_state[agent_id] = memory.sample(batch_size)
-                    done[agent_id] = memory.sample(batch_size)
-            experiences = state_dict, action_dict, reward_dict, next_state_dict, done_dict
-            maddpg_agent.learn(experiences) 
+                    state_dict[agent_id] = memory.sample(batch_size)[0]
+                    action_dict[agent_id] = memory.sample(batch_size)[1]
+                    reward_dict[agent_id] = memory.sample(batch_size)[2]
+                    next_state_dict[agent_id] = memory.sample(batch_size)[3]
+                    done_dict[agent_id] = memory.sample(batch_size)[4]
+                experiences = state_dict, action_dict, reward_dict, next_state_dict, done_dict
+                
+            # Check if experiences dictionaries have been populated
+            if bool(experiences[0]): 
+                maddpg_agent.learn(experiences) 
             state = next_state
 
         # Update epsilon
