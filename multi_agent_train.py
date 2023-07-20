@@ -1,13 +1,13 @@
 from pettingzoo.mpe import simple_adversary_v3
 from agilerl.algorithms.maddpg import MADDPG
+from agilerl.components.replay_buffer import ReplayBuffer
 import torch
 import numpy as np
 
 
 if __name__ == "__main__":
     # Device agnostic code
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Configure the environment
     env = simple_adversary_v3.parallel_env(N=2, max_cycles=25, continuous_actions=True)
     env.reset(seed=42)
@@ -23,8 +23,8 @@ if __name__ == "__main__":
     # [action_agent_1, action_agent_2, ..., action_agent_n]
     action_dims = [env.action_space(agent).shape[0] for agent in env.agents]
     # [state_agent_1, state_agent_2, ..., state_agent_n]
-    state_dims = [env.observation_space(agent).shape[0] for agent in env.agents]
-    print(action_dims, state_dims)
+    state_dims = [env.observation_space(agent).shape for agent in env.agents]
+    print(action_dims, state_dims[0][0])
     one_hot = False 
     index=0
     net_config={'arch': 'mlp', 'h_size': [64,64]}
@@ -45,6 +45,7 @@ if __name__ == "__main__":
                    one_hot=one_hot,
                    n_agents=n_agents,
                    index=index,
+                   environment=env,
                    net_config=net_config,
                    batch_size=batch_size,
                    lr=lr,
@@ -59,21 +60,62 @@ if __name__ == "__main__":
     
     step = 0
     agent_num = env.num_agents
-    episodes = 1
+    episodes = 10
+    epsilon = 1
+    epsilon_end = 0.1
+    epsilon_decay = 0.995
     episode_rewards = {agent_id: np.zeros(episodes) for agent_id in env.agents}
+    memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx]) for idx, agent_id in enumerate(env.agents)}
 
     for ep in range(episodes):
-        state = env.reset()
+        print(f"Episode: {ep}")
+        state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
         
         while env.agents:
-            print(f"This is the state: {state}")
             step += 1
-            action = maddpg_agent.getAction(state)
-            next_state, reward, done, info = env.step(action)
-            print("next_state", next_state)
-            print("reward", reward)
-            print("done", done)
+            action = maddpg_agent.getAction(state, epsilon)
+            next_state, reward, done, info, _ = env.step(action)
+
+            # Save experiences of each agent to the agents' corresponding memory
+            for agent_id, memory in memory_dict.items():
+                memory.save2memory(state[agent_id], action[agent_id], reward[agent_id], next_state[agent_id], done[agent_id])
+            
+            # Save each agents' reward 
+            for agent_id, r in reward.items():
+                agent_reward[agent_id] += r
+
+            # Sample the experiences from each agents' memory
+            # Note: each experience is a dictionary of format {agent_0: experience, ..., agent_n: experience}
+            state_dict, action_dict, reward_dict, next_state_dict, done_dict = {}, {}, {}, {}, {}      
+            for agent_id, memory in memory_dict.items():
+                if memory.counter % maddpg_agent.learn_step == 0 and len(
+                    memory) >= maddpg_agent.batch_size:
+                    state[agent_id] = memory.sample(batch_size)
+                    action[agent_id] = memory.sample(batch_size)
+                    reward[agent_id] = memory.sample(batch_size)
+                    next_state[agent_id] = memory.sample(batch_size)
+                    done[agent_id] = memory.sample(batch_size)
+            experiences = state_dict, action_dict, reward_dict, next_state_dict, done_dict
+            maddpg_agent.learn(experiences) 
+            state = next_state
+
+        # Episode finishes 
+        for agent_id, r in agent_reward.items():
+            episode_rewards[agent_id][ep] = r
+
+        # Print every 100 episodes
+        if (ep + 1) % 100 == 0:
+            sum_reward = 0
+            for agent_id, r in agent_reward.items():
+                message = f"| {agent_id}: {r:.4f}"
+                sum_reward += r
+            print(----------f"Episode: {ep + 1}"----------)
+            print(message)
+            print(f"Total reward: {sum_reward}")
+
+
+        epsilon = max(epsilon_end, epsilon * epsilon_decay)
 
 
         # for agent in env.agent_iter():

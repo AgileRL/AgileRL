@@ -46,7 +46,7 @@ class MADDPG():
     :type wrap: bool, optional
     """
 
-    def __init__(self, state_dims, action_dims, one_hot, n_agents, index=0, 
+    def __init__(self, state_dims, action_dims, one_hot, n_agents, environment, index=0, 
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
                  learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, 
                  device='cpu', accelerator=None, wrap=True):
@@ -65,7 +65,7 @@ class MADDPG():
         self.policy_freq = policy_freq
         self.device = device
         self.accelerator = accelerator
-
+        self.env = environment
         self.index = index
         self.scores = []
         self.fitness = []
@@ -78,16 +78,16 @@ class MADDPG():
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
             self.actors = [EvolvableMLP(
-                num_inputs=state_dim,
+                num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
-                output_activation='tanh',
+                output_activation='sigmoid',
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableMLP(
-                num_inputs=state_dim + action_dim*self.n_agents,
+                num_inputs=state_dim[0] + action_dim*self.n_agents,
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
@@ -103,7 +103,7 @@ class MADDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
-                mlp_activation='tanh',
+                mlp_activation='sigmoid',
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
@@ -150,31 +150,36 @@ class MADDPG():
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        states = [torch.from_numpy(state).float() for state in states[0].values()]
+        agent_ids = [agent_id for agent_id in states.keys()]
+        states = [torch.from_numpy(state).float() for state in states.values()]
         print(states)
+
         if self.accelerator is None:
-            states = states.to(self.device)
+            states = [state.to(self.device) for state in states]
 
+        #### Need to adjust
         if self.one_hot:
-            states = nn.functional.one_hot(
-                states.long(), num_classes=self.state_dim[0]).float().squeeze()
+            states = [nn.functional.one_hot(
+                state.long(), num_classes=state_dim[0]).float().squeeze() for state, state_dim 
+                in zip(states, self.state_dims)]
 
-        if len(states.size()) < 2:
-            states = states.unsqueeze(0)       
+          
+        states = [state.unsqueeze(0) for state in states if len(state.size()) < 2]   
 
-        actions = [] 
-        for state, actor in zip(states, self.actors):
-            # epsilon-greedy
+        actions = {} 
+        for agent_id, state, actor in zip(agent_ids, states, self.actors):
             if random.random() < epsilon:
-                action = (np.random.rand(state.size()[0], self.action_dim).astype('float32')-0.5)*2
+                # See what Nick thinks of this implementation, should we standardise across other algos?
+                # action = np.random.rand(state.size()[0], action_dim).astype('float32').squeeze() 
+                action = self.env.action_space(agent_id).sample()
             else:
                 actor.eval()
                 with torch.no_grad():
                     action_values = actor(state)
                 actor.train()
-
-                action = action_values.cpu().data.numpy()
-            actions.append(action)
+                action = action_values.cpu().data.numpy().squeeze()
+                print("ACTION", action)
+            actions[agent_id] = action
 
         return actions
     
