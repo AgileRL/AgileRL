@@ -25,6 +25,7 @@ if __name__ == "__main__":
     # [state_agent_1, state_agent_2, ..., state_agent_n]
     state_dims = [env.observation_space(agent).shape for agent in env.agents]
     agent_ids = [agent_id for agent_id in env.agents]
+    print(agent_ids)
     one_hot = False 
     index=0
     net_config={'arch': 'mlp', 'h_size': [64,64]}
@@ -71,9 +72,10 @@ if __name__ == "__main__":
                         field_names=field_names, device=device) for idx, agent_id in enumerate(env.agents)}
 
     for ep in range(episodes):
-        print("------------------new episode-----------------------")
+        print(f"------------------Episode: {ep+1}-----------------------")
         state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
+
         while env.agents:
             step += 1
             action = maddpg_agent.getAction(state, epsilon)
@@ -118,9 +120,9 @@ if __name__ == "__main__":
             for agent_id, r in agent_reward.items():
                 message = f"| {agent_id}: {r:.4f}"
                 sum_reward += r
-            print(f"----------Episode: {ep + 1}----------")
+            print(f"-----------------------------------------------")
             print(message)
-            print(f"Total reward: {sum_reward}")
+            print(f"Total reward for episode {ep + 1}: {sum_reward}")
 
         
 

@@ -203,7 +203,11 @@ class MADDPG():
         :type policy_noise: float, optional
         """
         # [batch_size x n_agents x dim]
-        
+        states, actions, rewards, next_states, dones = experiences
+        next_actions_ = [self.actor_targets[idx](next_states[agent_id]).detach() for idx, agent_id in enumerate(self.agent_ids)]
+        next_actions = torch.stack(next_actions_)
+        # next_actions = (next_actions.transpose(0, 1).contiguous())
+        critic_counter = 0
         for agent_id, actor, actor_target, critic, critic_target, actor_optimizer, critic_optimizer in zip(self.agent_ids,
                                                                                                  self.actors,    
                                                                                                  self.actor_targets,
@@ -211,20 +215,14 @@ class MADDPG():
                                                                                                  self.critic_targets,
                                                                                                  self.actor_optimizers, 
                                                                                                  self.critic_optimizers):
-            
-            states, actions, rewards, next_states, dones = experiences
-            agent_state = states[agent_id]
-            agent_action = actions[agent_id]
-            agent_reward = rewards[agent_id]
-            agent_dones = dones[agent_id]
-
+            if agent_id == 'agent_0' or agent_id == 'agent_1':
+                continue
             #### Re-configure once the base case is working
             # if self.one_hot:
             #     states = nn.functional.one_hot(
             #         states.long(), num_classes=self.state_dim[0]).float().squeeze()
             #     next_states = nn.functional.one_hot(
             #         next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
-            print(f"{states.values()=}")
 
             if self.net_config['arch'] == 'mlp':
                 input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
@@ -234,9 +232,6 @@ class MADDPG():
             # elif self.net_config['arch'] == 'cnn':
             #     q_value = critic(states, actions)
 
-            next_actions = [self.actor_targets[i](next_states[agent_id]) for i, agent_id in enumerate(self.agent_ids)]
-            next_actions = torch.stack(next_actions)
-            # next_actions = (next_actions.transpose(0, 1).contiguous())
 
             #### Add in the noise once we have the simplest mlp case working
             # noise = actions.data.normal_(0, policy_noise)
@@ -251,38 +246,42 @@ class MADDPG():
             # elif self.net_config['arch'] == 'cnn':
             #     q_value_next_state = critic_target(next_states, next_actions)
 
-            y_j = agent_reward + ((1-agent_dones)*self.gamma * q_value_next_state).detach()
-
-            critic_loss = self.criterion(q_value, y_j)
+            y_j = rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
+            critic_loss = self.criterion(q_value, y_j.detach())
+            print(critic_loss)
 
             # critic loss backprop
             critic_optimizer.zero_grad()
             if self.accelerator is not None:
                 self.accelerator.backward(critic_loss)
             else:
+                print(agent_id)
                 critic_loss.backward()
             critic_optimizer.step()
+            critic_counter += 1
+            print(critic_counter)
 
+            #### Add in the time delay once basic case is working
             # update actor and targets every policy_freq episodes
-            if len(self.scores) % self.policy_freq == 0:
-                if self.net_config['arch'] == 'mlp':
-                    action = actor(states[agent_id])
-                    actions[agent_id] = action
-                    input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
-                    actor_loss = -critic(input_combined).mean()
+            #if len(self.scores) % self.policy_freq == 0:
+            if self.net_config['arch'] == 'mlp':
+                action = actor(states[agent_id])
+                actions[agent_id] = action
+                input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
+                actor_loss = -critic(input_combined).mean()
                 
                 #### Complete cnns once mlp is working 
                 # elif self.net_config['arch'] == 'cnn':
                 #     actor_loss = - \
                 #         critic(states, actor.forward(states)).mean()
 
-                # actor loss backprop
-                actor_optimizer.zero_grad()
-                if self.accelerator is not None:
-                    self.accelerator.backward(actor_loss)
-                else:
-                    actor_loss.backward()
-                actor_optimizer.step()
+            # actor loss backprop
+            actor_optimizer.zero_grad()
+            if self.accelerator is not None:
+                self.accelerator.backward(actor_loss)
+            else:
+                actor_loss.backward()
+            actor_optimizer.step()
 
         if len(self.scores) % self.policy_freq == 0:
             for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
