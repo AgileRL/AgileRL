@@ -25,7 +25,6 @@ if __name__ == "__main__":
     # [state_agent_1, state_agent_2, ..., state_agent_n]
     state_dims = [env.observation_space(agent).shape for agent in env.agents]
     agent_ids = [agent_id for agent_id in env.agents]
-    print(agent_ids)
     one_hot = False 
     index=0
     net_config={'arch': 'mlp', 'h_size': [64,64]}
@@ -62,7 +61,7 @@ if __name__ == "__main__":
     
     step = 0
     agent_num = env.num_agents
-    episodes = 1000
+    episodes = 10000
     epsilon = 1
     epsilon_end = 0.1
     epsilon_decay = 0.995
@@ -70,6 +69,7 @@ if __name__ == "__main__":
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx], memory_size=100_000, 
                         field_names=field_names, device=device) for idx, agent_id in enumerate(env.agents)}
+    learn_interval = 100
 
     for ep in range(episodes):
         #print(f"------------------Episode: {ep+1}-----------------------")
@@ -103,10 +103,11 @@ if __name__ == "__main__":
                 experiences = state_dict, action_dict, reward_dict, next_state_dict, done_dict
                 
             # Check if experiences dictionaries have been populated
-            if bool(experiences[0]): 
+            if bool(experiences[0]) and (step % learn_interval == 0): 
                 maddpg_agent.learn(experiences) 
             state = next_state
 
+        maddpg_agent.scores.append(1)
         # Update epsilon
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
 
@@ -117,37 +118,15 @@ if __name__ == "__main__":
         # Print every 100 episodes
         if (ep + 1) % 100 == 0:
             sum_reward = 0
+            message = ""
             for agent_id, r in agent_reward.items():
-                message = f"| {agent_id}: {r:.4f}"
+                message += f"| {agent_id}: {r:.4f}"
                 sum_reward += r
             print(f"-----------------------------------------------")
             print(message)
             print(f"Total reward for episode {ep + 1}: {sum_reward}")
 
         
-
-
-        # for agent in env.agent_iter():
-        #     observation, reward, termination, truncation, _ = env.last()
-        #     total_reward[agent] += reward
-        #     if (termination or truncation):
-        #         ep_rewards.append(total_reward[agent])
-        #         action = None 
-        #     else:
-
-        #         action = maddpg_agent.getAction(observation)
-        #     env.step(action[0])
-
-
-            # state = env.reset(seed=42)
-            # print(f"{state=}")
-            # score = 0
-            # done = [False]*n_agents
-
-            # while not any(done):
-            #     actions = agent.getAction(state)
-            #     next_state, reward, done, _, _ = env.step(actions)
-            #     print(next_state)
 
 
 
