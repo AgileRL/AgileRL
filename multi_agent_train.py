@@ -62,7 +62,7 @@ if __name__ == "__main__":
     
     step = 0
     agent_num = env.num_agents
-    episodes = 10
+    episodes = 1000
     epsilon = 1
     epsilon_end = 0.1
     epsilon_decay = 0.995
@@ -72,7 +72,7 @@ if __name__ == "__main__":
                         field_names=field_names, device=device) for idx, agent_id in enumerate(env.agents)}
 
     for ep in range(episodes):
-        print(f"------------------Episode: {ep+1}-----------------------")
+        #print(f"------------------Episode: {ep+1}-----------------------")
         state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
 
