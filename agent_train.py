@@ -69,6 +69,7 @@ def agent_test():
 
         while not done[0]:
             action = agent.getAction(state)
+            print(f"{action=}")
             next_state, reward, done, _, _ = env.step(action)
             memory.save2memoryVectEnvs(state, action, reward, next_state, done)
                     

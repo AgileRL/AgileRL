@@ -47,7 +47,7 @@ class MADDPG():
     """
 
     def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, environment, index=0, 
-                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
+                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, critic_lr=1e-3, actor_lr=3e-4,
                  learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, 
                  device='cpu', accelerator=None, wrap=True):
         self.algo = 'MADDPG'
@@ -59,7 +59,8 @@ class MADDPG():
         self.agent_ids = agent_ids
         self.net_config = net_config
         self.batch_size = batch_size
-        self.lr = lr
+        self.critic_lr = critic_lr
+        self.actor_lr = actor_lr
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
@@ -124,8 +125,8 @@ class MADDPG():
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.critic_targets = copy.deepcopy(self.critics)
 
-        self.actor_optimizer_types = [optim.Adam(actor.parameters(), lr=self.lr) for actor in self.actors]
-        self.critic_optimizer_types = [optim.Adam(critic.parameters(), lr=self.lr) for critic in self.critics]
+        self.actor_optimizer_types = [optim.Adam(actor.parameters(), lr=self.actor_lr) for actor in self.actors]
+        self.critic_optimizer_types = [optim.Adam(critic.parameters(), lr=self.critic_lr) for critic in self.critics]
 
         if self.accelerator is not None:
             self.actor_optimizers = self.actor_optimizer_types
@@ -152,8 +153,10 @@ class MADDPG():
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
+        # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
 
+        # Configure accelerator
         if self.accelerator is None:
             states = [state.to(self.device) for state in states]
 
@@ -163,7 +166,7 @@ class MADDPG():
                 state.long(), num_classes=state_dim[0]).float().squeeze() for state, state_dim 
                 in zip(states, self.state_dims)]
 
-          
+        
         states = [state.unsqueeze(0) for state in states if len(state.size()) < 2]   
 
         actions = {} 
@@ -179,7 +182,7 @@ class MADDPG():
                 actor.train()
                 action = action_values.cpu().data.numpy().squeeze()
             actions[agent_id] = action
-
+        
         return actions
     
     def _squeeze_exp(self, experiences):
@@ -203,7 +206,7 @@ class MADDPG():
         :type policy_noise: float, optional
         """
         # [batch_size x n_agents x dim]
-        states, actions, rewards, next_states, dones = experiences
+        
         # next_actions = (next_actions.transpose(0, 1).contiguous())
         for agent_id, actor, actor_target, critic, critic_target, actor_optimizer, critic_optimizer in zip(self.agent_ids,
                                                                                                  self.actors,    
@@ -220,17 +223,17 @@ class MADDPG():
             #         states.long(), num_classes=self.state_dim[0]).float().squeeze()
             #     next_states = nn.functional.one_hot(
             #         next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
-
+            states, actions, rewards, next_states, dones = experiences
             if self.net_config['arch'] == 'mlp':
                 input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
                 q_value = critic(input_combined)
                 
-
             #### Work on cnn once mlp is working
             # elif self.net_config['arch'] == 'cnn':
             #     q_value = critic(states, actions)
 
             next_actions_ = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
+            #print(f"{next_actions_}")
             next_actions = torch.stack(next_actions_)
             #### Add in the noise once we have the simplest mlp case working
             # noise = actions.data.normal_(0, policy_noise)
@@ -247,7 +250,6 @@ class MADDPG():
 
             y_j = rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
 
-            test_variable = torch.zeros(q_value.shape).to(self.device)
             critic_loss = self.criterion(q_value, y_j.detach_())
 
             # critic loss backprop
@@ -260,7 +262,7 @@ class MADDPG():
 
             ### Add in the time delay once basic case is working
             # update actor and targets every policy_freq episodes
-            # if len(self.scores) % self.policy_freq == 0:
+            #if len(self.scores) % self.policy_freq == 0:
             if self.net_config['arch'] == 'mlp':
                 action = actor(states[agent_id])
                 detached_actions = copy.deepcopy(actions)
@@ -271,7 +273,9 @@ class MADDPG():
                 #### Complete cnns once mlp is working 
                 # elif self.net_config['arch'] == 'cnn':
                 #     actor_loss = - \
-                #         critic(states, actor.forward(states)).mean()
+                #         critic(states, actor.forward(states)).
+                # 
+                # mean()
 
             # actor loss backprop
             actor_optimizer.zero_grad()
@@ -281,11 +285,11 @@ class MADDPG():
                 actor_loss.backward()
             actor_optimizer.step()
 
-        if len(self.scores) % self.policy_freq == 0:
-            for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
-                                                                  self.critics, self.critic_targets):
-                self.softUpdate(actor, actor_target)
-                self.softUpdate(critic, critic_target)
+        #if len(self.scores) % self.policy_freq == 0:
+        # for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
+        #                                                         self.critics, self.critic_targets):
+            self.softUpdate(actor, actor_target)
+            self.softUpdate(critic, critic_target)
 
     def softUpdate(self, net, target):
         """Soft updates target network.

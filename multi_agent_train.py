@@ -1,16 +1,20 @@
-from pettingzoo.mpe import simple_adversary_v3
+from pettingzoo.mpe import simple_adversary_v3, simple_spread_v3, simple_v3
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.components.replay_buffer import ReplayBuffer
 import torch
 import numpy as np
+import wandb
+from datetime import datetime
 
 
 if __name__ == "__main__":
     # Device agnostic code
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Configure the environment
-    env = simple_adversary_v3.parallel_env(N=2, max_cycles=25, continuous_actions=True)
-    env.reset(seed=42)
+    env = simple_v3.parallel_env(max_cycles=25, continuous_actions=True)
+    env.reset()
+
     # Print information about the agents
     # print('Number of agents: ', len(env.agents))
     # for agent in env.agents:
@@ -28,11 +32,12 @@ if __name__ == "__main__":
     one_hot = False 
     index=0
     net_config={'arch': 'mlp', 'h_size': [64,64]}
-    batch_size=64
-    lr=1e-4
-    learn_step=5
-    gamma=0.99
-    tau=1e-3
+    batch_size=1024
+    critic_lr = 0.01
+    actor_lr = 0.01
+    learn_step=100
+    gamma=0.95
+    tau=0.01
     mutation=None
     policy_freq=2
     device=device
@@ -49,7 +54,8 @@ if __name__ == "__main__":
                    environment=env,
                    net_config=net_config,
                    batch_size=batch_size,
-                   lr=lr,
+                   actor_lr=actor_lr,
+                   critic_lr=critic_lr,
                    learn_step=learn_step,
                    gamma=gamma,
                    tau=tau,
@@ -60,8 +66,9 @@ if __name__ == "__main__":
                    wrap=wrap) 
     
     step = 0
+    wb = True
     agent_num = env.num_agents
-    episodes = 10000
+    episodes = 10_000
     epsilon = 1
     epsilon_end = 0.1
     epsilon_decay = 0.995
@@ -69,7 +76,18 @@ if __name__ == "__main__":
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx], memory_size=100_000, 
                         field_names=field_names, device=device) for idx, agent_id in enumerate(env.agents)}
-    learn_interval = 100
+    reward_history = []
+    if wb:
+        print("... Initialsing W&B ...")
+        wandb.init(
+            project="MADDPG Testing",
+            name=f"MADDPG_simple_{datetime.now().strftime('%m%d%Y%H%M%S')}",
+            config = {
+                "algo": "MADDPG",
+                "env": "simple_v3"
+            }
+
+        )
 
     for ep in range(episodes):
         #print(f"------------------Episode: {ep+1}-----------------------")
@@ -79,8 +97,8 @@ if __name__ == "__main__":
         while env.agents:
             step += 1
             action = maddpg_agent.getAction(state, epsilon)
+            # These are dictionaries of format: n_s = {agent_i: n_s_i,...,...}
             next_state, reward, done, info, _ = env.step(action)
-
             # Save experiences of each agent to the agents' corresponding memory
             for agent_id, memory in memory_dict.items():
                 memory.save2memory(state[agent_id], action[agent_id], reward[agent_id], next_state[agent_id], done[agent_id])
@@ -103,11 +121,10 @@ if __name__ == "__main__":
                 experiences = state_dict, action_dict, reward_dict, next_state_dict, done_dict
                 
             # Check if experiences dictionaries have been populated
-            if bool(experiences[0]) and (step % learn_interval == 0): 
+            if bool(experiences[0]):# and (step % maddpg_agent.learn_step == 0): 
                 maddpg_agent.learn(experiences) 
             state = next_state
 
-        maddpg_agent.scores.append(1)
         # Update epsilon
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
 
@@ -115,17 +132,28 @@ if __name__ == "__main__":
         for agent_id, r in agent_reward.items():
             episode_rewards[agent_id][ep] = r
 
+        # Calculate total reward of episode
+        score = sum(agent_reward.values())
+        reward_history.append(score)
+
+        # Append the score to the agent object
+        maddpg_agent.scores.append(score)
+        
         # Print every 100 episodes
         if (ep + 1) % 100 == 0:
-            sum_reward = 0
-            message = ""
-            for agent_id, r in agent_reward.items():
-                message += f"| {agent_id}: {r:.4f}"
-                sum_reward += r
-            print(f"-----------------------------------------------")
-            print(message)
-            print(f"Total reward for episode {ep + 1}: {sum_reward}")
+            if wb:
+                wandb.log(
+                    {"episode": ep + 1,
+                     "total_reward":score,
+                     "mean_reward": np.mean(reward_history[-100:])}
+                )
+            else:
+                print(f"-----------------------------------------------")
+                print(f"Total reward for episode {ep + 1}: {score}")
+                print(f"{episode_rewards}")
 
+
+        
         
 
 
