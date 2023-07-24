@@ -5,8 +5,6 @@ from minari.storage.local import load_dataset
 from minari.storage.datasets_root_dir import get_dataset_path
 import h5py
 
-
-
 def load_minari_dataset(dataset_id, accelerator=None, remote=False):
     
     if remote:    
@@ -32,8 +30,6 @@ def load_minari_dataset(dataset_id, accelerator=None, remote=False):
     minari_dataset = load_dataset(dataset_id)
     
     return minari_dataset
-    
-    
 
 def MinariToAgileBuffer(dataset_id, memory, accelerator=None, remote=False):
     
@@ -48,7 +44,6 @@ def MinariToAgileBuffer(dataset_id, memory, accelerator=None, remote=False):
             action = episode.actions[num_steps]
             reward = episode.rewards[num_steps]
             terminal = episode.terminations[num_steps]
-            
             memory.save2memory(observation, action, reward, next_observation, terminal)
     
     return memory
@@ -75,7 +70,6 @@ def MinariToAgileDataset(dataset_id, remote=False):
     
     agile_file_path = get_dataset_path(agile_dataset_id)
     
-    
     agile_dataset_path = os.path.join(agile_file_path, "data")
     os.makedirs(agile_dataset_path, exist_ok=True)
     data_path = os.path.join(agile_dataset_path, "main_data.hdf5")
@@ -90,19 +84,3 @@ def MinariToAgileDataset(dataset_id, remote=False):
     f.create_dataset('terminals', data=terminals)
     
     return f
-
-    
-    
-    
-
-    
-    
-        
-        
-    
-    
-    
-
-
-
-
