@@ -36,10 +36,17 @@ For something that is bigger than a one or two line fix:
 
 1. Create your own fork of the code.
 2. Do the changes in your fork.
-3. Run the tests. - **(TESTS UNDER CONSTRUCTION)**
-4. Make the test pass.
-5. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
-6. Push to your fork and submit a pull request. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
+3. Run the linter.
+````
+ruff --format=github --target-version=py37 --ignore E501
+````
+4. Run the tests. - **(TESTS UNDER CONSTRUCTION)**
+````
+pytest
+````
+5. Make the test pass.
+6. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
+7. Push to your fork and submit a pull request. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
 
 Small contributions such as fixing spelling errors, where the content is small enough to not be considered intellectual property, can be submitted by a contributor as a patch. <br>
 As a rule of thumb, changes are obvious fixes if they do not introduce any new functionality or creative thinking. As long as the change does not affect functionality, some likely examples include the following:
