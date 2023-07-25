@@ -86,7 +86,7 @@ class MADDPG():
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
-                output_activation='sigmoid',
+                output_activation='softmax',
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
@@ -171,25 +171,6 @@ class MADDPG():
         
         states = [state.unsqueeze(0) for state in states if len(state.size()) < 2]   
 
-
-        # if random.random() < epsilon:
-        #     actions = {agent_id: self.env.action_space(agent_id).sample() for agent_id in self.agent_ids}
-        # else:
-        #     actions = {}
-        #     for idx, (agent_id, state, actor) in enumerate(zip(self.agent_ids, states, self.actors)):
-        #         #print("POLICY USED")
-        #         actor.eval()
-        #         with torch.no_grad():
-        #             action_values = actor(state)
-        #         actor.train()
-        #         action = action_values.cpu().data.numpy().squeeze() # + \
-        #         #     np.random.normal(0, self.max_action * self.expl_noise, 
-        #         #     size=self.action_dims[idx]).astype(np.float32)
-        #         # action = np.clip(action, 0, 1)
-        #         actions[agent_id] = action
-
-
-        ### For loop must be inside each if and else 
         actions = {} 
         for agent_id, state, actor in zip(self.agent_ids, states, self.actors):
             if random.random() < epsilon:
@@ -226,9 +207,7 @@ class MADDPG():
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        # [batch_size x n_agents x dim]
-        
-        # next_actions = (next_actions.transpose(0, 1).contiguous())
+
         for agent_id, actor, actor_target, critic, critic_target, actor_optimizer, critic_optimizer in zip(self.agent_ids,
                                                                                                  self.actors,    
                                                                                                  self.actor_targets,
@@ -236,15 +215,16 @@ class MADDPG():
                                                                                                  self.critic_targets,
                                                                                                  self.actor_optimizers, 
                                                                                                  self.critic_optimizers):
-            # if agent_id == 'agent_0' or agent_id == 'agent_1':
-            #     continue
+         
             #### Re-configure once the base case is working
             # if self.one_hot:
             #     states = nn.functional.one_hot(
             #         states.long(), num_classes=self.state_dim[0]).float().squeeze()
             #     next_states = nn.functional.one_hot(
             #         next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
+
             states, actions, rewards, next_states, dones = experiences
+
             if self.net_config['arch'] == 'mlp':
                 input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
                 q_value = critic(input_combined)
@@ -254,8 +234,6 @@ class MADDPG():
             #     q_value = critic(states, actions)
 
             next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
-            #print(f"{next_action_=}")
-            #print(f"{next_actions_}")
             #next_actions = torch.stack(next_actions_)
             #### Add in the noise once we have the simplest mlp case working
             # noise = actions.data.normal_(0, policy_noise)
@@ -307,11 +285,10 @@ class MADDPG():
                 actor_loss.backward()
             actor_optimizer.step()
 
-        if len(self.scores) % self.policy_freq == 0:
-            for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
+        for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
                                                                  self.critics, self.critic_targets):
-                self.softUpdate(actor, actor_target)
-                self.softUpdate(critic, critic_target)
+            self.softUpdate(actor, actor_target)
+            self.softUpdate(critic, critic_target)
 
     def softUpdate(self, net, target):
         """Soft updates target network.

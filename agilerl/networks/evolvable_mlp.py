@@ -76,11 +76,12 @@ class EvolvableMLP(nn.Module):
             'softsign': nn.Softsign,
             'sigmoid': nn.Sigmoid,
             'softplus': nn.Softplus,
+            'softmax': nn.Softmax,
             'lrelu': nn.LeakyReLU,
             'prelu': nn.PReLU,
             'gelu': nn.GELU}
 
-        return activation_functions[activation_names]()
+        return activation_functions[activation_names](dim=1) if activation_names == 'softmax' else activation_functions[activation_names]()
 
     def create_net(self):
         """Creates and returns neural network.

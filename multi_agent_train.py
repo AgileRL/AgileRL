@@ -1,6 +1,7 @@
 from pettingzoo.mpe import simple_adversary_v3, simple_spread_v3, simple_v3, simple_speaker_listener_v4
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 import torch
 import numpy as np
 import wandb
@@ -12,7 +13,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Configure the environment
-    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
+    env = simple_adversary_v3.parallel_env(N=2, max_cycles=25, continuous_actions=True)
     env.reset()
 
     # Print information about the agents
@@ -68,7 +69,7 @@ if __name__ == "__main__":
                    wrap=wrap) 
     
     step = 0 # Global step counter
-    wb = True
+    wb = False
     agent_num = env.num_agents
     episodes = 40_000
     epsilon = 1
@@ -76,8 +77,8 @@ if __name__ == "__main__":
     epsilon_decay = 0.995
     episode_rewards = {agent_id: np.zeros(episodes) for agent_id in env.agents}
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory_dict = {agent_id: ReplayBuffer(action_dim=action_dims[idx], memory_size=1_000_000, 
-                        field_names=field_names, device=device) for idx, agent_id in enumerate(env.agents)}
+    ma_buffer = MultiAgentReplayBuffer(field_names=field_names, memory_size= 1000000, 
+                                       agent_ids=agent_ids, device=device)
     reward_history = []
 
     # Initialise weights and biases
@@ -85,22 +86,23 @@ if __name__ == "__main__":
         print("... Initialsing W&B ...")
         wandb.init(
             project="MADDPG Testing",
-            name=f"Fixing_simple_speaker_listener_{datetime.now().strftime('%m%d%Y%H%M%S')}",
+            name=f"MADDPG_simple_adversary_v3_{datetime.now().strftime('%m%d%Y%H%M%S')}",
             config = {
                 "algo": "MADDPG",
-                "env": "simple_speaker_listener_v4",
+                "env": "simple_adversary_v3",
                 "arch": net_config,
                 "gamma": gamma,
                 "critic_lr": critic_lr,
                 "actor_lr": actor_lr,
                 "tau": tau,
-                "detail": "Original get action config"
+                "batch_size":batch_size,
+                "output activation": 'softmax',
+                "detail": "Test using multi-agent buffer"
             }
 
         )
 
     for ep in range(episodes):
-        #print(f"------------------Episode: {ep+1}-----------------------")
         state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
 
@@ -109,31 +111,22 @@ if __name__ == "__main__":
             action = maddpg_agent.getAction(state, epsilon)
             # These are dictionaries of format: n_s = {agent_i: n_s_i,...,...}
             next_state, reward, done, info, _ = env.step(action)
-            # Save experiences of each agent to the agents' corresponding memory
-            for agent_id, memory in memory_dict.items():
-                memory.save2memory(state[agent_id], action[agent_id], reward[agent_id], next_state[agent_id], done[agent_id])
-            
+            print(done)
+            print(state)
+
+            # Save experiences to the buffer
+            ma_buffer.save2memory(state, action, reward, next_state, done)
+
             # Save each agents' reward 
             for agent_id, r in reward.items():
                 agent_reward[agent_id] += r
 
-            # Sample the experiences from each agents' memory
-            # Note: each experience is a dictionary of format {agent_0: experience, ..., agent_n: experience}
-            state_dict, action_dict, reward_dict, next_state_dict, done_dict = {}, {}, {}, {}, {}      
-            for agent_id, memory in memory_dict.items():
-                if memory.counter % maddpg_agent.learn_step == 0 and len(
-                    memory) >= maddpg_agent.batch_size:
-                    state_dict[agent_id] = memory.sample(batch_size)[0]
-                    action_dict[agent_id] = memory.sample(batch_size)[1]
-                    reward_dict[agent_id] = memory.sample(batch_size)[2]
-                    next_state_dict[agent_id] = memory.sample(batch_size)[3]
-                    done_dict[agent_id] = memory.sample(batch_size)[4]
-            experiences = state_dict, action_dict, reward_dict, next_state_dict, done_dict
-                
-            # Check if experiences dictionaries have been populated
-            if bool(experiences[0]):# and (step % maddpg_agent.learn_step == 0): 
+            # Sample from the buffer and then learn the maddpg
+            if ma_buffer.counter % maddpg_agent.learn_step == 0 and len(
+                ma_buffer) >= maddpg_agent.batch_size:
+                experiences = ma_buffer.sample(batch_size)
                 maddpg_agent.learn(experiences)
-
+ 
             # Update the state 
             state = next_state
 
