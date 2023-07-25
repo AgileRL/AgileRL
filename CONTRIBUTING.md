@@ -38,7 +38,8 @@ For something that is bigger than a one or two line fix:
 2. Do the changes in your fork.
 3. Run the linter.
 ````
-ruff --format=github --target-version=py37 --ignore E501
+cd AgileRL
+ruff --format=github --target-version=py37 --ignore E501 ./
 ````
 4. Run the tests. - **(TESTS UNDER CONSTRUCTION)**
 ````
