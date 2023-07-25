@@ -46,14 +46,15 @@ class MADDPG():
     :type wrap: bool, optional
     """
 
-    def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, environment, index=0, 
+    def __init__(self, state_dims, action_dims, max_action, one_hot, n_agents, agent_ids, environment, index=0, 
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, critic_lr=1e-3, actor_lr=3e-4,
-                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, policy_freq=2, 
+                 learn_step=5, gamma=0.99, tau=1e-3, expl_noise=0.1, mutation=None, policy_freq=2, 
                  device='cpu', accelerator=None, wrap=True):
         self.algo = 'MADDPG'
         self.state_dims = state_dims
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
         self.action_dims = action_dims
+        self.max_action = max_action
         self.one_hot = one_hot
         self.n_agents = n_agents
         self.agent_ids = agent_ids
@@ -64,6 +65,7 @@ class MADDPG():
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
+        self.expl_noise = expl_noise
         self.mut = mutation
         self.policy_freq = policy_freq
         self.device = device
@@ -90,11 +92,11 @@ class MADDPG():
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableMLP(
-                num_inputs=self.total_state_dims + self.n_agents*action_dim,
+                num_inputs=self.total_state_dims + sum(self.action_dims),
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
-                accelerator=self.accelerator) for action_dim in self.action_dims]
+                accelerator=self.accelerator) for _ in range(self.n_agents)]
             self.critic_targets = copy.deepcopy(self.critics)
 
         elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
@@ -106,7 +108,7 @@ class MADDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
-                mlp_activation='sigmoid',
+                mlp_activation='softmax',
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
@@ -169,6 +171,25 @@ class MADDPG():
         
         states = [state.unsqueeze(0) for state in states if len(state.size()) < 2]   
 
+
+        # if random.random() < epsilon:
+        #     actions = {agent_id: self.env.action_space(agent_id).sample() for agent_id in self.agent_ids}
+        # else:
+        #     actions = {}
+        #     for idx, (agent_id, state, actor) in enumerate(zip(self.agent_ids, states, self.actors)):
+        #         #print("POLICY USED")
+        #         actor.eval()
+        #         with torch.no_grad():
+        #             action_values = actor(state)
+        #         actor.train()
+        #         action = action_values.cpu().data.numpy().squeeze() # + \
+        #         #     np.random.normal(0, self.max_action * self.expl_noise, 
+        #         #     size=self.action_dims[idx]).astype(np.float32)
+        #         # action = np.clip(action, 0, 1)
+        #         actions[agent_id] = action
+
+
+        ### For loop must be inside each if and else 
         actions = {} 
         for agent_id, state, actor in zip(self.agent_ids, states, self.actors):
             if random.random() < epsilon:
@@ -180,7 +201,7 @@ class MADDPG():
                 with torch.no_grad():
                     action_values = actor(state)
                 actor.train()
-                action = action_values.cpu().data.numpy().squeeze()
+                action = action_values.cpu().data.numpy().squeeze() 
             actions[agent_id] = action
         
         return actions
@@ -232,16 +253,17 @@ class MADDPG():
             # elif self.net_config['arch'] == 'cnn':
             #     q_value = critic(states, actions)
 
-            next_actions_ = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
+            next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
+            #print(f"{next_action_=}")
             #print(f"{next_actions_}")
-            next_actions = torch.stack(next_actions_)
+            #next_actions = torch.stack(next_actions_)
             #### Add in the noise once we have the simplest mlp case working
             # noise = actions.data.normal_(0, policy_noise)
             # noise = noise.clamp(-noise_clip, noise_clip)
             # next_actions = (next_actions + noise)
 
             if self.net_config['arch'] == 'mlp':
-                next_input_combined = torch.cat(list(next_states.values()) + list(next_actions), 1)
+                next_input_combined = torch.cat(list(next_states.values()) + next_actions, 1)
                 q_value_next_state = critic_target(next_input_combined)
 
             #### Work on cnn once mlp is working
@@ -285,11 +307,11 @@ class MADDPG():
                 actor_loss.backward()
             actor_optimizer.step()
 
-        #if len(self.scores) % self.policy_freq == 0:
-        # for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
-        #                                                         self.critics, self.critic_targets):
-            self.softUpdate(actor, actor_target)
-            self.softUpdate(critic, critic_target)
+        if len(self.scores) % self.policy_freq == 0:
+            for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
+                                                                 self.critics, self.critic_targets):
+                self.softUpdate(actor, actor_target)
+                self.softUpdate(critic, critic_target)
 
     def softUpdate(self, net, target):
         """Soft updates target network.
