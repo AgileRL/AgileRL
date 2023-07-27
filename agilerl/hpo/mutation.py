@@ -35,7 +35,7 @@ class Mutations():
     """
 
     def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, 
-                 activation, rl_hp, rl_hp_selection, mutation_sd, arch='mlp', 
+                 activation, rl_hp, rl_hp_selection, mutation_sd, arch='mlp', agent_ids,
                  rand_seed=None, device='cpu', accelerator=None):
         # Random seed for repeatability
         self.rng = np.random.RandomState(rand_seed)
@@ -54,6 +54,7 @@ class Mutations():
         self.mutation_sd = mutation_sd          # Mutation strength
         self.device = device
         self.accelerator = accelerator
+        self.agent_ids = agent_ids
 
         # Set algorithm dictionary with agent network names for mutation
         # Use custom agent dict, or pre-configured agent from API
@@ -527,5 +528,11 @@ class Mutations():
                     'target': 'critic_target_2',
                     'optimizer': 'critic_2_optimizer'
                 }]
+            }
+
+        elif algo == "MADDPG":
+            nets{
+                'actors': {},
+                'critic':{}
             }
         return nets
