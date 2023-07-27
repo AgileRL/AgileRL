@@ -80,7 +80,7 @@ def create_dataset_return_timesteps(dataset_id, env_id):
         observations.append(observation)
 
     # Create Minari dataset and store locally
-    dataset = minari.create_dataset_from_buffers(
+    minari.create_dataset_from_buffers(
         dataset_id=dataset_id,
         env=env,
         buffer=buffer,
@@ -109,7 +109,10 @@ def test_minari_to_agile_dataset(dataset_id, env_id):
     assert len(dataset['rewards'][:]) == total_timesteps
     
     check_delete_dataset(dataset_id)
-    check_delete_dataset(dataset_id+'_agile')
+    agile_dataset_id = dataset_id.split("-")
+    agile_dataset_id[0] = agile_dataset_id[0] + '_agile'
+    agile_dataset_id = "-".join(agile_dataset_id)
+    check_delete_dataset(agile_dataset_id)
     
 @pytest.mark.parametrize(
     "dataset_id,env_id",
@@ -159,7 +162,7 @@ def test_load_minari_dataset_errors(dataset_id):
 @pytest.mark.parametrize(
     "dataset_id",
     [
-        ("door-human-v0")
+        ("door-human-v1")
     ],
 )
 def test_load_remote_minari_dataset(dataset_id):

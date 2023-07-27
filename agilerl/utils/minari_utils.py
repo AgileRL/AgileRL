@@ -66,7 +66,9 @@ def MinariToAgileDataset(dataset_id, remote=False):
         rewards.extend(episode.rewards[:])
         terminals.extend(episode.terminations[:])
 
-    agile_dataset_id = dataset_id + "_agile" 
+    agile_dataset_id = dataset_id.split("-")
+    agile_dataset_id[0] = agile_dataset_id[0] + '_agile'
+    agile_dataset_id = "-".join(agile_dataset_id)
     
     agile_file_path = get_dataset_path(agile_dataset_id)
     
