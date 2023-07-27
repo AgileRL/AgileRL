@@ -12,14 +12,16 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 class MADDPG():
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
 
-    :param state_dim: State observation dimension
-    :type state_dim: int
-    :param action_dim: Action dimension
-    :type action_dim: int
+    :param state_dims: State observation dimensions for each agent
+    :type state_dims: List[tuple]
+    :param action_dims: Action dimensions for each agent
+    :type action_dims: List[int]
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
     :param n_agents: Number of agents
     :type n_agents: int
+    :param agent_ids: Agent ID for each agent
+    :type agent_ids: List[str]
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -36,8 +38,6 @@ class MADDPG():
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
-    :type policy_freq: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -46,15 +46,14 @@ class MADDPG():
     :type wrap: bool, optional
     """
 
-    def __init__(self, state_dims, action_dims, max_action, one_hot, n_agents, agent_ids, environment, index=0, 
-                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, critic_lr=1e-3, actor_lr=3e-4,
-                 learn_step=5, gamma=0.99, tau=1e-3, expl_noise=0.1, mutation=None, policy_freq=2, 
-                 device='cpu', accelerator=None, wrap=True):
+    def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, max_action, 
+                 min_action, expl_noise=0.1, index=0, 
+                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, critic_lr=0.01, actor_lr=0.01,
+                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu', accelerator=None, wrap=True):
         self.algo = 'MADDPG'
         self.state_dims = state_dims
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
         self.action_dims = action_dims
-        self.max_action = max_action
         self.one_hot = one_hot
         self.n_agents = n_agents
         self.agent_ids = agent_ids
@@ -65,20 +64,17 @@ class MADDPG():
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
-        self.expl_noise = expl_noise
         self.mut = mutation
-        self.policy_freq = policy_freq
         self.device = device
         self.accelerator = accelerator
-        self.env = environment
         self.index = index
         self.scores = []
         self.fitness = []
         self.steps = [0]
 
-        ####
-        # May need to make adjsutment here to create multiple agents with different dims
-        # We now have action_dims = 
+        self.max_action = max_action
+        self.expl_noise = expl_noise
+        self.min_action = min_action
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
@@ -114,8 +110,8 @@ class MADDPG():
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableCNN(
-                input_shape=state_dim, #### This needs changing once mlp is working for the base case, it needs to be a summation of all states
-                num_actions=action_dim*self.n_agents,
+                input_shape=self.total_state_dims, #### This needs changing once mlp is working for the base case, it needs to be a summation of all states
+                num_actions=sum(self.action_dims),
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
@@ -124,7 +120,7 @@ class MADDPG():
                 mlp_activation='tanh',
                 critic=True,
                 device=self.device,
-                accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
+                accelerator=self.accelerator) for _ in range(self.n_agents)]
             self.critic_targets = copy.deepcopy(self.critics)
 
         self.actor_optimizer_types = [optim.Adam(actor.parameters(), lr=self.actor_lr) for actor in self.actors]
@@ -150,8 +146,8 @@ class MADDPG():
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
-        :param state: Environment observations: [n_agents x state_dim]
-        :type state: numpy.Array
+        :param state: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
+        :type state: Dict[str, numpy.Array]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
@@ -172,17 +168,17 @@ class MADDPG():
         states = [state.unsqueeze(0) for state in states if len(state.size()) < 2]   
 
         actions = {} 
-        for agent_id, state, actor in zip(self.agent_ids, states, self.actors):
+        for idx, (agent_id, state, actor) in enumerate(zip(self.agent_ids, states, self.actors)):
             if random.random() < epsilon:
-                # See what Nick thinks of this implementation, should we standardise across other algos?
-                # action = np.random.rand(state.size()[0], action_dim).astype('float32').squeeze() 
-                action = self.env.action_space(agent_id).sample()
+                action = np.random.rand(state.size()[0], self.action_dims[idx]).astype('float32').squeeze() 
             else:
                 actor.eval()
                 with torch.no_grad():
                     action_values = actor(state)
                 actor.train()
-                action = action_values.cpu().data.numpy().squeeze() 
+                action = action_values.cpu().data.numpy().squeeze() \
+                    + np.random.normal(0, self.max_action[idx][0] * self.expl_noise, size=self.action_dims[idx]).astype(np.float32)
+                action = np.clip(action, self.min_action[idx][0], self.max_action[idx][0])     
             actions[agent_id] = action
         
         return actions
@@ -196,16 +192,12 @@ class MADDPG():
         st, ac, re, ne, do = experiences
         return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
-    def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
+    def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of dictionaries containing batched states, actions, rewards, next_states, 
+        :param experience: Tuple of dictionaries containing batched states, actions, rewards, next_states, 
         dones in that order for each individual agent.
-        :type experience: 
-        :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
-        :type noise_clip: float, optional
-        :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
-        :type policy_noise: float, optional
+        :type experience: Tuple[Dict[str, torch.Tensor]]
         """
 
         for agent_id, actor, actor_target, critic, critic_target, actor_optimizer, critic_optimizer in zip(self.agent_ids,
@@ -230,8 +222,8 @@ class MADDPG():
                 q_value = critic(input_combined)
                 
             #### Work on cnn once mlp is working
-            # elif self.net_config['arch'] == 'cnn':
-            #     q_value = critic(states, actions)
+            elif self.net_config['arch'] == 'cnn':
+                q_value = critic(states.values(), actions.values())
 
             next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
             #next_actions = torch.stack(next_actions_)
@@ -245,8 +237,8 @@ class MADDPG():
                 q_value_next_state = critic_target(next_input_combined)
 
             #### Work on cnn once mlp is working
-            # elif self.net_config['arch'] == 'cnn':
-            #     q_value_next_state = critic_target(next_states, next_actions)
+            elif self.net_config['arch'] == 'cnn':
+                q_value_next_state = critic_target(next_states.values(), next_actions)
 
             y_j = rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
 
@@ -271,11 +263,12 @@ class MADDPG():
                 actor_loss = -critic(input_combined).mean()
                 
                 #### Complete cnns once mlp is working 
-                # elif self.net_config['arch'] == 'cnn':
-                #     actor_loss = - \
-                #         critic(states, actor.forward(states)).
-                # 
-                # mean()
+            elif self.net_config['arch'] == 'cnn':
+                action = actor(states[agent_id])
+                detached_actions = copy.deepcopy(actions)
+                detached_actions[agent_id] = action
+                actor_loss = - \
+                    critic(states.values(), detached_actions.values()).mean()
 
             # actor loss backprop
             actor_optimizer.zero_grad()
@@ -312,14 +305,17 @@ class MADDPG():
         with torch.no_grad():
             rewards = []
             for i in range(loop):
-                state = env.reset()[0]
+                state, _ = env.reset()
                 score = 0
+                agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
                 for idx_step in range(max_steps):
                     if swap_channels:
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
                     state, reward, done, trunc, info = env.step(action)
-                    score += reward
+                    for agent_id, r in reward.items():
+                        agent_reward[agent_id] += r 
+                    score += sum(agent_reward.values())
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
@@ -334,13 +330,19 @@ class MADDPG():
         if index is None:
             index = self.index
 
-        clone = type(self)(state_dim=self.state_dim,
-                           action_dim=self.action_dim,
+        clone = type(self)(state_dims=self.state_dims,
+                           action_dims=self.action_dims,
                            one_hot=self.one_hot,
+                           n_agents=self.n_agents,
+                           agent_ids=self.agent_ids,
+                           max_action=self.max_action,
+                           min_action=self.min_action,
+                           expl_noise=self.expl_noise,
                            index=index,
                            net_config=self.net_config,
                            batch_size=self.batch_size,
-                           lr=self.lr,
+                           critic_lr=self.critic_lr,
+                           actor_lr=self.actor_lr
                            learn_step=self.learn_step,
                            gamma=self.gamma,
                            tau=self.tau,
@@ -352,33 +354,33 @@ class MADDPG():
         
         if self.accelerator is not None:
             self.unwrap_models()
-        actor = self.actor.clone()
-        actor_target = self.actor_target.clone()
-        critic = self.critic.clone()
-        critic_target = self.critic_target.clone()
-        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr)
-        clone.actor_optimizer_type = actor_optimizer
-        clone.critic_optimizer_type = critic_optimizer
+        actors = self.actors.clone()
+        actor_targets = self.actor_targets.clone()
+        critics = self.critics.clone()
+        critic_targets = self.critic_targets.clone()
+        actor_optimizer = optim.Adam(actors.parameters(), lr=clone.lr)
+        critic_optimizer = optim.Adam(critics.parameters(), lr=clone.lr)
+        clone.actor_optimizer_types = actor_optimizer
+        clone.critic_optimizer_types = critic_optimizer
 
         if self.accelerator is not None:
             if wrap:
-                clone.actor, clone.actor_target, clone.critic, clone.critic_target, \
-                clone.actor_optimizer, clone.critic_optimizer = self.accelerator.prepare(actor,
-                                                                                actor_target,
-                                                                                critic,
-                                                                                critic_target,
+                clone.actors, clone.actor_targets, clone.critics, clone.critic_targets, \
+                clone.actor_optimizer, clone.critic_optimizer = self.accelerator.prepare(actors,
+                                                                                actor_targets,
+                                                                                critics,
+                                                                                critic_targets,
                                                                                 actor_optimizer,
                                                                                 critic_optimizer)
             else:
-                clone.actor, clone.actor_target, clone.critic, clone.critic_target, \
-                clone.actor_optimizer, clone.critic_optimizer = actor, actor_target, critic, \
-                critic_target, actor_optimizer, critic_optimizer
+                clone.actors, clone.actor_targets, clone.critics, clone.critic_targets, \
+                clone.actor_optimizer, clone.critic_optimizer = actors, actor_targets, critics, \
+                critic_targets, actor_optimizer, critic_optimizer
         else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
-            clone.critic = critic.to(self.device)
-            clone.critic_target = critic_target.to(self.device)
+            clone.actors = actors.to(self.device)
+            clone.actor_targets = actor_targets.to(self.device)
+            clone.critics = critics.to(self.device)
+            clone.critic_targets = critic_targets.to(self.device)
             clone.actor_optimizer = actor_optimizer
             clone.critic_optimizer = critic_optimizer
 

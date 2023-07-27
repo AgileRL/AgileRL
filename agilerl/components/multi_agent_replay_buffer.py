@@ -54,15 +54,15 @@ class MultiAgentReplayBuffer:
         """Saves experience to memory.
 
         :param state: Environment observation
-        :type state: dict[str, np.array]
+        :type state: Dict[str, numpy.Array]
         :param action: Action in environment
-        :type action: dict[str, np.array]
+        :type action: Dict[str, numpy.Array]
         :param reward: Reward from environment
         :type reward: dict[str, int]
         :param next_state: Environment observation of next state
-        :type next_state: dict[str, np.array]
+        :type next_state: Dict[str, numpy.Array]
         :param done: True if environment episode finished, else False
-        :type done: dict[str, bool]
+        :type done: Dict[str, bool]
         """
         self._add(state, action, reward, next_state, done)
         self.counter += 1
@@ -71,15 +71,15 @@ class MultiAgentReplayBuffer:
         """Saves multiple experiences to memory.
 
         :param state: Environment observation
-        :type state: List[dict[str, np.array]]
+        :type state: List[Dict[str, np.array]]
         :param action: Action in environment
-        :type action: List[dict[str, np.array]]
+        :type action: List[Dict[str, np.array]]
         :param reward: Reward from environment
-        :type reward: List[dict[str, int]]
+        :type reward: List[Dict[str, int]]
         :param next_state: Environment observation of next state
-        :type next_state: List[dict[str, np.array]]
+        :type next_state: List[Dict[str, np.array]]
         :param done: True if environment episode finished, else False
-        :type done: List[dict[str, bool]]
+        :type done: List[Dict[str, bool]]
         """
         for state, action, reward, next_state, done in zip(
                 states, actions, rewards, next_states, dones):

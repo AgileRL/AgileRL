@@ -1,11 +1,11 @@
 from pettingzoo.mpe import simple_adversary_v3, simple_spread_v3, simple_v3, simple_speaker_listener_v4
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 import torch
 import numpy as np
 import wandb
 from datetime import datetime
+#from pettingzoo.atari import basketball_pong_v3
 
 
 if __name__ == "__main__":
@@ -13,24 +13,17 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Configure the environment
-    env = simple_adversary_v3.parallel_env(N=2, max_cycles=25, continuous_actions=True)
+    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
     env.reset()
 
-    # Print information about the agents
-    # print('Number of agents: ', len(env.agents))
-    # for agent in env.agents:
-    #     print(f"Observations space for {agent}: ", env.observation_space(agent))
-    # for agent in env.agents:
-    #     print(f"Action space for {agent}: ", env.action_space(agent))
-    
-
+    # Configure maddpg input arguments
     n_agents = env.num_agents
-    # [action_agent_1, action_agent_2, ..., action_agent_n]
-    action_dims = [env.action_space(agent).shape[0] for agent in env.agents]
-    max_action = [env.action_space(agent).high for agent in env.agents][0][0] # Assume all agents have the same max action space
-    # [state_agent_1, state_agent_2, ..., state_agent_n]
-    state_dims = [env.observation_space(agent).shape for agent in env.agents]
+    action_dims = [env.action_space(agent).shape[0] for agent in env.agents] # [action_agent_1, action_agent_2, ..., action_agent_n]
+    state_dims = [env.observation_space(agent).shape for agent in env.agents] # [state_agent_1, state_agent_2, ..., state_agent_n]
     agent_ids = [agent_id for agent_id in env.agents]
+    max_action = [env.action_space(agent).high for agent in env.agents]
+    min_action = [env.action_space(agent).low for agent in env.agents]
+
     one_hot = False 
     index = 0
     net_config = {'arch': 'mlp', 'h_size': [64,64]}
@@ -41,7 +34,6 @@ if __name__ == "__main__":
     gamma = 0.95
     tau = 0.01
     mutation=None
-    policy_freq=2
     device=device
     accelerator=None 
     wrap=True
@@ -49,12 +41,12 @@ if __name__ == "__main__":
     # Instantiate MADDPG class
     maddpg_agent = MADDPG(state_dims=state_dims,
                    action_dims=action_dims,
-                   max_action=max_action,
                    one_hot=one_hot,
                    n_agents=n_agents,
                    agent_ids=agent_ids,
                    index=index,
-                   environment=env,
+                   max_action = max_action,
+                   min_action = min_action,
                    net_config=net_config,
                    batch_size=batch_size,
                    actor_lr=actor_lr,
@@ -63,13 +55,13 @@ if __name__ == "__main__":
                    gamma=gamma,
                    tau=tau,
                    mutation=mutation,
-                   policy_freq=policy_freq,
                    device=device,
                    accelerator=accelerator,
                    wrap=wrap) 
     
+    # Configure the training loop parameters
     step = 0 # Global step counter
-    wb = False
+    wb = True # Initiate weights and biases
     agent_num = env.num_agents
     episodes = 40_000
     epsilon = 1
@@ -77,7 +69,7 @@ if __name__ == "__main__":
     epsilon_decay = 0.995
     episode_rewards = {agent_id: np.zeros(episodes) for agent_id in env.agents}
     field_names = ["state", "action", "reward", "next_state", "done"]
-    ma_buffer = MultiAgentReplayBuffer(field_names=field_names, memory_size= 1000000, 
+    memory = MultiAgentReplayBuffer(field_names=field_names, memory_size= 1000000, 
                                        agent_ids=agent_ids, device=device)
     reward_history = []
 
@@ -86,10 +78,10 @@ if __name__ == "__main__":
         print("... Initialsing W&B ...")
         wandb.init(
             project="MADDPG Testing",
-            name=f"MADDPG_simple_adversary_v3_{datetime.now().strftime('%m%d%Y%H%M%S')}",
+            name=f"MADDPG_simple_speaker_listener_v4_min_action_test_{datetime.now().strftime('%m%d%Y%H%M%S')}",
             config = {
                 "algo": "MADDPG",
-                "env": "simple_adversary_v3",
+                "env": "simple_speaker_listener_v4",
                 "arch": net_config,
                 "gamma": gamma,
                 "critic_lr": critic_lr,
@@ -97,9 +89,8 @@ if __name__ == "__main__":
                 "tau": tau,
                 "batch_size":batch_size,
                 "output activation": 'softmax',
-                "detail": "Test using multi-agent buffer"
+                "detail": "Testing min_action"
             }
-
         )
 
     for ep in range(episodes):
@@ -111,20 +102,18 @@ if __name__ == "__main__":
             action = maddpg_agent.getAction(state, epsilon)
             # These are dictionaries of format: n_s = {agent_i: n_s_i,...,...}
             next_state, reward, done, info, _ = env.step(action)
-            print(done)
-            print(state)
 
             # Save experiences to the buffer
-            ma_buffer.save2memory(state, action, reward, next_state, done)
+            memory.save2memory(state, action, reward, next_state, done)
 
             # Save each agents' reward 
             for agent_id, r in reward.items():
                 agent_reward[agent_id] += r
 
             # Sample from the buffer and then learn the maddpg
-            if ma_buffer.counter % maddpg_agent.learn_step == 0 and len(
-                ma_buffer) >= maddpg_agent.batch_size:
-                experiences = ma_buffer.sample(batch_size)
+            if memory.counter % maddpg_agent.learn_step == 0 and len(
+                memory) >= maddpg_agent.batch_size:
+                experiences = memory.sample(batch_size)
                 maddpg_agent.learn(experiences)
  
             # Update the state 
@@ -144,7 +133,7 @@ if __name__ == "__main__":
         # Append the score to the agent object
         maddpg_agent.scores.append(score)
         
-        # Print every 100 episodes
+        # Log to wandb or print to terminal if wandb not selected
         if (ep + 1) % 100 == 0:
             if wb:
                 wandb.log(
