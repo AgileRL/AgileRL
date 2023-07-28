@@ -35,8 +35,8 @@ class Mutations():
     """
 
     def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, 
-                 activation, rl_hp, rl_hp_selection, mutation_sd, arch='mlp', agent_ids,
-                 rand_seed=None, device='cpu', accelerator=None):
+                 activation, rl_hp, rl_hp_selection, mutation_sd, agent_ids=None,  
+                 arch='mlp', rand_seed=None, device='cpu', accelerator=None):
         # Random seed for repeatability
         self.rng = np.random.RandomState(rand_seed)
 
@@ -55,6 +55,11 @@ class Mutations():
         self.device = device
         self.accelerator = accelerator
         self.agent_ids = agent_ids
+
+        if agent_ids is not None:
+            self.multi_agent = True 
+        else:
+            self.multi_agent = False
 
         # Set algorithm dictionary with agent network names for mutation
         # Use custom agent dict, or pre-configured agent from API
@@ -144,33 +149,72 @@ class Mutations():
             mutated_population.append(individual)
 
         return mutated_population
-
+    
     def reinit_opt(self, individual):
-        # Reinitialise optimizer
-        actor_opt = getattr(individual, self.algo['actor']['optimizer'])
-        net_params = getattr(
-            individual, self.algo['actor']['eval']).parameters()
-        if self.accelerator is not None:
-            setattr(individual, 
-                    self.algo['actor']['optimizer'].replace('_type', ''), 
-                    type(actor_opt)(net_params, lr=individual.lr))
-        else:
-            setattr(individual, 
-                    self.algo['actor']['optimizer'].replace('_type', ''), 
-                    type(actor_opt)(net_params, lr=individual.lr))
 
-        # If algorithm has critics, reinitialise their optimizers too
-        for critic in self.algo['critics']:
-            critic_opt = getattr(individual, critic['optimizer'])
-            net_params = getattr(individual, critic['eval']).parameters()
+        if self.multi_agent:
+            # Reinitialise optimizer
+            actor_opts = getattr(individual, self.algo['actor']['optimizer'])
+            net_params = [actor.parameters() for actor in 
+                          getattr(individual, self.algo['actor']['eval'])]
+            
+            offspring_actor_opts = [type(actor_opt)(net_param, lr=individual.actor_lr)
+                                    for actor_opt, net_param in zip(actor_opts, net_params)]
+
             if self.accelerator is not None:
                 setattr(individual, 
-                        critic['optimizer'].replace('_type', ''), 
-                        type(critic_opt)(net_params, lr=individual.lr))
+                        self.algo['actor']['optimizer'].replace('_type', ''), 
+                        offspring_actor_opts)
             else:
                 setattr(individual, 
-                        critic['optimizer'].replace('_type', ''), 
-                        type(critic_opt)(net_params, lr=individual.lr))
+                        self.algo['actor']['optimizer'].replace('_type', ''), 
+                        offspring_actor_opts)
+
+            # If algorithm has critics, reinitialise their optimizers too
+            for critic_list in self.algo['critics']:
+                critic_opts = getattr(individual, critic_list['optimizer'])
+
+                net_params = [critic.parameters() for critic in 
+                              getattr(individual, critic_list['eval'])]
+                
+                offspring_critic_opts = [type(critic_opt)(net_param, lr=individual.critic_lr)
+                                         for critic_opt, net_param in zip(actor_opts, net_params)]
+                
+                if self.accelerator is not None:
+                    setattr(individual, 
+                            critic_list['optimizer'].replace('_type', ''), 
+                            offspring_critic_opts)
+                else:
+                    setattr(individual, 
+                            critic_list['optimizer'].replace('_type', ''), 
+                            offspring_critic_opts)
+        else:
+            # Reinitialise optimizer
+            actor_opt = getattr(individual, self.algo['actor']['optimizer'])
+            net_params = getattr(
+                individual, self.algo['actor']['eval']).parameters()
+            if self.accelerator is not None:
+                setattr(individual, 
+                        self.algo['actor']['optimizer'].replace('_type', ''), 
+                        type(actor_opt)(net_params, lr=individual.lr))
+            else:
+                setattr(individual, 
+                        self.algo['actor']['optimizer'].replace('_type', ''), 
+                        type(actor_opt)(net_params, lr=individual.lr))
+
+            # If algorithm has critics, reinitialise their optimizers too
+            for critic in self.algo['critics']:
+                critic_opt = getattr(individual, critic['optimizer'])
+                net_params = getattr(individual, critic['eval']).parameters()
+                if self.accelerator is not None:
+                    setattr(individual, 
+                            critic['optimizer'].replace('_type', ''), 
+                            type(critic_opt)(net_params, lr=individual.lr))
+                else:
+                    setattr(individual, 
+                            critic['optimizer'].replace('_type', ''), 
+                            type(critic_opt)(net_params, lr=individual.lr))
+
 
     def rl_hyperparam_mutation(self, individual):
         """Returns individual from population with RL hyperparameter mutation.
@@ -203,6 +247,26 @@ class Mutations():
             # Reinitialise optimizer if new learning rate
             self.reinit_opt(individual)
             individual.mut = 'lr'
+        
+        elif mutate_param == 'actor_lr':
+            if random_num > 0.5:
+                individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 1.2))
+            else:
+                individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 0.8))
+            
+            # Reinitialise optimizer if new learning rate
+            self.reinit_opt(individual)
+            individual.mut = 'actor_lr'
+
+        elif mutate_param == 'critic_lr':
+            if random_num > 0.5:
+                individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 1.2))
+            else:
+                individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 0.8))
+
+            # Reinitialise optimizer if new learning rate
+            self.reinit_opt(individual)
+            individual.mut = 'critic_lr'
 
         elif mutate_param == 'learn_step':
             if random_num > 0.5:
@@ -227,27 +291,50 @@ class Mutations():
         if individual.algo == 'TD3':   # Needs to stay tanh for TD3 continuous actions
             individual.mut = 'None'
             return individual
-
-        # Mutate network activation layer
-        offspring_actor = getattr(individual, self.algo['actor']['eval'])
-        offspring_actor = self._permutate_activation(
-            offspring_actor)   # Mutate activation function
-        if self.accelerator is not None:
-            setattr(individual, self.algo['actor']
-                    ['eval'], offspring_actor)
-        else:
-            setattr(individual, self.algo['actor']
-                    ['eval'], offspring_actor.to(self.device))
-
-        # If algorithm has critics, mutate their activations too
-        for critic in self.algo['critics']:
-            offspring_critic = getattr(individual, critic['eval'])
-            offspring_critic = self._permutate_activation(offspring_critic)
-            if self.accelerator is not None:
-                setattr(individual, critic['eval'], offspring_critic)
+        
+        if self.multi_agent:
+            if individual.algo == 'MADDPG':
+                individual.mut = 'None'
+                return individual
             else:
-                setattr(individual, critic['eval'],
-                        offspring_critic.to(self.device))
+                offspring_actors = getattr(individual, self.algo['actor']['eval'])
+                offspring_actors = [self._permutate_activation(offspring_actor) for 
+                                    offspring_actor in offspring_actors]
+                if self.accelerator is None:
+                    offspring_actors = [offspring_actor.to(self.device) for offspring_actor
+                                        in offspring_actors]
+                setattr(individual, self.algo['actor']['eval'], offspring_actors)
+
+                # If algorithm has critics, mutate their activations too
+                for critics in self.algo['critics']:
+                    offspring_critics = getattr(individual, critics['eval'])
+                    offspring_critics = [self._permutate_activation(offspring_critic) for
+                                         offspring_critic in offspring_critics]
+                    if self.accelerator is None:
+                        offspring_critics = [offspring_critic.to(self.device) for offspring_critic
+                                             in offspring_critics]
+                    setattr(individual, critics['eval'], offspring_critics)
+        else:
+            # Mutate network activation layer
+            offspring_actor = getattr(individual, self.algo['actor']['eval'])
+            offspring_actor = self._permutate_activation(
+                offspring_actor)   # Mutate activation function
+            if self.accelerator is not None:
+                setattr(individual, self.algo['actor']
+                        ['eval'], offspring_actor)
+            else:
+                setattr(individual, self.algo['actor']
+                        ['eval'], offspring_actor.to(self.device))
+
+            # If algorithm has critics, mutate their activations too
+            for critic in self.algo['critics']:
+                offspring_critic = getattr(individual, critic['eval'])
+                offspring_critic = self._permutate_activation(offspring_critic)
+                if self.accelerator is not None:
+                    setattr(individual, critic['eval'], offspring_critic)
+                else:
+                    setattr(individual, critic['eval'],
+                            offspring_critic.to(self.device))
 
         individual.mut = 'act'
         return individual
@@ -286,14 +373,23 @@ class Mutations():
         :type individual: object
         """
         # Mutate network parameters
-        offspring_actor = getattr(individual, self.algo['actor']['eval'])
-        offspring_actor = self.classic_parameter_mutation(
-            offspring_actor)  # Network parameter mutation function
-        if self.accelerator is not None:
-            setattr(individual, self.algo['actor']['eval'], offspring_actor)
+        if self.multi_agent:
+            offspring_actors = getattr(individual, self.algo['actor']['eval'])
+            offspring_actors = [self.classic_parameter_mutation(offspring_actor) for 
+                                offspring_actor in offspring_actors]
+            if self.accelerator is None:
+                offspring_actors = [offspring_actor.to(self.device) for offspring_actor
+                                    in offspring_actors]
+            setattr(individual, self.algo['actor']['eval'], offspring_actors)
         else:
-            setattr(individual, self.algo['actor']
-                    ['eval'], offspring_actor.to(self.device))
+            offspring_actor = getattr(individual, self.algo['actor']['eval'])
+            offspring_actor = self.classic_parameter_mutation(
+                offspring_actor)  # Network parameter mutation function
+            if self.accelerator is not None:
+                setattr(individual, self.algo['actor']['eval'], offspring_actor)
+            else:
+                setattr(individual, self.algo['actor']
+                        ['eval'], offspring_actor.to(self.device))
         individual.mut = 'param'
         return individual
 
@@ -358,7 +454,7 @@ class Mutations():
             network = network.to(self.device)
 
         return network
-
+    
     def architecture_mutate(self, individual):
         """Returns individual from population with network architecture mutation.
 
@@ -366,100 +462,241 @@ class Mutations():
         :type individual: object
         """
         # Mutate network architecture by adding layers or nodes
-        offspring_actor = getattr(
-            individual, self.algo['actor']['eval']).clone()
-        offspring_critics = [getattr(individual, critic['eval']).clone()
-                             for critic in self.algo['critics']]
+        if self.multi_agent:
+            offspring_actors = getattr(individual, self.algo['actor']['eval']) # List of actors
+            offspring_critics_list = [getattr(individual, critic['eval']).clone() # List of List of critics (len==1 for 
+                                for critic in self.algo['critics']]          # maddpg but for matd3, will be multiple lists)
+            rand_numb = self.rng.uniform(0,1)
 
-        rand_numb = self.rng.uniform(0, 1)
+            if self.arch == 'cnn':
+                if rand_numb < self.new_layer_prob / 2:
+                    for offspring_actor in offspring_actors:
+                        offspring_actor.add_mlp_layer()
+                    for offspring_critics in offspring_critics_list:
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_mlp_layer()
+                elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
+                    for offspring_actor in offspring_actors:
+                        offspring_actor.add_cnn_layer()
+                    for offspring_critics in offspring_critics_list:
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_cnn_layer()
+                else:
+                    rand_numb = self.rng.uniform(0, 1)
+                    if rand_numb < 0.2:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.change_cnn_kernal()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.change_cnn_kernal()
+                    elif 0.2 <= rand_numb < 0.65:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.add_cnn_channel()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.add_cnn_channel()
+                    else:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.add_mlp_node()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.add_mlp_node()
+            
+            elif self.arch == 'bert':
+                if rand_numb < self.new_layer_prob / 2:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.add_encoder_layer()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.add_encoder_layer()
+                    else:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.remove_encoder_layer()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.remove_encoder_layer()
+                elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.add_decoder_layer()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.add_decoder_layer()
+                    else:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.remove_decoder_layer()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.remove_decoder_layer()
+                else:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        # Functionality to account for MATD3
+                        if len(offspring_critics) == 1:
+                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                                node_dict = offspring_actor.add_node()  
+                                offspring_critic.add_node(**node_dict)
+                        else:
+                            for offspring_actor, offspring_critic_1, offspring_critic_2 in zip(offspring_actors, *offspring_critics_list):
+                                node_dict = offspring_actor.add_node()
+                                offspring_critic_1.add_node(**node_dict)
+                                offspring_critic_2.add_node(**node_dict)
+                    else:
+                        if len(offspring_critics) == 1:
+                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                                node_dict = offspring_actor.remove_node()  
+                                offspring_critic.remove_node(**node_dict)
+                        else:
+                            for offspring_actor, offspring_critic_1, offspring_critic_2 in zip(offspring_actors, *offspring_critics_list):
+                                node_dict = offspring_actor.add_node()
+                                offspring_critic_1.remove_node(**node_dict)
+                                offspring_critic_2.remove_node(**node_dict)
+            else:   # mlp or gpt
+                if rand_numb < self.new_layer_prob:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.add_layer()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.add_layer()
+                    else:
+                        for offspring_actor in offspring_actors:
+                            offspring_actor.remove_layer()
+                        for offspring_critics in offspring_critics_list:
+                            for offspring_critic in offspring_critics:
+                                offspring_critic.remove_layer()
+                else:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        if len(offspring_critics) == 1:
+                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                                node_dict = offspring_actor.add_node()  
+                                offspring_critic.add_node(**node_dict)
+                        else:
+                            for offspring_actor, offspring_critic_1, offspring_critic_2 in zip(offspring_actors, *offspring_critics_list):
+                                node_dict = offspring_actor.add_node()
+                                offspring_critic_1.add_node(**node_dict)
+                                offspring_critic_2.add_node(**node_dict)
+                    else:
+                        if len(offspring_critics) == 1:
+                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                                node_dict = offspring_actor.remove_node()  
+                                offspring_critic.remove_node(**node_dict)
+                        else:
+                            for offspring_actor, offspring_critic_1, offspring_critic_2 in zip(offspring_actors, *offspring_critics_list):
+                                node_dict = offspring_actor.add_node()
+                                offspring_critic_1.remove_node(**node_dict)
+                                offspring_critic_2.remove_node(**node_dict)
 
-        # Randomly select whether to add layer or node with relative probabilities
-        # If algorithm has critics, apply to these too
-
-        if self.arch == 'cnn':
-            if rand_numb < self.new_layer_prob / 2:
-                offspring_actor.add_mlp_layer()
-                for offspring_critic in offspring_critics:
-                    offspring_critic.add_mlp_layer()
-            elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
-                offspring_actor.add_cnn_layer()
-                for offspring_critic in offspring_critics:
-                    offspring_critic.add_cnn_layer()
-            else:
-                rand_numb = self.rng.uniform(0, 1)
-                if rand_numb < 0.2:
-                    offspring_actor.change_cnn_kernal()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.change_cnn_kernal()
-                elif 0.2 <= rand_numb < 0.65:
-                    offspring_actor.add_cnn_channel()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_cnn_channel()
-                else:
-                    offspring_actor.add_mlp_node()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_mlp_node()
-
-        elif self.arch == 'bert':
-            if rand_numb < self.new_layer_prob / 2:
-                if self.rng.uniform(0, 1) < 0.5:
-                    offspring_actor.add_encoder_layer()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_encoder_layer()
-                else:
-                    offspring_actor.remove_encoder_layer()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.remove_encoder_layer()
-            elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
-                if self.rng.uniform(0, 1) < 0.5:
-                    offspring_actor.add_decoder_layer()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_decoder_layer()
-                else:
-                    offspring_actor.remove_decoder_layer()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.remove_decoder_layer()
-            else:
-                if self.rng.uniform(0, 1) < 0.5:
-                    node_dict = offspring_actor.add_node()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_node(**node_dict)
-                else:
-                    node_dict = offspring_actor.remove_node()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.remove_node(**node_dict)
-
-        else:   # mlp or gpt
-            if rand_numb < self.new_layer_prob:
-                if self.rng.uniform(0, 1) < 0.5:
-                    offspring_actor.add_layer()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_layer()
-                else:
-                    offspring_actor.remove_layer()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.remove_layer()
-            else:
-                if self.rng.uniform(0, 1) < 0.5:
-                    node_dict = offspring_actor.add_node()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.add_node(**node_dict)
-                else:
-                    node_dict = offspring_actor.remove_node()
-                    for offspring_critic in offspring_critics:
-                        offspring_critic.remove_node(**node_dict)
-
-        if self.accelerator is not None:
-            setattr(individual, self.algo['actor']['eval'], offspring_actor)
-        else:
-            setattr(individual, self.algo['actor']
-                    ['eval'], offspring_actor.to(self.device))
-        for offspring_critic, critic in zip(offspring_critics, self.algo['critics']):
             if self.accelerator is not None:
-                setattr(individual, critic['eval'], offspring_critic)
+                setattr(individual, self.algo['actor']['eval'], offspring_actors)
             else:
-                setattr(individual, critic['eval'],
-                        offspring_critic.to(self.device))
+                offspring_actors = [offspring_actor.to(self.device) for offspring_actor in offspring_actors]
+                setattr(individual, self.algo['actor']
+                        ['eval'], offspring_actors)
+
+            for offspring_critics, critics in zip(offspring_critics_list, self.algo['critics']): 
+                if self.accelerator is not None:
+                        setattr(individual, critics['eval'], offspring_critics)
+                else:
+                    offspring_critics = [offspring_critic.to(self.device) for offspring_critic in offspring_critics]
+                    setattr(individual, critics['eval'],
+                                offspring_critics)
+        else:
+            offspring_actor = getattr(
+                individual, self.algo['actor']['eval']).clone()
+            offspring_critics = [getattr(individual, critic['eval']).clone()
+                                for critic in self.algo['critics']]
+
+            rand_numb = self.rng.uniform(0, 1)
+
+            # Randomly select whether to add layer or node with relative probabilities
+            # If algorithm has critics, apply to these too
+
+            if self.arch == 'cnn':
+                if rand_numb < self.new_layer_prob / 2:
+                    offspring_actor.add_mlp_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_mlp_layer()
+                elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
+                    offspring_actor.add_cnn_layer()
+                    for offspring_critic in offspring_critics:
+                        offspring_critic.add_cnn_layer()
+                else:
+                    rand_numb = self.rng.uniform(0, 1)
+                    if rand_numb < 0.2:
+                        offspring_actor.change_cnn_kernal()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.change_cnn_kernal()
+                    elif 0.2 <= rand_numb < 0.65:
+                        offspring_actor.add_cnn_channel()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_cnn_channel()
+                    else:
+                        offspring_actor.add_mlp_node()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_mlp_node()
+
+            elif self.arch == 'bert':
+                if rand_numb < self.new_layer_prob / 2:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        offspring_actor.add_encoder_layer()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_encoder_layer()
+                    else:
+                        offspring_actor.remove_encoder_layer()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.remove_encoder_layer()
+                elif self.new_layer_prob / 2 <= rand_numb < self.new_layer_prob:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        offspring_actor.add_decoder_layer()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_decoder_layer()
+                    else:
+                        offspring_actor.remove_decoder_layer()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.remove_decoder_layer()
+                else:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        node_dict = offspring_actor.add_node()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_node(**node_dict)
+                    else:
+                        node_dict = offspring_actor.remove_node()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.remove_node(**node_dict)
+
+            else:   # mlp or gpt
+                if rand_numb < self.new_layer_prob:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        offspring_actor.add_layer()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_layer()
+                    else:
+                        offspring_actor.remove_layer()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.remove_layer()
+                else:
+                    if self.rng.uniform(0, 1) < 0.5:
+                        node_dict = offspring_actor.add_node()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.add_node(**node_dict)
+                    else:
+                        node_dict = offspring_actor.remove_node()
+                        for offspring_critic in offspring_critics:
+                            offspring_critic.remove_node(**node_dict)
+
+
+            if self.accelerator is not None:
+                setattr(individual, self.algo['actor']['eval'], offspring_actor)
+            else:
+                setattr(individual, self.algo['actor']
+                        ['eval'], offspring_actor.to(self.device))
+            for offspring_critic, critic in zip(offspring_critics, self.algo['critics']):
+                if self.accelerator is not None:
+                    setattr(individual, critic['eval'], offspring_critic)
+                else:
+                    setattr(individual, critic['eval'],
+                            offspring_critic.to(self.device))
 
         self.reinit_opt(individual) # Reinitialise optimizer
         individual.mut = 'arch'
@@ -517,22 +754,30 @@ class Mutations():
                 'actor': {
                     'eval': 'actor',
                     'target': 'actor_target',
-                    'optimizer': 'actor_optimizer'
+                    'optimizer': 'actor_optimizer_type'
                 },
                 'critics': [{
                     'eval': 'critic_1',
                     'target': 'critic_target_1',
-                    'optimizer': 'critic_1_optimizer'
+                    'optimizer': 'critic_1_optimizer_type'
                 },{
                     'eval': 'critic_2',
                     'target': 'critic_target_2',
-                    'optimizer': 'critic_2_optimizer'
+                    'optimizer': 'critic_2_optimizer_type'
                 }]
             }
 
         elif algo == "MADDPG":
-            nets{
-                'actors': {},
-                'critic':{}
+            nets = {
+                'actor': {
+                    'eval': 'actors',
+                    'target': 'actor_targets',
+                    'optimizer': 'actor_optimizers_type'
+                },
+                'critics': [{
+                    'eval': 'critics',
+                    'target': 'critic_targets',
+                    'optimizer' : 'critic_optimizers_type'
+                }]
             }
         return nets

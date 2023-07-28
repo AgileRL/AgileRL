@@ -123,12 +123,12 @@ class MADDPG():
                 accelerator=self.accelerator) for _ in range(self.n_agents)]
             self.critic_targets = copy.deepcopy(self.critics)
 
-        self.actor_optimizer_types = [optim.Adam(actor.parameters(), lr=self.actor_lr) for actor in self.actors]
-        self.critic_optimizer_types = [optim.Adam(critic.parameters(), lr=self.critic_lr) for critic in self.critics]
+        self.actor_optimizers_type = [optim.Adam(actor.parameters(), lr=self.actor_lr) for actor in self.actors]
+        self.critic_optimizers_type = [optim.Adam(critic.parameters(), lr=self.critic_lr) for critic in self.critics]
 
         if self.accelerator is not None:
-            self.actor_optimizers = self.actor_optimizer_types
-            self.critic_optimizers = self.critic_optimizer_types
+            self.actor_optimizers = self.actor_optimizers_type
+            self.critic_optimizers = self.critic_optimizers_type
             if wrap:
                 self.wrap_models()          
         else:
@@ -136,8 +136,8 @@ class MADDPG():
             self.actor_targets = [actor_target.to(self.device) for actor_target in self.actor_targets]
             self.critics = [critic.to(self.device) for critic in self.critics]
             self.critic_targets = [critic_target.to(self.device) for critic_target in self.critic_targets]
-            self.actor_optimizers = self.actor_optimizer_types
-            self.critic_optimizers = self.critic_optimizer_types
+            self.actor_optimizers = self.actor_optimizers_type
+            self.critic_optimizers = self.critic_optimizers_type
 
         self.criterion = nn.MSELoss()
 
@@ -360,8 +360,8 @@ class MADDPG():
         critic_targets = [critic_target.clone() for critic_target in self.critic_targets]
         actor_optimizers = [optim.Adam(actor.parameters(), lr=clone.actor_lr) for actor in self.actors]
         critic_optimizers = [optim.Adam(critic.parameters(), lr=clone.critic_lr) for critic in self.critics]
-        clone.actor_optimizer_types = actor_optimizers
-        clone.critic_optimizer_types = critic_optimizers
+        clone.actor_optimizers_type = actor_optimizers
+        clone.critic_optimizers_type = critic_optimizers
 
         if self.accelerator is not None:
             if wrap:
