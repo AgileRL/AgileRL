@@ -121,30 +121,56 @@ class Mutations():
             # Call mutation function for each individual
             individual = mutation(individual)
 
-            offspring_actor = getattr(individual, self.algo['actor']['eval'])
+            if self.multi_agent:
+                offspring_actors = getattr(individual, self.algo['actor']['eval'])
 
-            # Reinitialise target network with frozen weights due to potential
-            # mutation in architecture of value network
-            ind_target = type(offspring_actor)(**offspring_actor.init_dict)
-            ind_target.load_state_dict(offspring_actor.state_dict())
-            if self.accelerator is not None:
-                setattr(individual, self.algo['actor']['target'], ind_target)
+                # Reinitialise target network with frozen weights due to potential
+                # mutation in architecture of value network
+                ind_targets = [type(offspring_actor)(**offspring_actor.init_dict) 
+                               for offspring_actor in offspring_actors]
+                ind_targets = [ind_target.load_state_dict(offspring_actor.state_dict())
+                               for ind_target, offspring_actor in zip(ind_targets, offspring_actors)]
+                if self.accelerator is None:
+                    ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
+                setattr(individual, self.algo['actor']['target'], ind_targets)
+
+                # If algorithm has critics, reinitialize their respective target networks
+                # too
+                for critics in self.algo['critics']:
+                    offspring_critics = getattr(individual, critics['eval'])
+                    ind_targets = [type(offspring_critic)(**offspring_critic.init_dict) 
+                               for offspring_critic in offspring_critics]
+                    ind_targets = [ind_target.load_state_dict(offspring_critic.state_dict())
+                               for ind_target, offspring_critic in zip(ind_targets, offspring_critics)]
+                    if self.accelerator is None:
+                        ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
+                    setattr(individual, critic['target'], ind_targets)
             else:
-                setattr(individual, self.algo['actor']['target'], 
-                        ind_target.to(self.device))
 
-            # If algorithm has critics, reinitialize their respective target networks
-            # too
-            for critic in self.algo['critics']:
-                offspring_critic = getattr(individual, critic['eval'])
-                ind_target = type(offspring_critic)(
-                    **offspring_critic.init_dict)
-                ind_target.load_state_dict(offspring_critic.state_dict())
+                offspring_actor = getattr(individual, self.algo['actor']['eval'])
+
+                # Reinitialise target network with frozen weights due to potential
+                # mutation in architecture of value network
+                ind_target = type(offspring_actor)(**offspring_actor.init_dict)
+                ind_target.load_state_dict(offspring_actor.state_dict())
                 if self.accelerator is not None:
-                    setattr(individual, critic['target'], ind_target)
+                    setattr(individual, self.algo['actor']['target'], ind_target)
                 else:
-                    setattr(individual, critic['target'],
+                    setattr(individual, self.algo['actor']['target'], 
                             ind_target.to(self.device))
+
+                # If algorithm has critics, reinitialize their respective target networks
+                # too
+                for critic in self.algo['critics']:
+                    offspring_critic = getattr(individual, critic['eval'])
+                    ind_target = type(offspring_critic)(
+                        **offspring_critic.init_dict)
+                    ind_target.load_state_dict(offspring_critic.state_dict())
+                    if self.accelerator is not None:
+                        setattr(individual, critic['target'], ind_target)
+                    else:
+                        setattr(individual, critic['target'],
+                                ind_target.to(self.device))
 
             mutated_population.append(individual)
 
