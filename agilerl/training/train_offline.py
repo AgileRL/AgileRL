@@ -3,6 +3,7 @@ import os
 from tqdm import trange
 import wandb
 from datetime import datetime
+from agilerl.utils.minari_utils import MinariToAgileBuffer
 from torch.utils.data import DataLoader
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
@@ -11,9 +12,8 @@ from agilerl.components.sampler import Sampler
 def train(env, env_name, dataset, algo, pop, memory, swap_channels=False, 
           n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, target=200., 
           tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, 
-          wb=False, accelerator=None):
-    """The general offline RL training function. Returns trained population of agents 
-    and their fitnesses.
+          wb=False, accelerator=None, minari_dataset_id=None, remote=False):
+    """The general offline RL training function. Returns trained population of agents and their fitnesses.
 
     :param env: The environment to train in
     :type env: Gym-style environment
@@ -96,36 +96,44 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
         accelerator.wait_for_everyone()
     else:
         print('Filling replay buffer with dataset...')
-
-    # Save transitions to replay buffer
-    dataset_length = dataset['rewards'].shape[0]
-    # for i in trange(dataset_length-1):
-    #     state = dataset['observations'][i]
-    #     next_state = dataset['next_observations'][i]
-    #     if swap_channels:
-    #         state = np.moveaxis(state, [3], [1])
-    #         next_state = np.moveaxis(next_state, [3], [1])
-    #     action = dataset['actions'][i]
-    #     reward = dataset['rewards'][i]
-    #     done = bool(dataset['terminals'][i])
-    #     memory.save2memory(state, action, next_state, reward, done)
-    for i in trange(dataset_length-1):
-        state = dataset['observations'][i]
-        next_state = dataset['observations'][i+1]
-        if swap_channels:
-            state = np.moveaxis(state, [3], [1])
-            next_state = np.moveaxis(next_state, [3], [1])
-        action = dataset['actions'][i]
-        reward = dataset['rewards'][i]
-        done = bool(dataset['terminals'][i])
-        # Save experience to replay buffer
-        memory.save2memory(state, action, reward, next_state, done)
-    if accelerator is not None:
-        if accelerator.is_main_process:
-            print('Loaded buffer.')
-        accelerator.wait_for_everyone()
+        
+    if minari_dataset_id:
+        print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
+        
+        memory = MinariToAgileBuffer(minari_dataset_id, memory, accelerator,remote)
+        
+        print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
+    
     else:
-        print('Loaded buffer.')
+        print('Loading buffer...')
+        dataset_length = dataset['rewards'].shape[0]
+        # for i in range(dataset_length):
+        #     state = dataset['observations'][i]
+        #     next_state = dataset['next_observations'][i]
+        #     if swap_channels:
+        #         state = np.moveaxis(state, [3], [1])
+        #         next_state = np.moveaxis(next_state, [3], [1])
+        #     action = dataset['actions'][i]
+        #     reward = dataset['rewards'][i]
+        #     done = bool(dataset['terminals'][i])
+        #     memory.save2memory(state, action, next_state, reward, done)
+        for i in range(dataset_length-1):
+            state = dataset['observations'][i]
+            next_state = dataset['observations'][i+1]
+            if swap_channels:
+                state = np.moveaxis(state, [3], [1])
+                next_state = np.moveaxis(next_state, [3], [1])
+            action = dataset['actions'][i]
+            reward = dataset['rewards'][i]
+            done = bool(dataset['terminals'][i])
+            memory.save2memory(state, action, reward, next_state, done)
+        if accelerator is not None:
+          if accelerator.is_main_process:
+              print('Loaded buffer.')
+          accelerator.wait_for_everyone()
+        else:
+          print('Loaded buffer.')
+    
 
     if accelerator is not None:
         # Create dataloader from replay buffer
