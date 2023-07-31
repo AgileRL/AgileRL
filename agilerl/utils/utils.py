@@ -5,6 +5,7 @@ from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.td3 import TD3
+from agilerl.algorithms.maddpg import MADDPG
 
 def makeVectEnvs(env_name, num_envs=1):
     """Returns async-vectorized gym environments.
@@ -138,6 +139,29 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
             )
             population.append(agent)
 
+    elif algo == 'MADDPG':
+        for idx in range(population_size):
+            agent = MADDPG(
+                state_dims=state_dim,
+                action_dims=action_dim,
+                one_hot=one_hot,
+                n_agents=INIT_HP['N_AGENTS'],
+                agent_ids=INIT_HP['AGENT_IDS'],
+                index=idx,
+                max_action = INIT_HP['MAX_ACTION'],
+                min_action = INIT_HP['MIN_ACTION'],
+                net_config=net_config,
+                batch_size=INIT_HP['BATCH_SIZE'],
+                actor_lr=INIT_HP['ACTOR_LR'],
+                critic_lr=INIT_HP['CRITIC_LR'],
+                learn_step=INIT_HP['LEARN_STEP'],
+                gamma=INIT_HP['GAMMA'],
+                tau=INIT_HP['TAU'],
+                device=device,
+                accelerator=accelerator,
+            )
+            population.append(agent)
+
     return population
 
 
@@ -147,6 +171,7 @@ def printHyperparams(pop):
     :param pop: Population of agents
     :type pop: List[object]
     """
+    
     for agent in pop:
         print('Agent ID: {}    Mean 100 fitness: {:.2f}    lr: {}    Batch Size: {}'.format(
             agent.index, np.mean(agent.fitness[-100:]), agent.lr, agent.batch_size))

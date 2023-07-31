@@ -24,6 +24,8 @@ class Mutations():
     :type rl_hp_selection: List[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
+    :param agents_id: List of agent ID's for multi-agent algorithms
+    :type agents_id: List[str]
     :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
     :type arch: str, optional
     :param rand_seed: Random seed for repeatability, defaults to None
@@ -128,8 +130,10 @@ class Mutations():
                 # mutation in architecture of value network
                 ind_targets = [type(offspring_actor)(**offspring_actor.init_dict) 
                                for offspring_actor in offspring_actors]
-                ind_targets = [ind_target.load_state_dict(offspring_actor.state_dict())
-                               for ind_target, offspring_actor in zip(ind_targets, offspring_actors)]
+                
+                for ind_target, offspring_actor in zip(ind_targets, offspring_actors):
+                    ind_target.load_state_dict(offspring_actor.state_dict())
+
                 if self.accelerator is None:
                     ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
                 setattr(individual, self.algo['actor']['target'], ind_targets)
@@ -140,11 +144,13 @@ class Mutations():
                     offspring_critics = getattr(individual, critics['eval'])
                     ind_targets = [type(offspring_critic)(**offspring_critic.init_dict) 
                                for offspring_critic in offspring_critics]
-                    ind_targets = [ind_target.load_state_dict(offspring_critic.state_dict())
-                               for ind_target, offspring_critic in zip(ind_targets, offspring_critics)]
+                    
+                    for ind_target, offspring_critic in zip(ind_targets, offspring_critics):
+                        ind_target.load_state_dict(offspring_critic.state_dict())
+
                     if self.accelerator is None:
                         ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
-                    setattr(individual, critic['target'], ind_targets)
+                    setattr(individual, critics['target'], ind_targets)
             else:
 
                 offspring_actor = getattr(individual, self.algo['actor']['eval'])
@@ -490,8 +496,7 @@ class Mutations():
         # Mutate network architecture by adding layers or nodes
         if self.multi_agent:
             offspring_actors = getattr(individual, self.algo['actor']['eval']) # List of actors
-            offspring_critics_list = [getattr(individual, critic['eval']).clone() # List of List of critics (len==1 for 
-                                for critic in self.algo['critics']]          # maddpg but for matd3, will be multiple lists)
+            offspring_critics_list = [[critic.clone() for critic in getattr(individual, critics['eval'])] for critics in self.algo['critics']] 
             rand_numb = self.rng.uniform(0,1)
 
             if self.arch == 'cnn':
@@ -558,8 +563,8 @@ class Mutations():
                 else:
                     if self.rng.uniform(0, 1) < 0.5:
                         # Functionality to account for MATD3
-                        if len(offspring_critics) == 1:
-                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                        if len(offspring_critics_list) == 1:
+                            for offspring_actor, offspring_critic in zip(offspring_actors, offspring_critics_list[0]):
                                 node_dict = offspring_actor.add_node()  
                                 offspring_critic.add_node(**node_dict)
                         else:
@@ -568,8 +573,8 @@ class Mutations():
                                 offspring_critic_1.add_node(**node_dict)
                                 offspring_critic_2.add_node(**node_dict)
                     else:
-                        if len(offspring_critics) == 1:
-                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                        if len(offspring_critics_list) == 1:
+                            for offspring_actor, offspring_critic in zip(offspring_actors, offspring_critics_list[0]):
                                 node_dict = offspring_actor.remove_node()  
                                 offspring_critic.remove_node(**node_dict)
                         else:
@@ -593,8 +598,8 @@ class Mutations():
                                 offspring_critic.remove_layer()
                 else:
                     if self.rng.uniform(0, 1) < 0.5:
-                        if len(offspring_critics) == 1:
-                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                        if len(offspring_critics_list) == 1:
+                            for offspring_actor, offspring_critic in zip(offspring_actors, offspring_critics_list[0]):
                                 node_dict = offspring_actor.add_node()  
                                 offspring_critic.add_node(**node_dict)
                         else:
@@ -603,8 +608,8 @@ class Mutations():
                                 offspring_critic_1.add_node(**node_dict)
                                 offspring_critic_2.add_node(**node_dict)
                     else:
-                        if len(offspring_critics) == 1:
-                            for offspring_actor, offspring_critic in offspring_actors, offspring_critics_list[0]:
+                        if len(offspring_critics_list) == 1:
+                            for offspring_actor, offspring_critic in zip(offspring_actors, offspring_critics_list[0]):
                                 node_dict = offspring_actor.remove_node()  
                                 offspring_critic.remove_node(**node_dict)
                         else:

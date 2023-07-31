@@ -33,10 +33,8 @@ if __name__ == "__main__":
     learn_step = 100
     gamma = 0.95
     tau = 0.01
-    mutation=None
     device=device
     accelerator=None 
-    wrap=True
 
     # Instantiate MADDPG class
     maddpg_agent = MADDPG(state_dims=state_dims,
@@ -54,10 +52,8 @@ if __name__ == "__main__":
                    learn_step=learn_step,
                    gamma=gamma,
                    tau=tau,
-                   mutation=mutation,
                    device=device,
-                   accelerator=accelerator,
-                   wrap=wrap) 
+                   accelerator=accelerator) 
     
     # Configure the training loop parameters
     step = 0 # Global step counter

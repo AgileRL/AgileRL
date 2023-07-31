@@ -308,7 +308,7 @@ class MADDPG():
                 state, _ = env.reset()
                 score = 0
                 agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
-                for idx_step in range(max_steps):
+                while env.agents:
                     if swap_channels:
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
@@ -347,7 +347,6 @@ class MADDPG():
                            gamma=self.gamma,
                            tau=self.tau,
                            mutation=self.mut,
-                           policy_freq=self.policy_freq,
                            device=self.device,
                            accelerator=self.accelerator,
                            wrap=wrap)
@@ -377,10 +376,10 @@ class MADDPG():
                 clone.actor_optimizer, clone.critic_optimizer = actors, actor_targets, critics, \
                 critic_targets, actor_optimizers, critic_optimizers
         else:
-            clone.actors = actors.to(self.device)
-            clone.actor_targets = actor_targets.to(self.device)
-            clone.critics = critics.to(self.device)
-            clone.critic_targets = critic_targets.to(self.device)
+            clone.actors = [actor.to(self.device) for actor in actors]
+            clone.actor_targets = [actor_target.to(self.device) for actor_target in actor_targets]
+            clone.critics = [critic.to(self.device) for critic in critics]
+            clone.critic_targets = [critic_target.to(self.device) for critic_target in critic_targets]
             clone.actor_optimizers = actor_optimizers
             clone.critic_optimizers = critic_optimizers
 

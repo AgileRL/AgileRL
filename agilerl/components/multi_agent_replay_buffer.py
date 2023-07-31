@@ -67,24 +67,7 @@ class MultiAgentReplayBuffer:
         self._add(state, action, reward, next_state, done)
         self.counter += 1
 
-    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
-        """Saves multiple experiences to memory.
-
-        :param state: Environment observation
-        :type state: List[Dict[str, np.array]]
-        :param action: Action in environment
-        :type action: List[Dict[str, np.array]]
-        :param reward: Reward from environment
-        :type reward: List[Dict[str, int]]
-        :param next_state: Environment observation of next state
-        :type next_state: List[Dict[str, np.array]]
-        :param done: True if environment episode finished, else False
-        :type done: List[Dict[str, bool]]
-        """
-        for state, action, reward, next_state, done in zip(
-                states, actions, rewards, next_states, dones):
-            self._add(state, action, reward, next_state, done)
-            self.counter += 1
+    
         
 
 
