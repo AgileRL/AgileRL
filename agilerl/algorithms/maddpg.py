@@ -104,7 +104,7 @@ class MADDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
-                mlp_activation='softmax',
+                mlp_activation='gumbel_softmax',
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
@@ -117,7 +117,7 @@ class MADDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
-                mlp_activation='tanh',
+                mlp_activation='gumbel_softmax',
                 critic=True,
                 device=self.device,
                 accelerator=self.accelerator) for _ in range(self.n_agents)]
@@ -357,8 +357,8 @@ class MADDPG():
         actor_targets = [actor_target.clone() for actor_target in self.actor_targets]
         critics = [critic.clone() for critic in self.critic_targets]
         critic_targets = [critic_target.clone() for critic_target in self.critic_targets]
-        actor_optimizers = [optim.Adam(actor.parameters(), lr=clone.actor_lr) for actor in self.actors]
-        critic_optimizers = [optim.Adam(critic.parameters(), lr=clone.critic_lr) for critic in self.critics]
+        actor_optimizers = [optim.Adam(actor.parameters(), lr=clone.actor_lr) for actor in actors]
+        critic_optimizers = [optim.Adam(critic.parameters(), lr=clone.critic_lr) for critic in critics]
         clone.actor_optimizers_type = actor_optimizers
         clone.critic_optimizers_type = critic_optimizers
 

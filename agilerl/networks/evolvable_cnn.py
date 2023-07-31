@@ -173,6 +173,18 @@ class EvolvableCNN(nn.Module):
         if stored_values is not None:
             self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
+    @staticmethod
+    def gumbel_softmax(logits, tau=1.0, eps=1e-20):
+        """Implementation of the gumbel softmax activation function
+        
+        :param logits: Tensor containing unnormalized log probabilities for each class.
+        :type logits: torch.Tensor
+        """
+        epsilon = torch.rand_like(logits)
+        logits += -torch.log(-torch.log(epsilon + eps) + eps)
+        return F.softmax(logits / tau, dim=-1)
+
+
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
 
@@ -186,6 +198,7 @@ class EvolvableCNN(nn.Module):
             'elu': nn.ELU,
             'softsign': nn.Softsign,
             'sigmoid': nn.Sigmoid,
+            'gumbel_softmax' : self.gumbel_softmax,
             'softplus': nn.Softplus,
             'lrelu': nn.LeakyReLU,
             'prelu': nn.PReLU}

@@ -64,7 +64,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_e
             if accelerator.is_main_process:
                 wandb.init(
                     # set the wandb project where this run will be logged
-                    project="AgileRL",
+                    project="EvoMADDPGTesting",
                     name="{}-MultiAgentEvoHPO-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
@@ -77,13 +77,14 @@ def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_e
         else:
             wandb.init(
                     # set the wandb project where this run will be logged
-                    project="AgileRL",
+                    project="EvoMADDPGTesting",
                     name="{}-MultiAgentEvoHPO-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
+                        "details": "Cloning fixed, isolate arch mutations."
                     }
                 )
 
@@ -242,8 +243,8 @@ def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_e
                         model.wrap_models()
                 else:
                     elite, pop = tournament.select(pop)
-                    pop = mutation.mutation(pop)
-                    
+                    pop_ = mutation.mutation(pop)
+
         # Save model checkpoint
         if checkpoint is not None:
             if (idx_epi + 1) % checkpoint == 0:

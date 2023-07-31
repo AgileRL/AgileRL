@@ -94,14 +94,14 @@ if __name__ == '__main__':
         'DOUBLE': False,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
-        'BATCH_SIZE': 1024,              # Batch size
+        'BATCH_SIZE': 1024,             # Batch size
         'ACTOR_LR': 0.01,               # Learning rate
         'CRITIC_LR': 0.01,
-        'EPISODES': 40000,               # Max no. episodes
-        'TARGET_SCORE': -30,           # Early training stop at avg score of last 100 episodes
+        'EPISODES': 40_000,             # Max no. episodes
+        'TARGET_SCORE': -30,            # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.95,                  # Discount factor
-        'MEMORY_SIZE': 1_000_000,           # Max memory buffer size
-        'LEARN_STEP': 100,                # Learning frequency
+        'MEMORY_SIZE': 1_000_000,       # Max memory buffer size
+        'LEARN_STEP': 100,              # Learning frequency
         'TAU': 0.01,                    # For soft update of target parameters
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
@@ -115,11 +115,11 @@ if __name__ == '__main__':
         'NO_MUT': 0.4,                              # No mutation
         'ARCH_MUT': 0.2,                            # Architecture mutation
         'NEW_LAYER': 0.2,                           # New layer mutation
-        'PARAMS_MUT': 0.2,                          # Network parameters mutation
+        'PARAMS_MUT': 0,                          # Network parameters mutation
         'ACT_MUT': 0,                               # Activation layer mutation
-        'RL_HP_MUT': 0.2,                           # Learning HP mutation
+        'RL_HP_MUT': 0,                           # Learning HP mutation
         # Learning HPs to choose from
-        'RL_HP_SELECTION': ['actor_lr', 'critic_lr'],
+        'RL_HP_SELECTION': ["actor_lr", "critic_lr"],
         'MUT_SD': 0.1,                              # Mutation strength
         'RAND_SEED': 1,                             # Random seed
     }
