@@ -5,24 +5,60 @@ import torch
 import numpy as np
 import wandb
 from datetime import datetime
-#from pettingzoo.atari import basketball_pong_v3
+from pettingzoo.atari import boxing_v2
 
 
 if __name__ == "__main__":
     # Device agnostic code
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Configure the environment
-    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env.reset()
+    atari = True
+    if atari:
+        env = boxing_v2.parallel_env()
+        env.reset()
+        discrete_actions = True
+        n_agents = env.agents
+        action_space = [env.action_space(agent).n for agent in env.agents]
+        observation_space = [env.observation_space(agent).shape for agent in env.agents]
+        print(f"{action_space=}")
+        print(f"{observation_space=}")
+        x
+    else:
+        # Configure the environment for mpe
+        env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
+        env.reset()
+        discrete_actions = False
+        # Configure continuous maddpg input arguments
+        n_agents = env.num_agents
+        agent_ids = [agent_id for agent_id in env.agents]
+        action_dims = [env.action_space(agent).shape[0] for agent in env.agents] # [action_agent_1, action_agent_2, ..., action_agent_n]
+        state_dims = [env.observation_space(agent).shape for agent in env.agents] # [state_agent_1, state_agent_2, ..., state_agent_n]
+        max_action = [env.action_space(agent).high for agent in env.agents]
+        min_action = [env.action_space(agent).low for agent in env.agents]
+
+    # Configure the environment for atari
+    
+    action_space = [env.action_space(agent).n for agent in env.agents]
+    observation_space = [env.observation_space(agent).shape for agent in env.agents]
+    print(action_space)
+    print(observation_space)
+    
 
     # Configure maddpg input arguments
     n_agents = env.num_agents
-    action_dims = [env.action_space(agent).shape[0] for agent in env.agents] # [action_agent_1, action_agent_2, ..., action_agent_n]
-    state_dims = [env.observation_space(agent).shape for agent in env.agents] # [state_agent_1, state_agent_2, ..., state_agent_n]
     agent_ids = [agent_id for agent_id in env.agents]
-    max_action = [env.action_space(agent).high for agent in env.agents]
-    min_action = [env.action_space(agent).low for agent in env.agents]
+    action_dims = [env.action_space(agent).shape for agent in env.agents] # [action_agent_1, action_agent_2, ..., action_agent_n]
+    state_dims = [env.observation_space(agent).shape for agent in env.agents] # [state_agent_1, state_agent_2, ..., state_agent_n]
+    # max_action = [env.action_space(agent).high for agent in env.agents]
+    # min_action = [env.action_space(agent).low for agent in env.agents]
+
+    
+    print(reward)
+    print(done)
+    x 
+    print(f"{action_dims=}")
+    print(f"{state_dims=}")
+    print(f"{agent_ids=}")
 
     one_hot = False 
     index = 0
@@ -57,7 +93,7 @@ if __name__ == "__main__":
     
     # Configure the training loop parameters
     step = 0 # Global step counter
-    wb = True # Initiate weights and biases
+    wb = False # Initiate weights and biases
     agent_num = env.num_agents
     episodes = 40_000
     epsilon = 1
