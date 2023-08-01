@@ -84,7 +84,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_e
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
-                        "details": "Cloning fixed, isolate arch mutations."
+                        "details": "Cloning fixed, run with all params but population of 6. Changed HPs to random, non - openai ones."
                     }
                 )
 

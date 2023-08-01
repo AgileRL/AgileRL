@@ -75,6 +75,7 @@ class MADDPG():
         self.max_action = max_action
         self.expl_noise = expl_noise
         self.min_action = min_action
+        self.discrete_actions = False
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
@@ -117,7 +118,7 @@ class MADDPG():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
-                mlp_activation='gumbel_softmax',
+                mlp_activation='tanh',
                 critic=True,
                 device=self.device,
                 accelerator=self.accelerator) for _ in range(self.n_agents)]
@@ -176,9 +177,13 @@ class MADDPG():
                 with torch.no_grad():
                     action_values = actor(state)
                 actor.train()
-                action = action_values.cpu().data.numpy().squeeze() \
-                    + np.random.normal(0, self.max_action[idx][0] * self.expl_noise, size=self.action_dims[idx]).astype(np.float32)
-                action = np.clip(action, self.min_action[idx][0], self.max_action[idx][0])     
+                #### Accounts for the discrete action space of the atari environments 
+                if self.discrete_actions:
+                    action = action_values.squeeze(0).argmax().item()
+                else:
+                    action = action_values.cpu().data.numpy().squeeze() \
+                        + np.random.normal(0, self.max_action[idx][0] * self.expl_noise, size=self.action_dims[idx]).astype(np.float32)
+                    action = np.clip(action, self.min_action[idx][0], self.max_action[idx][0])     
             actions[agent_id] = action
         
         return actions
