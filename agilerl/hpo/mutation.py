@@ -190,7 +190,7 @@ class Mutations():
             net_params = [actor.parameters() for actor in 
                           getattr(individual, self.algo['actor']['eval'])]
             
-            offspring_actor_opts = [type(actor_opt)(net_param, lr=individual.actor_lr)
+            offspring_actor_opts = [type(actor_opt)(net_param, lr=individual.lr)
                                     for actor_opt, net_param in zip(actor_opts, net_params)]
 
             if self.accelerator is not None:
@@ -209,8 +209,8 @@ class Mutations():
                 net_params = [critic.parameters() for critic in 
                               getattr(individual, critic_list['eval'])]
                 
-                offspring_critic_opts = [type(critic_opt)(net_param, lr=individual.critic_lr)
-                                         for critic_opt, net_param in zip(actor_opts, net_params)]
+                offspring_critic_opts = [type(critic_opt)(net_param, lr=individual.lr)
+                                         for critic_opt, net_param in zip(critic_opts, net_params)]
                 
                 if self.accelerator is not None:
                     setattr(individual, 
@@ -280,25 +280,25 @@ class Mutations():
             self.reinit_opt(individual)
             individual.mut = 'lr'
         
-        elif mutate_param == 'actor_lr':
-            if random_num > 0.5:
-                individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 1.2))
-            else:
-                individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 0.8))
+        # elif mutate_param == 'actor_lr':
+        #     if random_num > 0.5:
+        #         individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 1.2))
+        #     else:
+        #         individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 0.8))
             
-            # Reinitialise optimizer if new learning rate
-            self.reinit_opt(individual)
-            individual.mut = 'actor_lr'
+        #     # Reinitialise optimizer if new learning rate
+        #     self.reinit_opt(individual)
+        #     individual.mut = 'actor_lr'
 
-        elif mutate_param == 'critic_lr':
-            if random_num > 0.5:
-                individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 1.2))
-            else:
-                individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 0.8))
+        # elif mutate_param == 'critic_lr':
+        #     if random_num > 0.5:
+        #         individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 1.2))
+        #     else:
+        #         individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 0.8))
 
-            # Reinitialise optimizer if new learning rate
-            self.reinit_opt(individual)
-            individual.mut = 'critic_lr'
+        #     # Reinitialise optimizer if new learning rate
+        #     self.reinit_opt(individual)
+        #     individual.mut = 'critic_lr'
 
         elif mutate_param == 'learn_step':
             if random_num > 0.5:

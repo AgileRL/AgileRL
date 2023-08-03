@@ -8,7 +8,7 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000, 
+def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
           max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
@@ -78,15 +78,30 @@ def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_e
             wandb.init(
                     # set the wandb project where this run will be logged
                     project="EvoMADDPGTesting",
-                    name="{}-MultiAgentEvoHPO-{}-{}".format(env_name, algo,
+                    name="{}-UpdatedMADDPGRLHPMut-LRChanged-BSFixed-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
-                        "details": "Cloning fixed, run with all params but population of 6. Changed HPs to random, non - openai ones."
+                        "net_config": net_config,
+                        "details": "Updated MADDPG, testing with rl hp mutations, lr now the same"
                     }
                 )
+            
+        wandb.config.batch_size = init_hp['BATCH_SIZE']
+        wandb.config.lr = init_hp['LR']
+        wandb.config.gamma = init_hp['GAMMA']
+        wandb.config.memory_size = init_hp['MEMORY_SIZE']
+        wandb.config.learn_step = init_hp['LEARN_STEP']
+        wandb.config.tau = init_hp['TAU']
+        wandb.config.pop_size = init_hp['TOURN_SIZE']
+        wandb.config.no_mut = mut_p['NO_MUT']
+        wandb.config.arch_mut = mut_p['ARCH_MUT']
+        wandb.config.params_mut = mut_p['PARAMS_MUT']
+        wandb.config.act_mut = mut_p['ACT_MUT']
+        wandb.config.rl_hp_mut = mut_p['RL_HP_MUT']
+
 
     if accelerator is not None:
         accel_temp_models_path = 'models/{}'.format(env_name)
@@ -152,7 +167,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, swap_channels=False, n_e
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r 
 
-                # Learn according to learning frequency
+                #Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(
                         memory) >= agent.batch_size:
                     # Sample replay buffer
