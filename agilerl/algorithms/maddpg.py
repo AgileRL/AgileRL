@@ -407,8 +407,8 @@ class MADDPG():
                                                                             self.actor_target,
                                                                             self.critic,
                                                                             self.critic_target,
-                                                                            self.actor_optimizer_type,
-                                                                            self.critic_optimizer_type)
+                                                                            self.actor_optimizers_type,
+                                                                            self.critic_optimizers_type)
     
     def unwrap_models(self):
         if self.accelerator is not None:

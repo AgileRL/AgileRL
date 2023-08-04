@@ -140,17 +140,17 @@ class Mutations():
 
                 # If algorithm has critics, reinitialize their respective target networks
                 # too
-                for critics in self.algo['critics']:
-                    offspring_critics = getattr(individual, critics['eval'])
+                for critics_list in self.algo['critics']:
+                    offspring_critics = getattr(individual, critics_list['eval'])
                     ind_targets = [type(offspring_critic)(**offspring_critic.init_dict) 
                                for offspring_critic in offspring_critics]
                     
                     for ind_target, offspring_critic in zip(ind_targets, offspring_critics):
                         ind_target.load_state_dict(offspring_critic.state_dict())
-
+                        
                     if self.accelerator is None:
                         ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
-                    setattr(individual, critics['target'], ind_targets)
+                    setattr(individual, critics_list['target'], ind_targets)
             else:
 
                 offspring_actor = getattr(individual, self.algo['actor']['eval'])
@@ -183,28 +183,42 @@ class Mutations():
         return mutated_population
     
     def reinit_opt(self, individual):
+        # print("-"*50)
+        # print("Updated Learning rate",individual.lr)
+        # print("ACTORS")
 
         if self.multi_agent:
             # Reinitialise optimizer
             actor_opts = getattr(individual, self.algo['actor']['optimizer'])
+
+            # for opt in actor_opts:
+            #     print("Parent actor optim params: ", hex(id(opt.param_groups)))
+            #     print("Parent actor optimizer learning rate", opt.defaults["lr"])
+
             net_params = [actor.parameters() for actor in 
                           getattr(individual, self.algo['actor']['eval'])]
             
             offspring_actor_opts = [type(actor_opt)(net_param, lr=individual.lr)
                                     for actor_opt, net_param in zip(actor_opts, net_params)]
 
-            if self.accelerator is not None:
-                setattr(individual, 
+            
+            setattr(individual, 
                         self.algo['actor']['optimizer'].replace('_type', ''), 
                         offspring_actor_opts)
-            else:
-                setattr(individual, 
-                        self.algo['actor']['optimizer'].replace('_type', ''), 
-                        offspring_actor_opts)
+            
+            ## Delete the following block
+            # for opt in offspring_actor_opts:
+            #     print("Offspring actor optim params: ", hex(id(opt.param_groups)))
+            #     print("Offspring actor optimizer learning rate", opt.defaults["lr"])
 
             # If algorithm has critics, reinitialise their optimizers too
+            # print("CRITICS")
             for critic_list in self.algo['critics']:
                 critic_opts = getattr(individual, critic_list['optimizer'])
+
+                # for opt in critic_opts:
+                #     print("Parent critic optim params: ", hex(id(opt.param_groups)))
+                #     print("Parent critic optimizer learning rate", opt.defaults["lr"])
 
                 net_params = [critic.parameters() for critic in 
                               getattr(individual, critic_list['eval'])]
@@ -212,40 +226,34 @@ class Mutations():
                 offspring_critic_opts = [type(critic_opt)(net_param, lr=individual.lr)
                                          for critic_opt, net_param in zip(critic_opts, net_params)]
                 
-                if self.accelerator is not None:
-                    setattr(individual, 
+                
+                setattr(individual, 
                             critic_list['optimizer'].replace('_type', ''), 
                             offspring_critic_opts)
-                else:
-                    setattr(individual, 
-                            critic_list['optimizer'].replace('_type', ''), 
-                            offspring_critic_opts)
+                
+                # for opt in offspring_critic_opts:
+                #     print("Offspring critic optim params: ", hex(id(opt.param_groups)))
+                #     print("Offspring critic optimizer learning rate", opt.defaults["lr"])
         else:
             # Reinitialise optimizer
             actor_opt = getattr(individual, self.algo['actor']['optimizer'])
             net_params = getattr(
                 individual, self.algo['actor']['eval']).parameters()
-            if self.accelerator is not None:
-                setattr(individual, 
+            setattr(individual, 
                         self.algo['actor']['optimizer'].replace('_type', ''), 
                         type(actor_opt)(net_params, lr=individual.lr))
-            else:
-                setattr(individual, 
-                        self.algo['actor']['optimizer'].replace('_type', ''), 
-                        type(actor_opt)(net_params, lr=individual.lr))
+            
+            #print("Actor optimizer learning rate",actor_opt.defaults["lr"])
 
             # If algorithm has critics, reinitialise their optimizers too
             for critic in self.algo['critics']:
                 critic_opt = getattr(individual, critic['optimizer'])
                 net_params = getattr(individual, critic['eval']).parameters()
-                if self.accelerator is not None:
-                    setattr(individual, 
+                setattr(individual, 
                             critic['optimizer'].replace('_type', ''), 
                             type(critic_opt)(net_params, lr=individual.lr))
-                else:
-                    setattr(individual, 
-                            critic['optimizer'].replace('_type', ''), 
-                            type(critic_opt)(net_params, lr=individual.lr))
+                
+                #print("Critic optimizer learning rate", critic_opt.defaults["lr"])
 
 
     def rl_hyperparam_mutation(self, individual):
@@ -276,7 +284,7 @@ class Mutations():
             else:
                 individual.lr = min(0.005, max(0.00001, individual.lr * 0.8))
 
-            # Reinitialise optimizer if new learning rate
+            #Reinitialise optimizer if new learning rate
             self.reinit_opt(individual)
             individual.mut = 'lr'
         

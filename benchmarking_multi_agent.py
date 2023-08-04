@@ -75,7 +75,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                             evo_epochs=INIT_HP['EVO_EPOCHS'],
                                             evo_loop=1,
                                             target=INIT_HP['TARGET_SCORE'],
-                                            tournament=tournament,
+                                            tournament=tournament, #tournament,
                                             mutation=mutations,
                                             wb=INIT_HP['WANDB'])
 
@@ -91,14 +91,14 @@ if __name__ == '__main__':
         'ENV_NAME': 'simple_v3',   # Gym environment name
         'ENV_PARAMS' : {
             'max_cycles': 25,
-            'continuous_actions' : False
+            'continuous_actions' : True
         },
         'ALGO': 'MADDPG',                  # Algorithm
         'DOUBLE': False,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 256,             # Batch size
-        'LR': 0.005,               # Learning rate
+        'LR': 0.05,               # Learning rate
         'EPISODES': 20_000,             # Max no. episodes
         'TARGET_SCORE': 100,            # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.95,                  # Discount factor
@@ -115,13 +115,13 @@ if __name__ == '__main__':
 
     MUTATION_PARAMS = {  # Relative probabilities
         'NO_MUT': 0.4,                              # No mutation
-        'ARCH_MUT': 0,                            # Architecture mutation
+        'ARCH_MUT': 0.2,                            # Architecture mutation
         'NEW_LAYER': 0.2,                           # New layer mutation
-        'PARAMS_MUT': 0,                          # Network parameters mutation
+        'PARAMS_MUT': 0.2,                          # Network parameters mutation
         'ACT_MUT': 0,                               # Activation layer mutation
         'RL_HP_MUT': 0.2,                           # Learning HP mutation
         # Learning HPs to choose from
-        'RL_HP_SELECTION': ["lr"],
+        'RL_HP_SELECTION': ["lr", "batch_size"],
         'MUT_SD': 0.1,                              # Mutation strength
         'RAND_SEED': 1,                             # Random seed
     }
