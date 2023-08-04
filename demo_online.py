@@ -103,8 +103,12 @@ if __name__ == '__main__':
                     action)   # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memoryVectEnvs(
-                    state, action, reward, next_state, done)
+                if INIT_HP['CHANNELS_LAST']:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+                else:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(
@@ -127,7 +131,7 @@ if __name__ == '__main__':
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=False,
+                    swap_channels=INIT_HP['CHANNELS_LAST'],
                     max_steps=max_steps,
                     loop=evo_loop) for agent in pop]
 
