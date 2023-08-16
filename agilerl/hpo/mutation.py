@@ -37,7 +37,14 @@ class Mutations():
     """
 
     def __init__(self, algo, no_mutation, architecture, new_layer_prob, parameters, 
-                 activation, rl_hp, rl_hp_selection, mutation_sd, agent_ids=None,  
+                 activation, rl_hp, rl_hp_selection, mutation_sd, 
+                 min_lr=0.0001,
+                 max_lr=0.01, 
+                 min_learn_step=1,
+                 max_learn_step=120,
+                 min_batch_size=8,
+                 max_batch_size=1024, 
+                 agent_ids=None,  
                  arch='mlp', rand_seed=None, device='cpu', accelerator=None):
         # Random seed for repeatability
         self.rng = np.random.RandomState(rand_seed)
@@ -57,6 +64,13 @@ class Mutations():
         self.device = device
         self.accelerator = accelerator
         self.agent_ids = agent_ids
+        self.min_batch_size = min_batch_size
+        self.max_batch_size = max_batch_size
+        self.min_lr = min_lr 
+        self.max_lr = max_lr
+        self.min_learn_step = min_learn_step
+        self.max_learn_step = max_learn_step 
+    
 
         if agent_ids is not None:
             self.multi_agent = True 
@@ -122,7 +136,7 @@ class Mutations():
 
             # Call mutation function for each individual
             individual = mutation(individual)
-
+        
             if self.multi_agent:
                 offspring_actors = getattr(individual, self.algo['actor']['eval'])
 
@@ -183,17 +197,10 @@ class Mutations():
         return mutated_population
     
     def reinit_opt(self, individual):
-        # print("-"*50)
-        # print("Updated Learning rate",individual.lr)
-        # print("ACTORS")
 
         if self.multi_agent:
             # Reinitialise optimizer
             actor_opts = getattr(individual, self.algo['actor']['optimizer'])
-
-            # for opt in actor_opts:
-            #     print("Parent actor optim params: ", hex(id(opt.param_groups)))
-            #     print("Parent actor optimizer learning rate", opt.defaults["lr"])
 
             net_params = [actor.parameters() for actor in 
                           getattr(individual, self.algo['actor']['eval'])]
@@ -206,19 +213,8 @@ class Mutations():
                         self.algo['actor']['optimizer'].replace('_type', ''), 
                         offspring_actor_opts)
             
-            ## Delete the following block
-            # for opt in offspring_actor_opts:
-            #     print("Offspring actor optim params: ", hex(id(opt.param_groups)))
-            #     print("Offspring actor optimizer learning rate", opt.defaults["lr"])
-
-            # If algorithm has critics, reinitialise their optimizers too
-            # print("CRITICS")
             for critic_list in self.algo['critics']:
                 critic_opts = getattr(individual, critic_list['optimizer'])
-
-                # for opt in critic_opts:
-                #     print("Parent critic optim params: ", hex(id(opt.param_groups)))
-                #     print("Parent critic optimizer learning rate", opt.defaults["lr"])
 
                 net_params = [critic.parameters() for critic in 
                               getattr(individual, critic_list['eval'])]
@@ -230,10 +226,6 @@ class Mutations():
                 setattr(individual, 
                             critic_list['optimizer'].replace('_type', ''), 
                             offspring_critic_opts)
-                
-                # for opt in offspring_critic_opts:
-                #     print("Offspring critic optim params: ", hex(id(opt.param_groups)))
-                #     print("Offspring critic optimizer learning rate", opt.defaults["lr"])
         else:
             # Reinitialise optimizer
             actor_opt = getattr(individual, self.algo['actor']['optimizer'])
@@ -243,8 +235,6 @@ class Mutations():
                         self.algo['actor']['optimizer'].replace('_type', ''), 
                         type(actor_opt)(net_params, lr=individual.lr))
             
-            #print("Actor optimizer learning rate",actor_opt.defaults["lr"])
-
             # If algorithm has critics, reinitialise their optimizers too
             for critic in self.algo['critics']:
                 critic_opt = getattr(individual, critic['optimizer'])
@@ -253,8 +243,6 @@ class Mutations():
                             critic['optimizer'].replace('_type', ''), 
                             type(critic_opt)(net_params, lr=individual.lr))
                 
-                #print("Critic optimizer learning rate", critic_opt.defaults["lr"])
-
 
     def rl_hyperparam_mutation(self, individual):
         """Returns individual from population with RL hyperparameter mutation.
@@ -272,49 +260,29 @@ class Mutations():
         if mutate_param == 'batch_size':
             if random_num > 0.5:
                 individual.batch_size = min(
-                    128, max(8, int(individual.batch_size * 1.2)))
+                    self.max_batch_size, max(self.min_batch_size, int(individual.batch_size * 1.2)))
             else:
                 individual.batch_size = min(
-                    128, max(8, int(individual.batch_size * 0.8)))
+                    self.max_batch_size, max(self.min_batch_size, int(individual.batch_size * 0.8)))
             individual.mut = 'bs'
 
         elif mutate_param == 'lr':
             if random_num > 0.5:
-                individual.lr = min(0.005, max(0.00001, individual.lr * 1.2))
+                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 1.2)) ## change back to 0.005, and 0.00001
             else:
-                individual.lr = min(0.005, max(0.00001, individual.lr * 0.8))
+                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 0.8)) ## change back to 0.005, and 0.00001
 
             #Reinitialise optimizer if new learning rate
             self.reinit_opt(individual)
             individual.mut = 'lr'
-        
-        # elif mutate_param == 'actor_lr':
-        #     if random_num > 0.5:
-        #         individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 1.2))
-        #     else:
-        #         individual.actor_lr = min(0.005, max(0.00001, individual.actor_lr * 0.8))
-            
-        #     # Reinitialise optimizer if new learning rate
-        #     self.reinit_opt(individual)
-        #     individual.mut = 'actor_lr'
-
-        # elif mutate_param == 'critic_lr':
-        #     if random_num > 0.5:
-        #         individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 1.2))
-        #     else:
-        #         individual.critic_lr = min(0.005, max(0.00001, individual.critic_lr * 0.8))
-
-        #     # Reinitialise optimizer if new learning rate
-        #     self.reinit_opt(individual)
-        #     individual.mut = 'critic_lr'
 
         elif mutate_param == 'learn_step':
             if random_num > 0.5:
                 individual.learn_step = min(
-                    1, max(0, int(individual.learn_step * 1.5)))
+                    self.max_learn_step, max(self.min_learn_step, int(individual.learn_step * 1.5)))
             else:
                 individual.learn_step = min(
-                    1, max(0, int(individual.learn_step * 0.75)))
+                    self.max_learn_step, max(self.min_learn_step, int(individual.learn_step * 0.75)))
 
         return individual
 
