@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
+import torchinfo
 
 
 class MADDPG():
@@ -47,7 +48,7 @@ class MADDPG():
     """
 
     def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, max_action, 
-                 min_action, expl_noise=0.1, index=0, discrete_actions=False, 
+                 min_action, expl_noise=0.1, index=0, discrete_actions=False, policy_freq=1,
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=0.01,
                  learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu', accelerator=None, wrap=True):
         self.algo = 'MADDPG'
@@ -75,7 +76,10 @@ class MADDPG():
         self.expl_noise = expl_noise
         self.min_action = min_action
         self.discrete_actions = discrete_actions
-        self.policy_freq=2
+        self.policy_freq = policy_freq
+
+        if net_config["arch"] == "cnn":
+            self.total_actions = sum(self.action_dims) if not self.discrete_actions else len(self.action_dims)
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
@@ -89,7 +93,7 @@ class MADDPG():
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableMLP(
-                num_inputs=self.total_state_dims + sum(self.action_dims),
+                num_inputs=self.total_state_dims + self.total_actions,
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
@@ -106,13 +110,14 @@ class MADDPG():
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
                 mlp_activation='gumbel_softmax',
+                multi=True,
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableCNN(
                 input_shape=state_dim, #### This needs changing once mlp is working for the base case, it needs to be a summation of all states
-                num_actions=sum(self.action_dims),
+                num_actions=self.total_actions,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
                 stride_size=self.net_config['s_size'],
@@ -120,6 +125,7 @@ class MADDPG():
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
+                multi=True,
                 device=self.device,
                 accelerator=self.accelerator) for state_dim in self.state_dims]
             self.critic_targets = copy.deepcopy(self.critics)
@@ -159,13 +165,15 @@ class MADDPG():
         if self.accelerator is None:
             states = [state.to(self.device) for state in states]
 
-        #### Need to adjust
         if self.one_hot:
             states = [nn.functional.one_hot(
                 state.long(), num_classes=state_dim[0]).float().squeeze() for state, state_dim 
                 in zip(states, self.state_dims)]
-
-        states = [state.unsqueeze(0) if len(state.size()) < 2 else state for state in states ]   
+        
+        if self.net_config["arch"] == "mlp":
+            states = [state.unsqueeze(0) if len(state.size()) < 2 else state for state in states]   
+        elif self.net_config["arch"] == "cnn":
+            states = [state.unsqueeze(2) for state in states]
 
         actions = {} 
         for idx, (agent_id, state, actor) in enumerate(zip(self.agent_ids, states, self.actors)):
@@ -179,7 +187,6 @@ class MADDPG():
                 with torch.no_grad():
                     action_values = actor(state)
                 actor.train()
-                #### Accounts for the discrete action space of the atari environments 
                 if self.discrete_actions:
                     action = action_values.squeeze(0).argmax().item()
                 else:
@@ -216,41 +223,33 @@ class MADDPG():
                                                                                                  self.actor_optimizers, 
                                                                                                  self.critic_optimizers):
          
-            #### Re-configure once the base case is working
-            # if self.one_hot:
-            #     states = nn.functional.one_hot(
-            #         states.long(), num_classes=self.state_dim[0]).float().squeeze()
-            #     next_states = nn.functional.one_hot(
-            #         next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
+            if self.one_hot:
+                states = {agent_id: nn.functional.one_hot(state.long(), num_classes=state_dim[0]).float().squeeze() for 
+                          agent_id, state, state_dim in zip(states.items(), self.state_dims)}
 
             states, actions, rewards, next_states, dones = experiences
 
             if self.net_config['arch'] == 'mlp':
                 input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
                 q_value = critic(input_combined)
-                
-            #### Work on cnn once mlp is working
-            elif self.net_config['arch'] == 'cnn':
-                q_value = critic(states.values(), actions.values())
-            next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() + actions[agent_id].data.normal_(0, policy_noise).clamp(0,1)
+                next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() + actions[agent_id].data.normal_(0, policy_noise).clamp(0,1)
                             for idx, agent_id in enumerate(self.agent_ids)]
-            #next_actions = torch.stack(next_actions_)
-            #### Add in the noise once we have the simplest mlp case working
-            # noise = actions.data.normal_(0, policy_noise)
-            # noise = noise.clamp(-noise_clip, noise_clip)
-            # next_actions = (next_actions + noise)
-            # for na, idx in enumerate(next_actions):
-            #     noise = actions[id].data.normal_(0, policy_noise)
-            #     noise = noise.clamp(0, 1)
-            #     na += noise
+                
+            elif self.net_config['arch'] == 'cnn':
+                stacked_states = torch.stack(list(states.values()), dim=2)
+                stacked_actions = torch.stack(list(actions.values()), dim=1)
+                q_value = critic(stacked_states, stacked_actions)
+                next_actions = [self.actor_targets[idx](next_states[agent_id].unsqueeze(2)).detach_() for idx, agent_id in enumerate(self.agent_ids)]
+                if self.discrete_actions:
+                    next_actions = [torch.argmax(agent_actions, dim=1) for agent_actions in next_actions]
 
             if self.net_config['arch'] == 'mlp':
                 next_input_combined = torch.cat(list(next_states.values()) + next_actions, 1)
                 q_value_next_state = critic_target(next_input_combined)
-
-            #### Work on cnn once mlp is working
             elif self.net_config['arch'] == 'cnn':
-                q_value_next_state = critic_target(next_states.values(), next_actions)
+                stacked_next_states = torch.stack(list(next_states.values()), dim=2)
+                stacked_next_actions = torch.stack(next_actions, dim=1)
+                q_value_next_state = critic_target(stacked_next_states, stacked_next_actions)
 
             y_j = rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
 
@@ -264,7 +263,6 @@ class MADDPG():
                 critic_loss.backward()
             critic_optimizer.step()
 
-            ### Add in the time delay once basic case is working
             # update actor and targets every policy_freq episodes
             if len(self.scores) % self.policy_freq == 0:
                 if self.net_config['arch'] == 'mlp':
@@ -273,14 +271,13 @@ class MADDPG():
                     detached_actions[agent_id] = action
                     input_combined = torch.cat(list(states.values()) + list(detached_actions.values()), 1)
                     actor_loss = -critic(input_combined).mean()
-                    
-                    #### Complete cnns once mlp is working 
                 elif self.net_config['arch'] == 'cnn':
-                    action = actor(states[agent_id])
+                    action = actor(states[agent_id].unsqueeze(2)).argmax(1)
                     detached_actions = copy.deepcopy(actions)
                     detached_actions[agent_id] = action
+                    stacked_detached_actions = torch.stack(list(detached_actions.values()), dim=1)
                     actor_loss = - \
-                        critic(states.values(), detached_actions.values()).mean()
+                        critic(stacked_states, stacked_detached_actions).mean()
 
                 # actor loss backprop
                 actor_optimizer.zero_grad()

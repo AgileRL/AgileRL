@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
 class GumbelSoftmax(nn.Module):
     """Applies gumbel softmax function element-wise

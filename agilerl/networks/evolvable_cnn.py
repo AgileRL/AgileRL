@@ -2,6 +2,7 @@ import copy
 import math
 from collections import OrderedDict
 from typing import List
+from agilerl.networks.custom_architecture import GumbelSoftmax
 
 import numpy as np
 import torch
@@ -141,6 +142,7 @@ class EvolvableCNN(nn.Module):
             num_atoms=51,
             mlp_activation='relu',
             cnn_activation='relu',
+            multi=False,
             layer_norm=False,
             stored_values=None,
             rainbow=False,
@@ -166,23 +168,13 @@ class EvolvableCNN(nn.Module):
         self.normalize = normalize
         self.device = device
         self.accelerator = accelerator
+        self.multi = multi
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
         
         if stored_values is not None:
             self.inject_parameters(pvec=stored_values, without_layer_norm=False)
-
-    @staticmethod
-    def gumbel_softmax(logits, tau=1.0, eps=1e-20):
-        """Implementation of the gumbel softmax activation function
-        
-        :param logits: Tensor containing unnormalized log probabilities for each class.
-        :type logits: torch.Tensor
-        """
-        epsilon = torch.rand_like(logits)
-        logits += -torch.log(-torch.log(epsilon + eps) + eps)
-        return F.softmax(logits / tau, dim=-1)
 
 
     def get_activation(self, activation_names):
@@ -198,7 +190,7 @@ class EvolvableCNN(nn.Module):
             'elu': nn.ELU,
             'softsign': nn.Softsign,
             'sigmoid': nn.Sigmoid,
-            'gumbel_softmax' : self.gumbel_softmax,
+            'gumbel_softmax' : GumbelSoftmax,
             'softplus': nn.Softplus,
             'lrelu': nn.LeakyReLU,
             'prelu': nn.PReLU}
@@ -231,28 +223,55 @@ class EvolvableCNN(nn.Module):
     def create_cnn(self, input_size, channel_size, kernal_size, stride_size, name):
         """Creates and returns convolutional neural network.
         """
-        net_dict = OrderedDict()
-        net_dict[f"{name}_conv_layer_0"] = nn.Conv2d(
-            in_channels=input_size,
-            out_channels=channel_size[0],
-            kernel_size=kernal_size[0],
-            stride=stride_size[0])
-        if self.layer_norm:
-            net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm2d(channel_size[0])
-        net_dict[f"{name}_activation_0"] = self.get_activation(
-            self.cnn_activation)
+        if self.multi:
+            net_dict = OrderedDict()
+            net_dict[f"{name}_conv_layer_0"] = nn.Conv3d(
+                in_channels=3,
+                out_channels=channel_size[0],
+                kernel_size=kernal_size[0],
+                stride=stride_size[0]            ## Maybe include the ability to have 3 dim kernel and stride
+            )
+            if self.layer_norm:
+                net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm3d(channel_size[0])
+            net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
 
-        if len(channel_size) > 1:
-            for l_no in range(1, len(channel_size)):
-                net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv2d(in_channels=channel_size[l_no - 1],
-                                                                       out_channels=channel_size[l_no],
-                                                                       kernel_size=kernal_size[l_no],
-                                                                       stride=stride_size[l_no])
-                if self.layer_norm:
-                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm2d(
-                        channel_size[l_no])
-                net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
-                    self.cnn_activation)
+            if len(channel_size) > 1:
+                for l_no in range(1, len(channel_size)):
+                    net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv3d(in_channels=channel_size[l_no - 1],
+                                                                           out_channels=channel_size[l_no],
+                                                                           kernel_size=kernal_size[l_no],
+                                                                           stride=stride_size[l_no])
+                    if self.layer_norm:
+                        net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm3d(
+                            channel_size[l_no])
+                    net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                        self.cnn_activation
+                    )
+                
+
+        else:
+            net_dict = OrderedDict()
+            net_dict[f"{name}_conv_layer_0"] = nn.Conv2d(
+                in_channels=input_size,
+                out_channels=channel_size[0],
+                kernel_size=kernal_size[0],
+                stride=stride_size[0])
+            if self.layer_norm:
+                net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm2d(channel_size[0])
+            net_dict[f"{name}_activation_0"] = self.get_activation(
+                self.cnn_activation)
+
+            if len(channel_size) > 1:
+                for l_no in range(1, len(channel_size)):
+                    net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv2d(in_channels=channel_size[l_no - 1],
+                                                                            out_channels=channel_size[l_no],
+                                                                            kernel_size=kernal_size[l_no],
+                                                                            stride=stride_size[l_no])
+                    if self.layer_norm:
+                        net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm2d(
+                            channel_size[l_no])
+                    net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                        self.cnn_activation)
 
         return nn.Sequential(net_dict)
 
@@ -266,8 +285,12 @@ class EvolvableCNN(nn.Module):
             self.stride_size,
             name="feature")
 
-        input_size = feature_net(autograd.Variable(
-            torch.zeros(1, *self.input_shape))).view(1, -1).size(1)
+        if self.multi:
+            input_size = feature_net(autograd.Variable(
+                torch.zeros(1, *self.input_shape).unsqueeze(2))).view(1, -1).size(1)
+        else:
+            input_size = feature_net(autograd.Variable(
+                torch.zeros(1, *self.input_shape))).view(1, -1).size(1)
 
         if self.critic:
             input_size += self.num_actions
@@ -344,6 +367,7 @@ class EvolvableCNN(nn.Module):
         if self.critic:
             x = torch.cat([x, xc], dim=1)
 
+
         value = self.value_net(x)
 
         if self.rainbow:
@@ -359,7 +383,7 @@ class EvolvableCNN(nn.Module):
 
         else:
             x = F.softmax(value, dim=-1)
-
+        
         return x
 
     def get_model_dict(self):
