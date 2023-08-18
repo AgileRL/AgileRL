@@ -9,7 +9,7 @@ from agilerl.components.sampler import Sampler
 
 
 def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
-          max_steps=500, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
+          max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
     """The general online RL training function. Returns trained population of agents 
@@ -77,15 +77,15 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
         else:
             wandb.init(
                     # set the wandb project where this run will be logged
-                    project="EvoMADDPGTesting",
-                    name="{}-TournMut-{}-{}".format(env_name, algo,
+                    project="MADDPG Testing",
+                    name="{}-LegacyTest-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
                         "net_config": net_config,
-                        "details": "MADDPG algorithm fixed, testing no mut and no torun again, please work omg."
+                        "details": "LR, batch_size and time_step mutations."
                     }
                 )
             
@@ -148,7 +148,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
             state = env.reset()[0]  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
 
-            while env.agents:
+            for _ in range(max_steps):
                 total_steps += 1
                 if swap_channels:
                     state = np.moveaxis(state, [3], [1])
@@ -214,13 +214,13 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                                 "eval/mean_reward": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     
-                for idx, agent in enumerate(pop):
-                    wandb.log({
-                        f"learn_step_agent_{idx}": agent.learn_step,
-                        #f"learning_rate_agent_{idx}" : agent.lr,
-                        f"batch_size_agent_{idx}" : agent.batch_size,
-                        f"indi_fitness_{idx}": agent.fitness[-1]
-                    })
+            for idx, agent in enumerate(pop):
+                wandb.log({
+                    f"learn_step_agent_{idx}": agent.learn_step,
+                    #f"learning_rate_agent_{idx}" : agent.lr,
+                    f"batch_size_agent_{idx}" : agent.batch_size,
+                    f"indi_fitness_{idx}": agent.fitness[-1]
+                })
 
             # Update step counter
             for agent in pop:
@@ -250,15 +250,12 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     for model in pop:
-                        print("...unwrappping")
                         model.unwrap_models()
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        print("... tourn and mut")
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            print("--- saving models")
                             model.saveCheckpoint(f'{accel_temp_models_path}/{algo}_{pop_i}.pt')
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:

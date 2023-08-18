@@ -49,7 +49,7 @@ class MADDPG():
     def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, max_action, 
                  min_action, expl_noise=0.1, index=0, discrete_actions=False, 
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=0.01,
-                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu', accelerator=None, wrap=True):
+                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device="cpu", accelerator=None, wrap=True):
         self.algo = 'MADDPG'
         self.state_dims = state_dims
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)

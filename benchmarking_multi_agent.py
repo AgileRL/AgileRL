@@ -21,9 +21,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         if accelerator.is_main_process:
             print('===== Distributed Training =====')
         accelerator.wait_for_everyone()
-
+    else:
+        accelerator = None
+        
     print('Multi-agent benchmarking')
-    print(f'DEVICE: {device}')
 
     env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
     env.reset()
@@ -60,7 +61,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                           agent_ids=INIT_HP['AGENT_IDS'],
                           arch=NET_CONFIG['arch'],
                           rand_seed=MUTATION_PARAMS['RAND_SEED'],
-                          device=device)
+                          device=device,
+                          accelerator=accelerator)
 
     agent_pop = initialPopulation(INIT_HP['ALGO'],
                                   state_dim,
@@ -69,7 +71,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                   NET_CONFIG,
                                   INIT_HP,
                                   INIT_HP['POP_SIZE'],
-                                  device=device)
+                                  device=device,
+                                  accelerator=accelerator)
 
     trained_pop, pop_fitnesses = train_multi_agent(env,
                                             INIT_HP['ENV_NAME'],
@@ -84,9 +87,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                             evo_epochs=INIT_HP['EVO_EPOCHS'],
                                             evo_loop=1,
                                             target=INIT_HP['TARGET_SCORE'],
-                                            tournament=None, #tournament, #tournament,
-                                            mutation=None, #mutations,
-                                            wb=INIT_HP['WANDB'])
+                                            tournament=tournament, #tournament,
+                                            mutation=mutations,
+                                            wb=INIT_HP['WANDB'],
+                                            accelerator=accelerator)
 
     printHyperparams(trained_pop)
     # plotPopulationScore(trained_pop)
@@ -119,7 +123,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 1,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
+        'WANDB': False                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities

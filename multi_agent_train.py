@@ -1,6 +1,5 @@
 from pettingzoo.mpe import simple_adversary_v3, simple_spread_v3, simple_v3, simple_speaker_listener_v4
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.algorithms.maddpg_legacy import MADDPG_LEG
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 import torch
 import numpy as np
@@ -24,6 +23,7 @@ if __name__ == "__main__":
         state_dims = [env.observation_space(agent).shape for agent in env.agents]
         max_action, min_action = None, None
         channels_last = True
+        net_config =  {'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]}
         
     else:
         # Configure the environment for mpe
@@ -38,6 +38,7 @@ if __name__ == "__main__":
         max_action = [env.action_space(agent).high for agent in env.agents]
         min_action = [env.action_space(agent).low for agent in env.agents]
         channels_last = False
+        net_config = {"arch": "mlp", "h_size":[32,32]}
 
     print(f"{agent_ids}")
     print(f"{action_dims=}")
@@ -48,7 +49,6 @@ if __name__ == "__main__":
 
     one_hot = False 
     index = 0
-    net_config =  {'arch':'mlp', 'h_size':[32,32]}#{'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]} # 
     batch_size = 128
     lr = 0.01
     learn_step = 100
@@ -64,43 +64,22 @@ if __name__ == "__main__":
                    n_agents=n_agents,
                    agent_ids=agent_ids,
                    index=index,
-                   discrete_actions=discrete_actions,
+                   discrete_actions=True,
                    max_action = max_action,
                    min_action = min_action,
                    net_config=net_config,
                    batch_size=batch_size,
-                   lr=0.01,
+                   lr=lr,
                    learn_step=learn_step,
                    gamma=gamma,
                    tau=tau,
                    device=device,
                    accelerator=accelerator) 
     
-    # maddpg_agent = MADDPG_LEG(
-    #     state_dims=state_dims,
-    #                action_dims=action_dims,
-    #                one_hot=one_hot,
-    #                n_agents=n_agents,
-    #                agent_ids=agent_ids,
-    #                index=index,
-    #               # discrete_actions=discrete_actions,
-    #                max_action = max_action,
-    #                min_action = min_action,
-    #                net_config=net_config,
-    #                batch_size=batch_size,
-    #                actor_lr=0.01,
-    #                critic_lr = 0.01,
-    #                learn_step=learn_step,
-    #                gamma=gamma,
-    #                tau=tau,
-    #                device=device,
-    #                accelerator=accelerator
-    # )
-    
     
     # Configure the training loop parameters
     step = 0 # Global step counter
-    wb = True # Initiate weights and biases
+    wb = False # Initiate weights and biases
     agent_num = env.num_agents
     episodes = 20000
     epsilon = 1
@@ -137,12 +116,14 @@ if __name__ == "__main__":
         if channels_last:
                 state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
         
-        while env.agents:
+        for _ in range(25):
             step += 1
             #print([s.shape for s in state.values()])
-            action = maddpg_agent.getAction(state, epsilon=0)
+            action = maddpg_agent.getAction(state, epsilon=1)
+            rand_action = {agent: env.action_space(agent).sample() for agent in agent_ids}
             # These are dictionaries of format: n_s = {agent_i: n_s_i,...,...}
             next_state, reward, done, info, _ = env.step(action)
+
 
             # Save experiences to the buffer
             if channels_last:
@@ -166,7 +147,6 @@ if __name__ == "__main__":
                 next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
             state = next_state
 
-            #print(step)
 
         # Update epsilon
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
