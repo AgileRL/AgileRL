@@ -9,7 +9,7 @@ from agilerl.components.sampler import Sampler
 
 
 def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
-          max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, 
+          max_steps=500, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
     """The general online RL training function. Returns trained population of agents 
@@ -78,14 +78,14 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
             wandb.init(
                     # set the wandb project where this run will be logged
                     project="EvoMADDPGTesting",
-                    name="{}-UpdatedMADDPG-0.05startingLR-{}-{}".format(env_name, algo,
+                    name="{}-NoTournNoMut-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
                         "net_config": net_config,
-                        "details": "All mutations for 40,000 episodes"
+                        "details": "MADDPG algorithm fixed, testing no mut and no torun again, please work omg."
                     }
                 )
             
@@ -168,8 +168,8 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     agent_reward[agent_id] += r 
 
                 #Learn according to learning frequency
-                if memory.counter % agent.learn_step == 0 and len(
-                        memory) >= agent.batch_size:
+                if (memory.counter % agent.learn_step == 0) and (len(
+                        memory) >= agent.batch_size):
                     # Sample replay buffer
                     experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
@@ -205,7 +205,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     if accelerator.is_main_process:
                         wandb.log({"global_step": total_steps*accelerator.state.num_processes,
                                 "eval/mean_score": np.mean(mean_scores),
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     accelerator.wait_for_everyone()
                 else:
@@ -213,6 +213,14 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                                 "eval/mean_score": np.mean(mean_scores),
                                 "eval/mean_reward": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
+                    
+            for idx, agent in enumerate(pop):
+                wandb.log({
+                    f"learn_step_agent_{idx}": agent.learn_step,
+                    #f"learning_rate_agent_{idx}" : agent.lr,
+                    f"batch_size_agent_{idx}" : agent.batch_size,
+                    f"indi_fitness_{idx}": agent.fitness[-1]
+                })
 
             # Update step counter
             for agent in pop:

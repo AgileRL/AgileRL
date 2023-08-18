@@ -268,9 +268,9 @@ class Mutations():
 
         elif mutate_param == 'lr':
             if random_num > 0.5:
-                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 1.2)) ## change back to 0.005, and 0.00001
+                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 1.2)) 
             else:
-                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 0.8)) ## change back to 0.005, and 0.00001
+                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 0.8)) 
 
             #Reinitialise optimizer if new learning rate
             self.reinit_opt(individual)
@@ -283,6 +283,7 @@ class Mutations():
             else:
                 individual.learn_step = min(
                     self.max_learn_step, max(self.min_learn_step, int(individual.learn_step * 0.75)))
+            individual.mut = "ls"
 
         return individual
 

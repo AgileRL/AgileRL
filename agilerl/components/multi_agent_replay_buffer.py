@@ -41,12 +41,20 @@ class MultiAgentReplayBuffer:
         :type batch_size: int
         """
         experiences = random.sample(self.memory, k=batch_size)
-        states = {agent_id: torch.from_numpy(np.stack([e.state[agent_id] for e in experiences])).to(self.device) for agent_id in self.agent_ids}
-        actions = {agent_id: torch.from_numpy(np.stack([e.action[agent_id] for e in experiences])).to(self.device) for agent_id in self.agent_ids}
-        rewards = {agent_id: torch.from_numpy(np.vstack([e.reward[agent_id] for e in experiences])).float().to(self.device) for agent_id in self.agent_ids}
-        next_states = {agent_id: torch.from_numpy(np.stack([e.next_state[agent_id] for e in experiences])).float().to(self.device) for agent_id in self.agent_ids}
-        dones = {agent_id: torch.from_numpy(np.vstack([e.done[agent_id] for e in experiences]).astype(np.uint8)).float().to(self.device) for agent_id in self.agent_ids}
 
+        if self.device is not None:
+            states = {agent_id: torch.from_numpy(np.stack([e.state[agent_id] for e in experiences])).to(self.device) for agent_id in self.agent_ids}
+            actions = {agent_id: torch.from_numpy(np.stack([e.action[agent_id] for e in experiences])).to(self.device) for agent_id in self.agent_ids}
+            rewards = {agent_id: torch.from_numpy(np.vstack([e.reward[agent_id] for e in experiences])).float().to(self.device) for agent_id in self.agent_ids}
+            next_states = {agent_id: torch.from_numpy(np.stack([e.next_state[agent_id] for e in experiences])).float().to(self.device) for agent_id in self.agent_ids}
+            dones = {agent_id: torch.from_numpy(np.vstack([e.done[agent_id] for e in experiences]).astype(np.uint8)).float().to(self.device) for agent_id in self.agent_ids}
+        else:
+            states = {agent_id: torch.from_numpy(np.stack([e.state[agent_id] for e in experiences])) for agent_id in self.agent_ids}
+            actions = {agent_id: torch.from_numpy(np.stack([e.action[agent_id] for e in experiences])) for agent_id in self.agent_ids}
+            rewards = {agent_id: torch.from_numpy(np.vstack([e.reward[agent_id] for e in experiences])).float() for agent_id in self.agent_ids}
+            next_states = {agent_id: torch.from_numpy(np.stack([e.next_state[agent_id] for e in experiences])).float()for agent_id in self.agent_ids}
+            dones = {agent_id: torch.from_numpy(np.vstack([e.done[agent_id] for e in experiences]).astype(np.uint8)).float() for agent_id in self.agent_ids}
+        
         return states, actions, rewards, next_states, dones
 
 

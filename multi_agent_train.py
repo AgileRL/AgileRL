@@ -1,5 +1,6 @@
 from pettingzoo.mpe import simple_adversary_v3, simple_spread_v3, simple_v3, simple_speaker_listener_v4
 from agilerl.algorithms.maddpg import MADDPG
+from agilerl.algorithms.maddpg_legacy import MADDPG_LEG
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 import torch
 import numpy as np
@@ -12,7 +13,7 @@ if __name__ == "__main__":
     # Device agnostic code
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    atari = True
+    atari = False
     if atari:
         env = space_invaders_v2.parallel_env()
         env.reset()
@@ -22,8 +23,6 @@ if __name__ == "__main__":
         action_dims = [env.action_space(agent).n for agent in env.agents]
         state_dims = [env.observation_space(agent).shape for agent in env.agents]
         max_action, min_action = None, None
-        print(f"{action_dims=}")
-        print(f"{state_dims=}")
         channels_last = True
         
     else:
@@ -38,14 +37,18 @@ if __name__ == "__main__":
         state_dims = [env.observation_space(agent).shape for agent in env.agents] # [state_agent_1, state_agent_2, ..., state_agent_n]
         max_action = [env.action_space(agent).high for agent in env.agents]
         min_action = [env.action_space(agent).low for agent in env.agents]
-        
+        channels_last = False
+
+    print(f"{agent_ids}")
+    print(f"{action_dims=}")
+    print(f"{state_dims=}")   
 
     if channels_last:
         state_dims = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dims]
 
     one_hot = False 
     index = 0
-    net_config = {'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]}
+    net_config =  {'arch':'mlp', 'h_size':[32,32]}#{'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]} # 
     batch_size = 128
     lr = 0.01
     learn_step = 100
@@ -66,18 +69,40 @@ if __name__ == "__main__":
                    min_action = min_action,
                    net_config=net_config,
                    batch_size=batch_size,
-                   lr=lr,
+                   lr=0.01,
                    learn_step=learn_step,
                    gamma=gamma,
                    tau=tau,
                    device=device,
                    accelerator=accelerator) 
     
+    # maddpg_agent = MADDPG_LEG(
+    #     state_dims=state_dims,
+    #                action_dims=action_dims,
+    #                one_hot=one_hot,
+    #                n_agents=n_agents,
+    #                agent_ids=agent_ids,
+    #                index=index,
+    #               # discrete_actions=discrete_actions,
+    #                max_action = max_action,
+    #                min_action = min_action,
+    #                net_config=net_config,
+    #                batch_size=batch_size,
+    #                actor_lr=0.01,
+    #                critic_lr = 0.01,
+    #                learn_step=learn_step,
+    #                gamma=gamma,
+    #                tau=tau,
+    #                device=device,
+    #                accelerator=accelerator
+    # )
+    
+    
     # Configure the training loop parameters
     step = 0 # Global step counter
     wb = True # Initiate weights and biases
     agent_num = env.num_agents
-    episodes = 1000
+    episodes = 20000
     epsilon = 1
     epsilon_end = 0.1
     epsilon_decay = 0.995
@@ -91,8 +116,8 @@ if __name__ == "__main__":
     if wb:
         print("... Initialsing W&B ...")
         wandb.init(
-            project="MA Atari",
-            name=f"MADDPG_space_invaders_min_action_test_{datetime.now().strftime('%m%d%Y%H%M%S')}",
+            project="MADDPG Testing",
+            name=f"simple_speaker_listener_v4_custom_training_loop_MADDPG_LEG_{datetime.now().strftime('%m%d%Y%H%M%S')}",
             config = {
                 "algo": "MADDPG",
                 "env": "space_invaders_v4",
@@ -112,7 +137,7 @@ if __name__ == "__main__":
         if channels_last:
                 state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
         
-        for _ in range(500):
+        while env.agents:
             step += 1
             #print([s.shape for s in state.values()])
             action = maddpg_agent.getAction(state, epsilon=0)
@@ -123,7 +148,7 @@ if __name__ == "__main__":
             if channels_last:
                 state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                 next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
-
+ 
             memory.save2memory(state, action, reward, next_state, done)
 
             # Save each agents' reward 
@@ -174,7 +199,7 @@ if __name__ == "__main__":
             else:
                 print(f"-----------------------------------------------")
                 print(f"Total reward {ep + 1}: {score} | Mean reward: {np.mean(reward_history[-100:])}")
-                print(f"{episode_rewards}")
+                #print(f"{episode_rewards}")
 
 
         

@@ -7,6 +7,7 @@ from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.td3 import TD3
 from agilerl.algorithms.maddpg import MADDPG
 
+
 def makeVectEnvs(env_name, num_envs=1):
     """Returns async-vectorized gym environments.
 
@@ -141,6 +142,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 accelerator=accelerator,
             )
             population.append(agent)
+
 
     return population
 

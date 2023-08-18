@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.optim as optim
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.evolvable_cnn import EvolvableCNN
-import torchinfo
 
 
 class MADDPG():
@@ -48,7 +47,7 @@ class MADDPG():
     """
 
     def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, max_action, 
-                 min_action, expl_noise=0.1, index=0, discrete_actions=False, policy_freq=1,
+                 min_action, expl_noise=0.1, index=0, discrete_actions=False, 
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=0.01,
                  learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device='cpu', accelerator=None, wrap=True):
         self.algo = 'MADDPG'
@@ -76,10 +75,7 @@ class MADDPG():
         self.expl_noise = expl_noise
         self.min_action = min_action
         self.discrete_actions = discrete_actions
-        self.policy_freq = policy_freq
-
-        if net_config["arch"] == "cnn":
-            self.total_actions = sum(self.action_dims) if not self.discrete_actions else len(self.action_dims)
+        self.total_actions = sum(self.action_dims) if not self.discrete_actions else len(self.action_dims)
 
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
@@ -93,7 +89,7 @@ class MADDPG():
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableMLP(
-                num_inputs=self.total_state_dims + self.total_actions,
+                num_inputs=self.total_state_dims + self.total_actions, 
                 num_outputs=1,
                 hidden_size=self.net_config['h_size'],
                 device=self.device,
@@ -182,6 +178,7 @@ class MADDPG():
                     action = np.random.randint(0, self.action_dims[idx])
                 else:
                     action = np.random.rand(state.size()[0], self.action_dims[idx]).astype('float32').squeeze()
+                    #action = env.action_space.sample()
             else:
                 actor.eval()
                 with torch.no_grad():
@@ -190,10 +187,9 @@ class MADDPG():
                 if self.discrete_actions:
                     action = action_values.squeeze(0).argmax().item()
                 else:
-                    action = action_values.cpu().data.numpy().squeeze() #\
-                    ## Commented out as not present in single agent ddpg
-                    #     + np.random.normal(0, self.max_action[idx][0] * self.expl_noise, size=self.action_dims[idx]).astype(np.float32)
-                    # action = np.clip(action, self.min_action[idx][0], self.max_action[idx][0])     
+                    action = action_values.cpu().data.numpy().squeeze() \
+                         + np.random.normal(0, self.max_action[idx][0] * self.expl_noise, size=self.action_dims[idx]).astype(np.float32)
+                    action = np.clip(action, self.min_action[idx][0], self.max_action[idx][0])     
             actions[agent_id] = action
         
         return actions
@@ -223,25 +219,27 @@ class MADDPG():
                                                                                                  self.actor_optimizers, 
                                                                                                  self.critic_optimizers):
          
+            states, actions, rewards, next_states, dones = experiences
+            
             if self.one_hot:
                 states = {agent_id: nn.functional.one_hot(state.long(), num_classes=state_dim[0]).float().squeeze() for 
                           agent_id, state, state_dim in zip(states.items(), self.state_dims)}
 
-            states, actions, rewards, next_states, dones = experiences
 
             if self.net_config['arch'] == 'mlp':
                 input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
                 q_value = critic(input_combined)
-                next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() + actions[agent_id].data.normal_(0, policy_noise).clamp(0,1)
-                            for idx, agent_id in enumerate(self.agent_ids)]
+                next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]#+ actions[agent_id].data.normal_(0, policy_noise).clamp(0,1)
+                            #for idx, agent_id in enumerate(self.agent_ids)]
                 
             elif self.net_config['arch'] == 'cnn':
                 stacked_states = torch.stack(list(states.values()), dim=2)
                 stacked_actions = torch.stack(list(actions.values()), dim=1)
                 q_value = critic(stacked_states, stacked_actions)
                 next_actions = [self.actor_targets[idx](next_states[agent_id].unsqueeze(2)).detach_() for idx, agent_id in enumerate(self.agent_ids)]
-                if self.discrete_actions:
-                    next_actions = [torch.argmax(agent_actions, dim=1) for agent_actions in next_actions]
+            
+            if self.discrete_actions:
+                next_actions = [torch.argmax(agent_actions, dim=1) for agent_actions in next_actions]
 
             if self.net_config['arch'] == 'mlp':
                 next_input_combined = torch.cat(list(next_states.values()) + next_actions, 1)
@@ -264,31 +262,32 @@ class MADDPG():
             critic_optimizer.step()
 
             # update actor and targets every policy_freq episodes
-            if len(self.scores) % self.policy_freq == 0:
-                if self.net_config['arch'] == 'mlp':
-                    action = actor(states[agent_id])
-                    detached_actions = copy.deepcopy(actions)
-                    detached_actions[agent_id] = action
-                    input_combined = torch.cat(list(states.values()) + list(detached_actions.values()), 1)
-                    actor_loss = -critic(input_combined).mean()
-                elif self.net_config['arch'] == 'cnn':
-                    action = actor(states[agent_id].unsqueeze(2)).argmax(1)
-                    detached_actions = copy.deepcopy(actions)
-                    detached_actions[agent_id] = action
-                    stacked_detached_actions = torch.stack(list(detached_actions.values()), dim=1)
-                    actor_loss = - \
-                        critic(stacked_states, stacked_detached_actions).mean()
+            if self.net_config['arch'] == 'mlp':
+                action = actor(states[agent_id])
+                detached_actions = copy.deepcopy(actions)
+                detached_actions[agent_id] = action
+                input_combined = torch.cat(list(states.values()) + list(detached_actions.values()), 1)
+                actor_loss = -critic(input_combined).mean()
+            elif self.net_config['arch'] == 'cnn':
+                action = actor(states[agent_id].unsqueeze(2))
+                if self.discrete_actions:
+                    action = action.argmax(1)
+                detached_actions = copy.deepcopy(actions)
+                detached_actions[agent_id] = action
+                stacked_detached_actions = torch.stack(list(detached_actions.values()), dim=1)
+                actor_loss = - \
+                    critic(stacked_states, stacked_detached_actions).mean()
 
-                # actor loss backprop
-                actor_optimizer.zero_grad()
-                if self.accelerator is not None:
-                    self.accelerator.backward(actor_loss)
-                else:
-                    actor_loss.backward()
-                actor_optimizer.step()
+            # actor loss backprop
+            actor_optimizer.zero_grad()
+            if self.accelerator is not None:
+                self.accelerator.backward(actor_loss)
+            else:
+                actor_loss.backward()
+            actor_optimizer.step()
 
         for actor, actor_target, critic, critic_target in zip(self.actors, self.actor_targets, 
-                                                                 self.critics, self.critic_targets):
+                                                                self.critics, self.critic_targets):
             self.softUpdate(actor, actor_target)
             self.softUpdate(critic, critic_target)
 
@@ -372,13 +371,12 @@ class MADDPG():
 
         if self.accelerator is not None:
             if wrap:
-                clone.actors, clone.actor_targets, clone.critics, clone.critic_targets, \
-                clone.actor_optimizer, clone.critic_optimizer = self.accelerator.prepare(actors,
-                                                                                actor_targets,
-                                                                                critics,
-                                                                                critic_targets,
-                                                                                actor_optimizers,
-                                                                                critic_optimizers)
+                clone.actors = [self.accelerator.prepare(actor) for actor in actors]
+                clone.actor_targets = [self.accelerator.prepare(actor_target) for actor_target in actor_targets]
+                clone.critics = [self.accelerator.prepare(critic) for critic in critics]
+                clone.critic_targets = [self.accelerator.prepare(critic_target) for critic_target in critic_targets]
+                clone.actor_optimizers = [self.accelerator.prepare(actor_optimizer) for actor_optimizer in actor_optimizers]
+                clone.critic_optimizers = [self.accelerator.prepare(critic_optimizer) for critic_optimizer in critic_optimizers]
             else:
                 clone.actors, clone.actor_targets, clone.critics, clone.critic_targets, \
                 clone.actor_optimizer, clone.critic_optimizer = actors, actor_targets, critics, \
@@ -399,22 +397,21 @@ class MADDPG():
 
     def wrap_models(self):
         if self.accelerator is not None:
-            self.actor, self.actor_target, self.critic, self.critic_target, \
-            self.actor_optimizer, self.critic_optimizer = self.accelerator.prepare(self.actor,
-                                                                            self.actor_target,
-                                                                            self.critic,
-                                                                            self.critic_target,
-                                                                            self.actor_optimizers_type,
-                                                                            self.critic_optimizers_type)
+            self.actors = [self.accelerator.prepare(actor) for actor in self.actors]
+            self.actor_targets = [self.accelerator.prepare(actor_target) for actor_target in self.actor_targets]
+            self.critics = [self.accelerator.prepare(critic) for critic in self.critics]
+            self.critic_targets = [self.accelerator.prepare(critic_target) for critic_target in self.critic_targets]
+            self.actor_optimizers = [self.accelerator.prepare(actor_optimizer) for actor_optimizer in self.actor_optimizers_type]
+            self.critic_optimizers = [self.accelerator.prepare(critic_optimizer) for critic_optimizer in self.critic_optimizers_type]
     
     def unwrap_models(self):
         if self.accelerator is not None:
-            self.actor = self.accelerator.unwrap_model(self.actor)
-            self.actor_target = self.accelerator.unwrap_model(self.actor_target)
-            self.critic = self.accelerator.unwrap_model(self.critic)
-            self.critic_target = self.accelerator.unwrap_model(self.critic_target)
-            self.actor_optimizer = self.accelerator.unwrap_model(self.actor_optimizer)
-            self.critic_optimizer = self.accelerator.unwrap_model(self.critic_optimizer)
+            self.actors = [self.accelerator.unwrap_model(actor) for actor in self.actors]
+            self.actor_targets = [self.accelerator.unwrap_model(actor_target) for actor_target in self.actor_targets]
+            self.critics = [self.accelerator.unwrap_model(critic) for critic in self.critics]
+            self.critic_targets = [self.accelerator.unwrap_model(critic_target) for critic_target in self.critic_targets]
+            self.actor_optimizers = [self.accelerator.unwrap_model(actor_optimizer) for actor_optimizer in self.actor_optimizers]
+            self.critic_optimizers = [self.accelerator.unwrap_model(critic_optimizer) for critic_optimizer in  self.critic_optimizers]
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.

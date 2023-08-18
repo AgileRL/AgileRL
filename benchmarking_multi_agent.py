@@ -4,7 +4,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train_multi_agent import train_multi_agent
-from pettingzoo.mpe import simple_v3
+from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_v3
 
 # def make_env(env_name, env_params):
 #     return env_name.parallel_env(env_params['max_cycles'], env_params['continuous_actions'])
@@ -16,7 +16,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print('Multi-agent benchmarking')
     print(f'DEVICE: {device}')
 
-    env = simple_v3.parallel_env(max_cycles=25, continuous_actions=True)
+    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
     env.reset()
 
     # Configure the maddpg input arguments
@@ -75,8 +75,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                             evo_epochs=INIT_HP['EVO_EPOCHS'],
                                             evo_loop=1,
                                             target=INIT_HP['TARGET_SCORE'],
-                                            tournament=tournament, #tournament,
-                                            mutation=mutations,
+                                            tournament=None, #tournament, #tournament,
+                                            mutation=None, #mutations,
                                             wb=INIT_HP['WANDB'])
 
     printHyperparams(trained_pop)
@@ -88,7 +88,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == '__main__':
     INIT_HP = {
-        'ENV_NAME': 'simple_v3',   # Gym environment name
+        'ENV_NAME': 'simple_speaker_listener_v4',   # Gym environment name
         'ENV_PARAMS' : {
             'max_cycles': 25,
             'continuous_actions' : True
@@ -97,20 +97,20 @@ if __name__ == '__main__':
         'DOUBLE': False,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
-        'BATCH_SIZE': 256,             # Batch size
-        'LR': 0.05,               # Learning rate
+        'BATCH_SIZE': 1024,             # Batch size
+        'LR': 0.01,                     # Learning rate
         'EPISODES': 20_000,             # Max no. episodes
         'TARGET_SCORE': 100,            # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.95,                  # Discount factor
         'MEMORY_SIZE': 1_000_000,       # Max memory buffer size
-        'LEARN_STEP': 100,              # Learning frequency
+        'LEARN_STEP': 5,                # Learning frequency
         'TAU': 0.01,                    # For soft update of target parameters
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
-        'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                  # Log with Weights and Biases
+        'POLICY_FREQ': 1,               # Policy network update frequency
+        'WANDB': True                   # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
@@ -121,14 +121,14 @@ if __name__ == '__main__':
         'ACT_MUT': 0,                               # Activation layer mutation
         'RL_HP_MUT': 0.2,                           # Learning HP mutation
         # Learning HPs to choose from
-        'RL_HP_SELECTION': ["lr", "batch_size"],
+        'RL_HP_SELECTION': ["lr", "batch_size", "learn_step"],
         'MUT_SD': 0.1,                              # Mutation strength
         'RAND_SEED': 1,                             # Random seed
     }
 
     NET_CONFIG = {
         'arch': 'mlp',      # Network architecture
-        'h_size': [32, 32]    # Actor hidden size
+        'h_size': [64, 64]    # Actor hidden size
     }
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
