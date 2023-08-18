@@ -5,6 +5,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train_multi_agent import train_multi_agent
 from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_v3
+from accelerate import Accelerator
 
 # def make_env(env_name, env_params):
 #     return env_name.parallel_env(env_params['max_cycles'], env_params['continuous_actions'])
@@ -13,6 +14,14 @@ from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('============ AgileRL ============')
+
+    if DISTRIBUTED_TRAINING:
+        accelerator = Accelerator()
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            print('===== Distributed Training =====')
+        accelerator.wait_for_everyone()
+
     print('Multi-agent benchmarking')
     print(f'DEVICE: {device}')
 
@@ -130,5 +139,7 @@ if __name__ == '__main__':
         'arch': 'mlp',      # Network architecture
         'h_size': [64, 64]    # Actor hidden size
     }
+
+    DISTRIBUTED_TRAINING = True
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
