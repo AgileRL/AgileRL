@@ -67,7 +67,7 @@ python demo_online.py
 ```
 or to demo distributed training:
 ```bash
-accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
+accelerate launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
 ```
 
 ## Algorithms implemented (more coming soon!)
