@@ -21,7 +21,7 @@ class TD3():
     :param max_action: Upper bound of the action space
     :type max_action: float
     :param expl_noise: Standard deviation for Gaussian exploration noise
-    :param expl_noise: float
+    :param expl_noise: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]

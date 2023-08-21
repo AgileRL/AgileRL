@@ -8,7 +8,7 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
+def train_multi_agent_atari(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
           max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
@@ -77,7 +77,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
         else:
             wandb.init(
                     # set the wandb project where this run will be logged
-                    project="MADDPG Testing",
+                    project="EvoMADDPGTesting",
                     name="{}-LegacyTest-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
@@ -147,22 +147,21 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
         for agent in pop:   # Loop through population 
             state = env.reset()[0]  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
+            if swap_channels:
+                state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
 
             for _ in range(max_steps):
                 total_steps += 1
-                if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
                 # Get next action from agent
                 action = agent.getAction(state, epsilon)
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
                 # Save experience to replay buffer
                 if swap_channels:
-                    memory.save2memory(
-                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
-                else:
-                    memory.save2memory(
-                        state, action, reward, next_state, done)
+                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                    next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+                
+                memory.save2memory(state, action, reward, next_state, done)
                 
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r 
@@ -174,7 +173,10 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
-
+                
+                # Update the state 
+                if swap_channels:
+                    next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
                 state = next_state
             
             score = sum(agent_reward.values())
@@ -205,13 +207,15 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     if accelerator.is_main_process:
                         wandb.log({"global_step": total_steps*accelerator.state.num_processes,
                                 "eval/mean_score": np.mean(mean_scores),
+                                "eval/best_score": np.max([agent.scores[-1] for agent in pop]),
                                 "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     accelerator.wait_for_everyone()
                 else:
                     wandb.log({"global_step": total_steps,
                                 "eval/mean_score": np.mean(mean_scores),
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/best_score": np.max([agent.scores[-1] for agent in pop]),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     
             for idx, agent in enumerate(pop):

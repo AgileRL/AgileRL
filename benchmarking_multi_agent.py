@@ -4,12 +4,10 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train_multi_agent import train_multi_agent
+from agilerl.training.train_multi_agent_atari import train_multi_agent_atari
 from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_v3
+from pettingzoo.atari import space_invaders_v2
 from accelerate import Accelerator
-
-# def make_env(env_name, env_params):
-#     return env_name.parallel_env(env_params['max_cycles'], env_params['continuous_actions'])
-
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,21 +21,38 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         accelerator.wait_for_everyone()
     else:
         accelerator = None
+        print(device)
         
     print('Multi-agent benchmarking')
 
-    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
+    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
     env.reset()
 
-    # Configure the maddpg input arguments
+    # Configure the multi-agent algo input arguments
+    try:
+        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        one_hot = True 
+    except Exception:
+        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        one_hot = False 
+    try:
+        action_dim = [env.action_space(agent).n for agent in env.agents]
+        INIT_HP['DISCRETE_ACTIONS'] = True
+        INIT_HP['MAX_ACTION'] = None
+        INIT_HP['MIN_ACTION'] = None
+    except Exception:
+        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        INIT_HP['DISCRETE_ACTIONS'] = False
+        INIT_HP['MAX_ACTION'] = [env.action_space(agent).high for agent in env.agents]
+        INIT_HP['MIN_ACTION'] = [env.action_space(agent).low for agent in env.agents]
+
+    if INIT_HP['CHANNELS_LAST']:
+        state_dim = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim]
+
     INIT_HP['N_AGENTS'] = env.num_agents
-    action_dim = [env.action_space(agent).shape[0] for agent in env.agents] # [action_agent_1, action_agent_2, ..., action_agent_n]
-    state_dim = [env.observation_space(agent).shape for agent in env.agents] # [state_agent_1, state_agent_2, ..., state_agent_n]
     INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
-    INIT_HP['MAX_ACTION'] = [env.action_space(agent).high for agent in env.agents]
-    INIT_HP['MIN_ACTION'] = [env.action_space(agent).low for agent in env.agents]
+    
    
-    one_hot = False
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(INIT_HP['MEMORY_SIZE'], 
                                     field_names=field_names, 
@@ -74,7 +89,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                   device=device,
                                   accelerator=accelerator)
 
-    trained_pop, pop_fitnesses = train_multi_agent(env,
+    trained_pop, pop_fitnesses = train_multi_agent_atari(env,
                                             INIT_HP['ENV_NAME'],
                                             INIT_HP['ALGO'],
                                             agent_pop,
@@ -86,6 +101,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                             n_episodes=INIT_HP['EPISODES'],
                                             evo_epochs=INIT_HP['EVO_EPOCHS'],
                                             evo_loop=1,
+                                            max_steps=25,
                                             target=INIT_HP['TARGET_SCORE'],
                                             tournament=tournament, #tournament,
                                             mutation=mutations,
@@ -102,12 +118,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 if __name__ == '__main__':
     INIT_HP = {
         'ENV_NAME': 'simple_speaker_listener_v4',   # Gym environment name
-        'ENV_PARAMS' : {
-            'max_cycles': 25,
-            'continuous_actions' : True
-        },
         'ALGO': 'MADDPG',                  # Algorithm
-        'DOUBLE': False,                 # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 1024,             # Batch size
@@ -123,7 +134,7 @@ if __name__ == '__main__':
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
         'POLICY_FREQ': 1,               # Policy network update frequency
-        'WANDB': False                   # Log with Weights and Biases
+        'WANDB': True                  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
@@ -144,6 +155,8 @@ if __name__ == '__main__':
         'h_size': [64, 64]    # Actor hidden size
     }
 
-    DISTRIBUTED_TRAINING = True
+    #NET_CONFIG = {'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]}
+
+    DISTRIBUTED_TRAINING = False
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

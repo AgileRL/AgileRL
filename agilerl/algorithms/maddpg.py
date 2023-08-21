@@ -22,19 +22,27 @@ class MADDPG():
     :type n_agents: int
     :param agent_ids: Agent ID for each agent
     :type agent_ids: List[str]
+    :param max_action: Upper bound of the action space
+    :type max_action float
+    :param min_action: Lower bound of the action space
+    :type min_action: float
+    :param discrete_actions: Boolean flag to indicate a discrete action space
+    :type discrete_actions: bool, optional
+    :param expl_noise: Standard deviation for Gaussian exploration noise, defaults to 0.1
+    :type expl_noise: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :param lr: Learning rate for optimizer, defaults to 0.01
     :type lr: float, optional
     :param learn_step: Learning frequency, defaults to 5
     :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.99
+    :param gamma: Discount factor, defaults to 0.95
     :type gamma: float, optional
-    :param tau: For soft update of target network parameters, defaults to 1e-3
+    :param tau: For soft update of target network parameters, defaults to 0.01
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
@@ -47,9 +55,9 @@ class MADDPG():
     """
 
     def __init__(self, state_dims, action_dims, one_hot, n_agents, agent_ids, max_action, 
-                 min_action, expl_noise=0.1, index=0, discrete_actions=False, 
+                 min_action, discrete_actions, expl_noise=0.1, index=0,  
                  net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=0.01,
-                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, device="cpu", accelerator=None, wrap=True):
+                 learn_step=5, gamma=0.95, tau=0.01, mutation=None, device="cpu", accelerator=None, wrap=True):
         self.algo = 'MADDPG'
         self.state_dims = state_dims
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
@@ -70,7 +78,6 @@ class MADDPG():
         self.scores = []
         self.fitness = []
         self.steps = [0]
-
         self.max_action = max_action
         self.expl_noise = expl_noise
         self.min_action = min_action
@@ -229,8 +236,7 @@ class MADDPG():
             if self.net_config['arch'] == 'mlp':
                 input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
                 q_value = critic(input_combined)
-                next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]#+ actions[agent_id].data.normal_(0, policy_noise).clamp(0,1)
-                            #for idx, agent_id in enumerate(self.agent_ids)]
+                next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
                 
             elif self.net_config['arch'] == 'cnn':
                 stacked_states = torch.stack(list(states.values()), dim=2)
@@ -315,18 +321,18 @@ class MADDPG():
             for i in range(loop):
                 state, _ = env.reset()
                 agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
-                while env.agents:
+                score = 0
+                for _ in range(max_steps):
                     if swap_channels:
-                        state = np.moveaxis(state, [3], [1])
+                        state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
                     action = self.getAction(state, epsilon=0)
                     state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r 
-                    score = sum(agent_reward.values())
+                    score += sum(agent_reward.values())
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
-        #print(self.fitness)
         return mean_fit
 
     def clone(self, index=None, wrap=True):

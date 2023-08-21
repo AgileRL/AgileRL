@@ -9,7 +9,7 @@ from agilerl.components.sampler import Sampler
 
 
 def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
-          max_steps=500, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
+          max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
     """The general online RL training function. Returns trained population of agents 
@@ -25,13 +25,19 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
+    :param init_hp: Dictionary containing inital hyper-parameters for given agent
+    :type: Dict
+    :param mut_p: Mutation parameters 
+    :type mut_p: Dict
+    :param net_config: Neural network configuration
+    :type net_config: Dict
     :param swap_channels: Swap image channels dimension from last to first 
     [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
     :param max_steps: Maximum number of steps in environment per episode, defaults to 
-    500
+    25
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -250,15 +256,12 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     for model in pop:
-                        print("...unwrappping")
                         model.unwrap_models()
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        print("... tourn and mut")
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            print("--- saving models")
                             model.saveCheckpoint(f'{accel_temp_models_path}/{algo}_{pop_i}.pt')
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:

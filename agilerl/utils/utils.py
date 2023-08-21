@@ -138,6 +138,7 @@ def initialPopulation(algo, state_dim, action_dim, one_hot,
                 learn_step=INIT_HP['LEARN_STEP'],
                 gamma=INIT_HP['GAMMA'],
                 tau=INIT_HP['TAU'],
+                discrete_actions=INIT_HP['DISCRETE_ACTIONS'],
                 device=device,
                 accelerator=accelerator,
             )
