@@ -242,18 +242,25 @@ def train(env, env_name, dataset, algo, pop, memory, swap_channels=False,
                     elite, pop = tournament.select(pop)
                     pop = mutation.mutation(pop)
 
-        # Save model checkpoint
         if checkpoint is not None:
             if (idx_epi + 1) % checkpoint == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                    if not accelerator.is_main_process:
+                    for model in pop:
+                        model.unwrap_models()
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
                             agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                        print('Saved checkpoint.')
+                    accelerator.wait_for_everyone()
+                    for model in pop:
+                        model.wrap_models()
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
                         agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                    print('Saved checkpoint.')
 
     if wb:
         if accelerator is not None:
