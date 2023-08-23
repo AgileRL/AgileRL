@@ -113,7 +113,7 @@ class DQN():
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
             if wrap:
-                self.wrap_models()          
+                self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
