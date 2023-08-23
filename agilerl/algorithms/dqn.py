@@ -61,12 +61,10 @@ class DQN():
         self.mut = mutation
         self.device = device
         self.accelerator = accelerator
-
         self.index = index
         self.scores = []
         self.fitness = []
         self.steps = [0]
-
         self.double = double
 
         # model
@@ -113,7 +111,7 @@ class DQN():
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
             if wrap:
-                self.wrap_models()          
+                self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
