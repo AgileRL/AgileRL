@@ -80,6 +80,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()
+        
+    env.close()
 
 
 if __name__ == '__main__':

@@ -143,3 +143,5 @@ if __name__ == '__main__':
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+
+    env.close()

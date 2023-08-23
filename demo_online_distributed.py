@@ -172,3 +172,5 @@ if __name__ == '__main__':
             accelerator.wait_for_everyone()
             for model in pop:
                 model.wrap_models()
+                
+    env.close()
