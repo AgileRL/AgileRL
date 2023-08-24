@@ -8,7 +8,7 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train_multi_agent_atari(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
+def train_multi_agent_atari(env, env_name, algo, pop, memory, INIT_HP, MUT_P, net_config, swap_channels=False, n_episodes=2000, 
           max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
@@ -71,38 +71,47 @@ def train_multi_agent_atari(env, env_name, algo, pop, memory, init_hp, mut_p, ne
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
-                    }
+                        "net_config": net_config,
+                        "batch_size" : INIT_HP['BATCH_SIZE'],
+                        "lr" : INIT_HP['LR'],
+                        "gamma": INIT_HP['GAMMA'],
+                        "memory_size" : INIT_HP['MEMORY_SIZE'],
+                        "learn_step" : INIT_HP['LEARN_STEP'],
+                        "tau" : INIT_HP['TAU'],
+                        "pop_size" : INIT_HP['TOURN_SIZE'],
+                        "no_mut" : MUT_P['NO_MUT'],
+                        "arch_mut" :  MUT_P['ARCH_MUT'],
+                        "params_mut" : MUT_P['PARAMS_MUT'],
+                        "act_mut" : MUT_P['ACT_MUT'],
+                        "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
             accelerator.wait_for_everyone()
         else:
             wandb.init(
                     # set the wandb project where this run will be logged
-                    project="EvoMADDPGTesting",
-                    name="{}-LegacyTest-{}-{}".format(env_name, algo,
+                    entity = "agilerl",
+                    project="MADDPG Benchmarking",
+                    name="{}-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
                         "net_config": net_config,
-                        "details": "LR, batch_size and time_step mutations."
-                    }
+                        "batch_size" : INIT_HP['BATCH_SIZE'],
+                        "lr" : INIT_HP['LR'],
+                        "gamma": INIT_HP['GAMMA'],
+                        "memory_size" : INIT_HP['MEMORY_SIZE'],
+                        "learn_step" : INIT_HP['LEARN_STEP'],
+                        "tau" : INIT_HP['TAU'],
+                        "pop_size" : INIT_HP['TOURN_SIZE'],
+                        "no_mut" : MUT_P['NO_MUT'],
+                        "arch_mut" :  MUT_P['ARCH_MUT'],
+                        "params_mut" : MUT_P['PARAMS_MUT'],
+                        "act_mut" : MUT_P['ACT_MUT'],
+                        "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
             
-        wandb.config.batch_size = init_hp['BATCH_SIZE']
-        wandb.config.lr = init_hp['LR']
-        wandb.config.gamma = init_hp['GAMMA']
-        wandb.config.memory_size = init_hp['MEMORY_SIZE']
-        wandb.config.learn_step = init_hp['LEARN_STEP']
-        wandb.config.tau = init_hp['TAU']
-        wandb.config.pop_size = init_hp['TOURN_SIZE']
-        wandb.config.no_mut = mut_p['NO_MUT']
-        wandb.config.arch_mut = mut_p['ARCH_MUT']
-        wandb.config.params_mut = mut_p['PARAMS_MUT']
-        wandb.config.act_mut = mut_p['ACT_MUT']
-        wandb.config.rl_hp_mut = mut_p['RL_HP_MUT']
-
-
     if accelerator is not None:
         accel_temp_models_path = 'models/{}'.format(env_name)
         if accelerator.is_main_process:
@@ -154,12 +163,15 @@ def train_multi_agent_atari(env, env_name, algo, pop, memory, init_hp, mut_p, ne
                 total_steps += 1
                 # Get next action from agent
                 action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(action)   # Act in environment
-
+                next_state, reward, done, truncation, _ = env.step(action)   # Act in environment
+                
                 # Save experience to replay buffer
                 if swap_channels:
                     state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                     next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+
+                if any(truncation.values()) or any(done.values()):
+                    break
                 
                 memory.save2memory(state, action, reward, next_state, done)
                 
@@ -218,13 +230,13 @@ def train_multi_agent_atari(env, env_name, algo, pop, memory, init_hp, mut_p, ne
                                 "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     
-            for idx, agent in enumerate(pop):
-                wandb.log({
-                    f"learn_step_agent_{idx}": agent.learn_step,
-                    #f"learning_rate_agent_{idx}" : agent.lr,
-                    f"batch_size_agent_{idx}" : agent.batch_size,
-                    f"indi_fitness_{idx}": agent.fitness[-1]
-                })
+                for idx, agent in enumerate(pop):
+                    wandb.log({
+                        f"learn_step_agent_{idx}": agent.learn_step,
+                        #f"learning_rate_agent_{idx}" : agent.lr,
+                        f"batch_size_agent_{idx}" : agent.batch_size,
+                        f"indi_fitness_agent_{idx}": agent.fitness[-1]
+                    })
 
             # Update step counter
             for agent in pop:
@@ -270,7 +282,7 @@ def train_multi_agent_atari(env, env_name, algo, pop, memory, init_hp, mut_p, ne
                         model.wrap_models()
                 else:
                     elite, pop = tournament.select(pop)
-                    pop_ = mutation.mutation(pop)
+                    pop = mutation.mutation(pop) 
 
         # Save model checkpoint
         if checkpoint is not None:

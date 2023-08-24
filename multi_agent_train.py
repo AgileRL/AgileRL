@@ -5,25 +5,40 @@ import torch
 import numpy as np
 import wandb
 from datetime import datetime
-from pettingzoo.atari import basketball_pong_v3, boxing_v2, space_invaders_v2
+from pettingzoo.atari import basketball_pong_v3, boxing_v2, space_invaders_v2, mario_bros_v3, pong_v3
+import supersuit as ss
 
 
 if __name__ == "__main__":
     # Device agnostic code
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    atari = False
+    atari = True
     if atari:
-        env = space_invaders_v2.parallel_env()
+        env = space_invaders_v2.parallel_env(alternating_control=False, moving_shields=True,
+        zigzaging_bombs=False, fast_bomb=False, invisible_invaders=False)
+
+        ## Atari pre-processing
+        env = ss.max_observation_v0(env, 2)
+        env = ss.frame_skip_v0(env, 4)
+        env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+        env = ss.color_reduction_v0(env, mode="B")
+        env = ss.resize_v1(env, x_size=84, y_size=84)
+        env = ss.frame_stack_v1(env, 4)
+        # env = ss.agent_indicator_v0(env, type_only=False)
+        # env = ss.pettingzoo_env_to_vec_env_v1(env)
+        # envs = ss.concat_vec_envs_v1(env, 10 // 2, num_cpus=0, base_class="gymnasium")
         env.reset()
         discrete_actions = True
         n_agents = env.num_agents
         agent_ids = [agent_id for agent_id in env.agents]
         action_dims = [env.action_space(agent).n for agent in env.agents]
         state_dims = [env.observation_space(agent).shape for agent in env.agents]
+        print(state_dims)
+        print(action_dims)
         max_action, min_action = None, None
         channels_last = True
-        net_config =  {'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]}
+        net_config =  {'arch': 'cnn','c_size': [4,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]}
         
     else:
         # Configure the environment for mpe
@@ -49,7 +64,7 @@ if __name__ == "__main__":
 
     one_hot = False 
     index = 0
-    batch_size = 128
+    batch_size = 32
     lr = 0.01
     learn_step = 100
     gamma = 0.95
@@ -79,7 +94,7 @@ if __name__ == "__main__":
     
     # Configure the training loop parameters
     step = 0 # Global step counter
-    wb = False # Initiate weights and biases
+    wb = True # Initiate weights and biases
     agent_num = env.num_agents
     episodes = 20000
     epsilon = 1
@@ -95,7 +110,7 @@ if __name__ == "__main__":
     if wb:
         print("... Initialsing W&B ...")
         wandb.init(
-            project="MADDPG Testing",
+            project="MA Atari",
             name=f"simple_speaker_listener_v4_custom_training_loop_MADDPG_LEG_{datetime.now().strftime('%m%d%Y%H%M%S')}",
             config = {
                 "algo": "MADDPG",
@@ -112,11 +127,12 @@ if __name__ == "__main__":
     for ep in range(episodes):
         state, _ = env.reset()
         agent_reward = {agent_id: 0 for agent_id in env.agents}
+        done = {agent_id: False for agent_id in agent_ids}
 
         if channels_last:
                 state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
         
-        for _ in range(25):
+        for _ in range(900) :
             step += 1
             #print([s.shape for s in state.values()])
             action = maddpg_agent.getAction(state, epsilon=1)
@@ -129,6 +145,9 @@ if __name__ == "__main__":
             if channels_last:
                 state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                 next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+
+            if any(done.values()):
+                break
  
             memory.save2memory(state, action, reward, next_state, done)
 

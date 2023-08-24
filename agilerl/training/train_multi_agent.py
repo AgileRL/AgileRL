@@ -84,7 +84,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
             wandb.init(
                     # set the wandb project where this run will be logged
                     project="EvoMADDPGTesting",
-                    name="{}-TournMut-{}-{}".format(env_name, algo,
+                    name="{}-Benchmarking-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
@@ -160,7 +160,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     state = np.moveaxis(state, [3], [1])
                 # Get next action from agent
                 action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(action)   # Act in environment
+                next_state, reward, done, truncation, _ = env.step(action)   # Act in environment
 
                 # Save experience to replay buffer
                 if swap_channels:
@@ -272,7 +272,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                         model.wrap_models()
                 else:
                     elite, pop = tournament.select(pop)
-                    pop_ = mutation.mutation(pop)
+                    pop = mutation.mutation(pop)
 
         # Save model checkpoint
         if checkpoint is not None:

@@ -142,6 +142,7 @@ class EvolvableCNN(nn.Module):
             num_atoms=51,
             mlp_activation='relu',
             cnn_activation='relu',
+            n_agents=None,
             multi=False,
             layer_norm=False,
             stored_values=None,
@@ -169,6 +170,7 @@ class EvolvableCNN(nn.Module):
         self.device = device
         self.accelerator = accelerator
         self.multi = multi
+        self.n_agents = n_agents
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
@@ -226,7 +228,7 @@ class EvolvableCNN(nn.Module):
         if self.multi:
             net_dict = OrderedDict()
             net_dict[f"{name}_conv_layer_0"] = nn.Conv3d(
-                in_channels=3,
+                in_channels=input_size,
                 out_channels=channel_size[0],
                 kernel_size=kernal_size[0],
                 stride=stride_size[0]            ## Maybe include the ability to have 3 dim kernel and stride
@@ -247,8 +249,6 @@ class EvolvableCNN(nn.Module):
                     net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
                         self.cnn_activation
                     )
-                
-
         else:
             net_dict = OrderedDict()
             net_dict[f"{name}_conv_layer_0"] = nn.Conv2d(
@@ -278,6 +278,7 @@ class EvolvableCNN(nn.Module):
     def create_nets(self):
         """Creates and returns neural networks.
         """
+        
         feature_net = self.create_cnn(
             self.input_shape[0],
             self.channel_size,
@@ -287,7 +288,7 @@ class EvolvableCNN(nn.Module):
 
         if self.multi:
             input_size = feature_net(autograd.Variable(
-                torch.zeros(1, *self.input_shape).unsqueeze(2))).view(1, -1).size(1)
+                    torch.zeros(1, *self.input_shape).unsqueeze(2))).view(1, -1).size(1)
         else:
             input_size = feature_net(autograd.Variable(
                 torch.zeros(1, *self.input_shape))).view(1, -1).size(1)
@@ -331,6 +332,8 @@ class EvolvableCNN(nn.Module):
             if self.accelerator is None:
                 self.feature_net, self.value_net, = feature_net.to(self.device), \
                     value_net.to(self.device)
+                
+        print(input_size)
 
         return feature_net, value_net, advantage_net
 
@@ -486,9 +489,12 @@ class EvolvableCNN(nn.Module):
             "stride_size": self.stride_size,
             "hidden_size": self.hidden_size,
             "num_actions": self.num_actions,
+            "n_agents": self.n_agents,
             "num_atoms": self.num_atoms,
+            "normalize": self.normalize,
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
+            "multi":self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
             "device": self.device,
@@ -530,29 +536,57 @@ class EvolvableCNN(nn.Module):
     def add_cnn_layer(self):
         """Adds a hidden layer to Convolutional Neural Network.
         """
-        if len(self.channel_size) < 6:  # HARD LIMIT
-            self.channel_size += [self.channel_size[-1]]
-            self.kernal_size += [3]
+        if self.multi:
+            if len(self.channel_size) < 6:  # HARD LIMIT
+                self.channel_size += [self.channel_size[-1]]
+                self.kernal_size += [(1, 3, 3)]
+                stride_size_list = [[4], [4, 2], [4, 2, 1], [
+                        2, 2, 2, 1], [2, 1, 2, 1, 2], [2, 1, 2, 1, 2, 1]]
+                self.stride_size = stride_size_list[len(self.channel_size) - 1]
 
-            stride_size_list = [[4], [4, 2], [4, 2, 1], [
-                2, 2, 2, 1], [2, 1, 2, 1, 2], [2, 1, 2, 1, 2, 1]]
-            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+                self.recreate_nets()
+            else:
+                self.add_cnn_channel()
 
-            self.recreate_nets()
         else:
-            self.add_cnn_channel()
+            if len(self.channel_size) < 6:  # HARD LIMIT
+                self.channel_size += [self.channel_size[-1]]
+                self.kernal_size += [3]
+
+                stride_size_list = [[4], [4, 2], [4, 2, 1], [
+                    2, 2, 2, 1], [2, 1, 2, 1, 2], [2, 1, 2, 1, 2, 1]]
+                self.stride_size = stride_size_list[len(self.channel_size) - 1]
+
+                self.recreate_nets()
+            else:
+                self.add_cnn_channel()
 
     def change_cnn_kernal(self):
         """Randomly alters convolution kernal of random CNN layer.
         """
-        if len(self.channel_size) > 1:
-            hidden_layer = np.random.randint(
-                1, min(4, len(self.channel_size)), 1)[0]
-            self.kernal_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
 
-            self.recreate_nets()
+        if self.multi:
+            if len(self.channel_size) > 1:
+                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+                kernal_size_value = np.random.choice([3, 4, 5, 7])
+                if self.critic:
+                    self.kernal_size[hidden_layer] = tuple(min(kernal_size_value, self.n_agents - 1) if idx == 0 else kernal_size_value for idx in range(3))
+                else:
+                    self.kernal_size[hidden_layer] = tuple(1 if idx == 0 else kernal_size_value for idx in range(3))
+                self.recreate_nets()
+            else:
+                self.add_cnn_layer()
         else:
-            self.add_cnn_layer()
+            if len(self.channel_size) > 1:
+                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+                self.kernal_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
+
+                self.recreate_nets()
+            else:
+                self.add_cnn_layer()
+
+
+        print("kernal after is:", self.kernal_size)
 
     def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
         """Adds channel to hidden layer of Convolutional Neural Network.

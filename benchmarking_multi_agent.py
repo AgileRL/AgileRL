@@ -8,6 +8,7 @@ from agilerl.training.train_multi_agent_atari import train_multi_agent_atari
 from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_v3
 from pettingzoo.atari import space_invaders_v2
 from accelerate import Accelerator
+import supersuit as ss
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,7 +26,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         
     print('Multi-agent benchmarking')
 
-    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
+    if INIT_HP['CHANNELS_LAST']:
+        # Environment processing for image based observations
+        env = ss.frame_skip_v0(env, 4)
+        env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+        env = ss.color_reduction_v0(env, mode="B")
+        env = ss.resize_v1(env, x_size=84, y_size=84)
+        env = ss.frame_stack_v1(env, 4)
+
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -52,6 +61,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     INIT_HP['N_AGENTS'] = env.num_agents
     INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
     
+    print(state_dim, action_dim)
    
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(INIT_HP['MEMORY_SIZE'], 
@@ -101,9 +111,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                             n_episodes=INIT_HP['EPISODES'],
                                             evo_epochs=INIT_HP['EVO_EPOCHS'],
                                             evo_loop=1,
-                                            max_steps=25,
+                                            max_steps=900,
                                             target=INIT_HP['TARGET_SCORE'],
-                                            tournament=tournament, #tournament,
+                                            tournament=tournament,
                                             mutation=mutations,
                                             wb=INIT_HP['WANDB'],
                                             accelerator=accelerator)
@@ -123,26 +133,25 @@ if __name__ == '__main__':
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 1024,             # Batch size
         'LR': 0.01,                     # Learning rate
-        'EPISODES': 20_000,             # Max no. episodes
+        'EPISODES': 6000,             # Max no. episodes
         'TARGET_SCORE': 100,            # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.95,                  # Discount factor
-        'MEMORY_SIZE': 1_000_000,       # Max memory buffer size
+        'MEMORY_SIZE': 100000,          # Max memory buffer size
         'LEARN_STEP': 5,                # Learning frequency
         'TAU': 0.01,                    # For soft update of target parameters
         'TOURN_SIZE': 2,                # Tournament size
         'ELITISM': True,                # Elitism in tournament selection
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
-        'POLICY_FREQ': 1,               # Policy network update frequency
-        'WANDB': True                  # Log with Weights and Biases
+        'WANDB': True                 # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
         'NO_MUT': 0.4,                              # No mutation
         'ARCH_MUT': 0.2,                            # Architecture mutation
         'NEW_LAYER': 0.2,                           # New layer mutation
-        'PARAMS_MUT': 0.2,                          # Network parameters mutation
-        'ACT_MUT': 0,                               # Activation layer mutation
+        'PARAMS_MUT': 0,                          # Network parameters mutation
+        'ACT_MUT': 0.2,                               # Activation layer mutation
         'RL_HP_MUT': 0.2,                           # Learning HP mutation
         # Learning HPs to choose from
         'RL_HP_SELECTION': ["lr", "batch_size", "learn_step"],
@@ -155,7 +164,7 @@ if __name__ == '__main__':
         'h_size': [64, 64]    # Actor hidden size
     }
 
-    #NET_CONFIG = {'arch': 'cnn','c_size': [3,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2,2], 'h_size': [32,32]}
+    #NET_CONFIG = {'arch': 'cnn','c_size': [4,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2, 2], 'h_size': [32,32]}
 
     DISTRIBUTED_TRAINING = False
 

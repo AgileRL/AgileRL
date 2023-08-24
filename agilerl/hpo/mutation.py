@@ -144,7 +144,7 @@ class Mutations():
                 # mutation in architecture of value network
                 ind_targets = [type(offspring_actor)(**offspring_actor.init_dict) 
                                for offspring_actor in offspring_actors]
-                
+                                
                 for ind_target, offspring_actor in zip(ind_targets, offspring_actors):
                     ind_target.load_state_dict(offspring_actor.state_dict())
 
@@ -472,7 +472,7 @@ class Mutations():
         """
         # Mutate network architecture by adding layers or nodes
         if self.multi_agent:
-            offspring_actors = getattr(individual, self.algo['actor']['eval']) # List of actors
+            offspring_actors = [actor.clone() for actor in getattr(individual, self.algo['actor']['eval'])] # List of actors
             offspring_critics_list = [[critic.clone() for critic in getattr(individual, critics['eval'])] for critics in self.algo['critics']] 
             rand_numb = self.rng.uniform(0,1)
 
@@ -493,10 +493,11 @@ class Mutations():
                     rand_numb = self.rng.uniform(0, 1)
                     if rand_numb < 0.2:
                         for offspring_actor in offspring_actors:
-                            offspring_actor.change_cnn_kernal()
+                            offspring_actor.change_cnn_kernal()                            
                         for offspring_critics in offspring_critics_list:
                             for offspring_critic in offspring_critics:
                                 offspring_critic.change_cnn_kernal()
+
                     elif 0.2 <= rand_numb < 0.65:
                         for offspring_actor in offspring_actors:
                             offspring_actor.add_cnn_channel()
@@ -595,20 +596,15 @@ class Mutations():
                                 offspring_critic_1.remove_node(**node_dict)
                                 offspring_critic_2.remove_node(**node_dict)
 
-            if self.accelerator is not None:
-                setattr(individual, self.algo['actor']['eval'], offspring_actors)
-            else:
+            if self.accelerator is None:
                 offspring_actors = [offspring_actor.to(self.device) for offspring_actor in offspring_actors]
-                setattr(individual, self.algo['actor']
-                        ['eval'], offspring_actors)
+            setattr(individual, self.algo['actor']['eval'], offspring_actors)
 
             for offspring_critics, critics in zip(offspring_critics_list, self.algo['critics']): 
-                if self.accelerator is not None:
-                        setattr(individual, critics['eval'], offspring_critics)
-                else:
-                    offspring_critics = [offspring_critic.to(self.device) for offspring_critic in offspring_critics]
-                    setattr(individual, critics['eval'],
-                                offspring_critics)
+                if self.accelerator is None:
+                        offspring_critics = [offspring_critic.to(self.device) for offspring_critic in offspring_critics]
+                setattr(individual, critics['eval'], offspring_critics)
+                
         else:
             offspring_actor = getattr(
                 individual, self.algo['actor']['eval']).clone()

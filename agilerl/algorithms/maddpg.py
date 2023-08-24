@@ -64,6 +64,7 @@ class MADDPG():
         self.action_dims = action_dims
         self.one_hot = one_hot
         self.n_agents = n_agents
+        self.multi = True if n_agents > 1 else False
         self.agent_ids = agent_ids
         self.net_config = net_config
         self.batch_size = batch_size
@@ -113,13 +114,14 @@ class MADDPG():
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
                 mlp_activation='gumbel_softmax',
-                multi=True,
+                multi=self.multi,
+                n_agents=self.n_agents,
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
 
             self.critics = [EvolvableCNN(
-                input_shape=state_dim, #### This needs changing once mlp is working for the base case, it needs to be a summation of all states
+                input_shape=state_dim, 
                 num_actions=self.total_actions,
                 channel_size=self.net_config['c_size'],
                 kernal_size=self.net_config['k_size'],
@@ -128,7 +130,8 @@ class MADDPG():
                 normalize=self.net_config['normalize'],
                 mlp_activation='tanh',
                 critic=True,
-                multi=True,
+                n_agents=self.n_agents,
+                multi=self.multi,
                 device=self.device,
                 accelerator=self.accelerator) for state_dim in self.state_dims]
             self.critic_targets = copy.deepcopy(self.critics)
@@ -234,7 +237,11 @@ class MADDPG():
 
 
             if self.net_config['arch'] == 'mlp':
-                input_combined = torch.cat(list(states.values()) + list(actions.values()), 1)
+                if self.discrete_actions:
+                    action_values = [a.unsqueeze(1) for a in actions.values()]
+                else:
+                    action_values = list(actions.values())
+                input_combined = torch.cat(list(states.values()) + action_values, 1)
                 q_value = critic(input_combined)
                 next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
                 
@@ -245,7 +252,8 @@ class MADDPG():
                 next_actions = [self.actor_targets[idx](next_states[agent_id].unsqueeze(2)).detach_() for idx, agent_id in enumerate(self.agent_ids)]
             
             if self.discrete_actions:
-                next_actions = [torch.argmax(agent_actions, dim=1) for agent_actions in next_actions]
+                next_actions = [torch.argmax(agent_actions, dim=1).unsqueeze(1) if  self.net_config['arch'] == 'mlp' else
+                                torch.argmax(agent_actions, dim=1) for agent_actions in next_actions]
 
             if self.net_config['arch'] == 'mlp':
                 next_input_combined = torch.cat(list(next_states.values()) + next_actions, 1)
@@ -271,9 +279,13 @@ class MADDPG():
             if self.net_config['arch'] == 'mlp':
                 action = actor(states[agent_id])
                 detached_actions = copy.deepcopy(actions)
+                if self.discrete_actions:
+                    action = action.argmax(1).unsqueeze(1)
+                    detached_actions = {agent_id: d.unsqueeze(1) for agent_id, d in detached_actions.items()}
                 detached_actions[agent_id] = action
                 input_combined = torch.cat(list(states.values()) + list(detached_actions.values()), 1)
                 actor_loss = -critic(input_combined).mean()
+
             elif self.net_config['arch'] == 'cnn':
                 action = actor(states[agent_id].unsqueeze(2))
                 if self.discrete_actions:
@@ -329,7 +341,7 @@ class MADDPG():
                     state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r 
-                    score += sum(agent_reward.values())
+                    score = sum(agent_reward.values())
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
@@ -352,6 +364,7 @@ class MADDPG():
                            max_action=self.max_action,
                            min_action=self.min_action,
                            expl_noise=self.expl_noise,
+                           discrete_actions=self.discrete_actions,
                            index=index,
                            net_config=self.net_config,
                            batch_size=self.batch_size,
