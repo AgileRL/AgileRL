@@ -4,11 +4,13 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.training.train_multi_agent_atari import train_multi_agent_atari
+from agilerl.training.train_multi_agent import train_multi_agent
 from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_v3
 from pettingzoo.atari import space_invaders_v2
 from accelerate import Accelerator
 import supersuit as ss
+import importlib
+
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,7 +28,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         
     print('Multi-agent benchmarking')
 
-    env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
+    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(max_cycles=25, continuous_actions=True)
+
     if INIT_HP['CHANNELS_LAST']:
         # Environment processing for image based observations
         env = ss.frame_skip_v0(env, 4)
@@ -60,9 +63,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     INIT_HP['N_AGENTS'] = env.num_agents
     INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
-    
-    print(state_dim, action_dim)
-   
+       
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(INIT_HP['MEMORY_SIZE'], 
                                     field_names=field_names, 
@@ -99,7 +100,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                   device=device,
                                   accelerator=accelerator)
 
-    trained_pop, pop_fitnesses = train_multi_agent_atari(env,
+    trained_pop, pop_fitnesses = train_multi_agent(env,
                                             INIT_HP['ENV_NAME'],
                                             INIT_HP['ALGO'],
                                             agent_pop,
@@ -127,13 +128,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == '__main__':
     INIT_HP = {
-        'ENV_NAME': 'simple_speaker_listener_v4',   # Gym environment name
-        'ALGO': 'MADDPG',                  # Algorithm
+        'ENV_NAME': 'pettingzoo.mpe.simple_speaker_listener_v4',   # Gym environment name
+        'ALGO': 'MADDPG',                                          # Algorithm
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
         'BATCH_SIZE': 1024,             # Batch size
         'LR': 0.01,                     # Learning rate
-        'EPISODES': 6000,             # Max no. episodes
+        'EPISODES': 6000,               # Max no. episodes
         'TARGET_SCORE': 100,            # Early training stop at avg score of last 100 episodes
         'GAMMA': 0.95,                  # Discount factor
         'MEMORY_SIZE': 100000,          # Max memory buffer size
@@ -143,7 +144,7 @@ if __name__ == '__main__':
         'ELITISM': True,                # Elitism in tournament selection
         'POP_SIZE': 6,                  # Population size
         'EVO_EPOCHS': 20,               # Evolution frequency
-        'WANDB': True                 # Log with Weights and Biases
+        'WANDB': False                  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities

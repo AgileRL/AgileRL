@@ -8,7 +8,7 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_config, swap_channels=False, n_episodes=2000, 
+def train_multi_agent(env, env_name, algo, pop, memory, INIT_HP, MUT_P, net_config, swap_channels=False, n_episodes=2000, 
           max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
@@ -25,19 +25,13 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param init_hp: Dictionary containing inital hyper-parameters for given agent
-    :type: Dict
-    :param mut_p: Mutation parameters 
-    :type mut_p: Dict
-    :param net_config: Neural network configuration
-    :type net_config: Dict
     :param swap_channels: Swap image channels dimension from last to first 
     [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
     :param max_steps: Maximum number of steps in environment per episode, defaults to 
-    25
+    500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -77,38 +71,47 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
-                    }
+                        "net_config": net_config,
+                        "batch_size" : INIT_HP['BATCH_SIZE'],
+                        "lr" : INIT_HP['LR'],
+                        "gamma": INIT_HP['GAMMA'],
+                        "memory_size" : INIT_HP['MEMORY_SIZE'],
+                        "learn_step" : INIT_HP['LEARN_STEP'],
+                        "tau" : INIT_HP['TAU'],
+                        "pop_size" : INIT_HP['TOURN_SIZE'],
+                        "no_mut" : MUT_P['NO_MUT'],
+                        "arch_mut" :  MUT_P['ARCH_MUT'],
+                        "params_mut" : MUT_P['PARAMS_MUT'],
+                        "act_mut" : MUT_P['ACT_MUT'],
+                        "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
             accelerator.wait_for_everyone()
         else:
             wandb.init(
                     # set the wandb project where this run will be logged
-                    project="EvoMADDPGTesting",
-                    name="{}-Benchmarking-{}-{}".format(env_name, algo,
+                    entity = "agilerl",
+                    project="MADDPG Benchmarking",
+                    name="{}-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
                         "net_config": net_config,
-                        "details": "MADDPG algorithm fixed, testing no mut and no torun again, please work omg."
-                    }
+                        "batch_size" : INIT_HP['BATCH_SIZE'],
+                        "lr" : INIT_HP['LR'],
+                        "gamma": INIT_HP['GAMMA'],
+                        "memory_size" : INIT_HP['MEMORY_SIZE'],
+                        "learn_step" : INIT_HP['LEARN_STEP'],
+                        "tau" : INIT_HP['TAU'],
+                        "pop_size" : INIT_HP['TOURN_SIZE'],
+                        "no_mut" : MUT_P['NO_MUT'],
+                        "arch_mut" :  MUT_P['ARCH_MUT'],
+                        "params_mut" : MUT_P['PARAMS_MUT'],
+                        "act_mut" : MUT_P['ACT_MUT'],
+                        "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
             
-        wandb.config.batch_size = init_hp['BATCH_SIZE']
-        wandb.config.lr = init_hp['LR']
-        wandb.config.gamma = init_hp['GAMMA']
-        wandb.config.memory_size = init_hp['MEMORY_SIZE']
-        wandb.config.learn_step = init_hp['LEARN_STEP']
-        wandb.config.tau = init_hp['TAU']
-        wandb.config.pop_size = init_hp['TOURN_SIZE']
-        wandb.config.no_mut = mut_p['NO_MUT']
-        wandb.config.arch_mut = mut_p['ARCH_MUT']
-        wandb.config.params_mut = mut_p['PARAMS_MUT']
-        wandb.config.act_mut = mut_p['ACT_MUT']
-        wandb.config.rl_hp_mut = mut_p['RL_HP_MUT']
-
-
     if accelerator is not None:
         accel_temp_models_path = 'models/{}'.format(env_name)
         if accelerator.is_main_process:
@@ -153,22 +156,24 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
         for agent in pop:   # Loop through population 
             state = env.reset()[0]  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
+            if swap_channels:
+                state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
 
-            while env.agents:
+            for _ in range(max_steps):
                 total_steps += 1
-                if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
                 # Get next action from agent
                 action = agent.getAction(state, epsilon)
                 next_state, reward, done, truncation, _ = env.step(action)   # Act in environment
-
+                
                 # Save experience to replay buffer
                 if swap_channels:
-                    memory.save2memory(
-                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
-                else:
-                    memory.save2memory(
-                        state, action, reward, next_state, done)
+                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                    next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+
+                if any(truncation.values()) or any(done.values()):
+                    break
+                
+                memory.save2memory(state, action, reward, next_state, done)
                 
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r 
@@ -180,7 +185,10 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
-
+                
+                # Update the state 
+                if swap_channels:
+                    next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
                 state = next_state
             
             score = sum(agent_reward.values())
@@ -211,21 +219,23 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                     if accelerator.is_main_process:
                         wandb.log({"global_step": total_steps*accelerator.state.num_processes,
                                 "eval/mean_score": np.mean(mean_scores),
+                                "eval/best_score": np.max([agent.scores[-1] for agent in pop]),
                                 "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     accelerator.wait_for_everyone()
                 else:
                     wandb.log({"global_step": total_steps,
                                 "eval/mean_score": np.mean(mean_scores),
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/best_score": np.max([agent.scores[-1] for agent in pop]),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     
                 for idx, agent in enumerate(pop):
                     wandb.log({
                         f"learn_step_agent_{idx}": agent.learn_step,
-                        #f"learning_rate_agent_{idx}" : agent.lr,
+                        f"learning_rate_agent_{idx}" : agent.lr,
                         f"batch_size_agent_{idx}" : agent.batch_size,
-                        f"indi_fitness_{idx}": agent.fitness[-1]
+                        f"indi_fitness_agent_{idx}": agent.fitness[-1]
                     })
 
             # Update step counter
@@ -272,7 +282,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, init_hp, mut_p, net_conf
                         model.wrap_models()
                 else:
                     elite, pop = tournament.select(pop)
-                    pop = mutation.mutation(pop)
+                    pop = mutation.mutation(pop) 
 
         # Save model checkpoint
         if checkpoint is not None:

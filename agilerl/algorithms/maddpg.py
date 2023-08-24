@@ -23,7 +23,7 @@ class MADDPG():
     :param agent_ids: Agent ID for each agent
     :type agent_ids: List[str]
     :param max_action: Upper bound of the action space
-    :type max_action float
+    :type max_action: float
     :param min_action: Lower bound of the action space
     :type min_action: float
     :param discrete_actions: Boolean flag to indicate a discrete action space

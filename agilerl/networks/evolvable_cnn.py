@@ -333,8 +333,6 @@ class EvolvableCNN(nn.Module):
                 self.feature_net, self.value_net, = feature_net.to(self.device), \
                     value_net.to(self.device)
                 
-        print(input_size)
-
         return feature_net, value_net, advantage_net
 
     def reset_noise(self):
@@ -584,9 +582,6 @@ class EvolvableCNN(nn.Module):
                 self.recreate_nets()
             else:
                 self.add_cnn_layer()
-
-
-        print("kernal after is:", self.kernal_size)
 
     def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
         """Adds channel to hidden layer of Convolutional Neural Network.
