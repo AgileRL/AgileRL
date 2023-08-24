@@ -18,7 +18,12 @@ are more likely to remain present in the population. The sequence of evolution (
 
     from agilerl.utils.utils import initialPopulation
     from pettingzoo.mpe import simple_speaker_listener_v4
+    from agilerl.training.train_multi_agent import train_multi_agent
+    from agilerl.comp.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.hpo.mutation import Mutations
     import torch
+    import numpy as np
 
     NET_CONFIG = {
         'arch': 'mlp',          # Network architecture
@@ -172,7 +177,7 @@ for multi-agent environments) it is easiest to use our training function, which 
     import gymnasium as gym
     import torch
 
-    trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+    trained_pop, pop_fitnesses = train_multi_agent(env=env,                                 # Gym-style environment
                                        env_name='simple_speaker_listener_v4',   # Environment name
                                        algo=INIT_HP['ALGO'],                    # Algorithm
                                        pop=agent_pop,                           # Population of agents

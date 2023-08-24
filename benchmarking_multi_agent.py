@@ -10,6 +10,7 @@ from pettingzoo.atari import space_invaders_v2
 from accelerate import Accelerator
 import supersuit as ss
 import importlib
+import yaml
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -127,46 +128,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == '__main__':
-    INIT_HP = {
-        'ENV_NAME': 'pettingzoo.mpe.simple_speaker_listener_v4',   # Gym environment name
-        'ALGO': 'MADDPG',                                          # Algorithm
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        'CHANNELS_LAST': False,
-        'BATCH_SIZE': 1024,             # Batch size
-        'LR': 0.01,                     # Learning rate
-        'EPISODES': 6000,               # Max no. episodes
-        'TARGET_SCORE': 100,            # Early training stop at avg score of last 100 episodes
-        'GAMMA': 0.95,                  # Discount factor
-        'MEMORY_SIZE': 100000,          # Max memory buffer size
-        'LEARN_STEP': 5,                # Learning frequency
-        'TAU': 0.01,                    # For soft update of target parameters
-        'TOURN_SIZE': 2,                # Tournament size
-        'ELITISM': True,                # Elitism in tournament selection
-        'POP_SIZE': 6,                  # Population size
-        'EVO_EPOCHS': 20,               # Evolution frequency
-        'WANDB': False                  # Log with Weights and Biases
-    }
-
-    MUTATION_PARAMS = {  # Relative probabilities
-        'NO_MUT': 0.4,                              # No mutation
-        'ARCH_MUT': 0.2,                            # Architecture mutation
-        'NEW_LAYER': 0.2,                           # New layer mutation
-        'PARAMS_MUT': 0,                          # Network parameters mutation
-        'ACT_MUT': 0.2,                               # Activation layer mutation
-        'RL_HP_MUT': 0.2,                           # Learning HP mutation
-        # Learning HPs to choose from
-        'RL_HP_SELECTION': ["lr", "batch_size", "learn_step"],
-        'MUT_SD': 0.1,                              # Mutation strength
-        'RAND_SEED': 1,                             # Random seed
-    }
-
-    NET_CONFIG = {
-        'arch': 'mlp',      # Network architecture
-        'h_size': [64, 64]    # Actor hidden size
-    }
-
-    #NET_CONFIG = {'arch': 'cnn','c_size': [4,16], 'normalize':True, 'k_size': [(1,3,3),(1,3,3)], 's_size':[2, 2], 'h_size': [32,32]}
-
-    DISTRIBUTED_TRAINING = False
-
+    with open('configs/training/maddpg.yaml', 'r') as file:
+        maddpg_config = yaml.safe_load(file)
+    INIT_HP = maddpg_config['INIT_HP']
+    MUTATION_PARAMS = maddpg_config['MUTATION_PARAMS']
+    NET_CONFIG = maddpg_config['NET_CONFIG']
+    DISTRIBUTED_TRAINING = maddpg_config['DISTRIBUTED_TRAINING']
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
