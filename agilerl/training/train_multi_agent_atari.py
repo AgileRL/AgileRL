@@ -233,7 +233,7 @@ def train_multi_agent_atari(env, env_name, algo, pop, memory, INIT_HP, MUT_P, ne
                 for idx, agent in enumerate(pop):
                     wandb.log({
                         f"learn_step_agent_{idx}": agent.learn_step,
-                        #f"learning_rate_agent_{idx}" : agent.lr,
+                        f"learning_rate_agent_{idx}" : agent.lr,
                         f"batch_size_agent_{idx}" : agent.batch_size,
                         f"indi_fitness_agent_{idx}": agent.fitness[-1]
                     })

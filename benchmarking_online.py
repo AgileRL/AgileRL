@@ -67,6 +67,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                                        INIT_HP['ALGO'],
                                        agent_pop,
                                        memory=memory,
+                                       INIT_HP=INIT_HP,
+                                       MUT_P=MUTATION_PARAMS,
                                        swap_channels=INIT_HP['CHANNELS_LAST'],
                                        n_episodes=INIT_HP['EPISODES'],
                                        evo_epochs=INIT_HP['EVO_EPOCHS'],

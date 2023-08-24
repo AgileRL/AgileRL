@@ -8,7 +8,7 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000, 
+def train(env, env_name, algo, pop, memory, INIT_HP, MUT_P, swap_channels=False, n_episodes=2000, 
           max_steps=500, evo_epochs=5, evo_loop=1, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
@@ -71,7 +71,18 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
-                    }
+                        "batch_size" : INIT_HP['BATCH_SIZE'],
+                        "lr" : INIT_HP['LR'],
+                        "gamma": INIT_HP['GAMMA'],
+                        "memory_size" : INIT_HP['MEMORY_SIZE'],
+                        "learn_step" : INIT_HP['LEARN_STEP'],
+                        "tau" : INIT_HP['TAU'],
+                        "pop_size" : INIT_HP['TOURN_SIZE'],
+                        "no_mut" : MUT_P['NO_MUT'],
+                        "arch_mut" :  MUT_P['ARCH_MUT'],
+                        "params_mut" : MUT_P['PARAMS_MUT'],
+                        "act_mut" : MUT_P['ACT_MUT'],
+                        "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
             accelerator.wait_for_everyone()
         else:
@@ -84,7 +95,18 @@ def train(env, env_name, algo, pop, memory, swap_channels=False, n_episodes=2000
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
-                    }
+                        "batch_size" : INIT_HP['BATCH_SIZE'],
+                        "lr" : INIT_HP['LR'],
+                        "gamma": INIT_HP['GAMMA'],
+                        "memory_size" : INIT_HP['MEMORY_SIZE'],
+                        "learn_step" : INIT_HP['LEARN_STEP'],
+                        "tau" : INIT_HP['TAU'],
+                        "pop_size" : INIT_HP['TOURN_SIZE'],
+                        "no_mut" : MUT_P['NO_MUT'],
+                        "arch_mut" :  MUT_P['ARCH_MUT'],
+                        "params_mut" : MUT_P['PARAMS_MUT'],
+                        "act_mut" : MUT_P['ACT_MUT'],
+                        "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
 
     if accelerator is not None:
