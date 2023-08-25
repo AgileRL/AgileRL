@@ -16,7 +16,7 @@ INIT_HP:
   ELITISM: True                # Elitism in tournament selection
   POP_SIZE: 6                  # Population size
   EVO_EPOCHS: 20               # Evolution frequency
-  WANDB: False                 # Log with Weights and Biases
+  WANDB: True                 # Log with Weights and Biases
 
 MUTATION_PARAMS:
   NO_MUT: 0.4                              # No mutation
@@ -28,7 +28,7 @@ MUTATION_PARAMS:
   # Learning HPs to choose from
   RL_HP_SELECTION: ["lr", "batch_size", "learn_step"]
   MUT_SD: 0.1                              # Mutation strength
-  RAND_SEED: 1                             # Random seed
+  RAND_SEED: 42                           # Random seed
   MIN_LR: 0.0001
   MAX_LR: 0.01
   MIN_LEARN_STEP: 1

@@ -94,11 +94,13 @@ class Mutations():
         return individual
 
     # Generic mutation function - gather mutation options and select from these
-    def mutation(self, population):
+    def mutation(self, population, pre_training_mut=False):
         """Returns mutated population.
 
         :param population: Population of agents
         :type population: List[object]
+        :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
+        :type pre_training_mut: bool, optional
         """
         # Create lists of possible mutation functions and their respective
         # relative probabilities
@@ -106,7 +108,10 @@ class Mutations():
         mutation_proba = []
         if self.no_mut:
             mutation_options.append(self.no_mutation)
-            mutation_proba.append(float(self.no_mut))
+            if pre_training_mut:
+                mutation_proba.append(float(0))
+            else:
+                mutation_proba.append(float(self.no_mut))
         if self.architecture_mut:
             mutation_options.append(self.architecture_mutate)
             mutation_proba.append(float(self.architecture_mut))
@@ -122,6 +127,8 @@ class Mutations():
 
         if len(mutation_options) == 0:  # Return if no mutation options
             return population
+        
+        print("MUTATION_OPTIONS",mutation_options)
 
         mutation_proba = np.array(mutation_proba) / \
             np.sum(mutation_proba)  # Normalize probs

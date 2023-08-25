@@ -175,6 +175,10 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
     pop_fitnesses = []
     total_steps = 0
 
+    # Pre-training mutation
+    if mutation is not None:
+        pop = mutation.mutation(pop, pre_training_mut=True)
+
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
