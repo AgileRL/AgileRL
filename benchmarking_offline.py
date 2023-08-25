@@ -5,6 +5,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
 from agilerl.training.train_offline import train
+import yaml
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -85,45 +86,51 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == '__main__':
-    INIT_HP = {
-        'ENV_NAME': 'CartPole-v1',      # Gym environment name
-        'DATASET': 'data/cartpole/cartpole_random_v1.1.0.h5', # Offline RL dataset
-        'ALGO': 'CQN',                  # Algorithm
-        'DOUBLE': True,                 # Use double Q-learning
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        'CHANNELS_LAST': False,
-        'BATCH_SIZE': 256,              # Batch size
-        'LR': 1e-3,                     # Learning rate
-        'EPISODES': 2000,               # Max no. episodes
-        'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
-        'GAMMA': 0.99,                  # Discount factor
-        'MEMORY_SIZE': 10000,           # Max memory buffer size
-        'LEARN_STEP': 1,                # Learning frequency
-        'TAU': 1e-3,                    # For soft update of target parameters
-        'TOURN_SIZE': 2,                # Tournament size
-        'ELITISM': True,                # Elitism in tournament selection
-        'POP_SIZE': 6,                  # Population size
-        'EVO_EPOCHS': 20,               # Evolution frequency
-        'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
-    }
+    # INIT_HP = {
+    #     'ENV_NAME': 'CartPole-v1',      # Gym environment name
+    #     'DATASET': 'data/cartpole/cartpole_random_v1.1.0.h5', # Offline RL dataset
+    #     'ALGO': 'CQN',                  # Algorithm
+    #     'DOUBLE': True,                 # Use double Q-learning
+    #     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+    #     'CHANNELS_LAST': False,
+    #     'BATCH_SIZE': 256,              # Batch size
+    #     'LR': 1e-3,                     # Learning rate
+    #     'EPISODES': 2000,               # Max no. episodes
+    #     'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
+    #     'GAMMA': 0.99,                  # Discount factor
+    #     'MEMORY_SIZE': 10000,           # Max memory buffer size
+    #     'LEARN_STEP': 1,                # Learning frequency
+    #     'TAU': 1e-3,                    # For soft update of target parameters
+    #     'TOURN_SIZE': 2,                # Tournament size
+    #     'ELITISM': True,                # Elitism in tournament selection
+    #     'POP_SIZE': 6,                  # Population size
+    #     'EVO_EPOCHS': 20,               # Evolution frequency
+    #     'POLICY_FREQ': 2,               # Policy network update frequency
+    #     'WANDB': True                   # Log with Weights and Biases
+    # }
 
-    MUTATION_PARAMS = {  # Relative probabilities
-        'NO_MUT': 0.4,                              # No mutation
-        'ARCH_MUT': 0.2,                            # Architecture mutation
-        'NEW_LAYER': 0.2,                           # New layer mutation
-        'PARAMS_MUT': 0.2,                          # Network parameters mutation
-        'ACT_MUT': 0,                               # Activation layer mutation
-        'RL_HP_MUT': 0.2,                           # Learning HP mutation
-        # Learning HPs to choose from
-        'RL_HP_SELECTION': ['lr', 'batch_size'],
-        'MUT_SD': 0.1,                              # Mutation strength
-        'RAND_SEED': 1,                             # Random seed
-    }
+    # MUTATION_PARAMS = {  # Relative probabilities
+    #     'NO_MUT': 0.4,                              # No mutation
+    #     'ARCH_MUT': 0.2,                            # Architecture mutation
+    #     'NEW_LAYER': 0.2,                           # New layer mutation
+    #     'PARAMS_MUT': 0.2,                          # Network parameters mutation
+    #     'ACT_MUT': 0,                               # Activation layer mutation
+    #     'RL_HP_MUT': 0.2,                           # Learning HP mutation
+    #     # Learning HPs to choose from
+    #     'RL_HP_SELECTION': ['lr', 'batch_size'],
+    #     'MUT_SD': 0.1,                              # Mutation strength
+    #     'RAND_SEED': 1,                             # Random seed
+    # }
 
-    NET_CONFIG = {
-        'arch': 'mlp',      # Network architecture
-        'h_size': [32, 32],    # Actor hidden size
-    }
+    # NET_CONFIG = {
+    #     'arch': 'mlp',      # Network architecture
+    #     'h_size': [32, 32],    # Actor hidden size
+    # }
 
+    with open('configs/training/cqn.yaml', 'r') as file:
+        cqn_config = yaml.safe_load(file)
+    INIT_HP = cqn_config['INIT_HP']
+    MUTATION_PARAMS = cqn_config['MUTATION_PARAMS']
+    NET_CONFIG = cqn_config['NET_CONFIG']
+    DISTRIBUTED_TRAINING = cqn_config['DISTRIBUTED_TRAINING']
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

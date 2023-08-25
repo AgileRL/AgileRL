@@ -128,8 +128,6 @@ class Mutations():
         if len(mutation_options) == 0:  # Return if no mutation options
             return population
         
-        print("MUTATION_OPTIONS",mutation_options)
-
         mutation_proba = np.array(mutation_proba) / \
             np.sum(mutation_proba)  # Normalize probs
 
