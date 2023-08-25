@@ -29,6 +29,13 @@ MUTATION_PARAMS:
   RL_HP_SELECTION: ["lr", "batch_size", "learn_step"]
   MUT_SD: 0.1                              # Mutation strength
   RAND_SEED: 1                             # Random seed
+  MIN_LR: 0.0001
+  MAX_LR: 0.01
+  MIN_LEARN_STEP: 1
+  MAX_LEARN_STEP: 200
+  MIN_BATCH_SIZE: 8
+  MAX_BATCH_SIZE: 1024
+
 
 NET_CONFIG: {'arch': 'mlp', 'h_size': [64, 64]}
 
