@@ -91,7 +91,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, INIT_HP, MUT_P, net_conf
                     # set the wandb project where this run will be logged
                     entity = "agilerl",
                     project="MADDPG Benchmarking",
-                    name="{}-{}-{}".format(env_name, algo,
+                    name="{}-{}-{}-RandomActions".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={

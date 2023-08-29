@@ -307,7 +307,7 @@ class Mutations():
             return individual
         
         if self.multi_agent:
-            if individual.algo == 'MADDPG':
+            if individual.algo == 'MADDPG' or individual.algo == 'MATD3':
                 individual.mut = 'None'
                 return individual
             else:
@@ -789,4 +789,23 @@ class Mutations():
                     'optimizer' : 'critic_optimizers_type'
                 }]
             }
+
+        elif algo == "MATD3":
+            nets = {
+                'actor': {
+                    'eval': 'actors',
+                    'target': 'actor_targets',
+                    'optimizer': 'actor_optimizers_type'
+                },
+                'critics': [{
+                    'eval': 'critics_1',
+                    'target': 'critic_targets_1',
+                    'optimizer' : 'critic_1_optimizers_type'
+                },{
+                    'eval': 'critics_2',
+                    'target': 'critic_targets_2',
+                    'optimizer' : 'critic_2_optimizers_type'
+                }]
+            }
+       
         return nets
