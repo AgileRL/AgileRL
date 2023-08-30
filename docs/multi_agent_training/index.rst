@@ -3,7 +3,7 @@ Multi-Agent Training
 
 In multi-agent reinforcement learning, multiple agents are trained to act in the same environment in both
 co-operative and competitive scenarios. With AgileRL, agents can be trained to act in multi-agent environments 
-using our implementation of the MADDPG algorithm (*more algorithms coming soon*) alongside our Evolutionary Hyperparameter
+using our implementation of the MADDPG or MATD3 algorithms alongside our Evolutionary Hyperparameter
 Optimisation algorithm.
 
 .. _initpop:
@@ -32,7 +32,6 @@ are more likely to remain present in the population. The sequence of evolution (
 
     INIT_HP = {
         'ALGO': 'MADDPG',                  # Algorithm
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'BATCH_SIZE': 1024,             # Batch size
         'LR': 0.01,                     # Learning rate
         'EPISODES': 10_000,             # Max no. episodes
@@ -40,7 +39,8 @@ are more likely to remain present in the population. The sequence of evolution (
         'MEMORY_SIZE': 1_000_000,       # Max memory buffer size
         'LEARN_STEP': 5,                # Learning frequency
         'TAU': 0.01,                    # For soft update of target parameters
-        'CHANNELS_LAST': False          # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        'CHANNELS_LAST': False          
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -90,7 +90,7 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself. 
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
-multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save2memory()`` function and sampled using the  ``NultiAgentReplayBuffer.sample()``.
+multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save2memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
 
 .. code-block:: python
 

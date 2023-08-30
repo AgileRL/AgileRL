@@ -1,6 +1,6 @@
 # Define initial hyperparameters
 INIT_HP:
-  ENV_NAME: 'pettingzoo.mpe.simple_spread_v3'   # Gym environment name
+  ENV_NAME: 'pettingzoo.mpe.simple_speaker_listener_v4'   # Gym environment name
   ALGO: 'MADDPG'                                         # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
   CHANNELS_LAST: False
@@ -14,7 +14,7 @@ INIT_HP:
   TAU: 0.01                    # For soft update of target parameters
   TOURN_SIZE: 2                # Tournament size
   ELITISM: True                # Elitism in tournament selection
-  POP_SIZE: 1                  # Population size
+  POP_SIZE: 6                  # Population size
   EVO_EPOCHS: 20               # Evolution frequency
   WANDB: True                 # Log with Weights and Biases
 

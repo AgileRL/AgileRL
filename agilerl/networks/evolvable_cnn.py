@@ -115,6 +115,10 @@ class EvolvableCNN(nn.Module):
     :type mlp_activation: str, optional
     :param cnn_activation: CNN activation layer, defaults to 'relu'
     :type cnn_activation: str, optional
+    :param n_agents: Number of agents
+    :type n_agents: int, optional
+    :param multi: Boolean flag to indicate if this is a multi-agent problem
+    :type multi: bool, optional
     :param layer_norm: Normalization between layers, defaults to False
     :type layer_norm: bool, optional
     :param stored_values: Stored network weights, defaults to None

@@ -1,11 +1,11 @@
-Multi-Agent Deep Deterministic Policy Gradient (MADDPG)
+Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 =========================================
 
-MADDPG (Multi-Agent Deep Deterministic Policy Gradients) extends the DDPG (Deep Deterministic Policy Gradients) 
-algorithm to enable cooperative or competitive training of multiple agents in complex environments, enhancing the 
-stability and convergence of the learning process through decentralized actor and centralized critic architectures.
+MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
+in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This 
+enables superior performance when compared to MADDPG.
 
-* MADDPG paper: https://arxiv.org/pdf/1706.02275.pdf
+* MATD3 paper: https://arxiv.org/abs/1910.01465
 
 Can I use it?
 ------------
@@ -40,7 +40,7 @@ Example
 
     import torch
     from pettingzoo.mpe import simple_speaker_listener_v4
-    from agilerl.algorithms.maddpg import MADDPG 
+    from agilerl.algorithms.matd3 import MATD3
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
     import numpy as np
 
@@ -75,7 +75,7 @@ Example
                                     agent_ids=agent_ids,
                                     device=device)
 
-    agent = MADDPG(state_dims=state_dim,
+    agent = MATD3(state_dims=state_dim,
                     action_dims=action_dim,
                     one_hot=one_hot,
                     n_agents=n_agents,
@@ -150,7 +150,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = MADDPG(state_dims=state_dim,
+  agent = MATD3(state_dims=state_dim,
                 action_dims=action_dim,
                 one_hot=one_hot,
                 n_agents=n_agents,
@@ -158,12 +158,12 @@ Or for a CNN:
                 max_action=max_action,
                 min_action=min_action,
                 discrete_actions=discrete_actions,
-                net_config=NET_CONFIG)   # Create MADDPG agent  
+                net_config=NET_CONFIG)   # Create MATD3 agent  
 
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.maddpg.MADDPG
+.. autoclass:: agilerl.algorithms.matd3.MATD3
   :members:
   :inherited-members:
 

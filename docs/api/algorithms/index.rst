@@ -8,6 +8,7 @@ Reinforcement learning algorithms implemented: (More coming soon!)
     * ILQL
     * TD3
     * MADDPG
+    * MATD3
 
 We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
 
@@ -20,3 +21,4 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
    ilql
    td3
    maddpg
+   matd3

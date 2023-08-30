@@ -150,8 +150,9 @@ def train_multi_agent(env, env_name, algo, pop, memory, INIT_HP, MUT_P, net_conf
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
 
     # RL training loop

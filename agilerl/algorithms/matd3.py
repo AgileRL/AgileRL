@@ -30,6 +30,8 @@ class MATD3():
     :type discrete_actions: bool, optional
     :param expl_noise: Standard deviation for Gaussian exploration noise, defaults to 0.1
     :type expl_noise: float, optional
+    :param policy_freq: Policy update frequency
+    :type policy_freq: int, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -86,13 +88,21 @@ class MATD3():
         self.discrete_actions = discrete_actions
         self.total_actions = sum(self.action_dims) if not self.discrete_actions else len(self.action_dims)
 
+        if 'output_activation' in self.net_config.keys():
+            pass
+        else:
+            if self.discrete_actions:
+                self.net_config['output_activation'] = 'gumbel_softmax'
+            else:
+                self.net_config['output_activation'] = 'softmax'
+
         # model
         if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
             self.actors = [EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config['h_size'],
-                output_activation='softmax',
+                output_activation=self.net_config['output_activation'],
                 device=self.device,
                 accelerator=self.accelerator) for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)]
             self.actor_targets = copy.deepcopy(self.actors)
@@ -122,7 +132,7 @@ class MATD3():
                 stride_size=self.net_config['s_size'],
                 hidden_size=self.net_config['h_size'],
                 normalize=self.net_config['normalize'],
-                mlp_activation='gumbel_softmax',
+                mlp_activation=self.net_config['output_activation'],
                 multi=self.multi,
                 n_agents=self.n_agents,
                 device=self.device,
@@ -221,8 +231,12 @@ class MATD3():
                     #action = env.action_space.sample()
             else:
                 actor.eval()
-                with torch.no_grad():
-                    action_values = actor(state)
+                if self.accelerator is not None:
+                    with actor.no_sync():
+                        action_values = actor(state)
+                else:
+                    with torch.no_grad():
+                        action_values = actor(state)
                 actor.train()
                 if self.discrete_actions:
                     action = action_values.squeeze(0).argmax().item()
@@ -276,16 +290,27 @@ class MATD3():
                 else:
                     action_values = list(actions.values())
                 input_combined = torch.cat(list(states.values()) + action_values, 1)
-                q_value_1 = critic_1(input_combined)
-                q_value_2 = critic_2(input_combined)
+                if self.accelerator is not None:
+                    with critic_1.no_sync():
+                        q_value_1 = critic_1(input_combined)
+                    with critic_2.no_sync():
+                        q_value_2 = critic_2(input_combined)
+                else:
+                    q_value_1 = critic_1(input_combined)
+                    q_value_2 = critic_2(input_combined)
                 next_actions = [self.actor_targets[idx](next_states[agent_id]).detach_() for idx, agent_id in enumerate(self.agent_ids)]
                 
             elif self.net_config['arch'] == 'cnn':
                 stacked_states = torch.stack(list(states.values()), dim=2)
                 stacked_actions = torch.stack(list(actions.values()), dim=1)
-                q_value_1 = critic_1(stacked_states, stacked_actions)
-                q_value_2 = critic_2(stacked_states, stacked_actions)
-                #### Add in noise here
+                if self.accelerator is not None:
+                    with critic_1.no_sync():
+                        q_value_1 = critic_1(stacked_states, stacked_actions)
+                    with critic_2.no_sync():
+                        q_value_2 = critic_2(stacked_states, stacked_actions)
+                else:
+                    q_value_1 = critic_1(stacked_states, stacked_actions)
+                    q_value_2 = critic_2(stacked_states, stacked_actions)
                 next_actions = [self.actor_targets[idx](next_states[agent_id].unsqueeze(2)).detach_() for idx, agent_id in enumerate(self.agent_ids)]
             
             if self.discrete_actions:
@@ -294,13 +319,25 @@ class MATD3():
 
             if self.net_config['arch'] == 'mlp':
                 next_input_combined = torch.cat(list(next_states.values()) + next_actions, 1)
-                q_value_next_state_1 = critic_target_1(next_input_combined)
-                q_value_next_state_2 = critic_target_2(next_input_combined)
+                if self.accelerator is not None:
+                    with critic_target_1.no_sync():
+                        q_value_next_state_1 = critic_target_1(next_input_combined)
+                    with critic_target_2.no_sync():
+                        q_value_next_state_2 = critic_target_2(next_input_combined)
+                else:
+                    q_value_next_state_1 = critic_target_1(next_input_combined)
+                    q_value_next_state_2 = critic_target_2(next_input_combined)
             elif self.net_config['arch'] == 'cnn':
                 stacked_next_states = torch.stack(list(next_states.values()), dim=2)
                 stacked_next_actions = torch.stack(next_actions, dim=1)
-                q_value_next_state_1 = critic_target_1(stacked_next_states, stacked_next_actions)
-                q_value_next_state_2 = critic_target_2(stacked_next_states, stacked_next_actions)
+                if self.accelerator is not None:
+                    with critic_target_1.no_sync():
+                        q_value_next_state_1 = critic_target_1(stacked_next_states, stacked_next_actions)
+                    with critic_target_2.no_sync():
+                        q_value_next_state_2 = critic_target_2(stacked_next_states, stacked_next_actions)
+                else:
+                    q_value_next_state_1 = critic_target_1(stacked_next_states, stacked_next_actions)
+                    q_value_next_state_2 = critic_target_2(stacked_next_states, stacked_next_actions)
             q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
             y_j = rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
@@ -320,23 +357,40 @@ class MATD3():
             # update actor and targets every policy_freq episodes
             if len(self.scores) % self.policy_freq == 0:
                 if self.net_config['arch'] == 'mlp':
-                    action = actor(states[agent_id])
+                    if self.accelerator is not None:
+                        with actor.no_sync():
+                            action = actor(states[agent_id])
+                    else:
+                        action = actor(states[agent_id])
                     detached_actions = copy.deepcopy(actions)
                     if self.discrete_actions:
                         action = action.argmax(1).unsqueeze(1)
                         detached_actions = {agent_id: d.unsqueeze(1) for agent_id, d in detached_actions.items()}
                     detached_actions[agent_id] = action
                     input_combined = torch.cat(list(states.values()) + list(detached_actions.values()), 1)
-                    actor_loss = -critic_1(input_combined).mean()
+                    if self.accelerator is not None:
+                        with critic_1.no_sync():
+                            actor_loss = -critic_1(input_combined).mean()
+                    else:
+                        actor_loss = -critic_1(input_combined).mean()
 
                 elif self.net_config['arch'] == 'cnn':
-                    action = actor(states[agent_id].unsqueeze(2))
+                    if self.accelerator is not None:
+                        with actor.no_sync():
+                            action = actor(states[agent_id].unsqueeze(2))
+                    else:
+                        action = actor(states[agent_id].unsqueeze(2))
                     if self.discrete_actions:
                         action = action.argmax(1)
                     detached_actions = copy.deepcopy(actions)
                     detached_actions[agent_id] = action
                     stacked_detached_actions = torch.stack(list(detached_actions.values()), dim=1)
-                    actor_loss = - \
+                    if self.accelerator is not None:
+                        with critic_1.no_sync():
+                            actor_loss = - \
+                                critic_1(stacked_states, stacked_detached_actions).mean()
+                    else:
+                        actor_loss = - \
                         critic_1(stacked_states, stacked_detached_actions).mean()
 
                 # actor loss backprop
@@ -451,8 +505,8 @@ class MATD3():
                 clone.critic_2_optimizers = [self.accelerator.prepare(critic_optimizer) for critic_optimizer in critic_2_optimizers]
             else:
                 clone.actors, clone.actor_targets, clone.critics_1, clone.critic_targets_1, \
-                clone.critics_2, clone.critic_targets_2, clone.actor_optimizer, clone.critic_1_optimizer, \
-                clone.critic_2_optimizer = actors, actor_targets, critics_1, critic_targets_1, critics_2, critic_targets_2, \
+                clone.critics_2, clone.critic_targets_2, clone.actor_optimizers, clone.critic_1_optimizers, \
+                clone.critic_2_optimizers = actors, actor_targets, critics_1, critic_targets_1, critics_2, critic_targets_2, \
                 actor_optimizers, critic_1_optimizers, critic_2_optimizers
         else:
             clone.actors = [actor.to(self.device) for actor in actors]
@@ -502,36 +556,22 @@ class MATD3():
         :type path: string
         """
         
-        for agent_id, actor, actor_target, critic_1, critic_target_1, \
-            critic_2,critic_target_2, actor_optimizer, critic_1_optimizer, critic_2_optimizer in zip(self.agent_ids,
-                                                                                self.actors,    
-                                                                                self.actor_targets,
-                                                                                self.critics_1, 
-                                                                                self.critic_targets_1,
-                                                                                self.critics_2, 
-                                                                                self.critic_targets_2,
-                                                                                self.actor_optimizers, 
-                                                                                self.critic_1_optimizers,
-                                                                                self.critic_2_optimizers):
-            torch.save({
-                f'actor_init_dict_{agent_id}': actor.init_dict,
-                f'actor_state_dict_{agent_id}': actor.state_dict(),
-                f'actor_target_init_dict_{agent_id}': actor_target.init_dict,
-                f'actor_target_state_dict_{agent_id}': actor_target.state_dict(),
-                f'critic_1_init_dict_{agent_id}': critic_1.init_dict,
-                f'critic_1_state_dict_{agent_id}': critic_1.state_dict(),
-                f'critic_target_1_init_dict_{agent_id}': critic_target_1.init_dict,
-                f'critic_target_1_state_dict_{agent_id}': critic_target_1.state_dict(),
-                f'critic_2_init_dict_{agent_id}': critic_2.init_dict,
-                f'critic_2_state_dict_{agent_id}': critic_2.state_dict(),
-                f'critic_target_2_init_dict_{agent_id}': critic_target_2.init_dict,
-                f'critic_target_2_state_dict_{agent_id}': critic_target_2.state_dict(),
-                f'actor_optimizer_state_dict_{agent_id}': actor_optimizer.state_dict(),
-                f'critic_1_optimizer_state_dict_{agent_id}': critic_1_optimizer.state_dict(),
-                f'critic_2_optimizer_state_dict_{agent_id}': critic_2_optimizer.state_dict()}
-                , path, pickle_module=dill)
-
         torch.save({
+            'actors_init_dict': [actor.init_dict for actor in self.actors],
+            'actors_state_dict': [actor.state_dict() for actor in self.actors],
+            'actor_targets_init_dict': [actor_target.init_dict for actor_target in self.actor_targets],
+            'actor_targets_state_dict': [actor_target.state_dict() for actor_target in self.actor_targets],
+            'critics_1_init_dict': [critic_1.init_dict for critic_1 in self.critics_1],
+            'critics_1_state_dict': [critic_1.state_dict() for critic_1 in self.critics_1],
+            'critic_targets_1_init_dict': [critic_target_1.init_dict for critic_target_1 in self.critic_targets_1],
+            'critic_targets_1_state_dict': [critic_target_1.state_dict() for critic_target_1 in self.critic_targets_1],
+            'critics_2_init_dict': [critic_2.init_dict for critic_2 in self.critics_2],
+            'critics_2_state_dict': [critic_2.state_dict() for critic_2 in self.critics_2],
+            'critic_targets_2_init_dict': [critic_target_2.init_dict for critic_target_2 in self.critic_targets_2],
+            'critic_targets_2_state_dict': [critic_target_2.state_dict() for critic_target_2 in self.critic_targets_2],
+            'actor_optimizers_state_dict': [actor_optimizer.state_dict() for actor_optimizer in self.actor_optimizers],
+            'critic_1_optimizers_state_dict': [critic_1_optimizer.state_dict() for critic_1_optimizer in self.critic_1_optimizers],
+            'critic_2_optimizers_state_dict': [critic_2_optimizer.state_dict() for critic_2_optimizer in self.critic_2_optimizers],
             'net_config': self.net_config,
             'batch_size': self.batch_size,
             'lr' : self.lr,
@@ -543,9 +583,9 @@ class MATD3():
             'index': self.index,
             'scores': self.scores,
             'fitness': self.fitness,
-            'steps': self.steps
+            'steps': self.steps,
             }, path, pickle_module=dill)
-        
+
 
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
@@ -556,46 +596,86 @@ class MATD3():
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint['net_config']
         if self.net_config['arch'] == 'mlp':
-            self.actors = [EvolvableMLP(**checkpoint[f'actor_init_dict_{agent_id}']) 
-                           for agent_id in self.agent_ids]
-            self.actor_targets = [EvolvableMLP(**checkpoint[f'actor_target_init_dict_{agent_id}'])
-                                  for agent_id in self.agent_ids]
-            self.critics_1 = [EvolvableMLP(**checkpoint[f'critic_1_init_dict_{agent_id}'])
-                            for agent_id in self.agent_ids]
-            self.critic_targets_1 = [EvolvableMLP(**checkpoint[f'critic_target_1_init_dict_{agent_id}'])
-                                   for agent_id in self.agent_ids]
-            self.critics_2 = [EvolvableMLP(**checkpoint[f'critic_2_init_dict_{agent_id}'])
-                            for agent_id in self.agent_ids]
-            self.critic_targets_2 = [EvolvableMLP(**checkpoint[f'critic_target_2_init_dict_{agent_id}'])
-                                   for agent_id in self.agent_ids]
+            self.actors = [EvolvableMLP(**checkpoint['actors_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.actor_targets = [EvolvableMLP(**checkpoint['actor_targets_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critics_1 = [EvolvableMLP(**checkpoint['critics_1_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critic_targets_1 = [EvolvableMLP(**checkpoint['critic_targets_1_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critics_2 = [EvolvableMLP(**checkpoint['critics_2_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critic_targets_2 = [EvolvableMLP(**checkpoint['critic_targets_2_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
         elif self.net_config['arch'] == 'cnn':
-            self.actors = [EvolvableCNN(**checkpoint[f'actor_init_dict_{agent_id}']) 
-                           for agent_id in self.agent_ids]
-            self.actor_targets = [EvolvableCNN(**checkpoint[f'actor_target_init_dict_{agent_id}'])
-                                  for agent_id in self.agent_ids]
-            self.critics_1 = [EvolvableCNN(**checkpoint[f'critic_1_init_dict_{agent_id}'])
-                            for agent_id in self.agent_ids]
-            self.critic_targets_1 = [EvolvableCNN(**checkpoint[f'critic_target_1_init_dict_{agent_id}'])
-                                   for agent_id in self.agent_ids]
-            self.critics_2 = [EvolvableCNN(**checkpoint[f'critic_2_init_dict_{agent_id}'])
-                            for agent_id in self.agent_ids]
-            self.critic_targets_2 = [EvolvableCNN(**checkpoint[f'critic_target_2_init_dict_{agent_id}'])
-                                   for agent_id in self.agent_ids]
+            self.actors = [EvolvableCNN(**checkpoint['actors_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.actor_targets = [EvolvableCNN(**checkpoint['actor_targets_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critics_1 = [EvolvableCNN(**checkpoint['critics_1_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critic_targets_1 = [EvolvableCNN(**checkpoint['critic_targets_1_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critics_2 = [EvolvableCNN(**checkpoint['critics_2_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            self.critic_targets_2 = [EvolvableCNN(**checkpoint['critic_targets_2_init_dict'][idx]) 
+                           for idx, _ in enumerate(self.agent_ids)]
+            
         self.lr = checkpoint['lr']
         self.actor_optimizers = [optim.Adam(actor.parameters(), lr=self.lr) for actor in self.actors]
-        self.critic_1_optimizers = [optim.Adam(critic.parameters(), lr=self.lr) for critic in self.critic_1]
-        self.critic_2_optimizers = [optim.Adam(critic.parameters(), lr=self.lr) for critic in self.critic_2]
-        self.actors = [actor.load_state_dict(checkpoint[f'actor_state_dict_{agent_id}']) for actor, agent_id in zip(self.actors, self.agent_ids)]
-        self.actor_targets = [actor_target.load_state_dict(checkpoint[f'actor_target_state_dict_{agent_id}']) for actor_target, agent_id in zip(self.actor_targets, self.agent_ids)]
-        self.critics_1 = [critic.load_state_dict(checkpoint[f'critic_1_state_dict_{agent_id}']) for critic, agent_id in zip(self.critics_1, self.agent_ids)]
-        self.critic_targets_1 = [critic_target.load_state_dict(checkpoint[f'critic_target_1_state_dict_{agent_id}']) for critic_target, agent_id in zip(self.critic_targets_1, self.agent_ids)]
-        self.critics_2 = [critic.load_state_dict(checkpoint[f'critic_2_state_dict_{agent_id}']) for critic, agent_id in zip(self.critics_2, self.agent_ids)]
-        self.critic_targets_2 = [critic_target.load_state_dict(checkpoint[f'critic_target_2_state_dict_{agent_id}']) for critic_target, agent_id in zip(self.critic_targets_2, self.agent_ids)]
-        self.actor_optimizers = [actor_optimizer.load_state_dict(checkpoint[f'actor_optimizer_state_dict_{agent_id}']) for actor_optimizer, agent_id in zip(self.actor_optimizers, self.agent_ids)]
-        self.critic_1_optimizers = [critic_optimizer.load_state_dict(checkpoint[f'critic_1_optimizer_state_dict_{agent_id}']) for critic_optimizer, agent_id in zip(self.critic_1_optimizers, self.agent_ids)]
-        self.critic_2_optimizers = [critic_optimizer.load_state_dict(checkpoint[f'critic_2_optimizer_state_dict_{agent_id}']) for critic_optimizer, agent_id in zip(self.critic_2_optimizers, self.agent_ids)]
+        self.critic_1_optimizers = [optim.Adam(critic_1.parameters(), lr=self.lr) for critic_1 in self.critics_1]
+        self.critic_2_optimizers = [optim.Adam(critic_2.parameters(), lr=self.lr) for critic_2 in self.critics_2]
+        actor_list = [] 
+        critic_1_list = []
+        critic_2_list = []
+        actor_target_list = []
+        critic_target_1_list = []
+        critic_target_2_list = []
+        actor_optimizer_list = []
+        critic_1_optimizer_list = []
+        critic_2_optimizer_list = []
+        for idx, (actor, actor_target, critic_1, critic_target_1, critic_2, critic_target_2, 
+                  actor_optimizer, critic_1_optimizer, critic_2_optimizer) in enumerate(zip(self.actors,
+                                                                                            self.actor_targets,
+                                                                                            self.critics_1,
+                                                                                            self.critic_targets_1,
+                                                                                            self.critics_2,
+                                                                                            self.critic_targets_2,
+                                                                                            self.actor_optimizers,
+                                                                                            self.critic_1_optimizers,
+                                                                                            self.critic_2_optimizers)):
+            
+
+            actor.load_state_dict(checkpoint['actors_state_dict'][idx])
+            actor_list.append(actor)
+            actor_target.load_state_dict(checkpoint['actor_targets_state_dict'][idx])
+            actor_target_list.append(actor_target)
+            critic_1.load_state_dict(checkpoint['critics_1_state_dict'][idx])
+            critic_1_list.append(critic_1)
+            critic_2.load_state_dict(checkpoint['critics_2_state_dict'][idx])
+            critic_2_list.append(critic_2)
+            critic_target_1.load_state_dict(checkpoint['critic_targets_1_state_dict'][idx])
+            critic_target_1_list.append(critic_target_1)
+            actor_optimizer.load_state_dict(checkpoint['actor_optimizers_state_dict'][idx])
+            actor_optimizer_list.append(actor_optimizer)
+            critic_1_optimizer.load_state_dict(checkpoint['critic_1_optimizers_state_dict'][idx])
+            critic_1_optimizer_list.append(critic_1_optimizer)
+            critic_2_optimizer.load_state_dict(checkpoint['critic_2_optimizers_state_dict'][idx])
+            critic_2_optimizer_list.append(critic_2_optimizer)
+        
+        self.actors = actor_list                        
+        self.actor_targets = actor_target_list          
+        self.critics_1 = critic_1_list                     
+        self.critic_targets_1 = critic_target_1_list
+        self.critics_2 = critic_2_list                     
+        self.critic_targets_2 = critic_target_2_list         
+        self.actor_optimizers = actor_optimizer_list    
+        self.critic_1_optimizers =  critic_1_optimizer_list 
+        self.critic_2_optimizers =  critic_2_optimizer_list 
         self.batch_size = checkpoint['batch_size']
         self.learn_step = checkpoint['learn_step']
+        self.policy_freq = checkpoint['policy_freq']
         self.gamma = checkpoint['gamma']
         self.tau = checkpoint['tau']
         self.mut = checkpoint['mutation']
