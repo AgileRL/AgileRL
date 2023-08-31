@@ -18,12 +18,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
     from agilerl.utils.utils import initialPopulation
     from pettingzoo.mpe import simple_speaker_listener_v4
-    from agilerl.training.train_multi_agent import train_multi_agent
-    from agilerl.comp.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.hpo.mutation import Mutations
     import torch
-    import numpy as np
 
     NET_CONFIG = {
         'arch': 'mlp',          # Network architecture
@@ -173,23 +168,27 @@ for multi-agent environments) it is easiest to use our training function, which 
 
 .. code-block:: python
 
-    from agilerl.training.train import train
+    from agilerl.training.train_multi_agent import train_multi_agent
     import gymnasium as gym
     import torch
 
-    trained_pop, pop_fitnesses = train_multi_agent(env=env,                                 # Gym-style environment
-                                       env_name='simple_speaker_listener_v4',   # Environment name
-                                       algo=INIT_HP['ALGO'],                    # Algorithm
-                                       pop=agent_pop,                           # Population of agents
-                                       memory=memory,                           # Replay buffer
-                                       swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                       n_episodes=1000,                         # Max number of training episodes
-                                       evo_epochs=20,                           # Evolution frequency
-                                       evo_loop=1,                              # Number of evaluation episodes per agent
-                                       target=200.,                             # Target score for early stopping
-                                       tournament=tournament,                   # Tournament selection object
-                                       mutation=mutations,                      # Mutations object
-                                       wb=False)                                # Weights and Biases tracking
+    trained_pop, pop_fitnesses = train_multi_agent(env=env,                              # Pettingzoo-style environment
+                                                env_name='simple_speaker_listener_v4',   # Environment name
+                                                algo=INIT_HP['ALGO'],                    # Algorithm
+                                                pop=agent_pop,                           # Population of agents
+                                                memory=memory,                           # Replay buffer
+                                                INIT_HP=INIT_HP,                         # IINIT_HP dictionary
+                                                MUT_P=MUTATION_PARAMS,                   # MUTATION_PARAMS dictionary
+                                                net_config=NET_CONFIG,                   # Network configuration
+                                                swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                                n_episodes=1000,                         # Max number of training episodes
+                                                evo_epochs=20,                           # Evolution frequency
+                                                evo_loop=1,                              # Number of evaluation episodes per agent
+                                                max_steps=900,                           # Max steps to take in the enviroment
+                                                target=200.,                             # Target score for early stopping
+                                                tournament=tournament,                   # Tournament selection object
+                                                mutation=mutations,                      # Mutations object
+                                                wb=INIT_HP["WANDB"])                     # Weights and Biases tracking
 
 
 Alternatively, use a custom training loop. Combining all of the above:

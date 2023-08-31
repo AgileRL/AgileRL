@@ -37,6 +37,7 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
     + [Custom Offline Training Loop](#custom-offline-training-loop)
   * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
   * [Distributed training](#distributed-training)
+  * [Multi-agent training](#multi-agent-training)
 
 ## Benchmarks
 
@@ -48,6 +49,12 @@ In the charts below, a single AgileRL run, which automatically tunes hyperparame
   <img src=https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png height="500">
 </p>
 <p align="center">AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</p>
+
+AgileRL also supports multi-agent reinforcement learning using the Petting Zoo parallel API. The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments. 
+
+<p align="center">
+  <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png>
+</p>
 
 ## Get Started
 Install as a package with pip: 
@@ -76,6 +83,8 @@ accelerate launch --config_file configs/accelerate/accelerate.yaml demo_online_d
   * CQL
   * ILQL
   * TD3
+  * MADDPG
+  * MATD3
 
 ## Train an agent on a Gym environment (Online)
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
@@ -807,4 +816,158 @@ if __name__ == '__main__':
     env.close()
 ```
 
+## Multi-agent training
+
+As in previous examples, before starting training, meta-hyperparameters ```INIT_HP```, ```MUTATION_PARAMS```, and ```NET_CONFIG``` must first be defined.
+
+```python
+NET_CONFIG = {
+        'arch': 'mlp',          # Network architecture
+        'h_size': [32, 32],     # Actor hidden size
+    }
+
+    INIT_HP = {
+        'ALGO': 'MADDPG',               # Algorithm
+        'BATCH_SIZE': 512,              # Batch size
+        'LR': 0.01,                     # Learning rate
+        'EPISODES': 10_000,             # Max no. episodes
+        'GAMMA': 0.95,                  # Discount factor
+        'MEMORY_SIZE': 1_000_000,       # Max memory buffer size
+        'LEARN_STEP': 5,                # Learning frequency
+        'TAU': 0.01,                    # For soft update of target parameters
+        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        'CHANNELS_LAST': False,
+        "WANDB": False                  # Start run with Weights&Biases         
+    }
+
+    MUTATION_PARAMS = {
+        "NO_MUT": 0.4,                              # No mutation
+        "ARCH_MUT": 0.2,                            # Architecture mutation
+        "NEW_LAYER": 0.2,                           # New layer mutation
+        "PARAMS_MUT": 0.2,                           # Network parameters mutation
+        "ACT_MUT": 0,                               # Activation layer mutation
+        "RL_HP_MUT": 0.2,                           # Learning HP mutation
+        # Learning HPs to choose from
+        "RL_HP_SELECTION": ["lr", "batch_size", "learn_step"],
+        "MUT_SD": 0.1,                              # Mutation strength
+        "RAND_SEED": 42,                            # Random seed
+        "MIN_LR": 0.0001,                           # Define max and min limits for mutating RL hyperparams
+        "MAX_LR": 0.01,
+        "MIN_LEARN_STEP": 1,
+        "MAX_LEARN_STEP": 200,
+        "MIN_BATCH_SIZE": 8,
+        "MAX_BATCH_SIZE": 1024
+    }
+```
+Use ```utils.utils.initialPopulation``` to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+```python
+    from agilerl.utils.utils import initialPopulation
+    from pettingzoo.mpe import simple_speaker_listener_v4
+    import torch
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
+    env.reset()
+
+    # Configure the multi-agent algo input arguments
+    try:
+        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        one_hot = True 
+    except Exception:
+        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        one_hot = False 
+    try:
+        action_dim = [env.action_space(agent).n for agent in env.agents]
+        INIT_HP['DISCRETE_ACTIONS'] = True
+        INIT_HP['MAX_ACTION'] = None
+        INIT_HP['MIN_ACTION'] = None
+    except Exception:
+        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        INIT_HP['DISCRETE_ACTIONS'] = False
+        INIT_HP['MAX_ACTION'] = [env.action_space(agent).high for agent in env.agents]
+        INIT_HP['MIN_ACTION'] = [env.action_space(agent).low for agent in env.agents]
+
+    if INIT_HP['CHANNELS_LAST']:
+        state_dim = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim]
+    
+    INIT_HP['N_AGENTS'] = env.num_agents
+    INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
+
+    agent_pop = initialPopulation(algo=INIT_HP['ALGO'],
+                                  state_dim=state_dim,
+                                  action_dim=action_dim,
+                                  one_hot=one_hot,
+                                  net_config=NET_CONFIG,
+                                  INIT_HP=INIT_HP,
+                                  population_size=6,
+                                  device=device)
+
+```
+
+Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
+
+```python
+    from agilerl.comp.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.hpo.mutation import Mutations
+
+    field_names = ["state", "action", "reward", "next_state", "done"]
+
+    memory = MultiAgentReplayBuffer(memory_size=1_000_000,        # Max replay buffer size
+                                    field_names=field_names,  # Field names to store in memory
+                                    agent_ids=INIT_HP['AGENT_IDS'],
+                                    device=torch.device("cuda"))
+
+    tournament = TournamentSelection(tournament_size=2, # Tournament selection size
+                                     elitism=True,      # Elitism in tournament selection
+                                     population_size=6, # Population size
+                                     evo_step=1)        # Evaluate using last N fitness scores
+
+    mutations = Mutations(algo=INIT_HP['ALGO'],
+                          no_mutation=MUTATION_PARAMS['NO_MUT'],
+                          architecture=MUTATION_PARAMS['ARCH_MUT'],
+                          new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],
+                          parameters=MUTATION_PARAMS['PARAMS_MUT'],
+                          activation=MUTATION_PARAMS['ACT_MUT'],
+                          rl_hp=MUTATION_PARAMS['RL_HP_MUT'],
+                          rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'],
+                          mutation_sd=MUTATION_PARAMS['MUT_SD'],
+                          min_lr=MUTATION_PARAMS['MIN_LR'],
+                          max_lr=MUTATION_PARAMS['MAX_LR'],
+                          min_learn_step=MUTATION_PARAMS['MIN_LEARN_STEP'],
+                          max_learn_step=MUTATION_PARAMS['MAX_LEARN_STEP'],
+                          min_batch_size=MUTATION_PARAMS['MIN_BATCH_SIZE'],
+                          max_batch_size=MUTATION_PARAMS['MAX_BATCH_SIZE'],
+                          agent_ids=INIT_HP['AGENT_IDS'],
+                          arch=NET_CONFIG['arch'],
+                          rand_seed=MUTATION_PARAMS['RAND_SEED'],
+                          device=device)
+
+```
+The easiest training loop implementation is to use our ```training.train_multi_agent.train_multi_agent()``` function. It requires the agent have functions ```getAction()``` and ```learn()```.
+
+```python
+
+    from agilerl.training.train_multi_agent import train_multi_agent
+    import torch
+
+    trained_pop, pop_fitnesses = train_multi_agent(env=env,                              # Pettingzoo-style environment
+                                                env_name='simple_speaker_listener_v4',   # Environment name
+                                                algo=INIT_HP['ALGO'],                    # Algorithm
+                                                pop=agent_pop,                           # Population of agents
+                                                memory=memory,                           # Replay buffer
+                                                INIT_HP=INIT_HP,                         # IINIT_HP dictionary
+                                                MUT_P=MUTATION_PARAMS,                   # MUTATION_PARAMS dictionary
+                                                net_config=NET_CONFIG,                   # Network configuration
+                                                swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                                n_episodes=1000,                         # Max number of training episodes
+                                                evo_epochs=20,                           # Evolution frequency
+                                                evo_loop=1,                              # Number of evaluation episodes per agent
+                                                max_steps=900,                           # Max steps to take in the enviroment
+                                                target=200.,                             # Target score for early stopping
+                                                tournament=tournament,                   # Tournament selection object
+                                                mutation=mutations,                      # Mutations object
+                                                wb=INIT_HP["WANDB"])                     # Weights and Biases tracking
+
+```
 View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.
