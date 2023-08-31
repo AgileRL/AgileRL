@@ -4,7 +4,6 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import initialPopulation, printHyperparams
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.training.train_multi_agent import train_multi_agent
 from accelerate import Accelerator
 import supersuit as ss
 import importlib
