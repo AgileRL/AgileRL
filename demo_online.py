@@ -10,6 +10,8 @@ if __name__ == '__main__':
 
     print('===== AgileRL Online Demo =====')
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     NET_CONFIG = {
         'arch': 'mlp',       # Network architecture
         'h_size': [32, 32],  # Actor hidden size
@@ -49,13 +51,13 @@ if __name__ == '__main__':
                             net_config=NET_CONFIG,      # Network configuration
                             INIT_HP=INIT_HP,            # Initial hyperparameters
                             population_size=INIT_HP['POPULATION_SIZE'], # Population size
-                            device=torch.device("cuda"))
+                            device=device)
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
                           memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
-                          device=torch.device("cuda"))
+                          device=device)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
                                      elitism=True,      # Elitism in tournament selection
@@ -73,7 +75,7 @@ if __name__ == '__main__':
                           mutation_sd=0.1,                      # Mutation strength
                           arch=NET_CONFIG['arch'],              # Network architecture
                           rand_seed=1,                          # Random seed
-                          device=torch.device("cuda"))
+                          device=device)
 
     max_episodes = 1000  # Max training episodes
     max_steps = 500     # Max steps per episode
@@ -101,8 +103,12 @@ if __name__ == '__main__':
                     action)   # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memoryVectEnvs(
-                    state, action, reward, next_state, done)
+                if INIT_HP['CHANNELS_LAST']:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+                else:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, next_state, done)
 
                 # Learn according to learning frequency
                 if memory.counter % agent.learn_step == 0 and len(
@@ -125,7 +131,7 @@ if __name__ == '__main__':
             fitnesses = [
                 agent.test(
                     env,
-                    swap_channels=False,
+                    swap_channels=INIT_HP['CHANNELS_LAST'],
                     max_steps=max_steps,
                     loop=evo_loop) for agent in pop]
 
@@ -137,3 +143,5 @@ if __name__ == '__main__':
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+
+    env.close()

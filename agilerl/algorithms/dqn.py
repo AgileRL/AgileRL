@@ -18,13 +18,11 @@ class DQN():
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
-    :param index: Index to keep track of object instance during tournament selection 
-    and mutation, defaults to 0
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, defaults 
-    to 64
+    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
@@ -63,12 +61,10 @@ class DQN():
         self.mut = mutation
         self.device = device
         self.accelerator = accelerator
-
         self.index = index
         self.scores = []
         self.fitness = []
         self.steps = [0]
-
         self.double = double
 
         # model
@@ -115,7 +111,7 @@ class DQN():
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
             if wrap:
-                self.wrap_models()          
+                self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
@@ -130,8 +126,7 @@ class DQN():
 
         :param state: State observation, or multiple observations in a batch
         :type state: float or List[float]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults 
-        to 0
+        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
         state = torch.from_numpy(state).float()
@@ -161,8 +156,7 @@ class DQN():
     def _squeeze_exp(self, experiences):
         """Remove first dim created by dataloader.
         
-        :param experiences: List of batched states, actions, rewards, next_states, 
-        dones in that order.
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: List[torch.Tensor[float]]
         """
         st, ac, re, ne, do = experiences
@@ -171,8 +165,7 @@ class DQN():
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, rewards, next_states, 
-        dones in that order.
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: List[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
@@ -218,13 +211,11 @@ class DQN():
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first 
-        [H, W, C] -> [C, H, W], defaults to False
+        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score 
-        is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():
@@ -246,8 +237,7 @@ class DQN():
     def clone(self, index=None, wrap=True):
         """Returns cloned agent identical to self.
 
-        :param index: Index to keep track of agent for tournament selection and 
-        mutation, defaults to None
+        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
         if index is None:

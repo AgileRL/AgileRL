@@ -91,6 +91,8 @@ def agent_test():
 
     x = [i+1 for i in range(episodes)]
     plot_learning_curve(x, score_history)
+    
+    env.close()
 
 if __name__ == "__main__":
     agent_test()

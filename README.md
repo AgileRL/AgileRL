@@ -67,7 +67,7 @@ python demo_online.py
 ```
 or to demo distributed training:
 ```bash
-accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
+accelerate launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
 ```
 
 ## Algorithms implemented (more coming soon!)
@@ -333,6 +333,8 @@ for idx_epi in range(max_episodes):
         # Tournament selection and population mutation
         elite, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
+
+env.close()
 ```
 
 ## Train an agent on data (Offline)
@@ -589,6 +591,8 @@ for idx_epi in trange(max_episodes):
         # Tournament selection and population mutation
         elite, pop = tournament.select(pop)
         pop = mutations.mutation(pop)
+
+env.close()
 ```
 
 ## Train an agent on a language environment (RLHF)
@@ -799,6 +803,8 @@ if __name__ == '__main__':
             accelerator.wait_for_everyone()
             for model in pop:
                 model.wrap_models()
+
+    env.close()
 ```
 
 View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.

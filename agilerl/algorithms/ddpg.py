@@ -18,13 +18,11 @@ class DDPG():
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
-    :param index: Index to keep track of object instance during tournament selection 
-    and mutation, defaults to 0
+    :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
-    :param batch_size: Size of batched sample from replay buffer for learning, 
-    defaults to 64
+    :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
@@ -36,8 +34,7 @@ class DDPG():
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param policy_freq: Frequency of target network updates compared to policy network, 
-    defaults to 2
+    :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
@@ -179,8 +176,7 @@ class DDPG():
 
         :param state: Environment observation, or multiple observations in a batch
         :type state: float or List[float]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults 
-        to 0
+        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
         state = torch.from_numpy(state).float()
@@ -211,8 +207,7 @@ class DDPG():
     def _squeeze_exp(self, experiences):
         """Remove first dim created by dataloader.
         
-        :param experiences: List of batched states, actions, rewards, next_states, 
-        dones in that order.
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: List[torch.Tensor[float]]
         """
         st, ac, re, ne, do = experiences
@@ -221,13 +216,11 @@ class DDPG():
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, rewards, next_states, 
-        dones in that order.
+        :param experience: List of batched states, actions, rewards, next_states, dones in that order.
         :type experience: List[torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
-        :param policy_noise: Standard deviation of noise applied to policy, defaults 
-        to 0.2
+        :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
@@ -300,13 +293,11 @@ class DDPG():
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
-        :param swap_channels: Swap image channels dimension from last to first 
-        [H, W, C] -> [C, H, W], defaults to False
+        :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score 
-        is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():
@@ -328,8 +319,7 @@ class DDPG():
     def clone(self, index=None, wrap=True):
         """Returns cloned agent identical to self.
 
-        :param index: Index to keep track of agent for tournament selection and 
-        mutation, defaults to None
+        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
         if index is None:

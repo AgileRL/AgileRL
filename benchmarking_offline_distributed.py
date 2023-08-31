@@ -84,6 +84,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     printHyperparams(trained_pop)
     # plotPopulationScore(trained_pop)
+    
+    env.close()
 
 if __name__ == '__main__':
     INIT_HP = {

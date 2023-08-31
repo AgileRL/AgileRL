@@ -592,8 +592,7 @@ class EvolvableCNN(nn.Module):
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
         :type hidden_layer: int, optional
-        :param numb_new_channels: Number of channels to add to hidden layer, defaults 
-        to None
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         """
         if hidden_layer is None:

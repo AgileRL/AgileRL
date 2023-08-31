@@ -36,8 +36,7 @@ class EvolvableBERT(nn.Module):
     :type activation: str, optional
     :param layer_norm_eps: Epsilon value in layer normalization components, defaults to 1e-5
     :type layer_norm_eps: float, optional
-    :param batch_first: Input and output tensor order. If True, (batch, seq, feature). If False, (seq, batch, feature). 
-    Defaults to False
+    :param batch_first: Input/output tensor order. True:(batch, seq, feat.) False:(seq, batch, feat.). Defaults to False
     :type batch_first: bool, optional
     :param norm_first: Perform LayerNorm before other attention and feedforward operations, defaults to False
     :type norm_first: bool, optional
@@ -249,8 +248,7 @@ class EvolvableBERT(nn.Module):
         :type tgt_key_padding_mask: torch.Tensor, optional
         :param memory_key_padding_mask: Tensor mask for memory keys per batch, defaults to None
         :type memory_key_padding_mask: torch.Tensor, optional
-        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product 
-        attention, defaults to False
+        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
         encoder_output, encoder_hidden_states = self.encode(
@@ -273,8 +271,7 @@ class EvolvableBERT(nn.Module):
         :type src_mask: torch.Tensor, optional
         :param src_key_padding_mask: Tensor mask for src keys per batch, defaults to None
         :type src_key_padding_mask: torch.Tensor, optional
-        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product 
-        attention, defaults to False
+        :param is_causal: Applies a causal mask as mask and ignores attn_mask for computing scaled dot product attention, defaults to False
         :type is_causal: bool, optional
         """
         if self.end2end:

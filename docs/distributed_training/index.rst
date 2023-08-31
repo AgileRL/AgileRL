@@ -5,21 +5,24 @@ AgileRL can also be used for distributed training if you have multiple devices y
 <https://github.com/huggingface/accelerate>`_ library to implement this in an open manner, without hiding behind too many layers of abstraction. 
 This should make implementations simple, but also highly customisable, by continuing to expose the PyTorch training loop beneath it all.
 
-To launch distributed training scripts in bash, use <code>accelerate launch</code>. To customise the distributed training properties, specify the key <code>--config_file</code>. An example 
-config file has been provided at <code>configs/accelerate/accelerate.yaml</code>.
+To launch distributed training scripts in bash, use ``accelerate launch``. To customise the distributed training properties, specify the key ``--config_file``. An example 
+config file has been provided at ``configs/accelerate/accelerate.yaml``.
 
 Putting this all together, launching a distributed training script can be done as follows:
+
 .. code-block:: bash
-accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
+
+  accelerate_launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
 
 
 There are some key considerations to bear in mind when implementing a distributed training run:
-  * If you only want to execute something once, rather than repeating it for each process, e.g printing a statement, logging to W&B, then use <code>if accelerator.is_main_process:</code>.
+  * If you only want to execute something once, rather than repeating it for each process, e.g printing a statement, logging to W&B, then use ``if accelerator.is_main_process:``.
   * Training happens in parallel on each device, meaning that steps in a RL environment happen on each device too. In order to count the number of global training steps taken, you must multiply the number of steps you have taken on a singular device by the number of devices (assuming they are equal). If you want to use distributed training to train more quickly, and normally you would train for 100,000 steps on one device, you can now train for just 25,000 steps if using four devices.
 
 Example distributed training loop:
 
 .. code-block:: python
+
     from agilerl.utils.utils import makeVectEnvs, initialPopulation
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.components.replay_data import ReplayDataset
@@ -189,3 +192,5 @@ Example distributed training loop:
                 accelerator.wait_for_everyone()
                 for model in pop:
                     model.wrap_models()
+
+        env.close()

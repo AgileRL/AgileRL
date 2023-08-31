@@ -25,13 +25,11 @@ def train(env, env_name, algo, pop, memory, INIT_HP, MUT_P, swap_channels=False,
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param swap_channels: Swap image channels dimension from last to first 
-    [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 
-    500
+    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -271,13 +269,21 @@ def train(env, env_name, algo, pop, memory, INIT_HP, MUT_P, swap_channels=False,
             if (idx_epi + 1) % checkpoint == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                    if not accelerator.is_main_process:
+                    for model in pop:
+                        model.unwrap_models()
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
                             agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                        print('Saved checkpoint.')
+                    accelerator.wait_for_everyone()
+                    for model in pop:
+                        model.wrap_models()
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
                         agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
+                    print('Saved checkpoint.')
 
     if wb:
         if accelerator is not None:
