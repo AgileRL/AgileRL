@@ -2,11 +2,9 @@ import torch
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.utils.utils import makeVectEnvs, initialPopulation, printHyperparams
+from agilerl.utils.utils import initialPopulation, printHyperparams
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_multi_agent import train_multi_agent
-from pettingzoo.mpe import simple_v3, simple_speaker_listener_v4, simple_spread_v3
-from pettingzoo.atari import space_invaders_v2
 from accelerate import Accelerator
 import supersuit as ss
 import importlib
