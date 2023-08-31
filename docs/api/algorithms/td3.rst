@@ -99,7 +99,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create DQN agent  
+  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create TD3 agent  
 
 Parameters
 ------------

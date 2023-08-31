@@ -3,40 +3,46 @@ import os
 from tqdm import trange
 import wandb
 from datetime import datetime
-from agilerl.utils.minari_utils import MinariToAgileBuffer
 from torch.utils.data import DataLoader
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
 
-def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channels=False, 
-          n_episodes=2000, max_steps=500, evo_epochs=5, evo_loop=1, target=200., 
-          tournament=None, mutation=None, checkpoint=None, checkpoint_path=None, 
-          wb=False, accelerator=None, minari_dataset_id=None, remote=False):
-    """The general offline RL training function. Returns trained population of agents and their fitnesses.
+def train_multi_agent(env, env_name, algo, pop, memory, INIT_HP, MUT_P, net_config, swap_channels=False, n_episodes=2000, 
+          max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
+          eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
+          checkpoint_path=None, wb=False, accelerator=None):
+    """The general online RL training function. Returns trained population of agents 
+    and their fitnesses.
 
-    :param env: The environment to train in
+    :param env: The environment to train in. Can be vectorized.
     :type env: Gym-style environment
     :param env_name: Environment name
     :type env_name: str
-    :param dataset: Offline RL dataset
-    :type dataset: h5py-style dataset
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
     :type pop: List[object]
     :param memory: Experience Replay Buffer
     :type memory: object
-    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first 
+    [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
+    :param max_steps: Maximum number of steps in environment per episode, defaults to 
+    500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
     :param evo_loop: Number of evaluation episodes, defaults to 1
     :type evo_loop: int, optional
+    :param eps_start: Maximum exploration - initial epsilon value, defaults to 1.0
+    :type eps_start: float, optional
+    :param eps_end: Minimum exploration - final epsilon value, defaults to 0.1
+    :type eps_end: float, optional
+    :param eps_decay: Epsilon decay per episode, defaults to 0.995
+    :type eps_decay: float, optional
     :param target: Target score for early stopping, defaults to 200.
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
@@ -58,13 +64,14 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
             if accelerator.is_main_process:
                 wandb.init(
                     # set the wandb project where this run will be logged
-                    project="AgileRL",
-                    name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                    project="EvoMADDPGTesting",
+                    name="{}-MultiAgentEvoHPO-{}-{}".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
+                        "net_config": net_config,
                         "batch_size" : INIT_HP['BATCH_SIZE'],
                         "lr" : INIT_HP['LR'],
                         "gamma": INIT_HP['GAMMA'],
@@ -82,13 +89,15 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
         else:
             wandb.init(
                     # set the wandb project where this run will be logged
-                    project="AgileRL",
-                    name="{}-EvoHPO-{}-{}".format(env_name, algo,
+                    entity = "agilerl",
+                    project="MADDPG Benchmarking",
+                    name="{}-{}-{}-RandomActions".format(env_name, algo,
                                                 datetime.now().strftime("%m%d%Y%H%M%S")),
                     # track hyperparameters and run metadata
                     config={
                         "algo": "Evo HPO {}".format(algo),
                         "env": env_name,
+                        "net_config": net_config,
                         "batch_size" : INIT_HP['BATCH_SIZE'],
                         "lr" : INIT_HP['LR'],
                         "gamma": INIT_HP['GAMMA'],
@@ -102,7 +111,7 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
                         "act_mut" : MUT_P['ACT_MUT'],
                         "rl_hp_mut" : MUT_P['RL_HP_MUT']}
                 )
-
+            
     if accelerator is not None:
         accel_temp_models_path = 'models/{}'.format(env_name)
         if accelerator.is_main_process:
@@ -113,51 +122,6 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S"))
     
     if accelerator is not None:
-        if accelerator.is_main_process:
-            print('Filling replay buffer with dataset...')
-        accelerator.wait_for_everyone()
-    else:
-        print('Filling replay buffer with dataset...')
-        
-    if minari_dataset_id:
-        print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
-        
-        memory = MinariToAgileBuffer(minari_dataset_id, memory, accelerator,remote)
-        
-        print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
-    
-    else:
-        print('Loading buffer...')
-        dataset_length = dataset['rewards'].shape[0]
-        # for i in range(dataset_length):
-        #     state = dataset['observations'][i]
-        #     next_state = dataset['next_observations'][i]
-        #     if swap_channels:
-        #         state = np.moveaxis(state, [3], [1])
-        #         next_state = np.moveaxis(next_state, [3], [1])
-        #     action = dataset['actions'][i]
-        #     reward = dataset['rewards'][i]
-        #     done = bool(dataset['terminals'][i])
-        #     memory.save2memory(state, action, next_state, reward, done)
-        for i in range(dataset_length-1):
-            state = dataset['observations'][i]
-            next_state = dataset['observations'][i+1]
-            if swap_channels:
-                state = np.moveaxis(state, [3], [1])
-                next_state = np.moveaxis(next_state, [3], [1])
-            action = dataset['actions'][i]
-            reward = dataset['rewards'][i]
-            done = bool(dataset['terminals'][i])
-            memory.save2memory(state, action, reward, next_state, done)
-        if accelerator is not None:
-          if accelerator.is_main_process:
-              print('Loaded buffer.')
-          accelerator.wait_for_everyone()
-        else:
-          print('Loaded buffer.')
-    
-
-    if accelerator is not None:
         # Create dataloader from replay buffer
         replay_dataset = ReplayDataset(memory, pop[0].batch_size)
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
@@ -167,7 +131,9 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
                           dataloader=replay_dataloader)
     else:
         sampler = Sampler(distributed=False, memory=memory)
-    
+
+    epsilon = eps_start
+
     if accelerator is not None:
         print(f'\nDistributed training on {accelerator.device}...')
     else:
@@ -184,43 +150,99 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
+
 
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
-            accelerator.wait_for_everyone() 
-        for agent in pop:   # Loop through population
-            for idx_step in range(max_steps):
-                experiences = sampler.sample(agent.batch_size)   # Sample replay buffer
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
+            accelerator.wait_for_everyone()   
+        for agent in pop:   # Loop through population 
+            state = env.reset()[0]  # Reset environment at start of episode
+            agent_reward = {agent_id: 0 for agent_id in env.agents}
+            if swap_channels:
+                state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
 
-            agent.steps[-1] += max_steps
-            total_steps += max_steps
+            for _ in range(max_steps):
+                total_steps += 1
+                # Get next action from agent
+                action = agent.getAction(state, epsilon)
+                next_state, reward, done, truncation, _ = env.step(action)   # Act in environment
+                
+                # Save experience to replay buffer
+                if swap_channels:
+                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                    next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+
+                if any(truncation.values()) or any(done.values()):
+                    break
+                
+                memory.save2memory(state, action, reward, next_state, done)
+                
+                for agent_id, r in reward.items():
+                    agent_reward[agent_id] += r 
+
+                #Learn according to learning frequency
+                if (memory.counter % agent.learn_step == 0) and (len(
+                        memory) >= agent.batch_size):
+                    # Sample replay buffer
+                    experiences = sampler.sample(agent.batch_size)
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
+                
+                # Update the state 
+                if swap_channels:
+                    next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
+                state = next_state
+            
+            score = sum(agent_reward.values())
+            agent.scores.append(score)
+
+            agent.steps[-1] += total_steps
+
+        # Update epsilon for exploration
+        epsilon = max(eps_end, epsilon * eps_decay)
 
         # Now evolve if necessary
         if (idx_epi + 1) % evo_epochs == 0:
+            
             # Evaluate population
-            fitnesses = [agent.test(env,
-                                    swap_channels=swap_channels,
-                                    max_steps=max_steps,
-                                    loop=evo_loop) for agent in pop]
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=swap_channels,
+                    max_steps=max_steps,
+                    loop=evo_loop) for agent in pop]
             pop_fitnesses.append(fitnesses)
+
+            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
 
             if wb:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         wandb.log({"global_step": total_steps*accelerator.state.num_processes,
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/mean_score": np.mean(mean_scores),
+                                "eval/best_score": np.max([agent.scores[-1] for agent in pop]),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
                     accelerator.wait_for_everyone()
                 else:
                     wandb.log({"global_step": total_steps,
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/mean_score": np.mean(mean_scores),
+                                "eval/best_score": np.max([agent.scores[-1] for agent in pop]),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses)})
+                    
+                for idx, agent in enumerate(pop):
+                    wandb.log({
+                        f"learn_step_agent_{idx}": agent.learn_step,
+                        f"learning_rate_agent_{idx}" : agent.lr,
+                        f"batch_size_agent_{idx}" : agent.batch_size,
+                        f"indi_fitness_agent_{idx}": agent.fitness[-1]
+                    })
 
             # Update step counter
             for agent in pop:
@@ -233,7 +255,7 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
             perf_info = f'Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}'
-            pop_info = f'Agents: {agents}, Steps: {num_steps}, Mutations: {muts}'
+            pop_info = f'Agents: {agents}, Steps: {num_steps}, Mutations: {muts}' 
             pbar_string = perf_info + ', ' + pop_info
             pbar.set_postfix_str(pbar_string)
             pbar.update(0)
@@ -266,27 +288,20 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
                         model.wrap_models()
                 else:
                     elite, pop = tournament.select(pop)
-                    pop = mutation.mutation(pop)
+                    pop = mutation.mutation(pop) 
 
+        # Save model checkpoint
         if checkpoint is not None:
             if (idx_epi + 1) % checkpoint == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.unwrap_models()
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
+                    if not accelerator.is_main_process:
                         for i, agent in enumerate(pop):
                             agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
-                        print('Saved checkpoint.')
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.wrap_models()
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
                         agent.saveCheckpoint(f'{save_path}_{i}_{idx_epi+1}.pt')
-                    print('Saved checkpoint.')
 
     if wb:
         if accelerator is not None:
@@ -296,5 +311,5 @@ def train(env, env_name, dataset, algo, pop, memory, INIT_HP, MUT_P, swap_channe
             accelerator.wait_for_everyone()
         else:
             wandb.finish()
-            
+
     return pop, pop_fitnesses

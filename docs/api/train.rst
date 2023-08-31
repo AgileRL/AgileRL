@@ -8,3 +8,5 @@ If you are training on static, offline data, you can use our offline RL training
 .. autofunction:: agilerl.training.train.train
 
 .. autofunction:: agilerl.training.train_offline.train
+
+.. autofunction:: agilerl.training.train_multi_agent.train_multi_agent

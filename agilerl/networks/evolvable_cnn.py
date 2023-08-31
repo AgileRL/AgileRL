@@ -2,6 +2,7 @@ import copy
 import math
 from collections import OrderedDict
 from typing import List
+from agilerl.networks.custom_architecture import GumbelSoftmax
 
 import numpy as np
 import torch
@@ -114,6 +115,10 @@ class EvolvableCNN(nn.Module):
     :type mlp_activation: str, optional
     :param cnn_activation: CNN activation layer, defaults to 'relu'
     :type cnn_activation: str, optional
+    :param n_agents: Number of agents, defaults to None
+    :type n_agents: int, optional
+    :param multi: Boolean flag to indicate if this is a multi-agent problem, defaults to False
+    :type multi: bool, optional
     :param layer_norm: Normalization between layers, defaults to False
     :type layer_norm: bool, optional
     :param stored_values: Stored network weights, defaults to None
@@ -141,6 +146,8 @@ class EvolvableCNN(nn.Module):
             num_atoms=51,
             mlp_activation='relu',
             cnn_activation='relu',
+            n_agents=None,
+            multi=False,
             layer_norm=False,
             stored_values=None,
             rainbow=False,
@@ -166,12 +173,15 @@ class EvolvableCNN(nn.Module):
         self.normalize = normalize
         self.device = device
         self.accelerator = accelerator
+        self.multi = multi
+        self.n_agents = n_agents
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
         
         if stored_values is not None:
             self.inject_parameters(pvec=stored_values, without_layer_norm=False)
+
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -186,6 +196,7 @@ class EvolvableCNN(nn.Module):
             'elu': nn.ELU,
             'softsign': nn.Softsign,
             'sigmoid': nn.Sigmoid,
+            'gumbel_softmax' : GumbelSoftmax,
             'softplus': nn.Softplus,
             'lrelu': nn.LeakyReLU,
             'prelu': nn.PReLU}
@@ -218,34 +229,60 @@ class EvolvableCNN(nn.Module):
     def create_cnn(self, input_size, channel_size, kernal_size, stride_size, name):
         """Creates and returns convolutional neural network.
         """
-        net_dict = OrderedDict()
-        net_dict[f"{name}_conv_layer_0"] = nn.Conv2d(
-            in_channels=input_size,
-            out_channels=channel_size[0],
-            kernel_size=kernal_size[0],
-            stride=stride_size[0])
-        if self.layer_norm:
-            net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm2d(channel_size[0])
-        net_dict[f"{name}_activation_0"] = self.get_activation(
-            self.cnn_activation)
+        if self.multi:
+            net_dict = OrderedDict()
+            net_dict[f"{name}_conv_layer_0"] = nn.Conv3d(
+                in_channels=input_size,
+                out_channels=channel_size[0],
+                kernel_size=kernal_size[0],
+                stride=stride_size[0]            ## Maybe include the ability to have 3 dim kernel and stride
+            )
+            if self.layer_norm:
+                net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm3d(channel_size[0])
+            net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
 
-        if len(channel_size) > 1:
-            for l_no in range(1, len(channel_size)):
-                net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv2d(in_channels=channel_size[l_no - 1],
-                                                                       out_channels=channel_size[l_no],
-                                                                       kernel_size=kernal_size[l_no],
-                                                                       stride=stride_size[l_no])
-                if self.layer_norm:
-                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm2d(
-                        channel_size[l_no])
-                net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
-                    self.cnn_activation)
+            if len(channel_size) > 1:
+                for l_no in range(1, len(channel_size)):
+                    net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv3d(in_channels=channel_size[l_no - 1],
+                                                                           out_channels=channel_size[l_no],
+                                                                           kernel_size=kernal_size[l_no],
+                                                                           stride=stride_size[l_no])
+                    if self.layer_norm:
+                        net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm3d(
+                            channel_size[l_no])
+                    net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                        self.cnn_activation
+                    )
+        else:
+            net_dict = OrderedDict()
+            net_dict[f"{name}_conv_layer_0"] = nn.Conv2d(
+                in_channels=input_size,
+                out_channels=channel_size[0],
+                kernel_size=kernal_size[0],
+                stride=stride_size[0])
+            if self.layer_norm:
+                net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm2d(channel_size[0])
+            net_dict[f"{name}_activation_0"] = self.get_activation(
+                self.cnn_activation)
+
+            if len(channel_size) > 1:
+                for l_no in range(1, len(channel_size)):
+                    net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv2d(in_channels=channel_size[l_no - 1],
+                                                                            out_channels=channel_size[l_no],
+                                                                            kernel_size=kernal_size[l_no],
+                                                                            stride=stride_size[l_no])
+                    if self.layer_norm:
+                        net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm2d(
+                            channel_size[l_no])
+                    net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                        self.cnn_activation)
 
         return nn.Sequential(net_dict)
 
     def create_nets(self):
         """Creates and returns neural networks.
         """
+        
         feature_net = self.create_cnn(
             self.input_shape[0],
             self.channel_size,
@@ -253,8 +290,12 @@ class EvolvableCNN(nn.Module):
             self.stride_size,
             name="feature")
 
-        input_size = feature_net(autograd.Variable(
-            torch.zeros(1, *self.input_shape))).view(1, -1).size(1)
+        if self.multi:
+            input_size = feature_net(autograd.Variable(
+                    torch.zeros(1, *self.input_shape).unsqueeze(2))).view(1, -1).size(1)
+        else:
+            input_size = feature_net(autograd.Variable(
+                torch.zeros(1, *self.input_shape))).view(1, -1).size(1)
 
         if self.critic:
             input_size += self.num_actions
@@ -295,7 +336,7 @@ class EvolvableCNN(nn.Module):
             if self.accelerator is None:
                 self.feature_net, self.value_net, = feature_net.to(self.device), \
                     value_net.to(self.device)
-
+                
         return feature_net, value_net, advantage_net
 
     def reset_noise(self):
@@ -331,6 +372,7 @@ class EvolvableCNN(nn.Module):
         if self.critic:
             x = torch.cat([x, xc], dim=1)
 
+
         value = self.value_net(x)
 
         if self.rainbow:
@@ -346,7 +388,7 @@ class EvolvableCNN(nn.Module):
 
         else:
             x = F.softmax(value, dim=-1)
-
+        
         return x
 
     def get_model_dict(self):
@@ -449,9 +491,12 @@ class EvolvableCNN(nn.Module):
             "stride_size": self.stride_size,
             "hidden_size": self.hidden_size,
             "num_actions": self.num_actions,
+            "n_agents": self.n_agents,
             "num_atoms": self.num_atoms,
+            "normalize": self.normalize,
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
+            "multi":self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
             "device": self.device,
@@ -493,29 +538,54 @@ class EvolvableCNN(nn.Module):
     def add_cnn_layer(self):
         """Adds a hidden layer to Convolutional Neural Network.
         """
-        if len(self.channel_size) < 6:  # HARD LIMIT
-            self.channel_size += [self.channel_size[-1]]
-            self.kernal_size += [3]
+        if self.multi:
+            if len(self.channel_size) < 6:  # HARD LIMIT
+                self.channel_size += [self.channel_size[-1]]
+                self.kernal_size += [(1, 3, 3)]
+                stride_size_list = [[4], [4, 2], [4, 2, 1], [
+                        2, 2, 2, 1], [2, 1, 2, 1, 2], [2, 1, 2, 1, 2, 1]]
+                self.stride_size = stride_size_list[len(self.channel_size) - 1]
 
-            stride_size_list = [[4], [4, 2], [4, 2, 1], [
-                2, 2, 2, 1], [2, 1, 2, 1, 2], [2, 1, 2, 1, 2, 1]]
-            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+                self.recreate_nets()
+            else:
+                self.add_cnn_channel()
 
-            self.recreate_nets()
         else:
-            self.add_cnn_channel()
+            if len(self.channel_size) < 6:  # HARD LIMIT
+                self.channel_size += [self.channel_size[-1]]
+                self.kernal_size += [3]
+
+                stride_size_list = [[4], [4, 2], [4, 2, 1], [
+                    2, 2, 2, 1], [2, 1, 2, 1, 2], [2, 1, 2, 1, 2, 1]]
+                self.stride_size = stride_size_list[len(self.channel_size) - 1]
+
+                self.recreate_nets()
+            else:
+                self.add_cnn_channel()
 
     def change_cnn_kernal(self):
         """Randomly alters convolution kernal of random CNN layer.
         """
-        if len(self.channel_size) > 1:
-            hidden_layer = np.random.randint(
-                1, min(4, len(self.channel_size)), 1)[0]
-            self.kernal_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
 
-            self.recreate_nets()
+        if self.multi:
+            if len(self.channel_size) > 1:
+                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+                kernal_size_value = np.random.choice([3, 4, 5, 7])
+                if self.critic:
+                    self.kernal_size[hidden_layer] = tuple(min(kernal_size_value, self.n_agents - 1) if idx == 0 else kernal_size_value for idx in range(3))
+                else:
+                    self.kernal_size[hidden_layer] = tuple(1 if idx == 0 else kernal_size_value for idx in range(3))
+                self.recreate_nets()
+            else:
+                self.add_cnn_layer()
         else:
-            self.add_cnn_layer()
+            if len(self.channel_size) > 1:
+                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+                self.kernal_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
+
+                self.recreate_nets()
+            else:
+                self.add_cnn_layer()
 
     def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
         """Adds channel to hidden layer of Convolutional Neural Network.
