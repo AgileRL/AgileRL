@@ -224,7 +224,7 @@ class MADDPG():
         st, ac, re, ne, do = experiences
         return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
-    def learn(self, experiences, policy_noise=0.2):
+    def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions, rewards, next_states, 

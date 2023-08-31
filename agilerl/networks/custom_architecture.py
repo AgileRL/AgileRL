@@ -11,6 +11,10 @@ class GumbelSoftmax(nn.Module):
         
         :param logits: Tensor containing unnormalized log probabilities for each class.
         :type logits: torch.Tensor
+        :param tau: Tau, defaults to 1.0
+        :type tau: float, optional
+        :param eps: Epsilon, defaults to 1e-20
+        :type eps: float, optional
         """
         epsilon = torch.rand_like(logits)
         logits += -torch.log(-torch.log(epsilon + eps) + eps)

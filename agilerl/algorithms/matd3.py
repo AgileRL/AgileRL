@@ -30,7 +30,7 @@ class MATD3():
     :type discrete_actions: bool, optional
     :param expl_noise: Standard deviation for Gaussian exploration noise, defaults to 0.1
     :type expl_noise: float, optional
-    :param policy_freq: Policy update frequency
+    :param policy_freq: Policy update frequency, defaults to 2
     :type policy_freq: int, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
@@ -256,7 +256,7 @@ class MATD3():
         st, ac, re, ne, do = experiences
         return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
-    def learn(self, experiences, policy_noise=0.2):
+    def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions, rewards, next_states, 
@@ -634,7 +634,7 @@ class MATD3():
         actor_optimizer_list = []
         critic_1_optimizer_list = []
         critic_2_optimizer_list = []
-        
+
         for idx, (actor, actor_target, critic_1, critic_target_1, critic_2, critic_target_2, 
                   actor_optimizer, critic_1_optimizer, critic_2_optimizer) in enumerate(zip(self.actors,
                                                                                             self.actor_targets,

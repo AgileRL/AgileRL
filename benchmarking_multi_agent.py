@@ -10,7 +10,7 @@ import importlib
 import yaml
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('============ AgileRL ============')
 
@@ -137,4 +137,4 @@ if __name__ == '__main__':
     MUTATION_PARAMS = config['MUTATION_PARAMS']
     NET_CONFIG = config['NET_CONFIG']
     DISTRIBUTED_TRAINING = config['DISTRIBUTED_TRAINING']
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING)

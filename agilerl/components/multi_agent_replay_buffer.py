@@ -10,8 +10,7 @@ class MultiAgentReplayBuffer:
 
     :param memory_size: Maximum length of the replay buffer
     :type memory_size: int
-    :param field_names: Field names for experience named tuple, 
-    e.g. ['state', 'action', 'reward']
+    :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
     :param agent_ids: Names of all agents that will act in the environment
     :type agent_ids: List[str]
