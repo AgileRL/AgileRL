@@ -196,7 +196,6 @@ class MADDPG():
                     action = np.random.randint(0, self.action_dims[idx])
                 else:
                     action = np.random.rand(state.size()[0], self.action_dims[idx]).astype('float32').squeeze()
-                    #action = env.action_space.sample()
             else:
                 actor.eval()
                 if self.accelerator is not None:
@@ -303,7 +302,7 @@ class MADDPG():
                 critic_loss.backward()
             critic_optimizer.step()
 
-            # update actor and targets every policy_freq episodes
+            # update actor and targets 
             if self.net_config['arch'] == 'mlp':
                 if self.accelerator is not None:
                     with actor.no_sync():
@@ -545,6 +544,7 @@ class MADDPG():
         critic_target_list = []
         actor_optimizer_list = []
         critic_optimizer_list = []
+        
         for idx, (actor, actor_target, critic, critic_target, actor_optimizer, critic_optimizer) in enumerate(zip(self.actors,
                                                                                                                 self.actor_targets,
                                                                                                                 self.critics,

@@ -24,6 +24,18 @@ class Mutations():
     :type rl_hp_selection: List[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
+    :param min_lr: Minimum learning rate in the hyperparameter search space
+    :type min_lr: float, optional
+    :param max_lr: Maximum learning rate in the hyperparameter search space
+    :type max_lr: float, optional
+    :param min_learn_step: Minimum learn step in the hyperparameter search space
+    :type min_learn_step: int, optional
+    :param max_learn_step: Maximum learn step in the hyperparameter search space
+    :type max_learn_step: int, optional
+    :param min_batch_size: Minimum batch size in the hyperparameter search space
+    :type min_batch_size: int, optional
+    :param max_batch_size: Maximum batch size in the hyperparameter search space
+    :type max_batch_size: int, optional
     :param agents_id: List of agent ID's for multi-agent algorithms
     :type agents_id: List[str]
     :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
@@ -131,7 +143,7 @@ class Mutations():
         mutation_proba = np.array(mutation_proba) / \
             np.sum(mutation_proba)  # Normalize probs
 
-        # Raandomly choose mutation for each agent in population from options with
+        # Randomly choose mutation for each agent in population from options with
         # relative probabilities
         mutation_choice = self.rng.choice(
             mutation_options, len(population), p=mutation_proba)

@@ -135,9 +135,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == '__main__':
     with open('configs/training/maddpg.yaml', 'r') as file:
-        maddpg_config = yaml.safe_load(file)
-    INIT_HP = maddpg_config['INIT_HP']
-    MUTATION_PARAMS = maddpg_config['MUTATION_PARAMS']
-    NET_CONFIG = maddpg_config['NET_CONFIG']
-    DISTRIBUTED_TRAINING = maddpg_config['DISTRIBUTED_TRAINING']
+        config = yaml.safe_load(file)
+    INIT_HP = config['INIT_HP']
+    MUTATION_PARAMS = config['MUTATION_PARAMS']
+    NET_CONFIG = config['NET_CONFIG']
+    DISTRIBUTED_TRAINING = config['DISTRIBUTED_TRAINING']
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

@@ -228,7 +228,6 @@ class MATD3():
                     action = np.random.randint(0, self.action_dims[idx])
                 else:
                     action = np.random.rand(state.size()[0], self.action_dims[idx]).astype('float32').squeeze()
-                    #action = env.action_space.sample()
             else:
                 actor.eval()
                 if self.accelerator is not None:
@@ -635,6 +634,7 @@ class MATD3():
         actor_optimizer_list = []
         critic_1_optimizer_list = []
         critic_2_optimizer_list = []
+        
         for idx, (actor, actor_target, critic_1, critic_target_1, critic_2, critic_target_2, 
                   actor_optimizer, critic_1_optimizer, critic_2_optimizer) in enumerate(zip(self.actors,
                                                                                             self.actor_targets,
