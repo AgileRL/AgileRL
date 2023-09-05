@@ -12,7 +12,7 @@ def train_multi_agent(env, env_name, algo, pop, memory, INIT_HP, MUT_P, net_conf
           max_steps=25, evo_epochs=5, evo_loop=5, eps_start=1.0, eps_end=0.1, 
           eps_decay=0.995, target=200., tournament=None, mutation=None, checkpoint=None, 
           checkpoint_path=None, wb=False, accelerator=None):
-    """The general online RL training function. Returns trained population of agents 
+    """The general online multi-agent RL training function. Returns trained population of agents 
     and their fitnesses.
 
     :param env: The environment to train in. Can be vectorized.

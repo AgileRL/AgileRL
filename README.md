@@ -50,7 +50,7 @@ In the charts below, a single AgileRL run, which automatically tunes hyperparame
 </p>
 <p align="center">AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</p>
 
-AgileRL also supports multi-agent reinforcement learning using the Petting Zoo parallel API. The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments. 
+AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments. 
 
 <p align="center">
   <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png>
@@ -960,7 +960,7 @@ The easiest training loop implementation is to use our ```training.train_multi_a
                                                 MUT_P=MUTATION_PARAMS,                   # MUTATION_PARAMS dictionary
                                                 net_config=NET_CONFIG,                   # Network configuration
                                                 swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                                n_episodes=1000,                         # Max number of training episodes
+                                                n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
                                                 evo_epochs=20,                           # Evolution frequency
                                                 evo_loop=1,                              # Number of evaluation episodes per agent
                                                 max_steps=900,                           # Max steps to take in the enviroment
