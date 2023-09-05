@@ -32,8 +32,7 @@ if __name__ == "__main__":
         'TAU': 0.01,                    # For soft update of target parameters
     }
 
-    # env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = simple_speaker_listener_v4.parallel_env()
+    env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
     if INIT_HP['CHANNELS_LAST']:
         # Environment processing for image based observations
         env = ss.frame_skip_v0(env, 4)
@@ -73,7 +72,7 @@ if __name__ == "__main__":
                             one_hot,
                             NET_CONFIG,
                             INIT_HP,
-                            population_size=6,
+                            population_size=INIT_HP['POPULATION_SIZE'],
                             device=device)
     
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -121,12 +120,16 @@ if __name__ == "__main__":
 
             for _ in range(max_steps):
                 action = agent.getAction(state, epsilon) # Get next action from agent
-                next_state, reward, done, _, _ = env.step(action) # Act in environment
+                next_state, reward, done, truncation, _ = env.step(action) # Act in environment
 
                 # Save experiences to replay buffer
                 if INIT_HP['CHANNELS_LAST']:
                         state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                         next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+
+                if any(truncation.values()) or any(done.values()):
+                    break
+
                 memory.save2memory(state, action, reward, next_state, done)
 
                 for agent_id, r in reward.items():
@@ -147,25 +150,25 @@ if __name__ == "__main__":
             score = sum(agent_reward.values())
             agent.scores.append(score)
 
-            # Update epsilon for exploration
-            epsilon = max(eps_end, epsilon * eps_decay)
+        # Update epsilon for exploration
+        epsilon = max(eps_end, epsilon * eps_decay)
 
-            # Now evolve population if necessary
-            if (idx_epi + 1) % evo_epochs == 0:
+        # Now evolve population if necessary
+        if (idx_epi + 1) % evo_epochs == 0:
 
-                # Evaluate population
-                fitnesses = [
-                    agent.test(
-                        env,
-                        swap_channels=False,
-                        max_steps=max_steps,
-                        loop=evo_loop) for agent in pop]
+            # Evaluate population
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=INIT_HP['CHANNELS_LAST'],
+                    max_steps=max_steps,
+                    loop=evo_loop) for agent in pop]
 
-                print(f'Episode {idx_epi+1}/{max_episodes}')
-                print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-                print(
-                    f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            print(f'Episode {idx_epi+1}/{max_episodes}')
+            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+            print(
+                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
 
-                # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
-                pop = mutations.mutation(pop)
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)

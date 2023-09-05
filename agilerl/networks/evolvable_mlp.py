@@ -1,6 +1,7 @@
 import copy
 from collections import OrderedDict
 from typing import List
+from agilerl.networks.custom_architecture import GumbelSoftmax
 
 import numpy as np
 import torch
@@ -75,6 +76,7 @@ class EvolvableMLP(nn.Module):
             'elu': nn.ELU,
             'softsign': nn.Softsign,
             'sigmoid': nn.Sigmoid,
+            'gumbel_softmax': GumbelSoftmax,
             'softplus': nn.Softplus,
             'softmax': nn.Softmax,
             'lrelu': nn.LeakyReLU,
