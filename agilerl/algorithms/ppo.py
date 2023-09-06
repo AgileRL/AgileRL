@@ -190,7 +190,6 @@ class PPO():
         :param grad: Calculate gradients on actions, defaults to False
         :type grad: bool, optional
         """
-        ns = copy.deepcopy(state)
         state = self.prepare_state(state)  
 
         if not grad:
