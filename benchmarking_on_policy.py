@@ -54,8 +54,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         INIT_HP,
         INIT_HP['POP_SIZE'],
         device=device)
-    
-    tournament = mutations = None
 
     trained_pop, pop_fitnesses = train(env,
                                        INIT_HP['ENV_NAME'],
