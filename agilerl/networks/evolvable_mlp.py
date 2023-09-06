@@ -24,6 +24,8 @@ class EvolvableMLP(nn.Module):
     :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
+    :param init_layers: Initialise network layers, defaults to True
+    :type init_layers: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -41,6 +43,7 @@ class EvolvableMLP(nn.Module):
             output_activation=None,
             layer_norm=False,
             output_vanish=True,
+            init_layers=True,
             stored_values=None,
             device='cpu',
             accelerator=None):
@@ -52,6 +55,7 @@ class EvolvableMLP(nn.Module):
         self.output_activation = output_activation
         self.layer_norm = layer_norm
         self.output_vanish = output_vanish
+        self.init_layers = init_layers
         self.hidden_size = hidden_size
         self.device = device
         self.accelerator = accelerator
@@ -82,6 +86,11 @@ class EvolvableMLP(nn.Module):
             'gelu': nn.GELU}
 
         return activation_functions[activation_names](dim=1) if activation_names == 'softmax' else activation_functions[activation_names]()
+    
+    def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
+        torch.nn.init.orthogonal_(layer.weight, std)
+        torch.nn.init.constant_(layer.bias, bias_const)
+        return layer
 
     def create_net(self):
         """Creates and returns neural network.
@@ -90,6 +99,8 @@ class EvolvableMLP(nn.Module):
 
         net_dict["linear_layer_0"] = nn.Linear(
             self.num_inputs, self.hidden_size[0])
+        if self.init_layers:
+            net_dict["linear_layer_0"] = self.layer_init(net_dict["linear_layer_0"])
         if self.layer_norm:
             net_dict["layer_norm_0"] = nn.LayerNorm(self.hidden_size[0])
         net_dict["activation_0"] = self.get_activation(self.activation)
@@ -98,6 +109,8 @@ class EvolvableMLP(nn.Module):
             for l_no in range(1, len(self.hidden_size)):
                 net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
                     self.hidden_size[l_no - 1], self.hidden_size[l_no])
+                if self.init_layers:
+                    net_dict[f"linear_layer_{str(l_no)}"] = self.layer_init(net_dict[f"linear_layer_{str(l_no)}"])
                 if self.layer_norm:
                     net_dict[f"layer_norm_{str(l_no)}"] = nn.LayerNorm(
                         self.hidden_size[l_no])
@@ -105,6 +118,8 @@ class EvolvableMLP(nn.Module):
                     self.activation)
 
         output_layer = nn.Linear(self.hidden_size[-1], self.num_outputs)
+        if self.init_layers:
+            output_layer = self.layer_init(output_layer) 
 
         if self.output_vanish:
             output_layer.weight.data.mul_(0.1)
