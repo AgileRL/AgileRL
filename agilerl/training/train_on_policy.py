@@ -106,10 +106,10 @@ def train(env, env_name, algo, pop, INIT_HP, MUT_P, swap_channels=False, n_episo
 
     bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
     if accelerator is not None:
-        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True, 
+        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True, dynamic_ncols=True, 
                       disable=not accelerator.is_local_main_process)
     else:
-        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
+        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True, dynamic_ncols=True)
 
     pop_fitnesses = []
     total_steps = 0
