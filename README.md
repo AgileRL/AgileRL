@@ -907,7 +907,7 @@ Use ```utils.utils.initialPopulation``` to create a list of agents - our populat
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 
 ```python
-    from agilerl.comp.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.hpo.mutation import Mutations
 
