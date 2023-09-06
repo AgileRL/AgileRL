@@ -182,31 +182,33 @@ class Mutations():
                         ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
                     setattr(individual, critics_list['target'], ind_targets)
             else:
+                
+                if 'target' in self.algo['actor'].keys():
 
-                offspring_actor = getattr(individual, self.algo['actor']['eval'])
+                    offspring_actor = getattr(individual, self.algo['actor']['eval'])
 
-                # Reinitialise target network with frozen weights due to potential
-                # mutation in architecture of value network
-                ind_target = type(offspring_actor)(**offspring_actor.init_dict)
-                ind_target.load_state_dict(offspring_actor.state_dict())
-                if self.accelerator is not None:
-                    setattr(individual, self.algo['actor']['target'], ind_target)
-                else:
-                    setattr(individual, self.algo['actor']['target'], 
-                            ind_target.to(self.device))
-
-                # If algorithm has critics, reinitialize their respective target networks
-                # too
-                for critic in self.algo['critics']:
-                    offspring_critic = getattr(individual, critic['eval'])
-                    ind_target = type(offspring_critic)(
-                        **offspring_critic.init_dict)
-                    ind_target.load_state_dict(offspring_critic.state_dict())
+                    # Reinitialise target network with frozen weights due to potential
+                    # mutation in architecture of value network
+                    ind_target = type(offspring_actor)(**offspring_actor.init_dict)
+                    ind_target.load_state_dict(offspring_actor.state_dict())
                     if self.accelerator is not None:
-                        setattr(individual, critic['target'], ind_target)
+                        setattr(individual, self.algo['actor']['target'], ind_target)
                     else:
-                        setattr(individual, critic['target'],
+                        setattr(individual, self.algo['actor']['target'], 
                                 ind_target.to(self.device))
+
+                    # If algorithm has critics, reinitialize their respective target networks
+                    # too
+                    for critic in self.algo['critics']:
+                        offspring_critic = getattr(individual, critic['eval'])
+                        ind_target = type(offspring_critic)(
+                            **offspring_critic.init_dict)
+                        ind_target.load_state_dict(offspring_critic.state_dict())
+                        if self.accelerator is not None:
+                            setattr(individual, critic['target'], ind_target)
+                        else:
+                            setattr(individual, critic['target'],
+                                    ind_target.to(self.device))
 
             mutated_population.append(individual)
 
@@ -251,13 +253,14 @@ class Mutations():
                         self.algo['actor']['optimizer'].replace('_type', ''), 
                         type(actor_opt)(net_params, lr=individual.lr))
             
-            # If algorithm has critics, reinitialise their optimizers too
-            for critic in self.algo['critics']:
-                critic_opt = getattr(individual, critic['optimizer'])
-                net_params = getattr(individual, critic['eval']).parameters()
-                setattr(individual, 
-                            critic['optimizer'].replace('_type', ''), 
-                            type(critic_opt)(net_params, lr=individual.lr))
+            if individual.algo not in ['PPO']:
+                # If algorithm has critics, reinitialise their optimizers too
+                for critic in self.algo['critics']:
+                    critic_opt = getattr(individual, critic['optimizer'])
+                    net_params = getattr(individual, critic['eval']).parameters()
+                    setattr(individual, 
+                                critic['optimizer'].replace('_type', ''), 
+                                type(critic_opt)(net_params, lr=individual.lr))
                 
 
     def rl_hyperparam_mutation(self, individual):
@@ -293,6 +296,9 @@ class Mutations():
             individual.mut = 'lr'
 
         elif mutate_param == 'learn_step':
+            if individual.algo in ['PPO']: # Needs to stay constant for on-policy
+                individual.mut = 'None'
+                return individual
             if random_num > 0.5:
                 individual.learn_step = min(
                     self.max_learn_step, max(self.min_learn_step, int(individual.learn_step * 1.5)))
@@ -308,12 +314,8 @@ class Mutations():
 
         :param individual: Individual agent from population
         :type individual: object
-        """
-        if individual.algo == 'DDPG':   # Needs to stay tanh for DDPG continuous actions
-            individual.mut = 'None'
-            return individual
-        
-        if individual.algo == 'TD3':   # Needs to stay tanh for TD3 continuous actions
+        """        
+        if individual.algo in ['PPO', 'DDPG', 'TD3']: # Needs to stay constant
             individual.mut = 'None'
             return individual
         
@@ -749,6 +751,16 @@ class Mutations():
                     'eval': 'critic',
                     'target': 'critic_target',
                     'optimizer': 'critic_optimizer_type'
+                }]
+            }
+        elif algo == 'PPO':
+            nets = {
+                'actor': {
+                    'eval': 'actor',
+                    'optimizer': 'optimizer_type'
+                },
+                'critics': [{
+                    'eval': 'critic'
                 }]
             }
         elif algo == 'CQN':
