@@ -511,10 +511,10 @@ class Mutations():
                     rand_numb = self.rng.uniform(0, 1)
                     if rand_numb < 0.2:
                         for offspring_actor in offspring_actors:
-                            offspring_actor.change_cnn_kernal()                            
+                            offspring_actor.change_cnn_kernel()                            
                         for offspring_critics in offspring_critics_list:
                             for offspring_critic in offspring_critics:
-                                offspring_critic.change_cnn_kernal()
+                                offspring_critic.change_cnn_kernel()
 
                     elif 0.2 <= rand_numb < 0.65:
                         for offspring_actor in offspring_actors:
@@ -646,9 +646,9 @@ class Mutations():
                 else:
                     rand_numb = self.rng.uniform(0, 1)
                     if rand_numb < 0.2:
-                        offspring_actor.change_cnn_kernal()
+                        offspring_actor.change_cnn_kernel()
                         for offspring_critic in offspring_critics:
-                            offspring_critic.change_cnn_kernal()
+                            offspring_critic.change_cnn_kernel()
                     elif 0.2 <= rand_numb < 0.65:
                         offspring_actor.add_cnn_channel()
                         for offspring_critic in offspring_critics:
