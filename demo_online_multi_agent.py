@@ -3,6 +3,7 @@ import supersuit as ss
 import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
 from tqdm import trange
+
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -33,7 +34,6 @@ if __name__ == "__main__":
     # env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
     env = simple_speaker_listener_v4.parallel_env()
     if INIT_HP["CHANNELS_LAST"]:
-
         # Environment processing for image based observations
         env = ss.frame_skip_v0(env, 4)
         env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
@@ -171,22 +171,20 @@ if __name__ == "__main__":
         # Update epsilon for exploration
         epsilon = max(eps_end, epsilon * eps_decay)
 
-            # Now evolve population if necessary
-            if (idx_epi + 1) % evo_epochs == 0:
-                # Evaluate population
-                fitnesses = [
-                    agent.test(
-                        env, swap_channels=False, max_steps=max_steps, loop=evo_loop
-                    )
-                    for agent in pop
-                ]
+        # Now evolve population if necessary
+        if (idx_epi + 1) % evo_epochs == 0:
+            # Evaluate population
+            fitnesses = [
+                agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop)
+                for agent in pop
+            ]
 
-                print(f"Episode {idx_epi+1}/{max_episodes}")
-                print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-                print(
-                    f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
-                )
+            print(f"Episode {idx_epi+1}/{max_episodes}")
+            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+            print(
+                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
+            )
 
-                # Tournament selection and population mutation
-                elite, pop = tournament.select(pop)
-                pop = mutations.mutation(pop)
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
