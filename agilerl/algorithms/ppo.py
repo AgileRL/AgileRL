@@ -214,7 +214,7 @@ class PPO():
         elif self.accelerator is None:
             action = action.to(self.device)
             
-        actiaon_logprob = dist.log_prob(action)
+        action_logprob = dist.log_prob(action)
         dist_entropy = dist.entropy()
         
         self.critic.eval()
