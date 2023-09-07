@@ -34,6 +34,7 @@ if __name__ == "__main__":
     # env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
     env = simple_speaker_listener_v4.parallel_env()
     if INIT_HP["CHANNELS_LAST"]:
+
         # Environment processing for image based observations
         env = ss.frame_skip_v0(env, 4)
         env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
@@ -56,6 +57,7 @@ if __name__ == "__main__":
         INIT_HP["MIN_ACTION"] = None
     except Exception:
         action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+
         INIT_HP["DISCRETE_ACTIONS"] = False
         INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
         INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
@@ -78,7 +80,6 @@ if __name__ == "__main__":
         population_size=6,
         device=device,
     )
-
     field_names = ["state", "action", "reward", "next_state", "done"]
 
     memory = MultiAgentReplayBuffer(
@@ -141,6 +142,7 @@ if __name__ == "__main__":
                         agent_id: np.moveaxis(ns, [2], [0])
                         for agent_id, ns in next_state.items()
                     }
+
                 memory.save2memory(state, action, reward, next_state, done)
 
                 for agent_id, r in reward.items():
@@ -167,8 +169,8 @@ if __name__ == "__main__":
             score = sum(agent_reward.values())
             agent.scores.append(score)
 
-            # Update epsilon for exploration
-            epsilon = max(eps_end, epsilon * eps_decay)
+        # Update epsilon for exploration
+        epsilon = max(eps_end, epsilon * eps_decay)
 
             # Now evolve population if necessary
             if (idx_epi + 1) % evo_epochs == 0:
