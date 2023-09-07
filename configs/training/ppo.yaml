@@ -8,7 +8,7 @@ INIT_HP:
   BATCH_SIZE: 128              # Batch size
   LR: 0.001                   # Learning rate
   EPISODES: 1000               # Max no. episodes
-  TARGET_SCORE: 490.           # Early training stop at avg score of last 100 episodes
+  TARGET_SCORE: 190.           # Early training stop at avg score of last 100 episodes
   GAMMA: 0.99                  # Discount factor
   GAE_LAMBDA: 0.95             # Lambda for general advantage estimation
   ACTION_STD_INIT: 0.6         # Initial action standard deviation
