@@ -1,7 +1,7 @@
 Twin Delayed Deep Deterministic Policy Gradient (TD3)
 =========================================
 
-TD3 is an extension of DDPG that addresses overestimation bias by introducing an extra 
+TD3 is an extension of DDPG that addresses overestimation bias by introducing an extra
 critic network, delayed actor network updates, and action noise regularization.
 
 * TD3 paper: https://arxiv.org/abs/1802.09477
@@ -13,7 +13,7 @@ Can I use it?
    :widths: 20 20 20
    :header-rows: 1
 
-   * - 
+   * -
      - Action
      - Observation
    * - Discrete
@@ -99,7 +99,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create TD3 agent  
+  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create TD3 agent
 
 Parameters
 ------------

@@ -2,7 +2,7 @@ Multi-Agent Training
 =====
 
 In multi-agent reinforcement learning, multiple agents are trained to act in the same environment in both
-co-operative and competitive scenarios. With AgileRL, agents can be trained to act in multi-agent environments 
+co-operative and competitive scenarios. With AgileRL, agents can be trained to act in multi-agent environments
 using our implementation of the MADDPG or MATD3 algorithms alongside our Evolutionary Hyperparameter
 Optimisation algorithm.
 
@@ -10,8 +10,8 @@ Optimisation algorithm.
 Population Creation
 ------------
 
-To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to 
-determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters 
+To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
+determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
 
 .. code-block:: python
@@ -35,7 +35,7 @@ are more likely to remain present in the population. The sequence of evolution (
         'LEARN_STEP': 5,                # Learning frequency
         'TAU': 0.01,                    # For soft update of target parameters
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        'CHANNELS_LAST': False          
+        'CHANNELS_LAST': False
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -45,10 +45,10 @@ are more likely to remain present in the population. The sequence of evolution (
     # Configure the multi-agent algo input arguments
     try:
         state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True 
+        one_hot = True
     except Exception:
         state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False 
+        one_hot = False
     try:
         action_dim = [env.action_space(agent).n for agent in env.agents]
         INIT_HP['DISCRETE_ACTIONS'] = True
@@ -62,7 +62,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim]
-    
+
     INIT_HP['N_AGENTS'] = env.num_agents
     INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
 
@@ -80,9 +80,9 @@ are more likely to remain present in the population. The sequence of evolution (
 Experience Replay
 ------------
 
-In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed 
-by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve 
-a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself. 
+In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
+by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
+a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
 multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save2memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
@@ -103,11 +103,11 @@ multi-agent environments. During training it can be added to using the ``MultiAg
 Tournament Selection
 ------------
 
-Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population 
-is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation 
+Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
+is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
 fitness is preserved. This is repeated until the population for the next generation is full.
 
-The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation 
+The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation
 of agents.
 
 .. code-block:: python
@@ -124,8 +124,8 @@ of agents.
 Mutation
 ------------
 
-Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters 
-prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the 
+Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
+prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
 population.
 
 The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
@@ -163,7 +163,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 Training Loop
 ------------
 
-Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment (e.g. pettingzoo 
+Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment (e.g. pettingzoo
 for multi-agent environments) it is easiest to use our training function, which returns a population of trained agents and logged training metrics.
 
 .. code-block:: python
@@ -184,7 +184,7 @@ for multi-agent environments) it is easiest to use our training function, which 
                                                 n_episodes=1000,                         # Max number of training episodes
                                                 evo_epochs=20,                           # Evolution frequency
                                                 evo_loop=1,                              # Number of evaluation episodes per agent
-                                                max_steps=900,                           # Max steps to take in the enviroment
+                                                max_steps=900,                           # Max steps to take in the environment
                                                 target=200.,                             # Target score for early stopping
                                                 tournament=tournament,                   # Tournament selection object
                                                 mutation=mutations,                      # Mutations object
@@ -228,10 +228,10 @@ Alternatively, use a custom training loop. Combining all of the above:
     # Configure the multi-agent algo input arguments
     try:
         state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True 
+        one_hot = True
     except Exception:
         state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False 
+        one_hot = False
     try:
         action_dim = [env.action_space(agent).n for agent in env.agents]
         INIT_HP['DISCRETE_ACTIONS'] = True
@@ -245,7 +245,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim]
-    
+
     INIT_HP['N_AGENTS'] = env.num_agents
     INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
 
@@ -298,8 +298,8 @@ Alternatively, use a custom training loop. Combining all of the above:
     # TRAINING LOOP
     for idx_epi in range(max_episodes):
         if accelerator is not None:
-            accelerator.wait_for_everyone()   
-        for agent in pop:   # Loop through population 
+            accelerator.wait_for_everyone()
+        for agent in pop:   # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
 
@@ -318,9 +318,9 @@ Alternatively, use a custom training loop. Combining all of the above:
                 else:
                     memory.save2memory(
                         state, action, reward, next_state, done)
-                
+
                 for agent_id, r in reward.items():
-                    agent_reward[agent_id] += r 
+                    agent_reward[agent_id] += r
 
                 #Learn according to learning frequency
                 if (memory.counter % agent.learn_step == 0) and (len(
@@ -331,7 +331,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                     agent.learn(experiences)
 
                 state = next_state
-            
+
             score = sum(agent_reward.values())
             agent.scores.append(score)
 
@@ -342,7 +342,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         # Now evolve population if necessary
         if (idx_epi+1) % evo_epochs == 0:
-            
+
             # Evaluate population
             fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
 
@@ -357,4 +357,3 @@ Alternatively, use a custom training loop. Combining all of the above:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
-

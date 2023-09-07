@@ -1,10 +1,10 @@
 Online Training
 =====
 
-In online reinforcement learning, an agent is able to gather data by directly interacting with its environment. It can then use this experience to learn from and 
+In online reinforcement learning, an agent is able to gather data by directly interacting with its environment. It can then use this experience to learn from and
 update its policy. To enable our agent to interact in this way, the agent needs to act either in the real world, or in a simulation.
 
-AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our 
+AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our
 Evolutionary Hyperparameter Optimization algorithm.
 
 .. _evoHPO:
@@ -12,14 +12,14 @@ Evolutionary Hyperparameter Optimization algorithm.
 Evolutionary Hyperparameter Optimization
 ------------
 
-Traditionally, hyperparameter optimization (HPO) for reinforcement learning (RL) is particularly difficult when compared to other types of machine learning.  
+Traditionally, hyperparameter optimization (HPO) for reinforcement learning (RL) is particularly difficult when compared to other types of machine learning.
 This is for several reasons, including the relative sample inefficiency of RL and its sensitivity to hyperparameters.
 
-AgileRL is initially focused on improving HPO for RL in order to allow faster development with robust training. 
-Evolutionary algorithms have been shown to allow faster, automatic convergence to optimal hyperparameters than other HPO methods by taking advantage of 
+AgileRL is initially focused on improving HPO for RL in order to allow faster development with robust training.
+Evolutionary algorithms have been shown to allow faster, automatic convergence to optimal hyperparameters than other HPO methods by taking advantage of
 shared memory between a population of agents acting in identical environments.
 
-At regular intervals, after learning from shared experiences, a population of agents can be evaluated in an environment. Through tournament selection, the 
+At regular intervals, after learning from shared experiences, a population of agents can be evaluated in an environment. Through tournament selection, the
 best agents are selected to survive until the next generation, and their offspring are mutated to further explore the hyperparameter space.
 Eventually, the optimal hyperparameters for learning in a given environment can be reached in significantly less steps than are required using other HPO methods.
 
@@ -28,8 +28,8 @@ Eventually, the optimal hyperparameters for learning in a given environment can 
 Population Creation
 ------------
 
-To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to 
-determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters 
+To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
+determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
 
 .. code-block:: python
@@ -82,12 +82,12 @@ are more likely to remain present in the population. The sequence of evolution (
 Experience Replay
 ------------
 
-In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed 
-by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve 
-a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself. 
+In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
+by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
+a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
-The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``. 
-During training it can be added to using the ``ReplayBuffer.save2memory()`` function, or ``ReplayBuffer.save2memoryVectEnvs()`` for vectorized environments (recommended). 
+The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
+During training it can be added to using the ``ReplayBuffer.save2memory()`` function, or ``ReplayBuffer.save2memoryVectEnvs()`` for vectorized environments (recommended).
 To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 
 .. code-block:: python
@@ -107,11 +107,11 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 Tournament Selection
 ------------
 
-Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population 
-is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation 
+Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
+is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
 fitness is preserved. This is repeated until the population for the next generation is full.
 
-The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation 
+The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation
 of agents.
 
 .. code-block:: python
@@ -129,8 +129,8 @@ of agents.
 Mutation
 ------------
 
-Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters 
-prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the 
+Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
+prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
 population.
 
 The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
@@ -168,7 +168,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 Training Loop
 ------------
 
-Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is 
+Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is
 easiest to use our training function, which returns a population of trained agents and logged training metrics.
 
 .. code-block:: python
@@ -290,7 +290,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                     state = np.moveaxis(state, [3], [1])
                 action = agent.getAction(state, epsilon)    # Get next action from agent
                 next_state, reward, done, _, _ = env.step(action)   # Act in environment
-                
+
                 # Save experience to replay buffer
                 if INIT_HP['CHANNELS_LAST']:
                     memory.save2memoryVectEnvs(
@@ -303,7 +303,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                 if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
                     experiences = memory.sample(agent.batch_size) # Sample replay buffer
                     agent.learn(experiences)    # Learn according to agent's RL algorithm
-                
+
                 state = next_state
                 score += reward
 
@@ -311,7 +311,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
         # Now evolve population if necessary
         if (idx_epi+1) % evo_epochs == 0:
-            
+
             # Evaluate population
             fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
 

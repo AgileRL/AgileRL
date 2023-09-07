@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from agilerl.networks.custom_architecture import GumbelSoftmax
+
 
 class EvolvableMLP(nn.Module):
     """The Evolvable Multi-layer Perceptron class.
@@ -73,19 +75,25 @@ class EvolvableMLP(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            'tanh': nn.Tanh,
-            'linear': nn.Identity,
-            'relu': nn.ReLU,
-            'elu': nn.ELU,
-            'softsign': nn.Softsign,
-            'sigmoid': nn.Sigmoid,
-            'softplus': nn.Softplus,
-            'softmax': nn.Softmax,
-            'lrelu': nn.LeakyReLU,
-            'prelu': nn.PReLU,
-            'gelu': nn.GELU}
+            "tanh": nn.Tanh,
+            "linear": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "gumbel_softmax": GumbelSoftmax,
+            "softplus": nn.Softplus,
+            "softmax": nn.Softmax,
+            "lrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": nn.GELU,
+        }
 
-        return activation_functions[activation_names](dim=1) if activation_names == 'softmax' else activation_functions[activation_names]()
+        return (
+            activation_functions[activation_names](dim=1)
+            if activation_names == "softmax"
+            else activation_functions[activation_names]()
+        )
     
     def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
         torch.nn.init.orthogonal_(layer.weight, std)

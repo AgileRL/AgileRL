@@ -1,12 +1,15 @@
-import torch
-from torch.utils.data import IterableDataset, Dataset
-from agilerl.data.rl_data import List_RL_Dataset, Iterable_RL_Dataset
 from typing import Union
+
+import torch
+from torch.utils.data import Dataset, IterableDataset
+
+from agilerl.data.rl_data import Iterable_RL_Dataset, List_RL_Dataset
 
 
 class GeneralIterDataset(IterableDataset):
-    def __init__(self, rl_dataset: Iterable_RL_Dataset,
-                 device: Union[torch.device, str]):
+    def __init__(
+        self, rl_dataset: Iterable_RL_Dataset, device: Union[torch.device, str]
+    ):
         self.rl_dataset = rl_dataset
         self.device = device
 
@@ -24,8 +27,7 @@ class GeneralIterDataset(IterableDataset):
 
 
 class GeneralDataset(Dataset):
-    def __init__(self, rl_dataset: List_RL_Dataset,
-                 device: Union[torch.device, str]):
+    def __init__(self, rl_dataset: List_RL_Dataset, device: Union[torch.device, str]):
         self.rl_dataset = rl_dataset
         self.device = device
 

@@ -1,8 +1,9 @@
-import numpy as np
 import copy
 
+import numpy as np
 
-class TournamentSelection():
+
+class TournamentSelection:
     """The tournament selection class.
 
     :param tournament_size: Tournament selection size
@@ -22,8 +23,7 @@ class TournamentSelection():
         self.evo_step = evo_step
 
     def _tournament(self, fitness_values):
-        selection = np.random.randint(
-            0, len(fitness_values), size=self.tournament_size)
+        selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
         selection_values = [fitness_values[i] for i in selection]
         winner = selection[np.argmax(selection_values)]
         return winner
@@ -34,8 +34,7 @@ class TournamentSelection():
         :param population: Population of agents
         :type population: List[object]
         """
-        last_fitness = [np.mean(indi.fitness[-self.evo_step:])
-                        for indi in population]
+        last_fitness = [np.mean(indi.fitness[-self.evo_step :]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
 
         max_id = max([ind.index for ind in population])

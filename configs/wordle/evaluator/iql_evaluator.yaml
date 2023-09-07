@@ -1,5 +1,6 @@
+---
 defaults:
-  - /env: wordle_env
+    - /env: wordle_env
 
 name: iql_evaluator
 verbose: true

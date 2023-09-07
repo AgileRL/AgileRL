@@ -1,8 +1,9 @@
+---
 defaults:
-  - /env: wordle_env
+    - /env: wordle_env
 name: score_evaluator
 verbose: true
 num_generations: 1
-max_generation_len: null
+max_generation_len:
 kind: sample
 kwargs_main: {}
