@@ -3,8 +3,15 @@ from typing import Any, List, Tuple, Union
 
 
 class Tokenizer(ABC):
-    def __init__(self, pad_token_id, eos_token_id, eoa_token_id,
-                 bos_token_id, boa_token_id, eod_token_id):
+    def __init__(
+        self,
+        pad_token_id,
+        eos_token_id,
+        eoa_token_id,
+        bos_token_id,
+        boa_token_id,
+        eod_token_id,
+    ):
         self.pad_token_id = pad_token_id
         self.eos_token_id = eos_token_id
         self.eoa_token_id = eoa_token_id
@@ -13,18 +20,15 @@ class Tokenizer(ABC):
         self.eod_token_id = eod_token_id
 
     @abstractmethod
-    def encode(self,
-               str_: Union[str,
-                           List[str]],
-               **kwargs) -> Tuple[Union[List[int],
-                                        List[List[int]]],
-                                  Union[List[int],
-                                        List[List[int]]]]:
+    def encode(
+        self, str_: Union[str, List[str]], **kwargs
+    ) -> Tuple[Union[List[int], List[List[int]]], Union[List[int], List[List[int]]]]:
         pass
 
     @abstractmethod
-    def decode(self, tokens: Union[List[int], List[List[int]]],
-               **kwargs) -> Union[str, List[str]]:
+    def decode(
+        self, tokens: Union[List[int], List[List[int]]], **kwargs
+    ) -> Union[str, List[str]]:
         pass
 
     @abstractmethod

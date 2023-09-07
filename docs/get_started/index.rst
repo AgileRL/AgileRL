@@ -8,7 +8,7 @@ Install AgileRL
 
 To use AgileRL, first download the source code and install requirements.
 
-Install as a package with pip: 
+Install as a package with pip:
 
 .. code-block:: bash
 
@@ -26,7 +26,7 @@ Quickstart: Training an online RL agent
 ----------------
 
 Before starting training, there are some meta-hyperparameters and settings that must be set.
-These are defined in ``INIT_HP``, for general parameters, ``MUTATION_PARAMS``, which define the evolutionary 
+These are defined in ``INIT_HP``, for general parameters, ``MUTATION_PARAMS``, which define the evolutionary
 probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
 
 .. code-block:: python
@@ -166,7 +166,7 @@ Quickstart: Training an offline RL agent
 Like with online RL, above, there are some meta-hyperparameters and settings that must be set before starting training. These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
 
 .. code-block:: python
-    
+
     INIT_HP = {
         'ENV_NAME': 'CartPole-v1',      # Gym environment name
         'DATASET': 'data/cartpole/cartpole_random_v1.1.0.h5', # Offline RL dataset

@@ -1,10 +1,11 @@
+---
 # defaults:
 #  - /gpt2: gpt2_pretrained
 
 name: bc_lm
-dataset: null
+dataset:
 transition_weight: 0.0
 load:
-  name: bc_lm
-  checkpoint_path: null
-  strict_load: true
+    name: bc_lm
+    checkpoint_path:
+    strict_load: true

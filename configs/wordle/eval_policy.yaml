@@ -1,78 +1,79 @@
+---
 defaults:
-  - model: per_token_iql
-  - dataset: human_dataset
-  - evaluator: iql_evaluator
-  - _self_
+    - model: per_token_iql
+    - dataset: human_dataset
+    - evaluator: iql_evaluator
+    - _self_
 
 dataset:
-  cache_id: d
-  file_path: data/wordle/random_human_tweet_data_200.json
-  use_true_word: false
-  index_file: data/wordle/human_eval_idxs.json
-  top_p: null
+    cache_id: d
+    file_path: data/wordle/random_human_tweet_data_200.json
+    use_true_word: false
+    index_file: data/wordle/human_eval_idxs.json
+    top_p:
 
 model:
-  alpha: 0.005
-  gamma: 0.99
-  beta: 0.0
-  transition_weight: 0.0
-  clip_weight: null
-  value_max: null
-  value_min: null
-  detach_v: false
-  detach_q: false
-  detach_pi: false
-  double_q: true
-  seperate_policy: true
-  seperate_target: true
-  tau: 0.9
-  exp_weights: true
-  dm_margin: 0.0
-  advanced_mlp: false
-  cql_temp: 1.0
-  dataset:
-    name: wordle_human_dataset
-    cache_id: d
-  load:
-    checkpoint_path: outputs/wordle/wordle_iql_official_test1/model.pkl
-    strict_load: true
+    alpha: 0.005
+    gamma: 0.99
+    beta: 0.0
+    transition_weight: 0.0
+    clip_weight:
+    value_max:
+    value_min:
+    detach_v: false
+    detach_q: false
+    detach_pi: false
+    double_q: true
+    seperate_policy: true
+    seperate_target: true
+    tau: 0.9
+    exp_weights: true
+    dm_margin: 0.0
+    advanced_mlp: false
+    cql_temp: 1.0
+    dataset:
+        name: wordle_human_dataset
+        cache_id: d
+    load:
+        checkpoint_path: outputs/wordle/wordle_iql_official_test1/model.pkl
+        strict_load: true
 
 evaluator:
-  env:
-    vocab:
-      name: vocab
-      vocab_path: data/wordle/word_lists/wordle_official_200.txt
-      cache_path: null
-      fill_cache: true
-  verbose: true
-  kind: beam
-  generation_kwargs:
-    max_generation_len: 6
-    beam_width: 1
-    temp: 1.0
-    top_k: null
-    top_p: null
-    exp_adv: true
-    adv_weight: 16.0
-    adv_clip: 0.0
-    include_logits: true
-    include_adv: true
+    env:
+        vocab:
+            name: vocab
+            vocab_path: data/wordle/word_lists/wordle_official_200.txt
+            cache_path:
+            fill_cache: true
+    verbose: true
+    kind: beam
+    generation_kwargs:
+        max_generation_len: 6
+        beam_width: 1
+        temp: 1.0
+        top_k:
+        top_p:
+        exp_adv: true
+        adv_weight: 16.0
+        adv_clip: 0.0
+        include_logits: true
+        include_adv: true
     # num_generations: 1
     # rerank_log_prob_weight: 0.0
     # rerank_advantage_weight: 1.0
 
 eval:
-  dataloader_workers: 1
-  bsize: 1
-  batches: 1024
-  print_every: 8
-  seed: 0
-  log_save_path: null
-  loss:
-    v_loss_weight: 1.0
-    q_loss_weight: 1.0
-    awac_weight: 1.0
-    cql_loss_weight: 0.01
-    dm_loss_weight: 0.0
-    mc_returns: false
+    dataloader_workers: 1
+    bsize: 1
+    batches: 1024
+    print_every: 8
+    seed: 0
+    log_save_path:
+    loss:
+        v_loss_weight: 1.0
+        q_loss_weight: 1.0
+        awac_weight: 1.0
+        cql_loss_weight: 0.01
+        dm_loss_weight: 0.0
+        mc_returns: false
   # loss: {}

@@ -1,12 +1,14 @@
 import copy
-from collections import OrderedDict
 import inspect
+import math
+import warnings
+from collections import OrderedDict
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import math
-import warnings
+
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 
@@ -46,23 +48,24 @@ class EvolvableGPT(nn.Module):
     """
 
     def __init__(
-            self,
-            n_layer: int = 12,
-            vocab_size: int = 50257,
-            n_embd: int = 768,
-            n_head: int = 12,
-            dim_feedfwd: int = 3072,
-            block_size: int = 1024,
-            dropout: float = 0.0,
-            activation: str = 'gelu',
-            layer_norm_eps: float = 1e-5,
-            min_layers: int = 8,
-            max_layers: int = 16,
-            bias: bool = True,
-            stored_values = None,
-            device='cpu',
-            accelerator=None):
-        super(EvolvableGPT, self).__init__()
+        self,
+        n_layer: int = 12,
+        vocab_size: int = 50257,
+        n_embd: int = 768,
+        n_head: int = 12,
+        dim_feedfwd: int = 3072,
+        block_size: int = 1024,
+        dropout: float = 0.0,
+        activation: str = "gelu",
+        layer_norm_eps: float = 1e-5,
+        min_layers: int = 8,
+        max_layers: int = 16,
+        bias: bool = True,
+        stored_values=None,
+        device="cpu",
+        accelerator=None,
+    ):
+        super().__init__()
 
         self.n_layer = n_layer
         self.vocab_size = vocab_size
@@ -87,17 +90,17 @@ class EvolvableGPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight
 
         if stored_values is not None:
-            self.inject_parameters(
-                pvec=stored_values, without_layer_norm=False)
+            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
         else:
             # init all weights
             self.apply(self._init_weights)
             # apply special scaled init to the residual projections, per GPT-2 paper
             for pn, p in self.named_parameters():
-                if pn.endswith('c_proj.weight'):
+                if pn.endswith("c_proj.weight"):
                     torch.nn.init.normal_(
-                        p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer))
+                        p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer)
+                    )
 
         # report number of parameters
         # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
@@ -128,41 +131,56 @@ class EvolvableGPT(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            'tanh': nn.Tanh,
-            'linear': nn.Identity,
-            'relu': nn.ReLU,
-            'elu': nn.ELU,
-            'softsign': nn.Softsign,
-            'sigmoid': nn.Sigmoid,
-            'softplus': nn.Softplus,
-            'lrelu': nn.LeakyReLU,
-            'prelu': nn.PReLU,
-            'gelu': nn.GELU}
+            "tanh": nn.Tanh,
+            "linear": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "softplus": nn.Softplus,
+            "lrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": nn.GELU,
+        }
 
         return activation_functions[activation_names]()
 
     def create_net(self):
-        """Creates and returns transformer neural network.
-        """
+        """Creates and returns transformer neural network."""
         net_dict = OrderedDict()
-        net_dict['wte'] = nn.Embedding(self.vocab_size, self.n_embd)
-        net_dict['wpe'] = nn.Embedding(self.block_size, self.n_embd)
-        net_dict['drop'] = nn.Dropout(self.dropout)
-        net_dict['h'] = nn.ModuleList([Block(self.n_embd,
-                                             self.n_head,
-                                             self.bias,
-                                             self.dropout,
-                                             self.block_size,
-                                             self.dim_feedfwd,
-                                             self.activation,
-                                             self.layer_norm_eps) for _ in range(self.n_layer)])
-        net_dict['ln_f'] = LayerNorm(self.n_embd, bias=self.bias)
+        net_dict["wte"] = nn.Embedding(self.vocab_size, self.n_embd)
+        net_dict["wpe"] = nn.Embedding(self.block_size, self.n_embd)
+        net_dict["drop"] = nn.Dropout(self.dropout)
+        net_dict["h"] = nn.ModuleList(
+            [
+                Block(
+                    self.n_embd,
+                    self.n_head,
+                    self.bias,
+                    self.dropout,
+                    self.block_size,
+                    self.dim_feedfwd,
+                    self.activation,
+                    self.layer_norm_eps,
+                )
+                for _ in range(self.n_layer)
+            ]
+        )
+        net_dict["ln_f"] = LayerNorm(self.n_embd, bias=self.bias)
         return nn.ModuleDict(net_dict)
 
-    def forward(self, idx=None, tok_emb=None, targets=None, attn_mask=None, past_key_values=None, pos=None, 
-                is_causal=True):
+    def forward(
+        self,
+        idx=None,
+        tok_emb=None,
+        targets=None,
+        attn_mask=None,
+        past_key_values=None,
+        pos=None,
+        is_causal=True,
+    ):
         """Forward pass through evolvable GPT model.
-        
+
         :param idxs: Input ids
         :type idxs: torch.Tensor
         :param targets: Target ids
@@ -174,8 +192,10 @@ class EvolvableGPT(nn.Module):
         else:
             device = tok_emb.device
             t = tok_emb.size(-2)
-        
-        assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
+
+        assert (
+            t <= self.block_size
+        ), f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
 
         presents = ()
         all_hidden_states = ()
@@ -188,8 +208,11 @@ class EvolvableGPT(nn.Module):
         if pos is not None:
             pos = pos.view(-1, t)
         else:
-            pos = torch.arange(past_length, t+past_length, dtype=torch.long,
-                            device=device).unsqueeze(0)  # shape (1, t)
+            pos = torch.arange(
+                past_length, t + past_length, dtype=torch.long, device=device
+            ).unsqueeze(
+                0
+            )  # shape (1, t)
 
         # forward the GPT model itself
         # token embeddings of shape (b, t, n_embd)
@@ -215,11 +238,12 @@ class EvolvableGPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             # logits = self.lm_head(x)
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), 
-                targets.view(-1).type(torch.LongTensor).to(self.device), 
-                ignore_index=-1)
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1).type(torch.LongTensor).to(self.device),
+                ignore_index=-1,
+            )
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last 
+            # inference-time mini-optimization: only forward the lm_head on the very last
             # position
             # note: using list [-1] to preserve the time dim
             # logits = self.lm_head(x[:, [-1], :])
@@ -234,67 +258,75 @@ class EvolvableGPT(nn.Module):
         assert block_size <= self.block_size
         self.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(
-            self.transformer.wpe.weight[:block_size])
+            self.transformer.wpe.weight[:block_size]
+        )
         for block in self.transformer.h:
-            if hasattr(block.attn, 'bias'):
-                block.attn.bias = block.attn.bias[:,
-                                                  :, :block_size, :block_size]
+            if hasattr(block.attn, "bias"):
+                block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None, custom_sd=None):
-        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+        assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
         override_args = override_args or {}  # default to empty dict
         from transformers import GPT2Config, GPT2LMHeadModel
+
         print("loading weights from pretrained gpt: %s" % model_type)
         config_args = {
-            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
-            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
-            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
+            "gpt2": dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
+            "gpt2-medium": dict(n_layer=24, n_head=16, n_embd=1024),  # 350M params
+            "gpt2-large": dict(n_layer=36, n_head=20, n_embd=1280),  # 774M params
+            "gpt2-xl": dict(n_layer=48, n_head=25, n_embd=1600),  # 1558M params
         }[model_type]
-        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
-        config_args['block_size'] = 1024 # always 1024 for GPT model checkpoints
-        config_args['bias'] = True # always True for GPT model checkpoints
+        config_args["vocab_size"] = 50257  # always 50257 for GPT model checkpoints
+        config_args["block_size"] = 1024  # always 1024 for GPT model checkpoints
+        config_args["bias"] = True  # always True for GPT model checkpoints
         # we can override the dropout rate, if desired
-        if 'dropout' in override_args:
+        if "dropout" in override_args:
             print(f"overriding dropout rate to {override_args['dropout']}")
-            config_args['dropout'] = override_args['dropout']
+            config_args["dropout"] = override_args["dropout"]
 
         if custom_sd is not None:
-            if 'vocab_size' in override_args:
+            if "vocab_size" in override_args:
                 print(f"overriding vocab_size to {override_args['vocab_size']}")
-                config_args['vocab_size'] = override_args['vocab_size']
+                config_args["vocab_size"] = override_args["vocab_size"]
             model = EvolvableGPT(**config_args)
             sd_hf = torch.load(custom_sd)
             config = GPT2Config(**config_args)
             model_hf = GPT2LMHeadModel(config)
-            sd_hf = {k.split("model.")[-1]: v for k,v in sd_hf.items()}
+            sd_hf = {k.split("model.")[-1]: v for k, v in sd_hf.items()}
             model_hf.load_state_dict(sd_hf)
-        else:         
+        else:
             # create a from-scratch initialized Evolvable GPT model
             model = EvolvableGPT(**config_args)
             # init a huggingface/transformers model
-            model_hf = GPT2LMHeadModel.from_pretrained(model_type)       
-            sd_hf = model_hf.state_dict()      
+            model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+            sd_hf = model_hf.state_dict()
 
         sd = model.state_dict()
         sd_keys = sd.keys()
         # discard this mask / buffer, not a param
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')]  
+        sd_keys = [k for k in sd_keys if not k.endswith(".attn.bias")]
 
         # copy while ensuring all of the parameters are aligned and match in names
         # and shapes
         sd_keys_hf = sd_hf.keys()
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(
-            '.attn.masked_bias')]  # ignore these, just a buffer
-        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(
-            '.attn.bias')]  # same, just the mask (buffer)
-        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight',
-                      'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        sd_keys_hf = [
+            k for k in sd_keys_hf if not k.endswith(".attn.masked_bias")
+        ]  # ignore these, just a buffer
+        sd_keys_hf = [
+            k for k in sd_keys_hf if not k.endswith(".attn.bias")
+        ]  # same, just the mask (buffer)
+        transposed = [
+            "attn.c_attn.weight",
+            "attn.c_proj.weight",
+            "mlp.c_fc.weight",
+            "mlp.c_proj.weight",
+        ]
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
         assert len(sd_keys_hf) == len(
-            sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+            sd_keys
+        ), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for khf, k in zip(sd_keys_hf, sd_keys):
             if any(khf.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
@@ -320,67 +352,82 @@ class EvolvableGPT(nn.Module):
         # regularizing weight decay
         decay = set()
         no_decay = set()
-        whitelist_weight_modules = (torch.nn.Linear, )
-        blacklist_weight_modules = (
-            torch.nn.LayerNorm, LayerNorm, torch.nn.Embedding)
+        whitelist_weight_modules = (torch.nn.Linear,)
+        blacklist_weight_modules = (torch.nn.LayerNorm, LayerNorm, torch.nn.Embedding)
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
-                fpn = '%s.%s' % (mn, pn) if mn else pn  # full param name
+                fpn = f"{mn}.{pn}" if mn else pn  # full param name
                 # random note: because named_modules and named_parameters are recursive
                 # we will see the same tensors p many many times. but doing it this way
                 # allows us to know which parent module any tensor p belongs to...
-                if pn.endswith('bias'):
+                if pn.endswith("bias"):
                     # all biases will not be decayed
                     no_decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
+                elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
                     # weights of whitelist modules will be weight decayed
                     decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
+                elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
                     # weights of blacklist modules will NOT be weight decayed
                     no_decay.add(fpn)
 
         # subtle: 'transformer.wte.weight' and 'lm_head.weight' are tied, so they
         # will appear in the no_decay and decay sets respectively after the above.
         # In addition, because named_parameters() doesn't return duplicates, it
-        # will only return the first occurence, key'd by 'transformer.wte.weight', below.
+        # will only return the first occurrence, key'd by 'transformer.wte.weight', below.
         # so let's manually remove 'lm_head.weight' from decay set. This will include
         # this tensor into optimization via transformer.wte.weight only, and not
         # decayed.
-        decay.remove('lm_head.weight')
+        decay.remove("lm_head.weight")
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}
         inter_params = decay & no_decay
         union_params = decay | no_decay
-        assert len(
-            inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
-        assert len(
-            param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
-            % (str(param_dict.keys() - union_params), )
+        assert (
+            len(inter_params) == 0
+        ), "parameters {} made it into both decay/no_decay sets!".format(
+            str(inter_params)
+        )
+        assert (
+            len(param_dict.keys() - union_params) == 0
+        ), "parameters {} were not separated into either decay/no_decay set!".format(
+            str(param_dict.keys() - union_params),
+        )
 
         # create the pytorch optimizer object
         optim_groups = [
-            {"params": [param_dict[pn] for pn in sorted(
-                list(decay))], "weight_decay": weight_decay},
-            {"params": [param_dict[pn]
-                        for pn in sorted(list(no_decay))], "weight_decay": 0.0},
+            {
+                "params": [param_dict[pn] for pn in sorted(list(decay))],
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": [param_dict[pn] for pn in sorted(list(no_decay))],
+                "weight_decay": 0.0,
+            },
         ]
         # new PyTorch nightly has a new 'fused' option for AdamW that is much faster
-        use_fused = (device_type == 'cuda') and (
-            'fused' in inspect.signature(torch.optim.AdamW).parameters)
+        use_fused = (device_type == "cuda") and (
+            "fused" in inspect.signature(torch.optim.AdamW).parameters
+        )
         print(f"using fused AdamW: {use_fused}")
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(
-            optim_groups, lr=learning_rate, betas=betas, **extra_args)
+            optim_groups, lr=learning_rate, betas=betas, **extra_args
+        )
 
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+        """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
-        L, H, Q, T = self.n_layer, self.n_head, self.n_embd // self.n_head, self.block_size
+        L, H, Q, T = (
+            self.n_layer,
+            self.n_head,
+            self.n_embd // self.n_head,
+            self.block_size,
+        )
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
@@ -399,8 +446,9 @@ class EvolvableGPT(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(
-                1) <= self.block_size else idx[:, -self.block_size:]
+            idx_cond = (
+                idx if idx.size(1) <= self.block_size else idx[:, -self.block_size :]
+            )
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
@@ -408,7 +456,7 @@ class EvolvableGPT(nn.Module):
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                logits[logits < v[:, [-1]]] = -float("Inf")
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
@@ -419,11 +467,11 @@ class EvolvableGPT(nn.Module):
         return idx
 
     def get_model_dict(self):
-        """Returns dictionary with model information and weights.
-        """
+        """Returns dictionary with model information and weights."""
         model_dict = self.init_dict
         model_dict.update(
-            {'stored_values': self.extract_parameters(without_layer_norm=False)})
+            {"stored_values": self.extract_parameters(without_layer_norm=False)}
+        )
         return model_dict
 
     def count_parameters(self, without_layer_norm=False):
@@ -434,7 +482,7 @@ class EvolvableGPT(nn.Module):
         """
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
 
@@ -448,9 +496,9 @@ class EvolvableGPT(nn.Module):
         pvec = np.zeros(tot_size, np.float32)
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count:count + sz] = param.grad.data.cpu().numpy().flatten()
+                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
                 count += sz
         return pvec.copy()
 
@@ -464,9 +512,9 @@ class EvolvableGPT(nn.Module):
         pvec = np.zeros(tot_size, np.float32)
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count:count + sz] = param.data.cpu().detach().numpy().flatten()
+                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
                 count += sz
         return copy.deepcopy(pvec)
 
@@ -481,19 +529,19 @@ class EvolvableGPT(nn.Module):
         count = 0
 
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count:count + sz]
+                raw = pvec[count : count + sz]
                 reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(
-                    copy.deepcopy(reshaped)).type(torch.FloatTensor)
+                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
+                    torch.FloatTensor
+                )
                 count += sz
         return pvec
 
     @property
     def init_dict(self):
-        """Returns model information in dictionary.
-        """
+        """Returns model information in dictionary."""
         init_dict = {
             "n_layer": self.n_layer,
             "vocab_size": self.vocab_size,
@@ -507,12 +555,12 @@ class EvolvableGPT(nn.Module):
             "min_layers": self.min_layers,
             "max_layers": self.max_layers,
             "bias": self.bias,
-            "device": self.device}
+            "device": self.device,
+        }
         return init_dict
 
     def add_layer(self):
-        """Adds a block layer to transformer.
-        """
+        """Adds a block layer to transformer."""
         if self.n_layer < self.max_layers:
             self.n_layer += 1
             self.recreate_nets()
@@ -520,8 +568,7 @@ class EvolvableGPT(nn.Module):
         #     self.add_nodes()
 
     def remove_layer(self):
-        """Removes a block layer from transformer.
-        """
+        """Removes a block layer from transformer."""
         if self.n_layer > self.min_layers:
             self.n_layer -= 1
             self.recreate_shrunk_nets()
@@ -553,22 +600,21 @@ class EvolvableGPT(nn.Module):
         return {"numb_new_nodes": numb_new_nodes}
 
     def recreate_nets(self):
-        """Recreates neural network.
-        """
+        """Recreates neural network."""
         new_transformer = self.create_net()
         self.transformer = self.preserve_parameters(
-            old_net=self.transformer, new_net=new_transformer)
+            old_net=self.transformer, new_net=new_transformer
+        )
 
     def recreate_shrunk_nets(self):
-        """Recreates shrunk neural network.
-        """
+        """Recreates shrunk neural network."""
         new_transformer = self.create_net()
         self.transformer = self.shrink_preserve_parameters(
-            old_net=self.transformer, new_net=new_transformer)
+            old_net=self.transformer, new_net=new_transformer
+        )
 
     def clone(self):
-        """Returns clone of neural net with identical parameters.
-        """
+        """Returns clone of neural net with identical parameters."""
         clone = EvolvableGPT(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
@@ -592,19 +638,17 @@ class EvolvableGPT(nn.Module):
                         old_size = old_net_dict[key].data.size()
                         new_size = param.data.size()
                         if len(param.data.size()) == 1:
-                            param.data[:min(old_size[0], new_size[0])] = old_net_dict[key].data[
-                                :min(old_size[0], new_size[0])]
+                            param.data[: min(old_size[0], new_size[0])] = old_net_dict[
+                                key
+                            ].data[: min(old_size[0], new_size[0])]
                         else:
-                            param.data[:min(old_size[0], new_size[0]), :min(old_size[1], new_size[1])] = old_net_dict[
-                                key].data[
-                                :min(old_size[
-                                    0],
-                                    new_size[
-                                    0]),
-                                :min(old_size[
-                                    1],
-                                    new_size[
-                                    1])]
+                            param.data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                            ] = old_net_dict[key].data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                            ]
 
         return new_net
 
@@ -631,20 +675,23 @@ class EvolvableGPT(nn.Module):
                             param.data[:min_0] = old_net_dict[key].data[:min_0]
                         else:
                             min_1 = min(old_size[1], new_size[1])
-                            param.data[:min_0,
-                                       :min_1] = old_net_dict[key].data[:min_0, :min_1]
+                            param.data[:min_0, :min_1] = old_net_dict[key].data[
+                                :min_0, :min_1
+                            ]
         return new_net
 
 
-def _canonical_mask(mask, mask_name, other_type, other_name,
-                    target_type, check_other=True):
+def _canonical_mask(
+    mask, mask_name, other_type, other_name, target_type, check_other=True
+):
     """Returns canconical mask. Adapted from torch.nn.functional"""
     if mask is not None:
         _mask_dtype = mask.dtype
         _mask_is_float = torch.is_floating_point(mask)
         if _mask_dtype != torch.bool and not _mask_is_float:
             raise AssertionError(
-                f"only bool and floating types of {mask_name} are supported")
+                f"only bool and floating types of {mask_name} are supported"
+            )
         if check_other and other_type is not None:
             if _mask_dtype != other_type:
                 warnings.warn(
@@ -652,15 +699,14 @@ def _canonical_mask(mask, mask_name, other_type, other_name,
                     "is deprecated. Use same type for both instead."
                 )
         if not _mask_is_float:
-            mask = (
-                torch.zeros_like(mask, dtype=target_type)
-                .masked_fill_(mask, float("-inf"))
+            mask = torch.zeros_like(mask, dtype=target_type).masked_fill_(
+                mask, float("-inf")
             )
     return mask
 
 
 class LayerNorm(nn.Module):
-    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
     def __init__(self, ndim, bias, layer_norm_eps=1e-5):
         super().__init__()
@@ -669,8 +715,9 @@ class LayerNorm(nn.Module):
         self.layer_norm_eps = layer_norm_eps
 
     def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight,
-                            self.bias, self.layer_norm_eps)
+        return F.layer_norm(
+            input, self.weight.shape, self.weight, self.bias, self.layer_norm_eps
+        )
 
 
 class CausalSelfAttention(nn.Module):
@@ -689,34 +736,45 @@ class CausalSelfAttention(nn.Module):
         self.dropout = dropout
         self.bias = bias
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional,
-                             'scaled_dot_product_attention')
+        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
         if not self.flash:
             print(
-                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+                "WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0"
+            )
             # causal mask to ensure that attention is only applied to the left in the
             # input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(block_size, block_size))
-                                 .view(1, 1, block_size, block_size))
+            self.register_buffer(
+                "bias",
+                torch.tril(torch.ones(block_size, block_size)).view(
+                    1, 1, block_size, block_size
+                ),
+            )
 
     def forward(self, x, attn_mask=None, layer_past=None, is_causal=True):
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        (
+            B,
+            T,
+            C,
+        ) = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head
         # forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C //
-                   self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C //
-                   self.n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C //
-                   self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
+            1, 2
+        )  # (B, nh, T, hs)
 
         if layer_past is not None:
             past_key, past_value = layer_past
             k = torch.cat((past_key, k), dim=-2)
             v = torch.cat((past_value, v), dim=-2)
-            
+
         present = (k, v)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) ->
@@ -729,11 +787,12 @@ class CausalSelfAttention(nn.Module):
                 v,
                 attn_mask=attn_mask,
                 dropout_p=self.dropout if self.training else 0,
-                is_causal=is_causal)
+                is_causal=is_causal,
+            )
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -747,26 +806,43 @@ class CausalSelfAttention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, bias, dropout, block_size,
-                 hidden_size, activation='gelu', layer_norm_eps=1e-5):
+    def __init__(
+        self,
+        n_embd,
+        n_head,
+        bias,
+        dropout,
+        block_size,
+        hidden_size,
+        activation="gelu",
+        layer_norm_eps=1e-5,
+    ):
         super().__init__()
         self.ln_1 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
-        self.attn = CausalSelfAttention(
-            n_embd, n_head, bias, dropout, block_size)
+        self.attn = CausalSelfAttention(n_embd, n_head, bias, dropout, block_size)
         self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
         self.mlp = MLP(n_embd, dropout, hidden_size, activation)
 
     def forward(self, x, attn_mask=None, layer_past=None, is_causal=True):
-        attn_output, present = self.attn(self.ln_1(x), attn_mask=attn_mask, layer_past=layer_past, is_causal=is_causal)
+        attn_output, present = self.attn(
+            self.ln_1(x),
+            attn_mask=attn_mask,
+            layer_past=layer_past,
+            is_causal=is_causal,
+        )
         x = x + attn_output
         x = x + self.mlp(self.ln_2(x))
         return x, present
 
 
 class MLP(EvolvableMLP):
-    def __init__(self, n_embd, dropout, hidden_size, activation='gelu'):
-        super().__init__(num_inputs=n_embd, num_outputs=n_embd,
-                         hidden_size=[hidden_size], activation=activation)
+    def __init__(self, n_embd, dropout, hidden_size, activation="gelu"):
+        super().__init__(
+            num_inputs=n_embd,
+            num_outputs=n_embd,
+            hidden_size=[hidden_size],
+            activation=activation,
+        )
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -789,16 +865,17 @@ class MLP(EvolvableMLP):
         :type activation_names: str
         """
         activation_functions = {
-            'tanh': nn.Tanh,
-            'linear': nn.Identity,
-            'relu': nn.ReLU,
-            'elu': nn.ELU,
-            'softsign': nn.Softsign,
-            'sigmoid': nn.Sigmoid,
-            'softplus': nn.Softplus,
-            'lrelu': nn.LeakyReLU,
-            'prelu': nn.PReLU,
-            'gelu': new_gelu}
+            "tanh": nn.Tanh,
+            "linear": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "softplus": nn.Softplus,
+            "lrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": new_gelu,
+        }
 
         return activation_functions[activation_names]()
 
@@ -808,17 +885,27 @@ class new_gelu(nn.Module):
     Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
     Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
     """
+
     def forward(self, x):
-        return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi)
-                      * (x + 0.044715 * torch.pow(x, 3.0))))
+        return (
+            0.5
+            * x
+            * (
+                1.0
+                + torch.tanh(
+                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))
+                )
+            )
+        )
 
 
 class PositionalEncoding(nn.Module):
-    """The positional embedding class. 
-    Converts tensor of input indices into corresponding tensor of position embeddings."""
+    """The positional embedding class.
+    Converts tensor of input indices into corresponding tensor of position embeddings.
+    """
 
     def __init__(self, max_positions: int, emb_size):
-        super(PositionalEncoding, self).__init__()
+        super().__init__()
         self.embedding = nn.Embedding(max_positions, emb_size)
         self.emb_size = emb_size
 
@@ -834,7 +921,7 @@ class TokenEmbedding(nn.Module):
     """The token embedding class. Converts tensor of input indices into corresponding tensor of token embeddings."""
 
     def __init__(self, vocab_size: int, emb_size):
-        super(TokenEmbedding, self).__init__()
+        super().__init__()
         self.embedding = nn.Embedding(vocab_size, emb_size)
         self.emb_size = emb_size
 
@@ -856,5 +943,4 @@ def _none_or_dtype(input):
         return None
     elif isinstance(input, torch.Tensor):
         return input.dtype
-    raise RuntimeError(
-        "input to _none_or_dtype() must be None or torch.Tensor")
+    raise RuntimeError("input to _none_or_dtype() must be None or torch.Tensor")

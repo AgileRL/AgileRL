@@ -1,8 +1,9 @@
+---
 defaults:
-  - /token_reward: constant
+    - /token_reward: constant
 name: wordle_human_dataset
-max_len: null
-file_path: null
+max_len:
+file_path:
 use_true_word: true
-index_file: null
-top_p: null
+index_file:
+top_p:

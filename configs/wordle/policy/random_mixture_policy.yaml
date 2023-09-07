@@ -1,3 +1,4 @@
+---
 name: random_mixture_policy
-vocab: null
+vocab:
 prob_smart: 1.0

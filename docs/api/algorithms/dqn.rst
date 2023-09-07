@@ -12,7 +12,7 @@ Can I use it?
    :widths: 20 20 20
    :header-rows: 1
 
-   * - 
+   * -
      - Action
      - Observation
    * - Discrete
@@ -97,7 +97,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent  
+  agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
 
 Parameters
 ------------

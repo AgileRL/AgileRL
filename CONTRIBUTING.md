@@ -21,7 +21,7 @@ All members of the AgileRL community are expected to follow the [Code of Conduct
 
 ## Your First Contribution
 AgileRL is nascent, and so there is a lot of scope to contribute on what you find interesting. You can have a big impact on the framework now and get involved in our exciting early development.
-Please feel free to suggest new, crazy ideas and have a go at the coolest RL implementations you can think of. 
+Please feel free to suggest new, crazy ideas and have a go at the coolest RL implementations you can think of.
 We expect the GitHub Issue tracker to fill up with bugs, improvements and feature requests, so please take a look there too.
 
 Some early suggestions for contributions we think would add value to AgileRL include adding more RL algorithms and evolvable network types, parallelising and benchmarking training, writing documentation, and general improvements to current implementations.
