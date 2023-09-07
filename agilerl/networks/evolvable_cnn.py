@@ -193,12 +193,14 @@ class EvolvableCNN(nn.Module):
             "elu": nn.ELU,
             "softsign": nn.Softsign,
             "sigmoid": nn.Sigmoid,
+            "softmax": nn.Softmax,
             "gumbel_softmax": GumbelSoftmax,
             "softplus": nn.Softplus,
             "lrelu": nn.LeakyReLU,
             "prelu": nn.PReLU,
         }
-        return activation_functions[activation_names]()
+        return activation_functions[activation_names](dim=1) if activation_names == 'softmax' \
+            else activation_functions[activation_names]()
 
     def create_mlp(self, input_size, output_size, hidden_size, name):
         """Creates and returns multi-layer perceptron."""

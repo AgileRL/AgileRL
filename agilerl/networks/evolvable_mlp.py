@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from agilerl.networks.custom_architecture import GumbelSoftmax
+
 
 class EvolvableMLP(nn.Module):
     """The Evolvable Multi-layer Perceptron class.
@@ -75,6 +77,7 @@ class EvolvableMLP(nn.Module):
             "elu": nn.ELU,
             "softsign": nn.Softsign,
             "sigmoid": nn.Sigmoid,
+            "gumbel_softmax": GumbelSoftmax,
             "softplus": nn.Softplus,
             "softmax": nn.Softmax,
             "lrelu": nn.LeakyReLU,
