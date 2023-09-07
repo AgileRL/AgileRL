@@ -1,7 +1,8 @@
+---
 defaults:
- - /vocab: wordle_official
- - /token_reward: constant
+    - /vocab: wordle_official
+    - /token_reward: constant
 
 name: wordle_dataset
-file_path: null
-max_len: null
+file_path:
+max_len:

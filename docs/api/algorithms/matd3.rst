@@ -2,7 +2,7 @@ Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 =========================================
 
 MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
-in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This 
+in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This
 enables superior performance when compared to MADDPG.
 
 * MATD3 paper: https://arxiv.org/abs/1910.01465
@@ -14,7 +14,7 @@ Can I use it?
    :widths: 20 20 20
    :header-rows: 1
 
-   * - 
+   * -
      - Action
      - Observation
    * - Discrete
@@ -27,9 +27,9 @@ Can I use it?
 Gumbel-Softmax
 ------------
 
-The Gumbel-Softmax activation function is a differentiable approximation that enables gradient-based optimization through 
-continuous relaxation of discrete action spaces in multi-agent reinforcement learning, allowing agents to learn and improve 
-decision-making in complex environments with discrete choices. If you would like to customise the mlp output activation function, 
+The Gumbel-Softmax activation function is a differentiable approximation that enables gradient-based optimization through
+continuous relaxation of discrete action spaces in multi-agent reinforcement learning, allowing agents to learn and improve
+decision-making in complex environments with discrete choices. If you would like to customise the mlp output activation function,
 you can define it within the network configuration using the key "output_activation". User definition for the output activation is however,
 unnecessary, as the algorithm will select the appropriate function given the environments action space.
 
@@ -51,10 +51,10 @@ Example
     # Configure the multi-agent algo input arguments
     try:
         state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True 
+        one_hot = True
     except Exception:
         state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False 
+        one_hot = False
     try:
         action_dim = [env.action_space(agent).n for agent in env.agents]
         discrete_actions = True
@@ -106,9 +106,9 @@ Example
                     state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                     next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
             memory.save2memory(state, action, reward, next_state, done)
-                
+
             for agent_id, r in reward.items():
-                    agent_reward[agent_id] += r 
+                    agent_reward[agent_id] += r
 
             # Learn according to learning frequency
             if (memory.counter % agent.learn_step == 0) and (len(
@@ -116,7 +116,7 @@ Example
                 experiences = memory.sample(agent.batch_size) # Sample replay buffer
                 agent.learn(experiences) # Learn according to agent's RL algorithm
 
-            # Update the state 
+            # Update the state
             if channels_last:
                 next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
             state = next_state
@@ -158,7 +158,7 @@ Or for a CNN:
                 max_action=max_action,
                 min_action=min_action,
                 discrete_actions=discrete_actions,
-                net_config=NET_CONFIG)   # Create MATD3 agent  
+                net_config=NET_CONFIG)   # Create MATD3 agent
 
 Parameters
 ------------
@@ -166,5 +166,3 @@ Parameters
 .. autoclass:: agilerl.algorithms.matd3.MATD3
   :members:
   :inherited-members:
-
-

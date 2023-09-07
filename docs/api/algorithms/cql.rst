@@ -1,7 +1,7 @@
 Conservative Q-Learning (CQL)
 =====================
 
-CQL is an extension of Q-learning that adresses the typical overestimation of values induced by the distributional shift between 
+CQL is an extension of Q-learning that addresses the typical overestimation of values induced by the distributional shift between
 the dataset and the learned policy in offline RL algorithms. A conservative Q-function is learned, such that the expected value of a
 policy under this Q-function lower-bounds its true value
 
@@ -14,7 +14,7 @@ Can I use it?
    :widths: 20 20 20
    :header-rows: 1
 
-   * - 
+   * -
      - Action
      - Observation
    * - Discrete
@@ -24,7 +24,7 @@ Can I use it?
      - ✔️
      - ✔️
 
-So far, we have implemented CQN - CQL applied to DQN, which cannot be used on continuous action spaces. We will soon be 
+So far, we have implemented CQN - CQL applied to DQN, which cannot be used on continuous action spaces. We will soon be
 adding other CQL extensions of algorithms for offline RL.
 
 Example
@@ -104,7 +104,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent  
+  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
 
 Parameters
 ------------

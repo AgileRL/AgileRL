@@ -1,12 +1,12 @@
 import copy
+import math
+import warnings
 from collections import OrderedDict
 from typing import List
 
 import numpy as np
 import torch
 import torch.nn as nn
-import math
-import warnings
 
 
 class EvolvableBERT(nn.Module):
@@ -51,26 +51,27 @@ class EvolvableBERT(nn.Module):
     """
 
     def __init__(
-            self,
-            encoder_layers: List[int],
-            decoder_layers: List[int],
-            end2end: bool = True,
-            src_vocab_size: int = 10837,
-            tgt_vocab_size: int = 10837,
-            encoder_norm: bool = True,
-            decoder_norm: bool = True,
-            d_model: int = 512,
-            n_head: int = 8,
-            dropout: float = 0.1,
-            activation: str = 'relu',
-            layer_norm_eps: float = 1e-5,
-            batch_first: bool = False,
-            norm_first: bool = False,
-            max_encoder_layers: int = 12,
-            max_decoder_layers: int = 12,
-            stored_values=None,
-            device='cpu'):
-        super(EvolvableBERT, self).__init__()
+        self,
+        encoder_layers: List[int],
+        decoder_layers: List[int],
+        end2end: bool = True,
+        src_vocab_size: int = 10837,
+        tgt_vocab_size: int = 10837,
+        encoder_norm: bool = True,
+        decoder_norm: bool = True,
+        d_model: int = 512,
+        n_head: int = 8,
+        dropout: float = 0.1,
+        activation: str = "relu",
+        layer_norm_eps: float = 1e-5,
+        batch_first: bool = False,
+        norm_first: bool = False,
+        max_encoder_layers: int = 12,
+        max_decoder_layers: int = 12,
+        stored_values=None,
+        device="cpu",
+    ):
+        super().__init__()
 
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
@@ -95,24 +96,20 @@ class EvolvableBERT(nn.Module):
             self.generator = nn.Linear(self.d_model, tgt_vocab_size)
             self.src_tok_emb = TokenEmbedding(src_vocab_size, self.d_model)
             self.tgt_tok_emb = TokenEmbedding(tgt_vocab_size, self.d_model)
-            self.positional_encoding = PositionalEncoder(
-                self.d_model, self.dropout)
+            self.positional_encoding = PositionalEncoder(self.d_model, self.dropout)
         else:
             self.wte = TokenEmbedding(src_vocab_size, self.d_model)
             if len(self.encoder_layers) > 0:
-                self.wpe = PositionalEncoding(
-                    self.d_model, self.encoder_layers[0])
+                self.wpe = PositionalEncoding(self.d_model, self.encoder_layers[0])
             else:
-                self.wpe = PositionalEncoding(
-                    self.d_model, self.decoder_layers[0])
+                self.wpe = PositionalEncoding(self.d_model, self.decoder_layers[0])
 
         self.encoder, self.decoder = self.create_nets()
         self.encoder_keys = list(self.encoder.keys())
         self.decoder_keys = list(self.decoder.keys())
 
         if stored_values is not None:
-            self.inject_parameters(
-                pvec=stored_values, without_layer_norm=False)
+            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -121,28 +118,30 @@ class EvolvableBERT(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            'tanh': nn.Tanh,
-            'linear': nn.Identity,
-            'relu': nn.ReLU,
-            'elu': nn.ELU,
-            'softsign': nn.Softsign,
-            'sigmoid': nn.Sigmoid,
-            'softplus': nn.Softplus,
-            'lrelu': nn.LeakyReLU,
-            'prelu': nn.PReLU,
-            'gelu': nn.GELU}
+            "tanh": nn.Tanh,
+            "linear": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "softplus": nn.Softplus,
+            "lrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": nn.GELU,
+        }
 
         return activation_functions[activation_names]()
 
     def create_nets(self):
-        """Creates and returns transformer neural network.
-        """
+        """Creates and returns transformer neural network."""
         encoder_dict = OrderedDict()
         decoder_dict = OrderedDict()
 
         # Create the encoder
         for n, dim_feedfwd in enumerate(self.encoder_layers):
-            encoder_dict[f"encoder_layer_{str(n)}"] = nn.modules.TransformerEncoderLayer(
+            encoder_dict[
+                f"encoder_layer_{str(n)}"
+            ] = nn.modules.TransformerEncoderLayer(
                 self.d_model,
                 self.n_head,
                 dim_feedfwd,
@@ -151,14 +150,18 @@ class EvolvableBERT(nn.Module):
                 self.layer_norm_eps,
                 self.batch_first,
                 self.norm_first,
-                device=self.device)
+                device=self.device,
+            )
         if self.encoder_norm:
             encoder_dict["encoder_norm_0"] = nn.modules.normalization.LayerNorm(
-                self.d_model, eps=self.layer_norm_eps, device=self.device)
+                self.d_model, eps=self.layer_norm_eps, device=self.device
+            )
 
         # Create the decoder
         for n, dim_feedfwd in enumerate(self.decoder_layers):
-            decoder_dict[f"decoder_layer_{str(n)}"] = nn.modules.TransformerDecoderLayer(
+            decoder_dict[
+                f"decoder_layer_{str(n)}"
+            ] = nn.modules.TransformerDecoderLayer(
                 self.d_model,
                 self.n_head,
                 dim_feedfwd,
@@ -167,27 +170,33 @@ class EvolvableBERT(nn.Module):
                 self.layer_norm_eps,
                 self.batch_first,
                 self.norm_first,
-                device=self.device)
+                device=self.device,
+            )
         if self.decoder_norm:
             decoder_dict["decoder_norm_0"] = nn.modules.normalization.LayerNorm(
-                self.d_model, eps=self.layer_norm_eps, device=self.device)
+                self.d_model, eps=self.layer_norm_eps, device=self.device
+            )
 
         self._reset_parameters()
 
         return nn.ModuleDict(encoder_dict), nn.ModuleDict(decoder_dict)
 
     def generate_square_subsequent_mask(self, sz):
-        """Returns a square mask for the sequence that prevents the model from looking into the future words when 
+        """Returns a square mask for the sequence that prevents the model from looking into the future words when
         making predictions.
         The masked positions are filled with float('-inf'). Unmasked positions are filled with float(0.0).
 
         :param sz: Size of mask to generate
         :type sz: int
         """
-        mask = (torch.triu(torch.ones((sz, sz), device=self.device))
-                == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float(
-            '-inf')).masked_fill(mask == 1, float(0.0))
+        mask = (torch.triu(torch.ones((sz, sz), device=self.device)) == 1).transpose(
+            0, 1
+        )
+        mask = (
+            mask.float()
+            .masked_fill(mask == 0, float("-inf"))
+            .masked_fill(mask == 1, float(0.0))
+        )
         return mask
 
     def create_mask(self, src, tgt, pad_idx):
@@ -204,32 +213,37 @@ class EvolvableBERT(nn.Module):
         tgt_seq_len = tgt.shape[0]
 
         tgt_mask = self.generate_square_subsequent_mask(tgt_seq_len)
-        src_mask = torch.zeros((src_seq_len, src_seq_len),
-                               device=self.device).type(torch.bool)
+        src_mask = torch.zeros((src_seq_len, src_seq_len), device=self.device).type(
+            torch.bool
+        )
 
         src_padding_mask = (src == pad_idx).transpose(0, 1)
         tgt_padding_mask = (tgt == pad_idx).transpose(0, 1)
-        return src_mask.to(self.device), tgt_mask.to(self.device), src_padding_mask.to(
-            self.device), tgt_padding_mask.to(self.device)
+        return (
+            src_mask.to(self.device),
+            tgt_mask.to(self.device),
+            src_padding_mask.to(self.device),
+            tgt_padding_mask.to(self.device),
+        )
 
     def _reset_parameters(self):
-        """Initiate parameters in the transformer model.
-        """
+        """Initiate parameters in the transformer model."""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
     def forward(
-            self,
-            src,
-            tgt,
-            src_mask=None,
-            tgt_mask=None,
-            memory_mask=None,
-            src_key_padding_mask=None,
-            tgt_key_padding_mask=None,
-            memory_key_padding_mask=None,
-            is_causal=False):
+        self,
+        src,
+        tgt,
+        src_mask=None,
+        tgt_mask=None,
+        memory_mask=None,
+        src_key_padding_mask=None,
+        tgt_key_padding_mask=None,
+        memory_key_padding_mask=None,
+        is_causal=False,
+    ):
         """Returns output of neural network.
 
         :param src: Encoder input sequence
@@ -252,10 +266,17 @@ class EvolvableBERT(nn.Module):
         :type is_causal: bool, optional
         """
         encoder_output, encoder_hidden_states = self.encode(
-            src, src_mask, src_key_padding_mask, is_causal)
+            src, src_mask, src_key_padding_mask, is_causal
+        )
         memory = encoder_output
         decoder_output, decoder_hidden_states = self.decode(
-            tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask)
+            tgt,
+            memory,
+            tgt_mask,
+            memory_mask,
+            tgt_key_padding_mask,
+            memory_key_padding_mask,
+        )
 
         if self.end2end:
             decoder_output = self.generator(decoder_output)
@@ -283,30 +304,36 @@ class EvolvableBERT(nn.Module):
             mask_name="src_key_padding_mask",
             other_type=_none_or_dtype(src_mask),
             other_name="mask",
-            target_type=src.dtype
+            target_type=src.dtype,
         )
         encoder_output = src
         first_layer = self.encoder[self.encoder_keys[0]]
         str_first_layer = "self.net[0]"
         src_key_padding_mask_for_layers = src_key_padding_mask
-        encoder_output, convert_to_nested, src_key_padding_mask_for_layers = self.check_encoder_sparsity_fast_path(
-            src, encoder_output, first_layer, str_first_layer, 
-            src_mask, src_key_padding_mask, src_key_padding_mask_for_layers)
+        (
+            encoder_output,
+            convert_to_nested,
+            src_key_padding_mask_for_layers,
+        ) = self.check_encoder_sparsity_fast_path(
+            src,
+            encoder_output,
+            first_layer,
+            str_first_layer,
+            src_mask,
+            src_key_padding_mask,
+            src_key_padding_mask_for_layers,
+        )
 
         # Prevent type refinement
-        make_causal = (is_causal is True)
+        make_causal = is_causal is True
 
         if is_causal is None:
             if src_mask is not None:
                 sz = src_mask.size(0)
                 causal_comparison = torch.triu(
-                    torch.ones(
-                        sz,
-                        sz,
-                        device=src_mask.device) *
-                    float('-inf'),
-                    diagonal=1).to(
-                    src_mask.dtype)
+                    torch.ones(sz, sz, device=src_mask.device) * float("-inf"),
+                    diagonal=1,
+                ).to(src_mask.dtype)
                 if torch.equal(src_mask, causal_comparison):
                     make_causal = True
         is_causal = make_causal
@@ -315,24 +342,32 @@ class EvolvableBERT(nn.Module):
 
         # Encoder forward pass
         for key in self.encoder_keys:
-            if 'norm' not in key:
+            if "norm" not in key:
                 all_hidden_states = all_hidden_states + (encoder_output,)
                 encoder_output = self.encoder[key](
                     encoder_output,
                     src_mask=src_mask,
                     is_causal=is_causal,
-                    src_key_padding_mask=src_key_padding_mask_for_layers)
+                    src_key_padding_mask=src_key_padding_mask_for_layers,
+                )
         all_hidden_states = all_hidden_states + (encoder_output,)
         if convert_to_nested:
-            encoder_output = encoder_output.to_padded_tensor(0.)
+            encoder_output = encoder_output.to_padded_tensor(0.0)
             all_hidden_states = all_hidden_states + (encoder_output,)
-        if ['encoder_norm_0'] in self.encoder_keys:
-            encoder_output = self.encoder['encoder_norm_0'](encoder_output)
+        if ["encoder_norm_0"] in self.encoder_keys:
+            encoder_output = self.encoder["encoder_norm_0"](encoder_output)
             all_hidden_states = all_hidden_states + (encoder_output,)
         return encoder_output, all_hidden_states
 
-    def decode(self, tgt, memory, tgt_mask=None, memory_mask=None,
-               tgt_key_padding_mask=None, memory_key_padding_mask=None):
+    def decode(
+        self,
+        tgt,
+        memory,
+        tgt_mask=None,
+        memory_mask=None,
+        tgt_key_padding_mask=None,
+        memory_key_padding_mask=None,
+    ):
         """Returns decoded transformer input.
 
         :param tgt: Decoder input sequence
@@ -356,7 +391,7 @@ class EvolvableBERT(nn.Module):
         # Decoder forward pass
         decoder_output = tgt
         for key in self.decoder_keys:
-            if 'norm' not in key:
+            if "norm" not in key:
                 all_hidden_states = all_hidden_states + (decoder_output,)
                 decoder_output = self.decoder[key](
                     decoder_output,
@@ -364,22 +399,24 @@ class EvolvableBERT(nn.Module):
                     tgt_mask=tgt_mask,
                     memory_mask=memory_mask,
                     tgt_key_padding_mask=tgt_key_padding_mask,
-                    memory_key_padding_mask=memory_key_padding_mask)
+                    memory_key_padding_mask=memory_key_padding_mask,
+                )
         all_hidden_states = all_hidden_states + (decoder_output,)
-        if ['decoder_norm_0'] in self.decoder_keys:
-            decoder_output = self.decoder['decoder_norm_0'](decoder_output)
+        if ["decoder_norm_0"] in self.decoder_keys:
+            decoder_output = self.decoder["decoder_norm_0"](decoder_output)
             all_hidden_states = all_hidden_states + (decoder_output,)
         return decoder_output, all_hidden_states
 
     def check_encoder_sparsity_fast_path(
-            self,
-            src,
-            output,
-            first_layer,
-            str_first_layer,
-            mask,
-            src_key_padding_mask,
-            src_key_padding_mask_for_layers):
+        self,
+        src,
+        output,
+        first_layer,
+        str_first_layer,
+        mask,
+        src_key_padding_mask,
+        src_key_padding_mask_for_layers,
+    ):
         """Returns encoder output, conversion to nested and padding mask depending on if sparsity fast path possible.
         :param src: Encoder input sequence
         :type src: torch.Tensor
@@ -396,35 +433,50 @@ class EvolvableBERT(nn.Module):
         :param src_key_padding_mask_for_layers: Tensor mask for src keys per batch for layers
         :type src_key_padding_mask_for_layers: torch.Tensor
         """
-        why_not_sparsity_fast_path = ''
+        why_not_sparsity_fast_path = ""
         convert_to_nested = False
         if not isinstance(first_layer, torch.nn.TransformerEncoderLayer):
-            why_not_sparsity_fast_path = f"{str_first_layer} was not TransformerEncoderLayer"
+            why_not_sparsity_fast_path = (
+                f"{str_first_layer} was not TransformerEncoderLayer"
+            )
         elif first_layer.norm_first:
             why_not_sparsity_fast_path = f"{str_first_layer}.norm_first was True"
         elif first_layer.training:
             why_not_sparsity_fast_path = f"{str_first_layer} was in training mode"
         elif not first_layer.self_attn.batch_first:
-            why_not_sparsity_fast_path = f" {str_first_layer}.self_attn.batch_first was not True"
+            why_not_sparsity_fast_path = (
+                f" {str_first_layer}.self_attn.batch_first was not True"
+            )
         elif not first_layer.self_attn._qkv_same_embed_dim:
-            why_not_sparsity_fast_path = f"{str_first_layer}.self_attn._qkv_same_embed_dim was not True"
+            why_not_sparsity_fast_path = (
+                f"{str_first_layer}.self_attn._qkv_same_embed_dim was not True"
+            )
         elif not first_layer.activation_relu_or_gelu:
-            why_not_sparsity_fast_path = f" {str_first_layer}.activation_relu_or_gelu was not True"
+            why_not_sparsity_fast_path = (
+                f" {str_first_layer}.activation_relu_or_gelu was not True"
+            )
         elif not (first_layer.norm1.eps == first_layer.norm2.eps):
             why_not_sparsity_fast_path = f"{str_first_layer}.norm1.eps was not equal to {str_first_layer}.norm2.eps"
         elif not src.dim() == 3:
-            why_not_sparsity_fast_path = f"input not batched; expected src.dim() of 3 but got {src.dim()}"
+            why_not_sparsity_fast_path = (
+                f"input not batched; expected src.dim() of 3 but got {src.dim()}"
+            )
         elif not self.enable_nested_tensor:
             why_not_sparsity_fast_path = "enable_nested_tensor was not True"
         elif src_key_padding_mask is None:
             why_not_sparsity_fast_path = "src_key_padding_mask was None"
-        elif (((not hasattr(self, "mask_check")) or self.mask_check)
-                and not torch._nested_tensor_from_mask_left_aligned(src, src_key_padding_mask.logical_not())):
+        elif (
+            (not hasattr(self, "mask_check")) or self.mask_check
+        ) and not torch._nested_tensor_from_mask_left_aligned(
+            src, src_key_padding_mask.logical_not()
+        ):
             why_not_sparsity_fast_path = "mask_check enabled, and src and src_key_padding_mask was not left aligned"
         elif output.is_nested:
             why_not_sparsity_fast_path = "NestedTensor input is not supported"
         elif mask is not None:
-            why_not_sparsity_fast_path = "src_key_padding_mask and mask were both supplied"
+            why_not_sparsity_fast_path = (
+                "src_key_padding_mask and mask were both supplied"
+            )
         elif first_layer.self_attn.num_heads % 2 == 1:
             why_not_sparsity_fast_path = "num_head is odd"
         elif torch.is_autocast_enabled():
@@ -447,26 +499,26 @@ class EvolvableBERT(nn.Module):
                 first_layer.linear2.bias,
             )
 
-            if not (src.is_cuda or 'cpu' in str(src.device)):
+            if not (src.is_cuda or "cpu" in str(src.device)):
                 why_not_sparsity_fast_path = "src is neither CUDA nor CPU"
             elif torch.is_grad_enabled() and any(x.requires_grad for x in tensor_args):
-                why_not_sparsity_fast_path = (
-                    "grad is enabled and at least one of query or the i/o projection weights or biases requires_grad")
+                why_not_sparsity_fast_path = "grad is enabled and at least one of query or the i/o projection weights or biases requires_grad"
 
             if (not why_not_sparsity_fast_path) and (src_key_padding_mask is not None):
                 convert_to_nested = True
                 output = torch._nested_tensor_from_mask(
-                    output, src_key_padding_mask.logical_not(), mask_check=False)
+                    output, src_key_padding_mask.logical_not(), mask_check=False
+                )
                 src_key_padding_mask_for_layers = None
 
         return output, convert_to_nested, src_key_padding_mask_for_layers
 
     def get_model_dict(self):
-        """Returns dictionary with model information and weights.
-        """
+        """Returns dictionary with model information and weights."""
         model_dict = self.init_dict
         model_dict.update(
-            {'stored_values': self.extract_parameters(without_layer_norm=False)})
+            {"stored_values": self.extract_parameters(without_layer_norm=False)}
+        )
         return model_dict
 
     def count_parameters(self, without_layer_norm=False):
@@ -477,7 +529,7 @@ class EvolvableBERT(nn.Module):
         """
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
 
@@ -491,9 +543,9 @@ class EvolvableBERT(nn.Module):
         pvec = np.zeros(tot_size, np.float32)
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count:count + sz] = param.grad.data.cpu().numpy().flatten()
+                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
                 count += sz
         return pvec.copy()
 
@@ -507,9 +559,9 @@ class EvolvableBERT(nn.Module):
         pvec = np.zeros(tot_size, np.float32)
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count:count + sz] = param.data.cpu().detach().numpy().flatten()
+                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
                 count += sz
         return copy.deepcopy(pvec)
 
@@ -524,19 +576,19 @@ class EvolvableBERT(nn.Module):
         count = 0
 
         for name, param in self.named_parameters():
-            if not without_layer_norm or 'layer_norm' not in name:
+            if not without_layer_norm or "layer_norm" not in name:
                 sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count:count + sz]
+                raw = pvec[count : count + sz]
                 reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(
-                    copy.deepcopy(reshaped)).type(torch.FloatTensor)
+                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
+                    torch.FloatTensor
+                )
                 count += sz
         return pvec
 
     @property
     def init_dict(self):
-        """Returns model information in dictionary.
-        """
+        """Returns model information in dictionary."""
         init_dict = {
             "encoder_layers": self.encoder_layers,
             "decoder_layers": self.decoder_layers,
@@ -554,12 +606,12 @@ class EvolvableBERT(nn.Module):
             "norm_first": self.norm_first,
             "max_encoder_layers": self.max_encoder_layers,
             "max_decoder_layers": self.max_decoder_layers,
-            "device": self.device}
+            "device": self.device,
+        }
         return init_dict
 
     def add_encoder_layer(self):
-        """Adds an encoder layer to transformer.
-        """
+        """Adds an encoder layer to transformer."""
         if len(self.encoder_layers) < self.max_encoder_layers:
             self.encoder_layers += [self.encoder_layers[-1]]
             self.recreate_nets()
@@ -567,8 +619,7 @@ class EvolvableBERT(nn.Module):
         #     self.add_node()
 
     def add_decoder_layer(self):
-        """Adds a decoder layer to transformer.
-        """
+        """Adds a decoder layer to transformer."""
         if len(self.decoder_layers) < self.max_decoder_layers:
             self.decoder_layers += [self.decoder_layers[-1]]
             self.recreate_nets()
@@ -576,8 +627,7 @@ class EvolvableBERT(nn.Module):
         #     self.add_node()
 
     def remove_encoder_layer(self):
-        """Removes an encoder layer from transformer.
-        """
+        """Removes an encoder layer from transformer."""
         if len(self.encoder_layers) > 1:
             self.encoder_layers = self.encoder_layers[:-1]
             self.recreate_shrunk_nets()
@@ -585,8 +635,7 @@ class EvolvableBERT(nn.Module):
         #     self.add_node()
 
     def remove_decoder_layer(self):
-        """Removes a decoder layer from transformer.
-        """
+        """Removes a decoder layer from transformer."""
         if len(self.decoder_layers) > 1:
             self.decoder_layers = self.decoder_layers[:-1]
             self.recreate_shrunk_nets()
@@ -604,28 +653,29 @@ class EvolvableBERT(nn.Module):
         :type numb_new_nodes: int, optional
         """
         if network is None:
-            network = np.random.choice(['encoder', 'decoder'], 1)[0]
+            network = np.random.choice(["encoder", "decoder"], 1)[0]
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
-        if network == 'encoder':
+        if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = np.random.randint(
-                    0, len(self.encoder_layers), 1)[0]
+                hidden_layer = np.random.randint(0, len(self.encoder_layers), 1)[0]
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
 
             self.encoder_layers[hidden_layer] += numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = np.random.randint(
-                    0, len(self.decoder_layers), 1)[0]
+                hidden_layer = np.random.randint(0, len(self.decoder_layers), 1)[0]
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 
             self.decoder_layers[hidden_layer] += numb_new_nodes
         self.recreate_nets()
-        return {"hidden_layer": hidden_layer,
-                "numb_new_nodes": numb_new_nodes, "network": network}
+        return {
+            "hidden_layer": hidden_layer,
+            "numb_new_nodes": numb_new_nodes,
+            "network": network,
+        }
 
     def remove_node(self, network=None, hidden_layer=None, numb_new_nodes=None):
         """Removes nodes from hidden layer of encoder/decoder.
@@ -638,52 +688,54 @@ class EvolvableBERT(nn.Module):
         :type numb_new_nodes: int, optional
         """
         if network is None:
-            network = np.random.choice(['encoder', 'decoder'], 1)[0]
+            network = np.random.choice(["encoder", "decoder"], 1)[0]
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
-        if network == 'encoder':
+        if network == "encoder":
             if hidden_layer is None:
-                hidden_layer = np.random.randint(
-                    0, len(self.encoder_layers), 1)[0]
+                hidden_layer = np.random.randint(0, len(self.encoder_layers), 1)[0]
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
             if self.encoder_layers[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
                 self.encoder_layers[hidden_layer] -= numb_new_nodes
         else:
             if hidden_layer is None:
-                hidden_layer = np.random.randint(
-                    0, len(self.decoder_layers), 1)[0]
+                hidden_layer = np.random.randint(0, len(self.decoder_layers), 1)[0]
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
             if self.decoder_layers[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
                 self.decoder_layers[hidden_layer] -= numb_new_nodes
         self.recreate_shrunk_nets()
-        return {"hidden_layer": hidden_layer,
-                "numb_new_nodes": numb_new_nodes, "network": network}
+        return {
+            "hidden_layer": hidden_layer,
+            "numb_new_nodes": numb_new_nodes,
+            "network": network,
+        }
 
     def recreate_nets(self):
-        """Recreates neural networks.
-        """
+        """Recreates neural networks."""
         new_encoder, new_decoder = self.create_nets()
         new_encoder = self.preserve_parameters(
-            old_net=self.encoder, new_net=new_encoder)
+            old_net=self.encoder, new_net=new_encoder
+        )
         new_decoder = self.preserve_parameters(
-            old_net=self.decoder, new_net=new_decoder)
+            old_net=self.decoder, new_net=new_decoder
+        )
         self.encoder, self.decoder = new_encoder, new_decoder
 
     def recreate_shrunk_nets(self):
-        """Recreates shrunk neural networks.
-        """
+        """Recreates shrunk neural networks."""
         new_encoder, new_decoder = self.create_nets()
         new_encoder = self.shrink_preserve_parameters(
-            old_net=self.encoder, new_net=new_encoder)
+            old_net=self.encoder, new_net=new_encoder
+        )
         new_decoder = self.shrink_preserve_parameters(
-            old_net=self.decoder, new_net=new_decoder)
+            old_net=self.decoder, new_net=new_decoder
+        )
         self.encoder, self.decoder = new_encoder, new_decoder
 
     def clone(self):
-        """Returns clone of neural net with identical parameters.
-        """
+        """Returns clone of neural net with identical parameters."""
         clone = EvolvableBERT(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
@@ -707,19 +759,17 @@ class EvolvableBERT(nn.Module):
                         old_size = old_net_dict[key].data.size()
                         new_size = param.data.size()
                         if len(param.data.size()) == 1:
-                            param.data[:min(old_size[0], new_size[0])] = old_net_dict[key].data[
-                                :min(old_size[0], new_size[0])]
+                            param.data[: min(old_size[0], new_size[0])] = old_net_dict[
+                                key
+                            ].data[: min(old_size[0], new_size[0])]
                         else:
-                            param.data[:min(old_size[0], new_size[0]), :min(old_size[1], new_size[1])] = old_net_dict[
-                                key].data[
-                                :min(old_size[
-                                    0],
-                                    new_size[
-                                    0]),
-                                :min(old_size[
-                                    1],
-                                    new_size[
-                                    1])]
+                            param.data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                            ] = old_net_dict[key].data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                            ]
 
         return new_net
 
@@ -746,20 +796,23 @@ class EvolvableBERT(nn.Module):
                             param.data[:min_0] = old_net_dict[key].data[:min_0]
                         else:
                             min_1 = min(old_size[1], new_size[1])
-                            param.data[:min_0,
-                                       :min_1] = old_net_dict[key].data[:min_0, :min_1]
+                            param.data[:min_0, :min_1] = old_net_dict[key].data[
+                                :min_0, :min_1
+                            ]
         return new_net
 
 
-def _canonical_mask(mask, mask_name, other_type, other_name,
-                    target_type, check_other=True):
+def _canonical_mask(
+    mask, mask_name, other_type, other_name, target_type, check_other=True
+):
     """Returns canconical mask. Adapted from torch.nn.functional"""
     if mask is not None:
         _mask_dtype = mask.dtype
         _mask_is_float = torch.is_floating_point(mask)
         if _mask_dtype != torch.bool and not _mask_is_float:
             raise AssertionError(
-                f"only bool and floating types of {mask_name} are supported")
+                f"only bool and floating types of {mask_name} are supported"
+            )
         if check_other and other_type is not None:
             if _mask_dtype != other_type:
                 warnings.warn(
@@ -767,15 +820,14 @@ def _canonical_mask(mask, mask_name, other_type, other_name,
                     "is deprecated. Use same type for both instead."
                 )
         if not _mask_is_float:
-            mask = (
-                torch.zeros_like(mask, dtype=target_type)
-                .masked_fill_(mask, float("-inf"))
+            mask = torch.zeros_like(mask, dtype=target_type).masked_fill_(
+                mask, float("-inf")
             )
     return mask
 
 
 class PositionalEncoder(nn.Module):
-    """The Positional Encoder class. 
+    """The Positional Encoder class.
     Adds positional encoding to the token embedding to introduce a notion of word order.
 
     :param emb_size: Number of expected features
@@ -787,10 +839,9 @@ class PositionalEncoder(nn.Module):
     """
 
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000):
-        super(PositionalEncoder, self).__init__()
+        super().__init__()
 
-        den = torch.exp(- torch.arange(0, emb_size, 2)
-                        * math.log(10000) / emb_size)
+        den = torch.exp(-torch.arange(0, emb_size, 2) * math.log(10000) / emb_size)
         pos = torch.arange(0, maxlen).reshape(maxlen, 1)
         pos_embedding = torch.zeros((maxlen, emb_size))
         pos_embedding[:, 0::2] = torch.sin(pos * den)
@@ -798,22 +849,23 @@ class PositionalEncoder(nn.Module):
         pos_embedding = pos_embedding.unsqueeze(-2)
 
         self.dropout = nn.Dropout(dropout)
-        self.register_buffer('pos_embedding', pos_embedding)
+        self.register_buffer("pos_embedding", pos_embedding)
 
     def forward(self, x: torch.Tensor):
         """Forward pass through positional encoder.
         :param x: Input to positional encoder, shape [seq_len, batch_size, embedding_dim]
         :type x: torch.Tensor
         """
-        return self.dropout(x + self.pos_embedding[:x.size(0), :])
+        return self.dropout(x + self.pos_embedding[: x.size(0), :])
 
 
 class PositionalEncoding(nn.Module):
-    """The positional embedding class. 
-    Converts tensor of input indices into corresponding tensor of position embeddings."""
+    """The positional embedding class.
+    Converts tensor of input indices into corresponding tensor of position embeddings.
+    """
 
     def __init__(self, max_positions: int, emb_size):
-        super(PositionalEncoding, self).__init__()
+        super().__init__()
         self.embedding = nn.Embedding(max_positions, emb_size)
         self.emb_size = emb_size
 
@@ -829,7 +881,7 @@ class TokenEmbedding(nn.Module):
     """The token embedding class. Converts tensor of input indices into corresponding tensor of token embeddings."""
 
     def __init__(self, vocab_size: int, emb_size):
-        super(TokenEmbedding, self).__init__()
+        super().__init__()
         self.embedding = nn.Embedding(vocab_size, emb_size)
         self.emb_size = emb_size
 
@@ -851,5 +903,4 @@ def _none_or_dtype(input):
         return None
     elif isinstance(input, torch.Tensor):
         return input.dtype
-    raise RuntimeError(
-        "input to _none_or_dtype() must be None or torch.Tensor")
+    raise RuntimeError("input to _none_or_dtype() must be None or torch.Tensor")

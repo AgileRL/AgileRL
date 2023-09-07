@@ -1,12 +1,14 @@
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
 from agilerl.utils.cache import Cache
 
 
 class Language_Observation(ABC):
     @abstractmethod
-    def to_sequence(self) -> Tuple[List[str, Optional[float]], bool]:
+    def to_sequence(self) -> tuple[list[str, float | None], bool]:
         # returns a List of Tuples and a bool indicating terminal
         # each state Tuple should be: (str, None)
         # each action Tuple should be: (str, reward)
@@ -16,13 +18,13 @@ class Language_Observation(ABC):
     def __str__(self) -> str:
         pass
 
-    def metadata(self) -> Optional[Dict[str, Any]]:
+    def metadata(self) -> dict[str, Any] | None:
         return None
 
 
 class Language_Environment(ABC):
     @abstractmethod
-    def step(self, action: str) -> Tuple[Language_Observation, float, bool]:
+    def step(self, action: str) -> tuple[Language_Observation, float, bool]:
         pass
 
     @abstractmethod
@@ -50,8 +52,11 @@ class Policy(ABC):
         pass
 
 
-def interact_environment(env: Language_Environment, policy: Policy,
-                         obs: Optional[Language_Observation] = None):
+def interact_environment(
+    env: Language_Environment,
+    policy: Policy,
+    obs: Language_Observation | None = None,
+):
     obs_sequence = []
     if obs is None:
         obs = env.reset()

@@ -1,15 +1,17 @@
-import random
 import copy
+import random
+
 import dill
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+
 from agilerl.networks.evolvable_cnn import EvolvableCNN
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 
-class DQN():
+class DQN:
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
     :param state_dim: State observation dimension
@@ -44,11 +46,25 @@ class DQN():
     :type wrap: bool, optional
     """
 
-    def __init__(self, state_dim, action_dim, one_hot, index=0, 
-                 net_config={'arch': 'mlp', 'h_size':[64,64]}, batch_size=64, lr=1e-4, 
-                 learn_step=5, gamma=0.99, tau=1e-3, mutation=None, double=False, 
-                 device='cpu', accelerator=None, wrap=True):
-        self.algo = 'DQN'
+    def __init__(
+        self,
+        state_dim,
+        action_dim,
+        one_hot,
+        index=0,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
+        batch_size=64,
+        lr=1e-4,
+        learn_step=5,
+        gamma=0.99,
+        tau=1e-3,
+        mutation=None,
+        double=False,
+        device="cpu",
+        accelerator=None,
+        wrap=True,
+    ):
+        self.algo = "DQN"
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.one_hot = one_hot
@@ -68,42 +84,46 @@ class DQN():
         self.double = double
 
         # model
-        if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
+        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
             self.actor = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
+                hidden_size=self.net_config["h_size"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
             self.actor_target = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
+                hidden_size=self.net_config["h_size"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
             self.actor_target.load_state_dict(self.actor.state_dict())
 
-        elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
+        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
             self.actor = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=action_dim,
-                channel_size=self.net_config['c_size'],
-                kernal_size=self.net_config['k_size'],
-                stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                normalize=self.net_config['normalize'],
+                channel_size=self.net_config["c_size"],
+                kernal_size=self.net_config["k_size"],
+                stride_size=self.net_config["s_size"],
+                hidden_size=self.net_config["h_size"],
+                normalize=self.net_config["normalize"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
             self.actor_target = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=action_dim,
-                channel_size=self.net_config['c_size'],
-                kernal_size=self.net_config['k_size'],
-                stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                normalize=self.net_config['normalize'],
+                channel_size=self.net_config["c_size"],
+                kernal_size=self.net_config["k_size"],
+                stride_size=self.net_config["s_size"],
+                hidden_size=self.net_config["h_size"],
+                normalize=self.net_config["normalize"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
             self.actor_target.load_state_dict(self.actor.state_dict())
 
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
@@ -120,7 +140,7 @@ class DQN():
         self.criterion = nn.MSELoss()
 
     def getAction(self, state, epsilon=0):
-        """Returns the next action to take in the environment. 
+        """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
@@ -134,8 +154,11 @@ class DQN():
             state = state.to(self.device)
 
         if self.one_hot:
-            state = nn.functional.one_hot(
-                state.long(), num_classes=self.state_dim[0]).float().squeeze()
+            state = (
+                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
 
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
@@ -152,10 +175,10 @@ class DQN():
             action = np.argmax(action_values.cpu().data.numpy(), axis=1)
 
         return action
-    
+
     def _squeeze_exp(self, experiences):
         """Remove first dim created by dataloader.
-        
+
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: List[torch.Tensor[float]]
         """
@@ -171,16 +194,24 @@ class DQN():
         states, actions, rewards, next_states, dones = experiences
 
         if self.one_hot:
-            states = nn.functional.one_hot(
-                states.long(), num_classes=self.state_dim[0]).float().squeeze()
-            next_states = nn.functional.one_hot(
-                next_states.long(), num_classes=self.state_dim[0]).float().squeeze()
+            states = (
+                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
+            next_states = (
+                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
 
-        if self.double: # Double Q-learning
+        if self.double:  # Double Q-learning
             q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
             q_target = self.actor(next_states).gather(dim=1, index=q_idx).detach()
         else:
-            q_target = self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+            q_target = (
+                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+            )
 
         # target, if terminal then y_j = rewards
         y_j = rewards + self.gamma * q_target * (1 - dones)
@@ -199,12 +230,13 @@ class DQN():
         self.softUpdate()
 
     def softUpdate(self):
-        """Soft updates target network.
-        """
+        """Soft updates target network."""
         for eval_param, target_param in zip(
-                self.actor.parameters(), self.actor_target.parameters()):
+            self.actor.parameters(), self.actor_target.parameters()
+        ):
             target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data)
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+            )
 
     def test(self, env, swap_channels=False, max_steps=500, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
@@ -243,20 +275,22 @@ class DQN():
         if index is None:
             index = self.index
 
-        clone = type(self)(state_dim=self.state_dim,
-                           action_dim=self.action_dim,
-                           one_hot=self.one_hot,
-                           index=index,
-                           net_config=self.net_config,
-                           batch_size=self.batch_size,
-                           lr=self.lr,
-                           learn_step=self.learn_step,
-                           gamma=self.gamma,
-                           tau=self.tau,
-                           mutation=self.mut,
-                           device=self.device,
-                           accelerator=self.accelerator,
-                           wrap=wrap)
+        clone = type(self)(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            one_hot=self.one_hot,
+            index=index,
+            net_config=self.net_config,
+            batch_size=self.batch_size,
+            lr=self.lr,
+            learn_step=self.learn_step,
+            gamma=self.gamma,
+            tau=self.tau,
+            mutation=self.mut,
+            device=self.device,
+            accelerator=self.accelerator,
+            wrap=wrap,
+        )
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
@@ -264,12 +298,17 @@ class DQN():
         clone.optimizer_type = optimizer
         if self.accelerator is not None:
             if wrap:
-                clone.actor, clone.actor_target, clone.optimizer = self.accelerator.prepare(
-                                                                                        actor, 
-                                                                                        actor_target,
-                                                                                        optimizer)
+                (
+                    clone.actor,
+                    clone.actor_target,
+                    clone.optimizer,
+                ) = self.accelerator.prepare(actor, actor_target, optimizer)
             else:
-                clone.actor, clone.actor_target, clone.optimizer = actor, actor_target, optimizer
+                clone.actor, clone.actor_target, clone.optimizer = (
+                    actor,
+                    actor_target,
+                    optimizer,
+                )
         else:
             clone.actor = actor.to(self.device)
             clone.actor_target = actor_target.to(self.device)
@@ -282,10 +321,10 @@ class DQN():
 
     def wrap_models(self):
         if self.accelerator is not None:
-            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(self.actor, 
-                                                                            self.actor_target, 
-                                                                            self.optimizer)
-    
+            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(
+                self.actor, self.actor_target, self.optimizer
+            )
+
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
@@ -298,24 +337,28 @@ class DQN():
         :param path: Location to save checkpoint at
         :type path: string
         """
-        torch.save({
-            'actor_init_dict': self.actor.init_dict,
-            'actor_state_dict': self.actor.state_dict(),
-            'actor_target_init_dict': self.actor_target.init_dict,
-            'actor_target_state_dict': self.actor_target.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'net_config': self.net_config,
-            'batch_size': self.batch_size,
-            'lr': self.lr,
-            'learn_step': self.learn_step,
-            'gamma': self.gamma,
-            'tau': self.tau,
-            'mutation': self.mut,
-            'index': self.index,
-            'scores': self.scores,
-            'fitness': self.fitness,
-            'steps': self.steps,
-        }, path, pickle_module=dill)
+        torch.save(
+            {
+                "actor_init_dict": self.actor.init_dict,
+                "actor_state_dict": self.actor.state_dict(),
+                "actor_target_init_dict": self.actor_target.init_dict,
+                "actor_target_state_dict": self.actor_target.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "net_config": self.net_config,
+                "batch_size": self.batch_size,
+                "lr": self.lr,
+                "learn_step": self.learn_step,
+                "gamma": self.gamma,
+                "tau": self.tau,
+                "mutation": self.mut,
+                "index": self.index,
+                "scores": self.scores,
+                "fitness": self.fitness,
+                "steps": self.steps,
+            },
+            path,
+            pickle_module=dill,
+        )
 
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
@@ -324,24 +367,24 @@ class DQN():
         :type path: string
         """
         checkpoint = torch.load(path, pickle_module=dill)
-        self.net_config = checkpoint['net_config']
-        if self.net_config['arch'] == 'mlp':
-            self.actor = EvolvableMLP(**checkpoint['actor_init_dict'])
-            self.actor_target = EvolvableMLP(**checkpoint['actor_target_init_dict'])
-        elif self.net_config['arch'] == 'cnn':
-            self.actor = EvolvableCNN(**checkpoint['actor_init_dict'])
-            self.actor_target = EvolvableCNN(**checkpoint['actor_target_init_dict'])
-        self.lr = checkpoint['lr']
+        self.net_config = checkpoint["net_config"]
+        if self.net_config["arch"] == "mlp":
+            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+        elif self.net_config["arch"] == "cnn":
+            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+        self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.actor.load_state_dict(checkpoint['actor_state_dict'])
-        self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.batch_size = checkpoint['batch_size']
-        self.learn_step = checkpoint['learn_step']
-        self.gamma = checkpoint['gamma']
-        self.tau = checkpoint['tau']
-        self.mut = checkpoint['mutation']
-        self.index = checkpoint['index']
-        self.scores = checkpoint['scores']
-        self.fitness = checkpoint['fitness']
-        self.steps = checkpoint['steps']
+        self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.batch_size = checkpoint["batch_size"]
+        self.learn_step = checkpoint["learn_step"]
+        self.gamma = checkpoint["gamma"]
+        self.tau = checkpoint["tau"]
+        self.mut = checkpoint["mutation"]
+        self.index = checkpoint["index"]
+        self.scores = checkpoint["scores"]
+        self.fitness = checkpoint["fitness"]
+        self.steps = checkpoint["steps"]

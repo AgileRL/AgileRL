@@ -17,7 +17,7 @@ Train even faster by taking full advantage of your entire compute stack._**
 </div>
 
 This is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
-  
+
 This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.<br>
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.<br>
 We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
@@ -50,14 +50,14 @@ In the charts below, a single AgileRL run, which automatically tunes hyperparame
 </p>
 <p align="center">AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.</p>
 
-AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments. 
+AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
 
 <p align="center">
   <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png>
 </p>
 
 ## Get Started
-Install as a package with pip: 
+Install as a package with pip:
 ```bash
 pip install agilerl
 ```
@@ -66,7 +66,7 @@ Or install in development mode: (Recommended due to nascent nature of this libra
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -r requirements.txt
 ```
-If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>. 
+If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>.
 
 Demo:
 ```bash
@@ -310,7 +310,7 @@ for idx_epi in range(max_episodes):
                 state = np.moveaxis(state, [3], [1])
             action = agent.getAction(state, epsilon)    # Get next action from agent
             next_state, reward, done, _, _ = env.step(action)   # Act in environment
-            
+
             # Save experience to replay buffer
             if INIT_HP['CHANNELS_LAST']:
                 memory.save2memoryVectEnvs(
@@ -323,7 +323,7 @@ for idx_epi in range(max_episodes):
             if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
                 experiences = memory.sample(agent.batch_size) # Sample replay buffer
                 agent.learn(experiences)    # Learn according to agent's RL algorithm
-            
+
             state = next_state
             score += reward
 
@@ -331,7 +331,7 @@ for idx_epi in range(max_episodes):
 
     # Now evolve population if necessary
     if (idx_epi+1) % evo_epochs == 0:
-        
+
         # Evaluate population
         fitnesses = [agent.test(env, swap_channels=INIT_HP['CHANNELS_LAST'], max_steps=max_steps, loop=evo_loop) for agent in pop]
 
@@ -589,7 +589,7 @@ for idx_epi in trange(max_episodes):
 
     # Now evolve population if necessary
     if (idx_epi+1) % evo_epochs == 0:
-        
+
         # Evaluate population
         fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
 
@@ -605,13 +605,13 @@ env.close()
 ```
 
 ## Train an agent on a language environment (RLHF)
-We implement RLHF on Wordle, and use <a href="https://arxiv.org/pdf/2206.11871.pdf">ILQL</a> to finetune our model. To create your own language environment, 
+We implement RLHF on Wordle, and use <a href="https://arxiv.org/pdf/2206.11871.pdf">ILQL</a> to finetune our model. To create your own language environment,
 see https://github.com/Sea-Snell/Implicit-Language-Q-Learning.
-The <code>EvolvableGPT</code> class allows us to combine LLMs and transformer architectures with evolvable HPO, which can massively reduce the time taken to finetune 
-these expensive models. Due to the vast number of parameters and settings involved in training a Large Language Model (LLM) on human feedback, these are defined in 
-<code>configs</code>. 
+The <code>EvolvableGPT</code> class allows us to combine LLMs and transformer architectures with evolvable HPO, which can massively reduce the time taken to finetune
+these expensive models. Due to the vast number of parameters and settings involved in training a Large Language Model (LLM) on human feedback, these are defined in
+<code>configs</code>.
 
-In order to finetune a model with RLHF, we need a trained model as a starting point. We can use behavioural cloning (BC, supervised learning) to build this first version of 
+In order to finetune a model with RLHF, we need a trained model as a starting point. We can use behavioural cloning (BC, supervised learning) to build this first version of
 the model. To train your own model from scratch:
 ```bash
 python run_bc_lm.py
@@ -624,11 +624,11 @@ python run_ilql.py
 ```
 
 ## Distributed training
-AgileRL can also be used for distributed training if you have multiple devices you want to take advantage of. We use the HuggingFace 
-<a href="https://github.com/huggingface/accelerate">Accelerate</a> library to implement this in an open manner, without hiding behind too many layers of abstraction. 
+AgileRL can also be used for distributed training if you have multiple devices you want to take advantage of. We use the HuggingFace
+<a href="https://github.com/huggingface/accelerate">Accelerate</a> library to implement this in an open manner, without hiding behind too many layers of abstraction.
 This should make implementations simple, but also highly customisable, by continuing to expose the PyTorch training loop beneath it all.
 
-To launch distributed training scripts in bash, use <code>accelerate launch</code>. To customise the distributed training properties, specify the key <code>--config_file</code>. An example 
+To launch distributed training scripts in bash, use <code>accelerate launch</code>. To customise the distributed training properties, specify the key <code>--config_file</code>. An example
 config file has been provided at <code>configs/accelerate/accelerate.yaml</code>.
 
 Putting this all together, launching a distributed training script can be done as follows:
@@ -708,8 +708,8 @@ if __name__ == '__main__':
     replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
     replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)
-    sampler = Sampler(distributed=True, 
-                    dataset=replay_dataset, 
+    sampler = Sampler(distributed=True,
+                    dataset=replay_dataset,
                     dataloader=replay_dataloader)
 
     tournament = TournamentSelection(tournament_size=2,  # Tournament selection size
@@ -837,7 +837,7 @@ NET_CONFIG = {
         'TAU': 0.01,                    # For soft update of target parameters
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         'CHANNELS_LAST': False,
-        "WANDB": False                  # Start run with Weights&Biases         
+        "WANDB": False                  # Start run with Weights&Biases
     }
 
     MUTATION_PARAMS = {
@@ -872,10 +872,10 @@ Use ```utils.utils.initialPopulation``` to create a list of agents - our populat
     # Configure the multi-agent algo input arguments
     try:
         state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True 
+        one_hot = True
     except Exception:
         state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False 
+        one_hot = False
     try:
         action_dim = [env.action_space(agent).n for agent in env.agents]
         INIT_HP['DISCRETE_ACTIONS'] = True
@@ -889,7 +889,7 @@ Use ```utils.utils.initialPopulation``` to create a list of agents - our populat
 
     if INIT_HP['CHANNELS_LAST']:
         state_dim = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim]
-    
+
     INIT_HP['N_AGENTS'] = env.num_agents
     INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
 
@@ -963,7 +963,7 @@ The easiest training loop implementation is to use our ```training.train_multi_a
                                                 n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
                                                 evo_epochs=20,                           # Evolution frequency
                                                 evo_loop=1,                              # Number of evaluation episodes per agent
-                                                max_steps=900,                           # Max steps to take in the enviroment
+                                                max_steps=900,                           # Max steps to take in the environment
                                                 target=200.,                             # Target score for early stopping
                                                 tournament=tournament,                   # Tournament selection object
                                                 mutation=mutations,                      # Mutations object

@@ -1,86 +1,74 @@
+---
 defaults:
-  - model: bc_lm
-  - dataset@train_dataset: human_dataset
-  - dataset@eval_dataset: human_dataset
-  - evaluator: bc_evaluator
-  - _self_
+    - model: bc_lm
+    - dataset@train_dataset: human_dataset
+    - dataset@eval_dataset: human_dataset
+    - evaluator: bc_evaluator
+    - _self_
 
 train_dataset:
-  cache_id: d_train
-  file_path: data/wordle/random_human_tweet_data_200.json
-  use_true_word: false
-  index_file: data/wordle/human_train_idxs.json
-  max_len: 1024
+    cache_id: d_train
+    file_path: data/wordle/random_human_tweet_data_200.json
+    use_true_word: false
+    index_file: data/wordle/human_train_idxs.json
+    max_len: 1024
 
 eval_dataset:
-  cache_id: d_eval
-  file_path: data/wordle/random_human_tweet_data_200.json
-  use_true_word: false
-  index_file: data/wordle/human_eval_idxs.json
-  max_len: 1024
+    cache_id: d_eval
+    file_path: data/wordle/random_human_tweet_data_200.json
+    use_true_word: false
+    index_file: data/wordle/human_eval_idxs.json
+    max_len: 1024
 
 model:
-  transition_weight: 0.0
-  dataset:
-    name: wordle_human_dataset
-    cache_id: d_train
-  net_config: {
-                'arch': 'gpt',
-                'vocab_size': 35,
-                'n_layer': 12,
-                'n_embd': 768,
-                'n_head': 12,
-                'dim_feedfwd': 3072,
-                'block_size': 1024,
-                'activation': 'gelu',
-                'dropout': 0.1,
-                'layer_norm_eps': 1e-5,
-                'min_layers': 8,
-                'max_layers': 16,
-                'bias': True,
-              }
-  load:
-    checkpoint_path: null
-    strict_load: true
-    gpt_pretrained: false
-    gpt_model_type: gpt2
-    gpt_checkpoint_path: null
+    transition_weight: 0.0
+    dataset:
+        name: wordle_human_dataset
+        cache_id: d_train
+    net_config: {arch: gpt, vocab_size: 35, n_layer: 12, n_embd: 768, n_head: 12, dim_feedfwd: 3072, block_size: 1024, activation: gelu, dropout: 0.1, layer_norm_eps: 1e-5,
+        min_layers: 8, max_layers: 16, bias: true}
+    load:
+        checkpoint_path:
+        strict_load: true
+        gpt_pretrained: false
+        gpt_model_type: gpt2
+        gpt_checkpoint_path:
 
 
 evaluator:
-  env:
-    vocab:
-      name: vocab
-      vocab_path: data/wordle/word_lists/wordle_official_200.txt
-      cache_path: null
-      fill_cache: true
-  verbose: true
-  kind: sample
-  generation_kwargs:
-    temp: 1.0
-    num_generations: 1
-    max_generation_len: null 
-    top_k: null
-    top_p: null
+    env:
+        vocab:
+            name: vocab
+            vocab_path: data/wordle/word_lists/wordle_official_200.txt
+            cache_path:
+            fill_cache: true
+    verbose: true
+    kind: sample
+    generation_kwargs:
+        temp: 1.0
+        num_generations: 1
+        max_generation_len:
+        top_k:
+        top_p:
 
 train:
-  save_checkpoint_dir: outputs/wordle_tweet_bc_test1/
-  optim_state_path: null
-  epochs: 1
-  dataloader_workers: 1
-  bsize: 64
-  grad_accum_steps: 1
-  log_every: 256
-  eval_every: 1024
-  save_every: 16384
-  max_checkpoints: 1
-  eval_bsize: 32
-  eval_batches: 1
-  lr: 1e-4
-  weight_decay: 0.01
-  max_steps: null
-  loss: {}
+    save_checkpoint_dir: outputs/wordle_tweet_bc_test1/
+    optim_state_path:
+    epochs: 1
+    dataloader_workers: 1
+    bsize: 64
+    grad_accum_steps: 1
+    log_every: 256
+    eval_every: 1024
+    save_every: 16384
+    max_checkpoints: 1
+    eval_bsize: 32
+    eval_batches: 1
+    lr: 1e-4
+    weight_decay: 0.01
+    max_steps:
+    loss: {}
 
 wandb:
-  use_wandb: true
-  wandb_project: wordle_iql
+    use_wandb: true
+    wandb_project: wordle_iql
