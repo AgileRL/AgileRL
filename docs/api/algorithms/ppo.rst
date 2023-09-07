@@ -1,9 +1,9 @@
 Proximal Policy Optimization (PPO)
 =========================================
 
-PPO is a policy gradient method that uses a clipped objective to constrain policy updates. 
-It aims to combine the stability of Trust Region Policy Optimization (TRPO) with the simplicity 
-and scalability of vanilla policy gradients, effectively maintaining a balance between exploration 
+PPO is a policy gradient method that uses a clipped objective to constrain policy updates.
+It aims to combine the stability of Trust Region Policy Optimization (TRPO) with the simplicity
+and scalability of vanilla policy gradients, effectively maintaining a balance between exploration
 and exploitation. PPO is an on-policy algorithm.
 
 * PPO paper: https://arxiv.org/abs/1707.06347v2
@@ -15,7 +15,7 @@ Can I use it?
    :widths: 20 20 20
    :header-rows: 1
 
-   * - 
+   * -
      - Action
      - Observation
    * - Discrete
@@ -100,7 +100,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent  
+  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
 
 Parameters
 ------------
