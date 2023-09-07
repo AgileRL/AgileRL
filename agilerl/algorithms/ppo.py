@@ -1,16 +1,17 @@
-import random
 import copy
+
 import dill
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+
 from agilerl.networks.evolvable_cnn import EvolvableCNN
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 
-class PPO():
+class PPO:
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
 
     :param state_dim: State observation dimension
@@ -57,12 +58,31 @@ class PPO():
     :type wrap: bool, optional
     """
 
-    def __init__(self, state_dim, action_dim, one_hot, discrete_actions, index=0, 
-                 net_config={'arch': 'mlp', 'h_size': [64,64]}, batch_size=64, lr=1e-4, 
-                 gamma=0.99, gae_lambda=0.95, mutation=None, action_std_init=0.6, 
-                 clip_coef=0.2, ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5,
-                 target_kl=None, update_epochs=4, device='cpu', accelerator=None, wrap=True):
-        self.algo = 'PPO'
+    def __init__(
+        self,
+        state_dim,
+        action_dim,
+        one_hot,
+        discrete_actions,
+        index=0,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
+        batch_size=64,
+        lr=1e-4,
+        gamma=0.99,
+        gae_lambda=0.95,
+        mutation=None,
+        action_std_init=0.6,
+        clip_coef=0.2,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        target_kl=None,
+        update_epochs=4,
+        device="cpu",
+        accelerator=None,
+        wrap=True,
+    ):
+        self.algo = "PPO"
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.one_hot = one_hot
@@ -87,16 +107,16 @@ class PPO():
         self.scores = []
         self.fitness = []
         self.steps = [0]
-        
+
         # Set up network output activations
-        if 'output_activation' in self.net_config.keys():
+        if "output_activation" in self.net_config.keys():
             pass
         else:
             if self.discrete_actions:
-                self.net_config['output_activation'] = 'softmax'
+                self.net_config["output_activation"] = "softmax"
             else:
-                self.net_config['output_activation'] = 'tanh'
-        
+                self.net_config["output_activation"] = "tanh"
+
         # For continuous action spaces
         if not self.discrete_actions:
             self.action_var = torch.full((action_dim,), action_std_init**2)
@@ -104,48 +124,56 @@ class PPO():
                 self.action_var = self.action_var.to(self.device)
 
         # model
-        if self.net_config['arch'] == 'mlp':      # Multi-layer Perceptron
+        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
             self.actor = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
-                hidden_size=self.net_config['h_size'],
-                output_activation=self.net_config['output_activation'],
+                hidden_size=self.net_config["h_size"],
+                output_activation=self.net_config["output_activation"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
             self.critic = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=1,
-                hidden_size=self.net_config['h_size'],
+                hidden_size=self.net_config["h_size"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
 
-        elif self.net_config['arch'] == 'cnn':    # Convolutional Neural Network
+        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
             self.actor = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=action_dim,
-                channel_size=self.net_config['c_size'],
-                kernal_size=self.net_config['k_size'],
-                stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                normalize=self.net_config['normalize'],
-                mlp_activation=self.net_config['output_activation'],
+                channel_size=self.net_config["c_size"],
+                kernal_size=self.net_config["k_size"],
+                stride_size=self.net_config["s_size"],
+                hidden_size=self.net_config["h_size"],
+                normalize=self.net_config["normalize"],
+                mlp_activation=self.net_config["output_activation"],
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
             self.critic = EvolvableCNN(
                 input_shape=state_dim,
                 num_actions=1,
-                channel_size=self.net_config['c_size'],
-                kernal_size=self.net_config['k_size'],
-                stride_size=self.net_config['s_size'],
-                hidden_size=self.net_config['h_size'],
-                normalize=self.net_config['normalize'],
-                mlp_activation='tanh',
+                channel_size=self.net_config["c_size"],
+                kernal_size=self.net_config["k_size"],
+                stride_size=self.net_config["s_size"],
+                hidden_size=self.net_config["h_size"],
+                normalize=self.net_config["normalize"],
+                mlp_activation="tanh",
                 device=self.device,
-                accelerator=self.accelerator)
+                accelerator=self.accelerator,
+            )
 
-        self.optimizer_type = optim.Adam([{'params': self.actor.parameters(), 'lr': self.lr},
-                                          {'params': self.critic.parameters(), 'lr': self.lr}])
-        
+        self.optimizer_type = optim.Adam(
+            [
+                {"params": self.actor.parameters(), "lr": self.lr},
+                {"params": self.critic.parameters(), "lr": self.lr},
+            ]
+        )
+
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
             if wrap:
@@ -156,30 +184,33 @@ class PPO():
             self.optimizer = self.optimizer_type
 
         self.criterion = nn.MSELoss()
-        
+
     def prepare_state(self, state):
         """Prepares state for forward pass through neural network.
-        
+
         :param state: Observation of environment
         :type state: np.Array() or List
         """
         if not isinstance(state, torch.Tensor):
             state = torch.from_numpy(state).float()
-            
+
         if self.accelerator is None:
             state = state.to(self.device)
 
         if self.one_hot:
-            state = nn.functional.one_hot(
-                state.long(), num_classes=self.state_dim[0]).float().squeeze()
+            state = (
+                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
 
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
-        
+
         return state.float()
 
     def getAction(self, state, action=None, grad=False):
-        """Returns the next action to take in the environment. 
+        """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
@@ -190,14 +221,14 @@ class PPO():
         :param grad: Calculate gradients on actions, defaults to False
         :type grad: bool, optional
         """
-        state = self.prepare_state(state)  
+        state = self.prepare_state(state)
 
         if not grad:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
-        
+
         else:
             action_values = self.actor(state)
 
@@ -205,18 +236,18 @@ class PPO():
             dist = Categorical(action_values)
         else:
             cov_mat = torch.diag(self.action_var).unsqueeze(dim=0)
-            dist = MultivariateNormal(action_values, cov_mat)    
-            
+            dist = MultivariateNormal(action_values, cov_mat)
+
         return_tensors = True
         if action is None:
             action = dist.sample()
             return_tensors = False
         elif self.accelerator is None:
             action = action.to(self.device)
-            
+
         action_logprob = dist.log_prob(action)
         dist_entropy = dist.entropy()
-        
+
         self.critic.eval()
         with torch.no_grad():
             state_values = self.critic(state).squeeze(-1)
@@ -225,8 +256,12 @@ class PPO():
         if return_tensors:
             return action, action_logprob, dist_entropy, state_values
         else:
-            return action.cpu().data.numpy(), action_logprob.cpu().data.numpy(), \
-                dist_entropy.cpu().data.numpy(), state_values.cpu().data.numpy()
+            return (
+                action.cpu().data.numpy(),
+                action_logprob.cpu().data.numpy(),
+                dist_entropy.cpu().data.numpy(),
+                state_values.cpu().data.numpy(),
+            )
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
@@ -239,9 +274,9 @@ class PPO():
         :type policy_noise: float, optional
         """
         experiences = [torch.from_numpy(np.array(exp)) for exp in experiences]
-        states, actions, log_probs, rewards, dones, values, next_state = experiences 
+        states, actions, log_probs, rewards, dones, values, next_state = experiences
         dones = dones.long()
-        
+
         # Bootstrapping
         with torch.no_grad():
             num_steps = rewards.size(0)
@@ -256,10 +291,15 @@ class PPO():
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = last_gae_lambda = delta+self.gamma*self.gae_lambda*nextnonterminal*last_gae_lambda
+                delta = (
+                    rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
+                )
+                advantages[t] = last_gae_lambda = (
+                    delta
+                    + self.gamma * self.gae_lambda * nextnonterminal * last_gae_lambda
+                )
             returns = advantages + values
-        
+
         states = states.reshape((-1,) + self.state_dim)
         if self.discrete_actions:
             actions = actions.reshape(-1)
@@ -269,50 +309,64 @@ class PPO():
         advantages = advantages.reshape(-1)
         returns = returns.reshape(-1)
         values = values.reshape(-1)
-        
+
         if self.accelerator is None:
-            states, actions, log_probs, advantages, returns, values = states.to(self.device), actions.to(self.device), \
-                log_probs.to(self.device), advantages.to(self.device), returns.to(self.device), values.to(self.device)
-        
+            states, actions, log_probs, advantages, returns, values = (
+                states.to(self.device),
+                actions.to(self.device),
+                log_probs.to(self.device),
+                advantages.to(self.device),
+                returns.to(self.device),
+                values.to(self.device),
+            )
+
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
-        
+
         clipfracs = []
-        
+
         for epoch in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
-                minibatch_idxs = batch_idxs[start:start+self.batch_size]
-                
-                _, log_prob, entropy, value = self.getAction(state=states[minibatch_idxs], 
-                                                             action=actions[minibatch_idxs],
-                                                             grad=True)
-                
+                minibatch_idxs = batch_idxs[start : start + self.batch_size]
+
+                _, log_prob, entropy, value = self.getAction(
+                    state=states[minibatch_idxs],
+                    action=actions[minibatch_idxs],
+                    grad=True,
+                )
+
                 logratio = log_prob - log_probs[minibatch_idxs]
                 ratio = logratio.exp()
-                
+
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > self.clip_coef).float().mean().item()]
-                
+                    clipfracs += [
+                        ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
+                    ]
+
                 minibatch_advs = advantages[minibatch_idxs]
-                minibatch_advs = (minibatch_advs-minibatch_advs.mean())/(minibatch_advs.std()+1e-8)
-                
+                minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
+                    minibatch_advs.std() + 1e-8
+                )
+
                 # Policy loss
                 pg_loss1 = -minibatch_advs * ratio
-                pg_loss2 = -minibatch_advs * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
+                pg_loss2 = -minibatch_advs * torch.clamp(
+                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                
+
                 # Value loss
                 value = value.view(-1)
                 v_loss_unclipped = (value - returns[minibatch_idxs]) ** 2
-                v_clipped = values[minibatch_idxs] + torch.clamp(value - values[minibatch_idxs], 
-                                                                 -self.clip_coef, 
-                                                                 self.clip_coef)
+                v_clipped = values[minibatch_idxs] + torch.clamp(
+                    value - values[minibatch_idxs], -self.clip_coef, self.clip_coef
+                )
                 v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                 v_loss = 0.5 * v_loss_max.mean()
-                
+
                 entropy_loss = entropy.mean()
                 loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
 
@@ -323,7 +377,7 @@ class PPO():
                 else:
                     loss.backward()
                 self.optimizer.step()
-                
+
             if self.target_kl is not None:
                 if approx_kl > self.target_kl:
                     break
@@ -367,43 +421,59 @@ class PPO():
         if index is None:
             index = self.index
 
-        clone = type(self)(state_dim=self.state_dim,
-                           action_dim=self.action_dim,
-                           one_hot=self.one_hot,
-                           discrete_actions=self.discrete_actions,
-                           index=index,
-                           net_config=self.net_config,
-                           batch_size=self.batch_size,
-                           lr=self.lr,
-                           gamma=self.gamma,
-                           gae_lambda=self.gae_lambda,
-                           action_std_init=self.action_std_init,
-                           clip_coef=self.clip_coef,
-                           ent_coef=self.ent_coef,
-                           vf_coef=self.vf_coef,
-                           max_grad_norm=self.max_grad_norm,
-                           target_kl=self.target_kl,
-                           update_epochs=self.update_epochs,
-                           mutation=self.mut,
-                           device=self.device,
-                           accelerator=self.accelerator,
-                           wrap=wrap)
-        
+        clone = type(self)(
+            state_dim=self.state_dim,
+            action_dim=self.action_dim,
+            one_hot=self.one_hot,
+            discrete_actions=self.discrete_actions,
+            index=index,
+            net_config=self.net_config,
+            batch_size=self.batch_size,
+            lr=self.lr,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            action_std_init=self.action_std_init,
+            clip_coef=self.clip_coef,
+            ent_coef=self.ent_coef,
+            vf_coef=self.vf_coef,
+            max_grad_norm=self.max_grad_norm,
+            target_kl=self.target_kl,
+            update_epochs=self.update_epochs,
+            mutation=self.mut,
+            device=self.device,
+            accelerator=self.accelerator,
+            wrap=wrap,
+        )
+
         if self.accelerator is not None:
             self.unwrap_models()
         actor = self.actor.clone()
         critic = self.critic.clone()
-        optimizer = optim.Adam([{'params': actor.parameters(), 'lr': self.lr},
-                                {'params': critic.parameters(), 'lr': self.lr}])
+        optimizer = optim.Adam(
+            [
+                {"params": actor.parameters(), "lr": self.lr},
+                {"params": critic.parameters(), "lr": self.lr},
+            ]
+        )
         clone.optimizer_type = optimizer
 
         if self.accelerator is not None:
             if wrap:
-                clone.actor, clone.critic, clone.optimizer, = self.accelerator.prepare(actor,
-                                                                      critic,
-                                                                      optimizer)
+                (
+                    clone.actor,
+                    clone.critic,
+                    clone.optimizer,
+                ) = self.accelerator.prepare(actor, critic, optimizer)
             else:
-                clone.actor, clone.critic, clone.optimizer, = actor, critic, optimizer
+                (
+                    clone.actor,
+                    clone.critic,
+                    clone.optimizer,
+                ) = (
+                    actor,
+                    critic,
+                    optimizer,
+                )
         else:
             clone.actor = actor.to(self.device)
             clone.critic = critic.to(self.device)
@@ -417,10 +487,10 @@ class PPO():
 
     def wrap_models(self):
         if self.accelerator is not None:
-            self.actor, self.critic, self.optimizer = self.accelerator.prepare(self.actor,
-                                                                 self.critic,
-                                                                 self.optimizer_type)
-    
+            self.actor, self.critic, self.optimizer = self.accelerator.prepare(
+                self.actor, self.critic, self.optimizer_type
+            )
+
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
@@ -433,31 +503,35 @@ class PPO():
         :param path: Location to save checkpoint at
         :type path: string
         """
-        torch.save({
-            'actor_init_dict': self.actor.init_dict,
-            'actor_state_dict': self.actor.state_dict(),
-            'critic_init_dict': self.critic.init_dict,
-            'critic_state_dict': self.critic.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'discrete_actions': self.discrete_actions,
-            'net_config': self.net_config,
-            'batch_size': self.batch_size,
-            'lr': self.lr,
-            'gamma': self.gamma,
-            'gae_lambda': self.gae_lambda,
-            'action_std_init': self.action_std_init,
-            'clip_coef': self.clip_coef,
-            'ent_coef': self.ent_coef,
-            'vf_coef': self.vf_coef,
-            'max_grad_norm': self.max_grad_norm,
-            'target_kl': self.target_kl,
-            'update_epochs': self.update_epochs,
-            'mutation': self.mut,
-            'index': self.index,
-            'scores': self.scores,
-            'fitness': self.fitness,
-            'steps': self.steps,
-        }, path, pickle_module=dill)
+        torch.save(
+            {
+                "actor_init_dict": self.actor.init_dict,
+                "actor_state_dict": self.actor.state_dict(),
+                "critic_init_dict": self.critic.init_dict,
+                "critic_state_dict": self.critic.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "discrete_actions": self.discrete_actions,
+                "net_config": self.net_config,
+                "batch_size": self.batch_size,
+                "lr": self.lr,
+                "gamma": self.gamma,
+                "gae_lambda": self.gae_lambda,
+                "action_std_init": self.action_std_init,
+                "clip_coef": self.clip_coef,
+                "ent_coef": self.ent_coef,
+                "vf_coef": self.vf_coef,
+                "max_grad_norm": self.max_grad_norm,
+                "target_kl": self.target_kl,
+                "update_epochs": self.update_epochs,
+                "mutation": self.mut,
+                "index": self.index,
+                "scores": self.scores,
+                "fitness": self.fitness,
+                "steps": self.steps,
+            },
+            path,
+            pickle_module=dill,
+        )
 
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
@@ -466,32 +540,36 @@ class PPO():
         :type path: string
         """
         checkpoint = torch.load(path, pickle_module=dill)
-        self.net_config = checkpoint['net_config']
-        if self.net_config['arch'] == 'mlp':
-            self.actor = EvolvableMLP(**checkpoint['actor_init_dict'])
-            self.critic = EvolvableMLP(**checkpoint['critic_init_dict'])
-        elif self.net_config['arch'] == 'cnn':
-            self.actor = EvolvableCNN(**checkpoint['actor_init_dict'])
-            self.critic = EvolvableCNN(**checkpoint['critic_init_dict'])
-        self.lr = checkpoint['lr']
-        self.optimizer = optim.Adam([{'params': self.actor.parameters(), 'lr': self.lr},
-                                     {'params': self.critic.parameters(), 'lr': self.lr}])
-        self.actor.load_state_dict(checkpoint['actor_state_dict'])
-        self.critic.load_state_dict(checkpoint['critic_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.discrete_actions = checkpoint['discrete_actions']
-        self.batch_size = checkpoint['batch_size']
-        self.gamma = checkpoint['gamma']
-        self.gae_lambda = checkpoint['gae_lambda']
-        self.action_std_init = checkpoint['action_std_init']
-        self.clip_coef = checkpoint['clip_coef']
-        self.ent_coef = checkpoint['ent_coef']
-        self.vf_coef = checkpoint['vf_coef']
-        self.max_grad_norm = checkpoint['max_grad_norm']
-        self.target_kl = checkpoint['target_kl']
-        self.update_epochs = checkpoint['update_epochs']
-        self.mut = checkpoint['mutation']
-        self.index = checkpoint['index']
-        self.scores = checkpoint['scores']
-        self.fitness = checkpoint['fitness']
-        self.steps = checkpoint['steps']
+        self.net_config = checkpoint["net_config"]
+        if self.net_config["arch"] == "mlp":
+            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+            self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
+        elif self.net_config["arch"] == "cnn":
+            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+            self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+        self.lr = checkpoint["lr"]
+        self.optimizer = optim.Adam(
+            [
+                {"params": self.actor.parameters(), "lr": self.lr},
+                {"params": self.critic.parameters(), "lr": self.lr},
+            ]
+        )
+        self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.critic.load_state_dict(checkpoint["critic_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.discrete_actions = checkpoint["discrete_actions"]
+        self.batch_size = checkpoint["batch_size"]
+        self.gamma = checkpoint["gamma"]
+        self.gae_lambda = checkpoint["gae_lambda"]
+        self.action_std_init = checkpoint["action_std_init"]
+        self.clip_coef = checkpoint["clip_coef"]
+        self.ent_coef = checkpoint["ent_coef"]
+        self.vf_coef = checkpoint["vf_coef"]
+        self.max_grad_norm = checkpoint["max_grad_norm"]
+        self.target_kl = checkpoint["target_kl"]
+        self.update_epochs = checkpoint["update_epochs"]
+        self.mut = checkpoint["mutation"]
+        self.index = checkpoint["index"]
+        self.scores = checkpoint["scores"]
+        self.fitness = checkpoint["fitness"]
+        self.steps = checkpoint["steps"]

@@ -1,5 +1,6 @@
+---
 defaults:
-  - /policy@start_word_policy: start_word_policy
+    - /policy@start_word_policy: start_word_policy
 name: optimal_policy
 progress_bar: false
-cache_path: null
+cache_path:

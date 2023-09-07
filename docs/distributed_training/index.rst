@@ -2,10 +2,10 @@ Distributed Training
 =====
 
 AgileRL can also be used for distributed training if you have multiple devices you want to take advantage of. We use the HuggingFace `Accelerate
-<https://github.com/huggingface/accelerate>`_ library to implement this in an open manner, without hiding behind too many layers of abstraction. 
+<https://github.com/huggingface/accelerate>`_ library to implement this in an open manner, without hiding behind too many layers of abstraction.
 This should make implementations simple, but also highly customisable, by continuing to expose the PyTorch training loop beneath it all.
 
-To launch distributed training scripts in bash, use ``accelerate launch``. To customise the distributed training properties, specify the key ``--config_file``. An example 
+To launch distributed training scripts in bash, use ``accelerate launch``. To customise the distributed training properties, specify the key ``--config_file``. An example
 config file has been provided at ``configs/accelerate/accelerate.yaml``.
 
 Putting this all together, launching a distributed training script can be done as follows:
@@ -88,8 +88,8 @@ Example distributed training loop:
         replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
-        sampler = Sampler(distributed=True, 
-                        dataset=replay_dataset, 
+        sampler = Sampler(distributed=True,
+                        dataset=replay_dataset,
                         dataloader=replay_dataloader)
 
         tournament = TournamentSelection(tournament_size=2,  # Tournament selection size

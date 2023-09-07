@@ -30,11 +30,13 @@ repos:
           - id: codespell
             args:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
-    - repo: https://github.com/astral-sh/ruff
+                - --ignore-words-list=magent,pres
+    - repo: https://github.com/astral-sh/ruff-pre-commit
       rev: v0.0.287
       hooks:
           - id: ruff
             args:
+                - --fix
                 - --ignore=E501
     - repo: https://github.com/PyCQA/isort
       rev: 5.12.0

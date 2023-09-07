@@ -1,3 +1,4 @@
+---
 name: user_policy
-hint_policy: null
-vocab: null
+hint_policy:
+vocab:

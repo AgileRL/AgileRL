@@ -1,57 +1,57 @@
+---
 defaults:
-  - model: per_token_iql
-  - dataset: wordle_list
-  - evaluator: action_ranking_evaluator
-  - _self_
+    - model: per_token_iql
+    - dataset: wordle_list
+    - evaluator: action_ranking_evaluator
+    - _self_
 
 dataset:
-  cache_id: d
-  file_path: data/wordle/expert_wordle_branch_20k.pkl
-  vocab:
-    cache_id: v
-    cache_path: data/wordle/vocab_cache_wordle_official_branch.pkl
+    cache_id: d
+    file_path: data/wordle/expert_wordle_branch_20k.pkl
+    vocab:
+        cache_id: v
+        cache_path: data/wordle/vocab_cache_wordle_official_branch.pkl
 
 model:
-  alpha: 0.005
-  gamma: 0.99
-  beta: 0.0
-  transition_weight: 0.0
-  clip_weight: null
-  value_max: null
-  value_min: null
-  detach_v: false
-  detach_q: false
-  detach_pi: false
-  double_q: true
-  seperate_policy: true
-  seperate_target: true
-  tau: 0.9
-  exp_weights: true
-  dm_margin: 0.0
-  advanced_mlp: false
-  cql_temp: 1.0
-  dataset:
-    name: wordle_human_dataset
-    cache_id: d
-  load:
-    checkpoint_path: outputs/wordle/wordle_iql_official_test1/model.pkl
-    strict_load: true
+    alpha: 0.005
+    gamma: 0.99
+    beta: 0.0
+    transition_weight: 0.0
+    clip_weight:
+    value_max:
+    value_min:
+    detach_v: false
+    detach_q: false
+    detach_pi: false
+    double_q: true
+    seperate_policy: true
+    seperate_target: true
+    tau: 0.9
+    exp_weights: true
+    dm_margin: 0.0
+    advanced_mlp: false
+    cql_temp: 1.0
+    dataset:
+        name: wordle_human_dataset
+        cache_id: d
+    load:
+        checkpoint_path: outputs/wordle/wordle_iql_official_test1/model.pkl
+        strict_load: true
 
 evaluator:
-  branching_data:
-    name: wordle_dataset
-    cache_id: d
+    branching_data:
+        name: wordle_dataset
+        cache_id: d
 
 eval:
-  dataloader_workers: 1
-  bsize: 64
-  batches: 128
-  print_every: 8
-  loss:
-    v_loss_weight: 1.0
-    q_loss_weight: 1.0
-    awac_weight: 1.0
-    cql_loss_weight: 0.01
-    dm_loss_weight: 0.0
-    mc_returns: false
-
+    dataloader_workers: 1
+    bsize: 64
+    batches: 128
+    print_every: 8
+    loss:
+        v_loss_weight: 1.0
+        q_loss_weight: 1.0
+        awac_weight: 1.0
+        cql_loss_weight: 0.01
+        dm_loss_weight: 0.0
+        mc_returns: false

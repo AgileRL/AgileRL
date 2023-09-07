@@ -13,7 +13,7 @@ Welcome to AgileRL's documentation!
 
 .. |Docs status| image:: https://readthedocs.org/projects/agilerl/badge/?version=latest
    :target: https://agilerl.readthedocs.io/en/latest/?badge=latest
-   
+
 .. |PyPI download total| image:: https://static.pepy.tech/badge/agilerl
    :target: https://pypi.python.org/pypi/agilerl/
 
