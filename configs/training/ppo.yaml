@@ -1,6 +1,6 @@
 # Define initial hyperparameters
 INIT_HP:
-  ENV_NAME: 'CartPole-v1'   # Gym environment name
+  ENV_NAME: 'LunarLander-v2'   # Gym environment name
   DISCRETE_ACTIONS: True
   ALGO: 'PPO'                                         # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]

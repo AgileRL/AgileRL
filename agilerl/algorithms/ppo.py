@@ -194,12 +194,16 @@ class PPO():
 
         if not grad:
             self.actor.eval()
+            self.critic.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
+                state_values = self.critic(state).squeeze(-1)
             self.actor.train()
+            self.critic.train()
         
         else:
             action_values = self.actor(state)
+            state_values = self.critic(state).squeeze(-1)
 
         if self.discrete_actions:
             dist = Categorical(action_values)
@@ -216,11 +220,6 @@ class PPO():
             
         action_logprob = dist.log_prob(action)
         dist_entropy = dist.entropy()
-        
-        self.critic.eval()
-        with torch.no_grad():
-            state_values = self.critic(state).squeeze(-1)
-        self.critic.train()
 
         if return_tensors:
             return action, action_logprob, dist_entropy, state_values
