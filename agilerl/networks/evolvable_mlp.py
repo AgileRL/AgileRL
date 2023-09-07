@@ -26,6 +26,8 @@ class EvolvableMLP(nn.Module):
     :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
+    :param init_layers: Initialise network layers, defaults to True
+    :type init_layers: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -35,19 +37,19 @@ class EvolvableMLP(nn.Module):
     """
 
     def __init__(
-        self,
-        num_inputs: int,
-        num_outputs: int,
-        hidden_size: List[int],
-        activation="relu",
-        output_activation=None,
-        layer_norm=False,
-        output_vanish=True,
-        stored_values=None,
-        device="cpu",
-        accelerator=None,
-    ):
-        super().__init__()
+            self,
+            num_inputs: int,
+            num_outputs: int,
+            hidden_size: List[int],
+            activation='relu',
+            output_activation=None,
+            layer_norm=False,
+            output_vanish=True,
+            init_layers=True,
+            stored_values=None,
+            device='cpu',
+            accelerator=None):
+        super(EvolvableMLP, self).__init__()
 
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
@@ -55,6 +57,7 @@ class EvolvableMLP(nn.Module):
         self.output_activation = output_activation
         self.layer_norm = layer_norm
         self.output_vanish = output_vanish
+        self.init_layers = init_layers
         self.hidden_size = hidden_size
         self.device = device
         self.accelerator = accelerator
@@ -62,7 +65,8 @@ class EvolvableMLP(nn.Module):
         self.net = self.create_net()
 
         if stored_values is not None:
-            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
+            self.inject_parameters(
+                pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -90,12 +94,21 @@ class EvolvableMLP(nn.Module):
             if activation_names == "softmax"
             else activation_functions[activation_names]()
         )
+    
+    def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
+        torch.nn.init.orthogonal_(layer.weight, std)
+        torch.nn.init.constant_(layer.bias, bias_const)
+        return layer
 
     def create_net(self):
-        """Creates and returns neural network."""
+        """Creates and returns neural network.
+        """
         net_dict = OrderedDict()
 
-        net_dict["linear_layer_0"] = nn.Linear(self.num_inputs, self.hidden_size[0])
+        net_dict["linear_layer_0"] = nn.Linear(
+            self.num_inputs, self.hidden_size[0])
+        if self.init_layers:
+            net_dict["linear_layer_0"] = self.layer_init(net_dict["linear_layer_0"])
         if self.layer_norm:
             net_dict["layer_norm_0"] = nn.LayerNorm(self.hidden_size[0])
         net_dict["activation_0"] = self.get_activation(self.activation)
@@ -103,17 +116,18 @@ class EvolvableMLP(nn.Module):
         if len(self.hidden_size) > 1:
             for l_no in range(1, len(self.hidden_size)):
                 net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
-                    self.hidden_size[l_no - 1], self.hidden_size[l_no]
-                )
+                    self.hidden_size[l_no - 1], self.hidden_size[l_no])
+                if self.init_layers:
+                    net_dict[f"linear_layer_{str(l_no)}"] = self.layer_init(net_dict[f"linear_layer_{str(l_no)}"])
                 if self.layer_norm:
                     net_dict[f"layer_norm_{str(l_no)}"] = nn.LayerNorm(
-                        self.hidden_size[l_no]
-                    )
+                        self.hidden_size[l_no])
                 net_dict[f"activation_{str(l_no)}"] = self.get_activation(
-                    self.activation
-                )
+                    self.activation)
 
         output_layer = nn.Linear(self.hidden_size[-1], self.num_outputs)
+        if self.init_layers:
+            output_layer = self.layer_init(output_layer) 
 
         if self.output_vanish:
             output_layer.weight.data.mul_(0.1)
@@ -121,10 +135,11 @@ class EvolvableMLP(nn.Module):
 
         net_dict["linear_layer_output"] = output_layer
         if self.output_activation is not None:
-            net_dict["activation_output"] = self.get_activation(self.output_activation)
-
+            net_dict["activation_output"] = self.get_activation(
+                self.output_activation)
+            
         net = nn.Sequential(net_dict)
-
+            
         if self.accelerator is None:
             net = net.to(self.device)
 
@@ -144,11 +159,11 @@ class EvolvableMLP(nn.Module):
         return x
 
     def get_model_dict(self):
-        """Returns dictionary with model information and weights."""
+        """Returns dictionary with model information and weights.
+        """
         model_dict = self.init_dict
         model_dict.update(
-            {"stored_values": self.extract_parameters(without_layer_norm=False)}
-        )
+            {'stored_values': self.extract_parameters(without_layer_norm=False)})
         return model_dict
 
     def count_parameters(self, without_layer_norm=False):
@@ -159,12 +174,12 @@ class EvolvableMLP(nn.Module):
         """
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
+            if not without_layer_norm or 'layer_norm' not in name:
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
 
     def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened
+        """Returns current pytorch gradient in same order as genome's flattened 
         parameter vector.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
@@ -174,9 +189,9 @@ class EvolvableMLP(nn.Module):
         pvec = np.zeros(tot_size, np.float32)
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
+            if not without_layer_norm or 'layer_norm' not in name:
                 sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
+                pvec[count:count + sz] = param.grad.data.cpu().numpy().flatten()
                 count += sz
         return pvec.copy()
 
@@ -190,14 +205,14 @@ class EvolvableMLP(nn.Module):
         pvec = np.zeros(tot_size, np.float32)
         count = 0
         for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
+            if not without_layer_norm or 'layer_norm' not in name:
                 sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
+                pvec[count:count + sz] = param.data.cpu().detach().numpy().flatten()
                 count += sz
         return copy.deepcopy(pvec)
 
     def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current
+        """Injects a flat vector of neural network parameters into the model's current 
         neural network weights.
 
         :param pvec: Network weights
@@ -208,19 +223,19 @@ class EvolvableMLP(nn.Module):
         count = 0
 
         for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
+            if not without_layer_norm or 'layer_norm' not in name:
                 sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count : count + sz]
+                raw = pvec[count:count + sz]
                 reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
-                    torch.FloatTensor
-                )
+                param.data = torch.from_numpy(
+                    copy.deepcopy(reshaped)).type(torch.FloatTensor)
                 count += sz
         return pvec
 
     @property
     def init_dict(self):
-        """Returns model information in dictionary."""
+        """Returns model information in dictionary.
+        """
         init_dict = {
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
@@ -229,40 +244,43 @@ class EvolvableMLP(nn.Module):
             "output_activation": self.output_activation,
             "layer_norm": self.layer_norm,
             "device": self.device,
-            "accelerator": self.accelerator,
-        }
+            "accelerator":self.accelerator}
         return init_dict
 
     @property
     def short_dict(self):
-        """Returns shortened version of model information in dictionary."""
+        """Returns shortened version of model information in dictionary.
+        """
         short_dict = {
             "hidden_size": self.hidden_size,
             "activation": self.activation,
             "output_activation": self.output_activation,
-            "layer_norm": self.layer_norm,
-        }
+            "layer_norm": self.layer_norm}
         return short_dict
 
     def add_layer(self):
-        """Adds a hidden layer to neural network."""
+        """Adds a hidden layer to neural network.
+        """
         # add layer to hyper params
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
 
             # copy old params to new net
             new_net = self.create_net()
-            new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
+            new_net = self.preserve_parameters(
+                old_net=self.net, new_net=new_net)
             self.net = new_net
         else:
             self.add_node()
 
     def remove_layer(self):
-        """Removes a hidden layer from neural network."""
+        """Removes a hidden layer from neural network.
+        """
         if len(self.hidden_size) > 1:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:1]
             new_net = self.create_net()
-            new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
+            new_net = self.shrink_preserve_parameters(
+                old_net=self.net, new_net=new_net)
             self.net = new_net
         else:
             self.add_node()
@@ -285,7 +303,8 @@ class EvolvableMLP(nn.Module):
         if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
             new_net = self.create_net()
-            new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
+            new_net = self.preserve_parameters(
+                old_net=self.net, new_net=new_net)
 
             self.net = new_net
 
@@ -307,18 +326,19 @@ class EvolvableMLP(nn.Module):
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
         if self.hidden_size[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
-            self.hidden_size[hidden_layer] = (
-                self.hidden_size[hidden_layer] - numb_new_nodes
-            )
+            self.hidden_size[hidden_layer] = self.hidden_size[hidden_layer] - \
+                numb_new_nodes
             new_net = self.create_net()
-            new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
+            new_net = self.shrink_preserve_parameters(
+                old_net=self.net, new_net=new_net)
 
             self.net = new_net
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     def clone(self):
-        """Returns clone of neural net with identical parameters."""
+        """Returns clone of neural net with identical parameters.
+        """
         clone = EvolvableMLP(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
@@ -342,17 +362,19 @@ class EvolvableMLP(nn.Module):
                         old_size = old_net_dict[key].data.size()
                         new_size = param.data.size()
                         if len(param.data.size()) == 1:
-                            param.data[: min(old_size[0], new_size[0])] = old_net_dict[
-                                key
-                            ].data[: min(old_size[0], new_size[0])]
+                            param.data[:min(old_size[0], new_size[0])] = old_net_dict[key].data[
+                                :min(old_size[0], new_size[0])]
                         else:
-                            param.data[
-                                : min(old_size[0], new_size[0]),
-                                : min(old_size[1], new_size[1]),
-                            ] = old_net_dict[key].data[
-                                : min(old_size[0], new_size[0]),
-                                : min(old_size[1], new_size[1]),
-                            ]
+                            param.data[:min(old_size[0], new_size[0]), :min(old_size[1], new_size[1])] = old_net_dict[
+                                key].data[
+                                :min(old_size[
+                                    0],
+                                    new_size[
+                                    0]),
+                                :min(old_size[
+                                    1],
+                                    new_size[
+                                    1])]
 
         return new_net
 
@@ -379,7 +401,6 @@ class EvolvableMLP(nn.Module):
                             param.data[:min_0] = old_net_dict[key].data[:min_0]
                         else:
                             min_1 = min(old_size[1], new_size[1])
-                            param.data[:min_0, :min_1] = old_net_dict[key].data[
-                                :min_0, :min_1
-                            ]
+                            param.data[:min_0,
+                                       :min_1] = old_net_dict[key].data[:min_0, :min_1]
         return new_net
