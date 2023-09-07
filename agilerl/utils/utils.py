@@ -5,10 +5,9 @@ import numpy as np
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
-from agilerl.algorithms.ppo import PPO
-from agilerl.algorithms.td3 import TD3
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
+from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 
 
@@ -94,29 +93,29 @@ def initialPopulation(
                 accelerator=accelerator,
             )
             population.append(agent)
-            
-    elif algo == 'PPO':
+
+    elif algo == "PPO":
         for idx in range(population_size):
             agent = PPO(
                 state_dim=state_dim,
                 action_dim=action_dim,
                 one_hot=one_hot,
-                discrete_actions=INIT_HP['DISCRETE_ACTIONS'],
+                discrete_actions=INIT_HP["DISCRETE_ACTIONS"],
                 index=idx,
                 net_config=net_config,
-                batch_size=INIT_HP['BATCH_SIZE'],
-                lr=INIT_HP['LR'],
-                gamma=INIT_HP['GAMMA'],
-                gae_lambda=INIT_HP['GAE_LAMBDA'],
-                action_std_init=INIT_HP['ACTION_STD_INIT'],
-                clip_coef=INIT_HP['CLIP_COEF'],
-                ent_coef=INIT_HP['ENT_COEF'],
-                vf_coef=INIT_HP['VF_COEF'],
-                max_grad_norm=INIT_HP['MAX_GRAD_NORM'],
-                target_kl=INIT_HP['TARGET_KL'],
-                update_epochs=INIT_HP['UPDATE_EPOCHS'],
+                batch_size=INIT_HP["BATCH_SIZE"],
+                lr=INIT_HP["LR"],
+                gamma=INIT_HP["GAMMA"],
+                gae_lambda=INIT_HP["GAE_LAMBDA"],
+                action_std_init=INIT_HP["ACTION_STD_INIT"],
+                clip_coef=INIT_HP["CLIP_COEF"],
+                ent_coef=INIT_HP["ENT_COEF"],
+                vf_coef=INIT_HP["VF_COEF"],
+                max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
+                target_kl=INIT_HP["TARGET_KL"],
+                update_epochs=INIT_HP["UPDATE_EPOCHS"],
                 device=device,
-                accelerator=accelerator
+                accelerator=accelerator,
             )
             population.append(agent)
 

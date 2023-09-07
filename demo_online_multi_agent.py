@@ -75,7 +75,7 @@ if __name__ == "__main__":
         one_hot,
         NET_CONFIG,
         INIT_HP,
-        population_size=INIT_HP['POPULATION_SIZE'],
+        population_size=INIT_HP["POPULATION_SIZE"],
         device=device,
     )
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -131,7 +131,9 @@ if __name__ == "__main__":
 
             for _ in range(max_steps):
                 action = agent.getAction(state, epsilon)  # Get next action from agent
-                next_state, reward, done, truncation, _ = env.step(action)  # Act in environment
+                next_state, reward, done, truncation, _ = env.step(
+                    action
+                )  # Act in environment
 
                 # Save experiences to replay buffer
                 if INIT_HP["CHANNELS_LAST"]:
@@ -162,7 +164,7 @@ if __name__ == "__main__":
                         for agent_id, ns in next_state.items()
                     }
                 state = next_state
-                
+
                 if any(truncation.values()) or any(done.values()):
                     break
 
