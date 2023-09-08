@@ -11,8 +11,7 @@
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
-**_NEW: AgileRL now supports distributed training with HuggingFace Accelerate!<br>
-Train even faster by taking full advantage of your entire compute stack._**
+**_NEW: AgileRL now supports distributed training and multi-agent reinforcement learning!_**
 
 </div>
 
@@ -20,7 +19,7 @@ This is a Deep Reinforcement Learning library focused on improving development b
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.<br>
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.<br>
-We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
 
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif height="250">
