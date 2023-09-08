@@ -103,7 +103,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn.yaml") as file:
+    with open("../configs/training/dqn.yaml") as file:
         dqn_config = yaml.safe_load(file)
     INIT_HP = dqn_config["INIT_HP"]
     MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]

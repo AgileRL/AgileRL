@@ -92,7 +92,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ppo.yaml") as file:
+    with open("../configs/training/ppo.yaml") as file:
         ppo_config = yaml.safe_load(file)
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]

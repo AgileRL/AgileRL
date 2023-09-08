@@ -70,12 +70,15 @@ If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.goog
 
 Demo:
 ```bash
+cd demos
 python demo_online.py
 ```
 or to demo distributed training:
 ```bash
-accelerate launch --config_file configs/accelerate/accelerate.yaml demo_online_distributed.py
+cd demos
+accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_online_distributed.py
 ```
+> Note: If you are running demo or benchmarking scripts in development mode, without having installed AgileRL, you will need to uncomment two lines at the beginning of the file.
 
 ## Algorithms implemented (more coming soon!)
   * DQN
