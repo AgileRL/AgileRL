@@ -24,7 +24,7 @@ Welcome to AgileRL's documentation!
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimisation (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
-We are constantly adding more algorithms, with a view to add hierarchical and multi-agent algorithms soon.
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
 
 .. note::
 
