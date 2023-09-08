@@ -1,8 +1,8 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: LunarLanderContinuous-v2   # Gym environment name
-    DISCRETE_ACTIONS: false
+    ENV_NAME: LunarLander-v2   # Gym environment name
+    DISCRETE_ACTIONS: true
     ALGO: PPO                                         # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false

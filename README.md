@@ -32,7 +32,10 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
   * [Get Started](#get-started)
   * [Algorithms implemented](#algorithms-implemented-more-coming-soon)
   * [Train an agent on a Gym environment (Online)](#train-an-agent-on-a-gym-environment-online)
-    + [Custom Online Training Loop](#custom-online-training-loop)
+    + [Off-policy Reinforcement Learning](#off-policy-reinforcement-learning)
+    + [Custom Off-policy Training Loop](#custom-off-policy-training-loop)
+    + [On-policy Reinforcement Learning](#on-policy-reinforcement-learning)
+    + [Custom On-policy Training Loop](#custom-on-policy-training-loop)
   * [Train an agent on data (Offline)](#train-an-agent-on-data-offline)
     + [Custom Offline Training Loop](#custom-offline-training-loop)
   * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
@@ -80,9 +83,10 @@ accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_on
 ```
 > Note: If you are running demo or benchmarking scripts in development mode, without having installed AgileRL, you will need to uncomment two lines at the beginning of the file.
 
-## Algorithms implemented (more coming soon!)
+## Evolvable algorithms implemented (more coming soon!)
   * DQN
   * DDPG
+  * PPO
   * CQL
   * ILQL
   * TD3
@@ -90,6 +94,7 @@ accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_on
   * MATD3
 
 ## Train an agent on a Gym environment (Online)
+### Off-policy Reinforcement Learning
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
 ```python
 INIT_HP = {
@@ -213,7 +218,7 @@ trained_pop, pop_fitnesses = train(env=env,                                 # Gy
                                    wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
 ```
 
-### Custom Online Training Loop
+### Custom Off-policy Training Loop
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```python
@@ -341,6 +346,188 @@ for idx_epi in range(max_episodes):
         print(f'Episode {idx_epi+1}/{max_episodes}')
         print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
         print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+
+        # Tournament selection and population mutation
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
+
+env.close()
+```
+
+### On-policy reinforcement learning
+While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences collected using a different or previous policy, we have still chosen to include an efficient, evolvable PPO implementation in AgileRL. This algorithm can be used in a variety of settings, with both discrete and continuous actions, and is widely popular across domains including robotics, games, finance, and RLHF.
+
+The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer.
+
+The easiest way to train a population of agents using PPO is to use our online training function:
+
+```python
+from agilerl.training.train_on_policy import train
+
+trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+                                   env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                   algo=INIT_HP['ALGO'],                    # Algorithm
+                                   pop=agent_pop,                           # Population of agents
+                                   swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                   n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                   evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                   evo_loop=1,                              # Number of evaluation episodes per agent
+                                   target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                   tournament=tournament,                   # Tournament selection object
+                                   mutation=mutations,                      # Mutations object
+                                   wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
+```
+### Custom On-policy Training Loop
+Alternatively, use a custom training loop:
+
+```python
+import numpy as np
+import torch
+from tqdm import trange
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.utils import initialPopulation, makeVectEnvs
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+NET_CONFIG = {
+    "arch": "mlp",  # Network architecture
+    "h_size": [32, 32],  # Actor hidden size
+}
+
+INIT_HP = {
+    "POPULATION_SIZE": 4,  # Population size
+    "DOUBLE": True,  # Use double Q-learning
+    "BATCH_SIZE": 128,  # Batch size
+    "LR": 1e-3,  # Learning rate
+    "GAMMA": 0.99,  # Discount factor
+    # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+    "CHANNELS_LAST": False,
+}
+
+env = makeVectEnvs("LunarLander-v2", num_envs=8)  # Create environment
+try:
+    state_dim = env.single_observation_space.n  # Discrete observation space
+    one_hot = True  # Requires one-hot encoding
+except Exception:
+    state_dim = env.single_observation_space.shape  # Continuous observation space
+    one_hot = False  # Does not require one-hot encoding
+try:
+    action_dim = env.single_action_space.n  # Discrete action space
+except Exception:
+    action_dim = env.single_action_space.shape[0]  # Continuous action space
+
+if INIT_HP["CHANNELS_LAST"]:
+    state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
+pop = initialPopulation(
+    algo="PPO",  # Algorithm
+    state_dim=state_dim,  # State dimension
+    action_dim=action_dim,  # Action dimension
+    one_hot=one_hot,  # One-hot encoding
+    net_config=NET_CONFIG,  # Network configuration
+    INIT_HP=INIT_HP,  # Initial hyperparameters
+    population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+    device=device,
+)
+
+tournament = TournamentSelection(
+    tournament_size=2,  # Tournament selection size
+    elitism=True,  # Elitism in tournament selection
+    population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+    evo_step=1,
+)  # Evaluate using last N fitness scores
+
+mutations = Mutations(
+    algo="PPO",  # Algorithm
+    no_mutation=0.4,  # No mutation
+    architecture=0.2,  # Architecture mutation
+    new_layer_prob=0.2,  # New layer mutation
+    parameters=0.2,  # Network parameters mutation
+    activation=0,  # Activation layer mutation
+    rl_hp=0.2,  # Learning HP mutation
+    rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
+    mutation_sd=0.1,  # Mutation strength
+    arch=NET_CONFIG["arch"],  # Network architecture
+    rand_seed=1,  # Random seed
+    device=device,
+)
+
+max_episodes = 1000  # Max training episodes
+max_steps = 500  # Max steps per episode
+
+evo_epochs = 5  # Evolution frequency
+evo_loop = 3  # Number of evaluation episodes
+
+print("Training...")
+
+# TRAINING LOOP
+for idx_epi in trange(max_episodes):
+    for agent in pop:  # Loop through population
+        state = env.reset()[0]  # Reset environment at start of episode
+        score = 0
+
+        states = []
+        actions = []
+        log_probs = []
+        rewards = []
+        dones = []
+        values = []
+
+        for idx_step in range(max_steps):
+            if INIT_HP["CHANNELS_LAST"]:
+                state = np.moveaxis(state, [3], [1])
+
+            # Get next action from agent
+            action, log_prob, _, value = agent.getAction(state)
+            next_state, reward, done, trunc, _ = env.step(
+                action
+            )  # Act in environment
+
+            states.append(state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            dones.append(done)
+            values.append(value)
+
+            state = next_state
+            score += reward
+
+        agent.scores.append(score)
+
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_state,
+        )
+        # Learn according to agent's RL algorithm
+        agent.learn(experiences)
+
+        agent.steps[-1] += idx_step + 1
+
+    # Now evolve population if necessary
+    if (idx_epi + 1) % evo_epochs == 0:
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=max_steps,
+                loop=evo_loop,
+            )
+            for agent in pop
+        ]
+
+        print(f"Episode {idx_epi+1}/{max_episodes}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(
+            f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
+        )
 
         # Tournament selection and population mutation
         elite, pop = tournament.select(pop)

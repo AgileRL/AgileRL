@@ -22,7 +22,7 @@ Or install in development mode: (Recommended due to nascent nature of this libra
    pip install -r requirements.txt
 
 
-Quickstart: Training an online RL agent
+Quickstart: Training an off-policy RL agent
 ----------------
 
 Before starting training, there are some meta-hyperparameters and settings that must be set.

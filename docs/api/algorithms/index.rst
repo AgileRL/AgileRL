@@ -6,6 +6,7 @@ Reinforcement learning algorithms implemented: (More coming soon!)
     * DDPG
     * DQN
     * ILQL
+    * PPO
     * TD3
     * MADDPG
     * MATD3
@@ -19,6 +20,7 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
    ddpg
    dqn
    ilql
+   ppo
    td3
    maddpg
    matd3
