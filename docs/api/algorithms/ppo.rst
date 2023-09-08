@@ -32,10 +32,9 @@ Example
 
   import gymnasium as gym
   from agilerl.utils import makeVectEnvs
-  from agilerl.components.replay_buffer import ReplayBuffer
-  from agilerl.algorithms.ddpg import DDPG
+  from agilerl.algorithms.ppo import PPO
 
-  # Create environment and Experience Replay Buffer
+  # Create environment
   env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=1)
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
@@ -53,30 +52,41 @@ Example
   if channels_last:
       state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-  field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create PPO agent
 
-  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DDPG agent
+  num_episodes = 10  # Number of episodes
+  max_steps = 100  # Max steps per episode
 
-  state = env.reset()[0]  # Reset environment at start of episode
-  while True:
-      if channels_last:
-          state = np.moveaxis(state, [3], [1])
-      action = agent.getAction(state, epsilon)    # Get next action from agent
-      next_state, reward, done, _, _ = env.step(action)   # Act in environment
+  for episode in range(num_episodes):
+      for step in range(max_steps):
+          if channels_last:
+              state = np.moveaxis(state, [3], [1])
+          # Get next action from agent
+          action, log_prob, _, value = agent.getAction(state)
+          next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
 
-      # Save experience to replay buffer
-      if channels_last:
-          memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [3], [1]), done)
-      else:
-          memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+          states.append(state)
+          actions.append(action)
+          log_probs.append(log_prob)
+          rewards.append(reward)
+          dones.append(done)
+          values.append(value)
 
-      # Learn according to learning frequency
-      if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-          experiences = memory.sample(agent.batch_size) # Sample replay buffer
-          agent.learn(experiences)    # Learn according to agent's RL algorithm
+          state = next_state
 
-To configure the network architecture, pass a dict to the DDPG ``net_config`` field. For an MLP, this can be as simple as:
+      experiences = (
+          states,
+          actions,
+          log_probs,
+          rewards,
+          dones,
+          values,
+          next_state,
+      )
+      # Learn according to agent's RL algorithm
+      agent.learn(experiences)
+
+To configure the network architecture, pass a dict to the PPO ``net_config`` field. For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -105,6 +115,6 @@ Or for a CNN:
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.ddpg.DDPG
+.. autoclass:: agilerl.algorithms.ppo.PPO
   :members:
   :inherited-members:
