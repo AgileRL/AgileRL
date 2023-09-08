@@ -2,12 +2,20 @@ import numpy as np
 import torch
 from tqdm import trange
 
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import initialPopulation, makeVectEnvs
 
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
+
+# import sys
+# sys.path.append('../')
+
+
 if __name__ == "__main__":
-    print("===== AgileRL On-policy Demo =====")
+    print("===== AgileRL Online Demo =====")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,6 +30,8 @@ if __name__ == "__main__":
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 0.99,  # Discount factor
+        "LEARN_STEP": 1,  # Learning frequency
+        "TAU": 1e-3,  # For soft update of target network parameters
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
     }
@@ -42,13 +52,21 @@ if __name__ == "__main__":
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     pop = initialPopulation(
-        algo="PPO",  # Algorithm
+        algo="DQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=one_hot,  # One-hot encoding
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        device=device,
+    )
+
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        action_dim=action_dim,  # Number of agent actions
+        memory_size=10000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
         device=device,
     )
 
@@ -60,7 +78,7 @@ if __name__ == "__main__":
     )  # Evaluate using last N fitness scores
 
     mutations = Mutations(
-        algo="PPO",  # Algorithm
+        algo="DQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
@@ -77,8 +95,14 @@ if __name__ == "__main__":
     max_episodes = 1000  # Max training episodes
     max_steps = 500  # Max steps per episode
 
+    # Exploration params
+    eps_start = 1.0  # Max exploration
+    eps_end = 0.1  # Min exploration
+    eps_decay = 0.995  # Decay per episode
+    epsilon = eps_start
+
     evo_epochs = 5  # Evolution frequency
-    evo_loop = 3  # Number of evaluation episodes
+    evo_loop = 1  # Number of evaluation episodes
 
     print("Training...")
 
@@ -87,49 +111,35 @@ if __name__ == "__main__":
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
-
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
-
             for idx_step in range(max_steps):
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [3], [1])
-
                 # Get next action from agent
-                action, log_prob, _, value = agent.getAction(state)
-                next_state, reward, done, trunc, _ = env.step(
-                    action
-                )  # Act in environment
+                action = agent.getAction(state, epsilon)
+                next_state, reward, done, _, _ = env.step(action)  # Act in environment
 
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
+                # Save experience to replay buffer
+                if INIT_HP["CHANNELS_LAST"]:
+                    memory.save2memoryVectEnvs(
+                        state, action, reward, np.moveaxis(next_state, [3], [1]), done
+                    )
+                else:
+                    memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+
+                # Learn according to learning frequency
+                if (
+                    memory.counter % agent.learn_step == 0
+                    and len(memory) >= agent.batch_size
+                ):
+                    experiences = memory.sample(
+                        agent.batch_size
+                    )  # Sample replay buffer
+                    # Learn according to agent's RL algorithm
+                    agent.learn(experiences)
 
                 state = next_state
                 score += reward
 
-            agent.scores.append(score)
-
-            experiences = (
-                states,
-                actions,
-                log_probs,
-                rewards,
-                dones,
-                values,
-                next_state,
-            )
-            # Learn according to agent's RL algorithm
-            agent.learn(experiences)
-
-            agent.steps[-1] += idx_step + 1
+        # Update epsilon for exploration
+        epsilon = max(eps_end, epsilon * eps_decay)
 
         # Now evolve population if necessary
         if (idx_epi + 1) % evo_epochs == 0:

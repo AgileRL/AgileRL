@@ -7,6 +7,12 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train import train
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
+
+# import sys
+# sys.path.append('../')
+
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
