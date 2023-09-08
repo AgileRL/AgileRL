@@ -1,11 +1,16 @@
-import h5py
 from accelerate import Accelerator
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_offline import train
+from agilerl.training.train import train
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
+
+# import sys
+# sys.path.append('../')
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -16,7 +21,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         print("============ AgileRL Distributed ============")
     accelerator.wait_for_everyone()
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -30,8 +35,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
-
-    dataset = h5py.File(INIT_HP["DATASET"], "r")
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(action_dim, INIT_HP["MEMORY_SIZE"], field_names=field_names)
@@ -70,7 +73,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     trained_pop, pop_fitnesses = train(
         env,
         INIT_HP["ENV_NAME"],
-        dataset,
         INIT_HP["ALGO"],
         agent_pop,
         memory=memory,
@@ -95,9 +97,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == "__main__":
     INIT_HP = {
-        "ENV_NAME": "CartPole-v1",  # Gym environment name
-        "DATASET": "data/cartpole/cartpole_random_v1.1.0.h5",  # Offline RL dataset
-        "ALGO": "CQN",  # Algorithm
+        "ENV_NAME": "LunarLander-v2",  # Gym environment name
+        "ALGO": "DQN",  # Algorithm
         "DOUBLE": True,  # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
@@ -114,7 +115,7 @@ if __name__ == "__main__":
         "POP_SIZE": 6,  # Population size
         "EVO_EPOCHS": 20,  # Evolution frequency
         "POLICY_FREQ": 2,  # Policy network update frequency
-        "WANDB": True,  # Log with Weights and Biases
+        "WANDB": False,  # Log with Weights and Biases
     }
 
     MUTATION_PARAMS = {  # Relative probabilities

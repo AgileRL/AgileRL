@@ -1,10 +1,18 @@
+import h5py
 import torch
 import yaml
 
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_on_policy import train
+from agilerl.training.train_offline import train
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
+
+# import sys
+# sys.path.append('../')
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -12,8 +20,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
-
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -28,6 +35,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
+    dataset = h5py.File(INIT_HP["DATASET"], "r")
+
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        action_dim, INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
+    )
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -63,8 +76,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     trained_pop, pop_fitnesses = train(
         env,
         INIT_HP["ENV_NAME"],
+        dataset,
         INIT_HP["ALGO"],
         agent_pop,
+        memory=memory,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
@@ -78,6 +93,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     )
 
     printHyperparams(trained_pop)
+    # plotPopulationScore(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()
@@ -86,9 +102,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/ppo.yaml") as file:
-        ppo_config = yaml.safe_load(file)
-    INIT_HP = ppo_config["INIT_HP"]
-    MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
-    NET_CONFIG = ppo_config["NET_CONFIG"]
+    with open("configs/training/cqn.yaml") as file:
+        cqn_config = yaml.safe_load(file)
+    INIT_HP = cqn_config["INIT_HP"]
+    MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
+    NET_CONFIG = cqn_config["NET_CONFIG"]
+    DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
