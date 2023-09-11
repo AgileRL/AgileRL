@@ -1,11 +1,18 @@
+import h5py
 import torch
 import yaml
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train import train
+from agilerl.training.train_offline import train
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
+
+# import sys
+# sys.path.append('../')
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -13,8 +20,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
-
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -29,9 +35,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    if INIT_HP["ALGO"] == "TD3":
-        max_action = float(env.single_action_space.high[0])
-        INIT_HP["MAX_ACTION"] = max_action
+    dataset = h5py.File(INIT_HP["DATASET"], "r")
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -72,6 +76,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     trained_pop, pop_fitnesses = train(
         env,
         INIT_HP["ENV_NAME"],
+        dataset,
         INIT_HP["ALGO"],
         agent_pop,
         memory=memory,
@@ -97,9 +102,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/dqn.yaml") as file:
-        dqn_config = yaml.safe_load(file)
-    INIT_HP = dqn_config["INIT_HP"]
-    MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = dqn_config["NET_CONFIG"]
+    with open("../configs/training/cqn.yaml") as file:
+        cqn_config = yaml.safe_load(file)
+    INIT_HP = cqn_config["INIT_HP"]
+    MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
+    NET_CONFIG = cqn_config["NET_CONFIG"]
+    DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
