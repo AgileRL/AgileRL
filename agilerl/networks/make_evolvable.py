@@ -1,3 +1,7 @@
+import copy
+from collections import OrderedDict
+from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -47,18 +51,34 @@ class CustomModel(nn.Module):
         # Combine all layers into a sequential model
         self.model = nn.Sequential(*layers)
 
-        self.softmax = nn.Softmax()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        return self.softmax(self.model(x))
+        return self.sigmoid(self.model(x))
 
 class MakeEvolvable(nn.Module):
-    def __init__(self, network, input_tensor, device):
+    def __init__(self, network, input_tensor, device, accelerator=None):
         super().__init__()
-        self.network = network
         self.input_tensor = input_tensor
         self.device = device 
-        self.network_information, self.in_features, self.out_features, self.hidden_layers, self.activation, self.output_activation = self.detect_architecture(self.input_tensor)
+        self.net = network
+        self.accelerator = accelerator
+        self.layer_norm = False
+        self.detect_architecture(network, input_tensor)
+
+    
+    def forward(self, x):
+        """Returns output of neural network.
+
+        :param x: Neural network input
+        :type x: torch.Tensor() or np.array
+        """
+        if not isinstance(x, torch.Tensor):
+            x = torch.FloatTensor(np.array(x))
+            if self.accelerator is None:
+                x = x.to(self.device)
+        x = self.net(x)
+        return x
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -82,7 +102,7 @@ class MakeEvolvable(nn.Module):
 
         return activation_functions[activation_names](dim=1) if activation_names == 'softmax' else activation_functions[activation_names]()
 
-    def detect_architecture(self, input_tensor):
+    def detect_architecture(self, network, input_tensor):
         """
         Determine the architecture of a neural network.
 
@@ -114,34 +134,39 @@ class MakeEvolvable(nn.Module):
                     network_information[f"{class_name}_{class_names[class_name]}"] = layer_dict
                     in_features_list.append(module.in_features)
                     out_features_list.append(module.out_features)
+                elif isinstance(module, nn.LayerNorm):
+                    self.layer_norm = True
                 else:
                     # Catch activation functions
                     network_information[f"{class_name}".lower()] = str(module.__class__)
-                    activation_list.append(self.get_activation(f"{class_name}".lower()))
+                    activation_list.append(f"{class_name}".lower())
 
-            if not isinstance(module, nn.Sequential) and not isinstance(module, nn.ModuleList) and not isinstance(module, type(self.network)):
+            if not isinstance(module, nn.Sequential) and not isinstance(module, nn.ModuleList) and not isinstance(module, type(network)):
                 hooks.append(module.register_forward_hook(forward_hook))
             
         hooks = []
-        self.network.apply(register_hooks)
+        network.apply(register_hooks)
 
         # Forward pass to collect input and output shapes
         with torch.no_grad():
-            self.network(input_tensor)
+            network(input_tensor)
 
         # Remove hooks
         for hook in hooks:
             hook.remove()
 
-        in_features = in_features_list[0]
-        out_features = out_features_list[-1]
-        hidden_size = in_features_list[1:]
-        activation = activation_list[0]
-        output_activation = activation_list[-1]
+        self.num_inputs = in_features_list[0]
+        self.num_outputs = out_features_list[-1]
+        self.hidden_size = in_features_list[1:]
+        self.activation = activation_list[0]
+        self.output_activation = activation_list[-1]
 
-        return network_information, in_features, out_features, hidden_size, activation, output_activation
+        print(network_information)
+
     
-    #### This function needs modifying for new evolvable wrapper
+    #### Do we still need this when we already have the nn passed in
+    #### For now lets agree to use original network as a blueprint to then create new evolved nets 
+    #### We will just reset the self.network parameter and therefore keep the create nets function
     def create_net(self):
         """Creates and returns neural network.
         """
@@ -165,9 +190,10 @@ class MakeEvolvable(nn.Module):
 
         output_layer = nn.Linear(self.hidden_size[-1], self.num_outputs)
 
-        if self.output_vanish:
-            output_layer.weight.data.mul_(0.1)
-            output_layer.bias.data.mul_(0.1)
+        #### What is output vanish and do we need it in this scenario??
+        # if self.output_vanish:
+        #     output_layer.weight.data.mul_(0.1)
+        #     output_layer.bias.data.mul_(0.1)
 
         net_dict["linear_layer_output"] = output_layer
         if self.output_activation is not None:
@@ -180,24 +206,279 @@ class MakeEvolvable(nn.Module):
             net = net.to(self.device)
 
         return net
+    
+    #### Come back to this one
+    def get_model_dict(self):
+        """Returns dictionary with model information and weights.
+        """
+        model_dict = self.init_dict
+        model_dict.update(
+            {'stored_values': self.extract_parameters(without_layer_norm=False)})
+        return model_dict
+    
+    ####
+    def count_parameters(self, without_layer_norm=False):
+        """Returns number of parameters in neural network.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or 'layer_norm' not in name:
+                count += param.data.cpu().numpy().flatten().shape[0]
+        return count
+    
+    ####
+    def extract_grad(self, without_layer_norm=False):
+        """Returns current pytorch gradient in same order as genome's flattened
+        parameter vector.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        tot_size = self.count_parameters(without_layer_norm)
+        pvec = np.zeros(tot_size, np.float32)
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                sz = param.grad.data.cpu().numpy().flatten().shape[0]
+                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
+                count += sz
+        return pvec.copy()
+    
+    ####
+    def extract_parameters(self, without_layer_norm=False):
+        """Returns current flattened neural network weights.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        tot_size = self.count_parameters(without_layer_norm)
+        pvec = np.zeros(tot_size, np.float32)
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                sz = param.data.cpu().detach().numpy().flatten().shape[0]
+                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
+                count += sz
+        return copy.deepcopy(pvec)
+    
+    ####
+    def inject_parameters(self, pvec, without_layer_norm=False):
+        """Injects a flat vector of neural network parameters into the model's current
+        neural network weights.
+
+        :param pvec: Network weights
+        :type pvec: np.array()
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        count = 0
+
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                sz = param.data.cpu().numpy().flatten().shape[0]
+                raw = pvec[count : count + sz]
+                reshaped = raw.reshape(param.data.cpu().numpy().shape)
+                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
+                    torch.FloatTensor
+                )
+                count += sz
+        return pvec
+    
+    #### Need to think about the best way to define the init dict when we're dealing with 
+    #### architectures other than an mlp
+    #### For just mlp functionality it can be kept as is but I don't like it
+    @property
+    def init_dict(self):
+        """Returns model information in dictionary."""
+        init_dict = {
+            "num_inputs": self.num_inputs,
+            "num_outputs": self.num_outputs,
+            "hidden_size": self.hidden_size,
+            "activation": self.activation,
+            "output_activation": self.output_activation,
+            "layer_norm": self.layer_norm,
+            "device": self.device,
+            "accelerator": self.accelerator,
+        }
+        return init_dict
+    
+    #### Leave the same for now but again same as init_dict function
+    @property
+    def short_dict(self):
+        """Returns shortened version of model information in dictionary."""
+        short_dict = {
+            "hidden_size": self.hidden_size,
+            "activation": self.activation,
+            "output_activation": self.output_activation,
+            "layer_norm": self.layer_norm,
+        }
+        return short_dict
+        
+    #### 
+    def add_mlp_layer(self):
+        """Adds a hidden layer to neural network."""
+        # add layer to hyper params
+        if len(self.hidden_size) < 3:  # HARD LIMIT
+            self.hidden_size += [self.hidden_size[-1]]
+
+            # copy old params to new net
+            new_net = self.create_net()
+            new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
+            self.net = new_net
+        else:
+            self.add_node()
+    
+    ####
+    def remove_layer(self):
+        """Removes a hidden layer from neural network."""
+        if len(self.hidden_size) > 1:  # HARD LIMIT
+            self.hidden_size = self.hidden_size[:1]
+            new_net = self.create_net()
+            new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
+            self.net = new_net
+        else:
+            self.add_node()
+    
+    ####
+    def add_node(self, hidden_layer=None, numb_new_nodes=None):
+        """Adds nodes to hidden layer of neural network.
+
+        :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_nodes: Number of nodes to add to hidden layer, defaults to None
+        :type numb_new_nodes: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+
+        if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
+            self.hidden_size[hidden_layer] += numb_new_nodes
+            new_net = self.create_net()
+            new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
+
+            self.net = new_net
+
+        return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
+    
+    ####
+    def remove_node(self, hidden_layer=None, numb_new_nodes=None):
+        """Removes nodes from hidden layer of neural network.
+
+        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
+        :type numb_new_nodes: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+
+        if self.hidden_size[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
+            self.hidden_size[hidden_layer] = (
+                self.hidden_size[hidden_layer] - numb_new_nodes
+            )
+            new_net = self.create_net()
+            new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
+
+            self.net = new_net
+
+        return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
+    
+    ####
+    def clone(self):
+        """Returns clone of neural net with identical parameters."""
+        clone = EvolvableMLP(**copy.deepcopy(self.init_dict))
+        clone.load_state_dict(self.state_dict())
+        return clone
+
+    ####
+    def preserve_parameters(self, old_net, new_net):
+        """Returns new neural network with copied parameters from old network.
+
+        :param old_net: Old neural network
+        :type old_net: nn.Module()
+        :param new_net: New neural network
+        :type new_net: nn.Module()
+        """
+        old_net_dict = dict(old_net.named_parameters())
+
+        for key, param in new_net.named_parameters():
+            if key in old_net_dict.keys():
+                if old_net_dict[key].data.size() == param.data.size():
+                    param.data = old_net_dict[key].data
+                else:
+                    if "norm" not in key:
+                        old_size = old_net_dict[key].data.size()
+                        new_size = param.data.size()
+                        if len(param.data.size()) == 1:
+                            param.data[: min(old_size[0], new_size[0])] = old_net_dict[
+                                key
+                            ].data[: min(old_size[0], new_size[0])]
+                        else:
+                            param.data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                            ] = old_net_dict[key].data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                            ]
+
+        return new_net
+
+    ####
+    def shrink_preserve_parameters(self, old_net, new_net):
+        """Returns shrunk new neural network with copied parameters from old network.
+
+        :param old_net: Old neural network
+        :type old_net: nn.Module()
+        :param new_net: New neural network
+        :type new_net: nn.Module()
+        """
+        old_net_dict = dict(old_net.named_parameters())
+
+        for key, param in new_net.named_parameters():
+            if key in old_net_dict.keys():
+                if old_net_dict[key].data.size() == param.data.size():
+                    param.data = old_net_dict[key].data
+                else:
+                    if "norm" not in key:
+                        old_size = old_net_dict[key].data.size()
+                        new_size = param.data.size()
+                        min_0 = min(old_size[0], new_size[0])
+                        if len(param.data.size()) == 1:
+                            param.data[:min_0] = old_net_dict[key].data[:min_0]
+                        else:
+                            min_1 = min(old_size[1], new_size[1])
+                            param.data[:min_0, :min_1] = old_net_dict[key].data[
+                                :min_0, :min_1
+                            ]
+        return new_net
+
+
 
 
 
 # Example input tensor
 input_size = 10
 input_tensor = torch.rand(32, input_size)  # Batch size of 32, input size of 10
-
 # Instantiate the CustomModel
 hidden_sizes = [64, 64]  # You can adjust these hidden layer sizes
 output_size = 1 
 custom_model = CustomModel(input_size, hidden_sizes, output_size)
-
 evolvable_model = MakeEvolvable(custom_model, input_tensor, device)
-
-
-print(evolvable_model.in_features)
-print(evolvable_model.out_features)
-print(evolvable_model.hidden_layers)
+print(evolvable_model.num_inputs)
+print(evolvable_model.num_outputs)
+print(evolvable_model.hidden_size)
 print(evolvable_model.activation)
 print(evolvable_model.output_activation)
-print(evolvable_model.network_information)
+print(evolvable_model.layer_norm)
