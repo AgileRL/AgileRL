@@ -9,7 +9,7 @@ import numpy as np
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from collections import OrderedDict
 
-
+# 
 class GumbelSoftmax(nn.Module):
     """Applies gumbel softmax function element-wise"""
 
