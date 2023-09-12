@@ -9,7 +9,7 @@ import numpy as np
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 from collections import OrderedDict
 
-# 
+
 class GumbelSoftmax(nn.Module):
     """Applies gumbel softmax function element-wise"""
 
@@ -58,17 +58,28 @@ class CustomModel(nn.Module):
         return self.sigmoid(self.model(x))
 
 class MakeEvolvable(nn.Module):
-    def __init__(self, network, input_tensor, device, accelerator=None):
+    def __init__(self, 
+                 network, 
+                 input_tensor, 
+                 device="cpu", 
+                 accelerator=None, 
+                 init_layers=True,
+                 output_vanish=True,
+                 activation=None):
         super().__init__()
-        self.input_tensor = input_tensor
+
         self.device = device 
-        self.net = network
+        self.input_tensor = input_tensor.to(self.device)
+        self.detect_architecture(network.to(self.device), self.input_tensor)
         self.accelerator = accelerator
         self.layer_norm = False
-        self.detect_architecture(network, input_tensor)
-
-    
-    def forward(self, x):
+        self.init_layers = init_layers
+        self.output_vanish = output_vanish
+        self.net = self.create_net() # Reset the names of the layers to allow for cloning
+        if activation is not None:
+            self.activation = activation
+        
+    def forward(self, x): #
         """Returns output of neural network.
 
         :param x: Neural network input
@@ -78,10 +89,14 @@ class MakeEvolvable(nn.Module):
             x = torch.FloatTensor(np.array(x))
             if self.accelerator is None:
                 x = x.to(self.device)
+
+        # print("Tensor device", x.device)
+        # for name, param in self.net.named_parameters():
+        #     print(f"Device {name}: ", param.device)
         x = self.net(x)
         return x
 
-    def get_activation(self, activation_names):
+    def get_activation(self, activation_names):#
         """Returns activation function for corresponding activation name.
 
         :param activation_names: Activation function name
@@ -162,9 +177,12 @@ class MakeEvolvable(nn.Module):
         self.activation = activation_list[0]
         self.output_activation = activation_list[-1]
 
-        print(network_information)
+    def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
 
-    
+        torch.nn.init.orthogonal_(layer.weight, std)
+        torch.nn.init.constant_(layer.bias, bias_const)
+        return layer
+
     #### Do we still need this when we already have the nn passed in
     #### For now lets agree to use original network as a blueprint to then create new evolved nets 
     #### We will just reset the self.network parameter and therefore keep the create nets function
@@ -182,33 +200,40 @@ class MakeEvolvable(nn.Module):
         if len(self.hidden_size) > 1:
             for l_no in range(1, len(self.hidden_size)):
                 net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
-                    self.hidden_size[l_no - 1], self.hidden_size[l_no])
+                    self.hidden_size[l_no - 1], self.hidden_size[l_no]
+                )
+                if self.init_layers:
+                    net_dict[f"linear_layer_{str(l_no)}"] = self.layer_init(
+                        net_dict[f"linear_layer_{str(l_no)}"]
+                    )
                 if self.layer_norm:
                     net_dict[f"layer_norm_{str(l_no)}"] = nn.LayerNorm(
-                        self.hidden_size[l_no])
+                        self.hidden_size[l_no]
+                    )
                 net_dict[f"activation_{str(l_no)}"] = self.get_activation(
-                    self.activation)
+                    self.activation
+                )
 
         output_layer = nn.Linear(self.hidden_size[-1], self.num_outputs)
+        if self.init_layers:
+            output_layer = self.layer_init(output_layer)
 
-        #### What is output vanish and do we need it in this scenario??
-        # if self.output_vanish:
-        #     output_layer.weight.data.mul_(0.1)
-        #     output_layer.bias.data.mul_(0.1)
+        #### Do we need this with this class??
+        if self.output_vanish:
+            output_layer.weight.data.mul_(0.1)
+            output_layer.bias.data.mul_(0.1)
 
         net_dict["linear_layer_output"] = output_layer
         if self.output_activation is not None:
-            net_dict["activation_output"] = self.get_activation(
-                self.output_activation)
-            
+            net_dict["activation_output"] = self.get_activation(self.output_activation)
+
         net = nn.Sequential(net_dict)
-            
+
         if self.accelerator is None:
             net = net.to(self.device)
 
         return net
     
-    #### Come back to this one
     def get_model_dict(self):
         """Returns dictionary with model information and weights.
         """
@@ -217,8 +242,7 @@ class MakeEvolvable(nn.Module):
             {'stored_values': self.extract_parameters(without_layer_norm=False)})
         return model_dict
     
-    ####
-    def count_parameters(self, without_layer_norm=False):
+    def count_parameters(self, without_layer_norm=False): #
         """Returns number of parameters in neural network.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
@@ -230,8 +254,7 @@ class MakeEvolvable(nn.Module):
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
     
-    ####
-    def extract_grad(self, without_layer_norm=False):
+    def extract_grad(self, without_layer_norm=False): #
         """Returns current pytorch gradient in same order as genome's flattened
         parameter vector.
 
@@ -241,15 +264,17 @@ class MakeEvolvable(nn.Module):
         tot_size = self.count_parameters(without_layer_norm)
         pvec = np.zeros(tot_size, np.float32)
         count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
-                count += sz
+        try:
+            for name, param in self.named_parameters():
+                if not without_layer_norm or "layer_norm" not in name:
+                    sz = param.grad.data.cpu().numpy().flatten().shape[0]
+                    pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
+                    count += sz
+        except:
+            return np.zeros(tot_size, np.float32)
         return pvec.copy()
     
-    ####
-    def extract_parameters(self, without_layer_norm=False):
+    def extract_parameters(self, without_layer_norm=False): #
         """Returns current flattened neural network weights.
 
         :param without_layer_norm: Exclude normalization layers, defaults to False
@@ -265,8 +290,8 @@ class MakeEvolvable(nn.Module):
                 count += sz
         return copy.deepcopy(pvec)
     
-    ####
-    def inject_parameters(self, pvec, without_layer_norm=False):
+    #### When is this ever used?
+    def inject_parameters(self, pvec, without_layer_norm=False): #
         """Injects a flat vector of neural network parameters into the model's current
         neural network weights.
 
@@ -292,17 +317,22 @@ class MakeEvolvable(nn.Module):
     #### architectures other than an mlp
     #### For just mlp functionality it can be kept as is but I don't like it
     @property
-    def init_dict(self):
+    def init_dict(self): #
         """Returns model information in dictionary."""
+        # init_dict = {
+        #     "num_inputs": self.num_inputs,
+        #     "num_outputs": self.num_outputs,
+        #     "hidden_size": self.hidden_size,
+        #     "activation": self.activation,
+        #     "output_activation": self.output_activation,
+        #     "layer_norm": self.layer_norm,
+        #     "device": self.device,
+        #     "accelerator": self.accelerator,
+        # }
         init_dict = {
-            "num_inputs": self.num_inputs,
-            "num_outputs": self.num_outputs,
-            "hidden_size": self.hidden_size,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
-            "layer_norm": self.layer_norm,
             "device": self.device,
-            "accelerator": self.accelerator,
+            "network": self.net,
+            "input_tensor": self.input_tensor
         }
         return init_dict
     
@@ -319,7 +349,7 @@ class MakeEvolvable(nn.Module):
         return short_dict
         
     #### 
-    def add_mlp_layer(self):
+    def add_layer(self): #
         """Adds a hidden layer to neural network."""
         # add layer to hyper params
         if len(self.hidden_size) < 3:  # HARD LIMIT
@@ -369,7 +399,7 @@ class MakeEvolvable(nn.Module):
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
     
     ####
-    def remove_node(self, hidden_layer=None, numb_new_nodes=None):
+    def remove_node(self, hidden_layer=None, numb_new_nodes=None): #
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -396,10 +426,10 @@ class MakeEvolvable(nn.Module):
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
     
     ####
-    def clone(self):
+    def clone(self): #
         """Returns clone of neural net with identical parameters."""
-        clone = EvolvableMLP(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
+        clone = MakeEvolvable(**copy.deepcopy(self.init_dict))
+        clone.load_state_dict(copy.deepcopy(self.state_dict()))
         return clone
 
     ####
@@ -469,17 +499,17 @@ class MakeEvolvable(nn.Module):
 
 
 
-# Example input tensor
-input_size = 10
-input_tensor = torch.rand(32, input_size)  # Batch size of 32, input size of 10
-# Instantiate the CustomModel
-hidden_sizes = [64, 64]  # You can adjust these hidden layer sizes
-output_size = 1 
-custom_model = CustomModel(input_size, hidden_sizes, output_size)
-evolvable_model = MakeEvolvable(custom_model, input_tensor, device)
-print(evolvable_model.num_inputs)
-print(evolvable_model.num_outputs)
-print(evolvable_model.hidden_size)
-print(evolvable_model.activation)
-print(evolvable_model.output_activation)
-print(evolvable_model.layer_norm)
+# # Example input tensor
+# input_size = 10
+# input_tensor = torch.rand(32, input_size)  # Batch size of 32, input size of 10
+# # Instantiate the CustomModel
+# hidden_sizes = [64, 64]  # You can adjust these hidden layer sizes
+# output_size = 1 
+# custom_model = CustomModel(input_size, hidden_sizes, output_size)
+# evolvable_model = MakeEvolvable(custom_model, input_tensor, device)
+# print(evolvable_model.num_inputs)
+# print(evolvable_model.num_outputs)
+# print(evolvable_model.hidden_size)
+# print(evolvable_model.activation)
+# print(evolvable_model.output_activation)
+# print(evolvable_model.layer_norm)

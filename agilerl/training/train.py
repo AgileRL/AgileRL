@@ -110,7 +110,7 @@ def train(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="AgileRL",
+                project="EvoWrappers",
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
