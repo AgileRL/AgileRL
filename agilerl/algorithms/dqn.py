@@ -184,13 +184,13 @@ class DQN:
             self.actor.train()
 
             if action_mask is None:
-                action = np.argmax(action_values.cpu().data.numpy(), axis=1)
+                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
             else:
                 inv_mask = 1 - action_mask
                 masked_action_values = np.ma.array(
                     action_values.cpu().data.numpy(), mask=inv_mask
                 )
-                action = np.argmax(masked_action_values, axis=1)
+                action = np.argmax(masked_action_values, axis=-1)
 
         return action
 
