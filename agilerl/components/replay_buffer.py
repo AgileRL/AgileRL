@@ -43,7 +43,7 @@ class ReplayBuffer:
 
         states = torch.from_numpy(
             np.stack([e.state for e in experiences if e is not None], axis=0)
-        )
+        ).float()
         actions = torch.from_numpy(
             np.vstack([e.action for e in experiences if e is not None])
         )
