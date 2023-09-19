@@ -171,10 +171,12 @@ class DQN:
                 action = np.random.randint(0, self.action_dim, size=state.size()[0])
             else:
                 inv_mask = 1 - action_mask
+
                 available_actions = np.ma.array(
                     np.arange(0, self.action_dim), mask=inv_mask
-                )
+                ).compressed()
                 action = np.random.choice(available_actions, size=state.size()[0])
+
         else:
             self.actor.eval()
             with torch.no_grad():
