@@ -516,6 +516,7 @@ class EvolvableCNN(nn.Module):
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
             "layer_norm": self.layer_norm,
+            "support": self.support,
         }
         return short_dict
 
@@ -531,6 +532,7 @@ class EvolvableCNN(nn.Module):
             "num_actions": self.num_actions,
             "n_agents": self.n_agents,
             "num_atoms": self.num_atoms,
+            "support": self.support,
             "normalize": self.normalize,
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,

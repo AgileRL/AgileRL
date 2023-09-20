@@ -411,6 +411,7 @@ class EvolvableMLP(nn.Module):
             "activation": self.activation,
             "output_activation": self.output_activation,
             "layer_norm": self.layer_norm,
+            "support": self.support,
             "rainbow": self.rainbow,
             "device": self.device,
             "accelerator": self.accelerator,

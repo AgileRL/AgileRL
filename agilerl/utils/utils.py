@@ -5,6 +5,7 @@ import numpy as np
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
+from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
@@ -70,6 +71,29 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 double=INIT_HP["DOUBLE"],
+                device=device,
+                accelerator=accelerator,
+            )
+            population.append(agent)
+
+    elif algo == "Rainbow DQN":
+        for idx in range(population_size):
+            agent = RainbowDQN(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                index=idx,
+                net_config=net_config,
+                batch_size=INIT_HP["BATCH_SIZE"],
+                lr=INIT_HP["LR"],
+                learn_step=INIT_HP["LEARN_STEP"],
+                gamma=INIT_HP["GAMMA"],
+                tau=INIT_HP["TAU"],
+                beta=INIT_HP["BETA"],
+                prior_eps=INIT_HP["PRIOR_EPS"],
+                num_atoms=INIT_HP["NUM_ATOMS"],
+                v_min=INIT_HP["V_MIN"],
+                v_max=INIT_HP["V_MAX"],
                 device=device,
                 accelerator=accelerator,
             )
