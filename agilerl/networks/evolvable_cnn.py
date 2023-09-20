@@ -121,6 +121,8 @@ class EvolvableCNN(nn.Module):
     :type layer_norm: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
+    :param support: Atoms support tensor, defaults to None
+    :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
     :type rainbow: bool, optional
     :param critic: CNN is a critic network, defaults to False
@@ -148,6 +150,7 @@ class EvolvableCNN(nn.Module):
         multi=False,
         layer_norm=False,
         stored_values=None,
+        support=None,
         rainbow=False,
         critic=False,
         normalize=True,
@@ -166,6 +169,7 @@ class EvolvableCNN(nn.Module):
         self.mlp_activation = mlp_activation
         self.cnn_activation = cnn_activation
         self.layer_norm = layer_norm
+        self.support = support
         self.rainbow = rainbow
         self.critic = critic
         self.normalize = normalize
@@ -379,13 +383,15 @@ class EvolvableCNN(nn.Module):
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
 
-    def forward(self, x, xc=None):
+    def forward(self, x, xc=None, q=True):
         """Returns output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
         :param xc: Actions to be evaluated by critic, defaults to None
         :type xc: torch.Tensor() or np.array, optional
+        :param q: Return Q value if using rainbow, defaults to True
+        :type q: bool, optional
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(x)
@@ -414,6 +420,9 @@ class EvolvableCNN(nn.Module):
                 -1, self.num_actions, self.num_atoms
             )
             x = x.clamp(min=1e-3)
+
+            if q:
+                x = torch.sum(x * self.support, dim=2)
 
         else:
             x = F.softmax(value, dim=-1)

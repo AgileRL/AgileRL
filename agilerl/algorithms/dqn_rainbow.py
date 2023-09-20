@@ -39,6 +39,12 @@ class RainbowDQN:
     :type beta: float, optional
     :param prior_eps: Minimum priority for sampling, defaults to 1e-6
     :type prior_eps: float, optional
+    :param num_atoms: Unit number of support, defaults to 51
+    :type num_atoms: int, optional
+    :param v_min: Minimum value of support, defaults to 0
+    :type v_min: float, optional
+    :param v_max: Maximum value of support, defaults to 200
+    :type v_max: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
     :param double: Use double Q-learning, defaults to False
@@ -65,7 +71,9 @@ class RainbowDQN:
         tau=1e-3,
         beta=0.4,
         prior_eps=1e-6,
-        num_atoms=50,
+        num_atoms=51,
+        v_min=0.0,
+        v_max=200.0,
         mutation=None,
         double=False,
         device="cpu",
@@ -85,6 +93,8 @@ class RainbowDQN:
         self.beta = beta
         self.prior_eps = prior_eps
         self.num_atoms = num_atoms
+        self.v_min = v_min
+        self.v_max = v_max
         self.mut = mutation
         self.device = device
         self.accelerator = accelerator
@@ -94,6 +104,10 @@ class RainbowDQN:
         self.steps = [0]
         self.double = double
 
+        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms).to(
+            self.device
+        )
+
         # model
         if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
             self.actor = EvolvableMLP(
@@ -102,6 +116,7 @@ class RainbowDQN:
                 hidden_size=self.net_config["h_size"],
                 output_vanish=False,
                 num_atoms=self.num_atoms,
+                support=self.support,
                 rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
@@ -112,6 +127,7 @@ class RainbowDQN:
                 hidden_size=self.net_config["h_size"],
                 output_vanish=False,
                 num_atoms=self.num_atoms,
+                support=self.support,
                 rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
@@ -128,6 +144,7 @@ class RainbowDQN:
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
                 num_atoms=self.num_atoms,
+                support=self.support,
                 rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
@@ -141,6 +158,7 @@ class RainbowDQN:
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
                 num_atoms=self.num_atoms,
+                support=self.support,
                 rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,

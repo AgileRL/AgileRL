@@ -114,6 +114,8 @@ class EvolvableMLP(nn.Module):
     :type init_layers: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
+    :param support: Atoms support tensor, defaults to None
+    :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
     :type rainbow: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -134,6 +136,7 @@ class EvolvableMLP(nn.Module):
         output_vanish=True,
         init_layers=True,
         stored_values=None,
+        support=None,
         rainbow=False,
         device="cpu",
         accelerator=None,
@@ -149,6 +152,7 @@ class EvolvableMLP(nn.Module):
         self.init_layers = init_layers
         self.hidden_size = hidden_size
         self.num_atoms = num_atoms
+        self.support = support
         self.rainbow = rainbow
         self.device = device
         self.accelerator = accelerator
@@ -286,11 +290,13 @@ class EvolvableMLP(nn.Module):
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
 
-    def forward(self, x):
+    def forward(self, x, q=True):
         """Returns output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
+        :param q: Return Q value if using rainbow, defaults to True
+        :type q: bool, optional
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
@@ -313,6 +319,9 @@ class EvolvableMLP(nn.Module):
                 -1, self.num_actions, self.num_atoms
             )
             x = x.clamp(min=1e-3)
+
+            if q:
+                x = torch.sum(x * self.support, dim=2)
 
         return x
 
