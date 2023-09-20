@@ -29,6 +29,7 @@ def train(
     target=200.0,
     per=False,
     noisy=False,
+    n_step_memory=None,
     tournament=None,
     mutation=None,
     checkpoint=None,
@@ -71,6 +72,8 @@ def train(
     :type per: bool, optional
     :param noisy: Using noisy network exploration, defaults to False
     :type noisy: bool, optional
+    :param memory: Multi-step Experience Replay Buffer to be used alongside Prioritized ERB, defaults to None
+    :type memory: object, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
@@ -208,12 +211,37 @@ def train(
                 next_state, reward, done, _, _ = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                if swap_channels:
-                    memory.save2memoryVectEnvs(
-                        state, action, reward, np.moveaxis(next_state, [3], [1]), done
-                    )
+                if n_step_memory is not None:
+                    if swap_channels:
+                        one_step_transition = n_step_memory.save2memoryVectEnvs(
+                            state, action, reward, next_state, done
+                        )
+                    else:
+                        one_step_transition = n_step_memory.save2memoryVectEnvs(
+                            state,
+                            action,
+                            reward,
+                            np.moveaxis(next_state, [3], [1]),
+                            done,
+                        )
+                    if one_step_transition:
+                        state, action, reward, next_state, done = one_step_transition
+                        memory.save2memoryVectEnvs(
+                            state, action, reward, next_state, done
+                        )
                 else:
-                    memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                    if swap_channels:
+                        memory.save2memoryVectEnvs(
+                            state,
+                            action,
+                            reward,
+                            np.moveaxis(next_state, [3], [1]),
+                            done,
+                        )
+                    else:
+                        memory.save2memoryVectEnvs(
+                            state, action, reward, next_state, done
+                        )
 
                 if per:
                     fraction = min((idx_step + 1) / max_steps, 1.0)
