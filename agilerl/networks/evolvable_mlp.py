@@ -312,6 +312,7 @@ class EvolvableMLP(nn.Module):
             x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
                 -1, self.num_actions, self.num_atoms
             )
+            x = x.clamp(min=1e-3)
 
         return x
 

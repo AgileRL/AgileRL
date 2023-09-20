@@ -1,5 +1,4 @@
 import copy
-import random
 
 import dill
 import numpy as np
@@ -161,15 +160,13 @@ class RainbowDQN:
 
         self.criterion = F.smooth_l1_loss
 
-    def getAction(self, state, epsilon=0, action_mask=None):
+    def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
         :type state: float or List[float]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
-        :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: List, optional
         """
@@ -187,32 +184,19 @@ class RainbowDQN:
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
-        # epsilon-greedy
-        if random.random() < epsilon:
-            if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=state.size()[0])
-            else:
-                inv_mask = 1 - action_mask
+        self.actor.eval()
+        with torch.no_grad():
+            action_values = self.actor(state)
+        self.actor.train()
 
-                available_actions = np.ma.array(
-                    np.arange(0, self.action_dim), mask=inv_mask
-                ).compressed()
-                action = np.random.choice(available_actions, size=state.size()[0])
-
+        if action_mask is None:
+            action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:
-            self.actor.eval()
-            with torch.no_grad():
-                action_values = self.actor(state)
-            self.actor.train()
-
-            if action_mask is None:
-                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
-            else:
-                inv_mask = 1 - action_mask
-                masked_action_values = np.ma.array(
-                    action_values.cpu().data.numpy(), mask=inv_mask
-                )
-                action = np.argmax(masked_action_values, axis=-1)
+            inv_mask = 1 - action_mask
+            masked_action_values = np.ma.array(
+                action_values.cpu().data.numpy(), mask=inv_mask
+            )
+            action = np.argmax(masked_action_values, axis=-1)
 
         return action
 
@@ -271,6 +255,9 @@ class RainbowDQN:
         # soft update target network
         self.softUpdate()
 
+        self.actor.reset_noise()
+        self.actor_target.reset_noise()
+
         loss_for_prior = elementwise_loss.detach().cpu().numpy()
         new_priorities = loss_for_prior + self.prior_eps
         self.memory.update_priorities(idxs, new_priorities)
@@ -304,7 +291,7 @@ class RainbowDQN:
                 for idx_step in range(max_steps):
                     if swap_channels:
                         state = np.moveaxis(state, [3], [1])
-                    action = self.getAction(state, epsilon=0)
+                    action = self.getAction(state)
                     state, reward, done, _, _ = env.step(action)
                     score += reward
                 rewards.append(score)

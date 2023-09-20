@@ -413,6 +413,7 @@ class EvolvableCNN(nn.Module):
             x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
                 -1, self.num_actions, self.num_atoms
             )
+            x = x.clamp(min=1e-3)
 
         else:
             x = F.softmax(value, dim=-1)

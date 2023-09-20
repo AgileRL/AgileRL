@@ -108,7 +108,146 @@ class ReplayBuffer:
             self.counter += 1
 
 
-class PrioritizedReplayBuffer(ReplayBuffer):
+class MultiStepReplayBuffer(ReplayBuffer):
+    """The Multi-step Experience Replay Buffer class. Used to store experiences and allow
+    off-policy learning.
+
+    :param n_actions: Action dimension
+    :type n_actions: int
+    :param memory_size: Maximum length of replay buffer
+    :type memory_size: int
+    :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
+    :type field_names: List[str]
+    :param n_step: Step number to calculate n-step td error, defaults to 3
+    :type n_step: int, optional
+    :param gamma: Discount factor, defaults to 0.99
+    :type gamma: float, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
+    :type device: str, optional
+    """
+
+    def __init__(
+        self, action_dim, memory_size, field_names, n_step=3, gamma=0.99, device=None
+    ):
+        super().__init__(action_dim, memory_size, field_names, device)
+        self.n_step_buffer = deque(maxlen=n_step)
+        self.n_step = n_step
+        self.gamma = gamma
+
+    def save2memory(self, state, action, reward, next_state, done):
+        """Saves experience to memory.
+
+        :param state: Environment observation
+        :type state: float or List[float]
+        :param action: Action in environment
+        :type action: float or List[float]
+        :param reward: Reward from environment
+        :type reward: float
+        :param next_state: Environment observation of next state
+        :type next_state: float or List[float]
+        :param done: True if environment episode finished, else False
+        :type done: bool
+        """
+        transition = (state, action, reward, next_state, done)
+        self.n_step_buffer.append(transition)
+
+        # single step transition is not ready
+        if len(self.n_step_buffer) < self.n_step:
+            return ()
+
+        # make a n-step transition
+        reward, next_state, done = self._get_n_step_info(self.n_step_buffer, self.gamma)
+        state, action = self.n_step_buffer[0][:2]
+        self._add(state, action, reward, next_state, done)
+        self.counter += 1
+
+        return transition
+
+    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
+        """Saves multiple experiences to memory.
+
+        :param states: Multiple environment observations in a batch
+        :type states: List[float] or List[List[float]]
+        :param actions: Multiple actions in environment a batch
+        :type actions: List[float] or List[List[float]]
+        :param rewards: Multiple rewards from environment in a batch
+        :type rewards: List[float]
+        :param next_states: Multiple environment observations of next states in a batch
+        :type next_states: List[float] or List[List[float]]
+        :param dones: True if environment episodes finished, else False, in a batch
+        :type dones: List[bool]
+        """
+        transition = (states, actions, rewards, next_states, dones)
+        self.n_step_buffer.append(transition)
+
+        # single step transition is not ready
+        if len(self.n_step_buffer) < self.n_step:
+            return ()
+
+        # make a n-step transition
+        rewards, next_states, dones = self._get_n_step_info(
+            self.n_step_buffer, self.gamma
+        )
+        states, actions = self.n_step_buffer[0][:2]
+
+        for state, action, reward, next_state, done in zip(
+            states, actions, rewards, next_states, dones
+        ):
+            self._add(state, action, reward, next_state, done)
+            self.counter += 1
+
+        return transition
+
+    def sample_from_indices(self, idxs):
+        """Returns sample of experiences from memory using provided indices.
+
+        :param idxs: Indices to sample
+        :type idxs: List[int]
+        """
+        experiences = self.memory[idxs]
+
+        states = torch.from_numpy(
+            np.stack([e.state for e in experiences if e is not None], axis=0)
+        ).float()
+        actions = torch.from_numpy(
+            np.vstack([e.action for e in experiences if e is not None])
+        )
+        rewards = torch.from_numpy(
+            np.vstack([e.reward for e in experiences if e is not None])
+        ).float()
+        next_states = torch.from_numpy(
+            np.stack([e.next_state for e in experiences if e is not None], axis=0)
+        ).float()
+        dones = torch.from_numpy(
+            np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)
+        ).float()
+
+        if self.device is not None:
+            states, actions, rewards, next_states, dones = (
+                states.to(self.device),
+                actions.to(self.device),
+                rewards.to(self.device),
+                next_states.to(self.device),
+                dones.to(self.device),
+            )
+
+        return (states, actions, rewards, next_states, dones)
+
+    def _get_n_step_info(self, n_step_buffer, gamma):
+        """Return n step reward, next_state, and done."""
+        # info of the last transition
+        reward, next_state, done = n_step_buffer[-1][-3:]
+
+        for transition in reversed(list(n_step_buffer)[:-1]):
+            r, n_s, d = transition[-3:]
+
+            reward = r + gamma * reward * (1 - d)
+            next_state, done = (n_s, d) if d else (next_state, done)
+
+        return reward, next_state, done
+
+
+class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     """The Prioritized Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
@@ -118,12 +257,27 @@ class PrioritizedReplayBuffer(ReplayBuffer):
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
+    :param alpha: Alpha parameter for prioritized replay buffer, defaults to 0.6
+    :type alpha: float, optional
+    :param n_step: Step number to calculate n-step td error, defaults to 1
+    :type n_step: int, optional
+    :param gamma: Discount factor, defaults to 0.99
+    :type gamma: float, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
     :type device: str, optional
     """
 
-    def __init__(self, action_dim, memory_size, field_names, alpha=0.6, device=None):
-        super().__init__(action_dim, memory_size, field_names, device)
+    def __init__(
+        self,
+        action_dim,
+        memory_size,
+        field_names,
+        alpha=0.6,
+        n_step=1,
+        gamma=0.99,
+        device=None,
+    ):
+        super().__init__(action_dim, memory_size, field_names, n_step, gamma, device)
         self.max_priority, self.tree_ptr = 1.0, 0
         self.alpha = alpha
 

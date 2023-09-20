@@ -28,6 +28,7 @@ def train(
     eps_decay=0.995,
     target=200.0,
     per=False,
+    noisy=False,
     tournament=None,
     mutation=None,
     checkpoint=None,
@@ -68,6 +69,8 @@ def train(
     :type target: float, optional
     :param per: Using prioritized experience replayt buffer, defaults to False
     :type per: bool, optional
+    :param noisy: Using noisy network exploration, defaults to False
+    :type noisy: bool, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
@@ -198,7 +201,10 @@ def train(
                 if swap_channels:
                     state = np.moveaxis(state, [3], [1])
                 # Get next action from agent
-                action = agent.getAction(state, epsilon)
+                if noisy:
+                    action = agent.getAction(state)
+                else:
+                    action = agent.getAction(state, epsilon)
                 next_state, reward, done, _, _ = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
