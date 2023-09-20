@@ -27,6 +27,7 @@ def train(
     eps_end=0.1,
     eps_decay=0.995,
     target=200.0,
+    per=False,
     tournament=None,
     mutation=None,
     checkpoint=None,
@@ -65,6 +66,8 @@ def train(
     :type eps_decay: float, optional
     :param target: Target score for early stopping, defaults to 200.
     :type target: float, optional
+    :param per: Using prioritized experience replayt buffer, defaults to False
+    :type per: bool, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
@@ -206,13 +209,20 @@ def train(
                 else:
                     memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
+                if per:
+                    fraction = min((idx_step + 1) / max_steps, 1.0)
+                    agent.beta += fraction * (1.0 - agent.beta)
+
                 # Learn according to learning frequency
                 if (
                     memory.counter % agent.learn_step == 0
                     and len(memory) >= agent.batch_size
                 ):
                     # Sample replay buffer
-                    experiences = sampler.sample(agent.batch_size)
+                    if per:
+                        experiences = sampler.sample(agent.batch_size, agent.beta)
+                    else:
+                        experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 

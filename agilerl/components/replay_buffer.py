@@ -165,22 +165,21 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         dones = torch.from_numpy(
             np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)
         ).float()
-
         weights = torch.from_numpy(
             np.array([self._calculate_weight(i, beta) for i in idxs])
-        )
+        ).float()
 
         if self.device is not None:
-            states, actions, rewards, next_states, dones = (
+            states, actions, rewards, next_states, dones, weights = (
                 states.to(self.device),
                 actions.to(self.device),
                 rewards.to(self.device),
                 next_states.to(self.device),
                 dones.to(self.device),
+                weights.to(self.device),
             )
-            weights = weights.to(self.device)
 
-        return (states, actions, rewards, next_states, dones), weights
+        return (states, actions, rewards, next_states, dones, weights, idxs)
 
     def update_priorities(self, idxs, priorities):
         """Update priorities of sampled transitions."""
@@ -218,40 +217,3 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         weight = weight / max_weight
 
         return weight
-
-    def save2memory(self, state, action, reward, next_state, done):
-        """Saves experience to memory.
-
-        :param state: Environment observation
-        :type state: float or List[float]
-        :param action: Action in environment
-        :type action: float or List[float]
-        :param reward: Reward from environment
-        :type reward: float
-        :param next_state: Environment observation of next state
-        :type next_state: float or List[float]
-        :param done: True if environment episode finished, else False
-        :type done: bool
-        """
-        self._add(state, action, reward, next_state, done)
-        self.counter += 1
-
-    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
-        """Saves multiple experiences to memory.
-
-        :param states: Multiple environment observations in a batch
-        :type states: List[float] or List[List[float]]
-        :param actions: Multiple actions in environment a batch
-        :type actions: List[float] or List[List[float]]
-        :param rewards: Multiple rewards from environment in a batch
-        :type rewards: List[float]
-        :param next_states: Multiple environment observations of next states in a batch
-        :type next_states: List[float] or List[List[float]]
-        :param dones: True if environment episodes finished, else False, in a batch
-        :type dones: List[bool]
-        """
-        for state, action, reward, next_state, done in zip(
-            states, actions, rewards, next_states, dones
-        ):
-            self._add(state, action, reward, next_state, done)
-            self.counter += 1
