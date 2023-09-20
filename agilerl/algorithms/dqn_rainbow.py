@@ -75,7 +75,6 @@ class RainbowDQN:
         v_min=0.0,
         v_max=200.0,
         mutation=None,
-        double=False,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -102,7 +101,6 @@ class RainbowDQN:
         self.scores = []
         self.fitness = []
         self.steps = [0]
-        self.double = double
 
         self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms).to(
             self.device
@@ -337,6 +335,11 @@ class RainbowDQN:
             learn_step=self.learn_step,
             gamma=self.gamma,
             tau=self.tau,
+            beta=self.beta,
+            prior_eps=self.prior_eps,
+            num_atoms=self.num_atoms,
+            v_min=self.v_min,
+            v_max=self.v_max,
             mutation=self.mut,
             device=self.device,
             accelerator=self.accelerator,
@@ -401,6 +404,11 @@ class RainbowDQN:
                 "learn_step": self.learn_step,
                 "gamma": self.gamma,
                 "tau": self.tau,
+                "beta": self.beta,
+                "prior_eps": self.prior_eps,
+                "num_atoms": self.num_atoms,
+                "v_min": self.v_min,
+                "v_max": self.v_max,
                 "mutation": self.mut,
                 "index": self.index,
                 "scores": self.scores,
@@ -434,6 +442,11 @@ class RainbowDQN:
         self.learn_step = checkpoint["learn_step"]
         self.gamma = checkpoint["gamma"]
         self.tau = checkpoint["tau"]
+        self.beta = checkpoint["beta"]
+        self.prior_eps = checkpoint["prior_eps"]
+        self.num_atoms = checkpoint["num_atoms"]
+        self.v_min = checkpoint["v_min"]
+        self.v_max = checkpoint["v_min"]
         self.mut = checkpoint["mutation"]
         self.index = checkpoint["index"]
         self.scores = checkpoint["scores"]
