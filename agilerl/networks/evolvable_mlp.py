@@ -1,12 +1,94 @@
 import copy
+import math
 from collections import OrderedDict
 from typing import List
 
 import numpy as np
 import torch
+import torch.functional as F
 import torch.nn as nn
 
 from agilerl.networks.custom_architecture import GumbelSoftmax
+
+
+class NoisyLinear(nn.Module):
+    """The Noisy Linear Neural Network class.
+
+    :param in_features: Input features size
+    :type in_features: int
+    :param out_features: Output features size
+    :type out_features: int
+    :param std_init: Standard deviation, defaults to 0.4
+    :type std_init: float, optional
+    """
+
+    def __init__(self, in_features, out_features, std_init=0.4):
+        super().__init__()
+
+        self.in_features = in_features
+        self.out_features = out_features
+        self.std_init = std_init
+
+        self.weight_mu = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        self.register_buffer(
+            "weight_epsilon", torch.FloatTensor(out_features, in_features)
+        )
+
+        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features))
+        self.bias_sigma = nn.Parameter(torch.FloatTensor(out_features))
+        self.register_buffer("bias_epsilon", torch.FloatTensor(out_features))
+
+        self.reset_parameters()
+        self.reset_noise()
+
+    def forward(self, x):
+        """Returns output of neural network.
+
+        :param x: Neural network input
+        :type x: torch.Tensor()
+        """
+        weight_epsilon = self.weight_epsilon.to(x.device)
+        bias_epsilon = self.bias_epsilon.to(x.device)
+
+        if self.training:
+            weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
+            bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
+        else:
+            weight = self.weight_mu
+            bias = self.bias_mu
+
+        return F.linear(x, weight, bias)
+
+    def reset_parameters(self):
+        """Resets neural network parameters."""
+        mu_range = 1 / math.sqrt(self.weight_mu.size(1))
+
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(
+            self.std_init / math.sqrt(self.weight_sigma.size(1))
+        )
+
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.bias_sigma.size(0)))
+
+    def reset_noise(self):
+        """Resets neural network noise."""
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
+
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def _scale_noise(self, size):
+        """Returns noisy tensor.
+
+        :param size: Tensor of same size as noisy output
+        :type size: torch.Tensor()
+        """
+        x = torch.randn(size)
+        x = x.sign().mul(x.abs().sqrt())
+        return x
 
 
 class EvolvableMLP(nn.Module):
@@ -18,6 +100,8 @@ class EvolvableMLP(nn.Module):
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
     :type hidden_size: List[int]
+    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
+    :type num_atoms: int, optional
     :param activation: Activation layer, defaults to 'relu'
     :type activation: str, optional
     :param output_activation: Output activation layer, defaults to None
@@ -30,6 +114,8 @@ class EvolvableMLP(nn.Module):
     :type init_layers: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
+    :param rainbow: Using Rainbow DQN, defaults to False
+    :type rainbow: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -41,12 +127,14 @@ class EvolvableMLP(nn.Module):
         num_inputs: int,
         num_outputs: int,
         hidden_size: List[int],
+        num_atoms=50,
         activation="relu",
         output_activation=None,
         layer_norm=False,
         output_vanish=True,
         init_layers=True,
         stored_values=None,
+        rainbow=False,
         device="cpu",
         accelerator=None,
     ):
@@ -60,10 +148,12 @@ class EvolvableMLP(nn.Module):
         self.output_vanish = output_vanish
         self.init_layers = init_layers
         self.hidden_size = hidden_size
+        self.num_atoms = num_atoms
+        self.rainbow = rainbow
         self.device = device
         self.accelerator = accelerator
 
-        self.net = self.create_net()
+        self.feature_net, self.value_net, self.advantage_net = self.create_net()
 
         if stored_values is not None:
             self.inject_parameters(pvec=stored_values, without_layer_norm=False)
@@ -100,52 +190,101 @@ class EvolvableMLP(nn.Module):
         torch.nn.init.constant_(layer.bias, bias_const)
         return layer
 
-    def create_net(self):
-        """Creates and returns neural network."""
+    def create_mlp(
+        self, input_size, output_size, hidden_size, output_vanish, noisy=False
+    ):
+        """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
-
-        net_dict["linear_layer_0"] = nn.Linear(self.num_inputs, self.hidden_size[0])
+        if noisy:
+            net_dict["linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+        else:
+            net_dict["linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.init_layers:
             net_dict["linear_layer_0"] = self.layer_init(net_dict["linear_layer_0"])
         if self.layer_norm:
-            net_dict["layer_norm_0"] = nn.LayerNorm(self.hidden_size[0])
+            net_dict["layer_norm_0"] = nn.LayerNorm(hidden_size[0])
         net_dict["activation_0"] = self.get_activation(self.activation)
-
-        if len(self.hidden_size) > 1:
-            for l_no in range(1, len(self.hidden_size)):
-                net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
-                    self.hidden_size[l_no - 1], self.hidden_size[l_no]
-                )
+        if len(hidden_size) > 1:
+            for l_no in range(1, len(hidden_size)):
+                if noisy:
+                    net_dict[f"linear_layer_{str(l_no)}"] = NoisyLinear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
+                else:
+                    net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
                 if self.init_layers:
                     net_dict[f"linear_layer_{str(l_no)}"] = self.layer_init(
                         net_dict[f"linear_layer_{str(l_no)}"]
                     )
                 if self.layer_norm:
                     net_dict[f"layer_norm_{str(l_no)}"] = nn.LayerNorm(
-                        self.hidden_size[l_no]
+                        hidden_size[l_no]
                     )
                 net_dict[f"activation_{str(l_no)}"] = self.get_activation(
                     self.activation
                 )
-
-        output_layer = nn.Linear(self.hidden_size[-1], self.num_outputs)
+        if noisy:
+            output_layer = NoisyLinear(hidden_size[-1], output_size)
+        else:
+            output_layer = nn.Linear(hidden_size[-1], output_size)
         if self.init_layers:
             output_layer = self.layer_init(output_layer)
-
-        if self.output_vanish:
+        if output_vanish:
             output_layer.weight.data.mul_(0.1)
             output_layer.bias.data.mul_(0.1)
-
         net_dict["linear_layer_output"] = output_layer
         if self.output_activation is not None:
             net_dict["activation_output"] = self.get_activation(self.output_activation)
-
         net = nn.Sequential(net_dict)
+        return net
+
+    def create_net(self):
+        """Creates and returns neural network."""
+        feature_net = self.create_mlp(
+            input_size=self.input_size,
+            output_size=self.hidden_size[0],
+            hidden_size=self.hidden_size,
+            output_vanish=False,
+        )
 
         if self.accelerator is None:
-            net = net.to(self.device)
+            feature_net = feature_net.to(self.device)
 
-        return net
+        value_net, advantage_net = None, None
+        if self.rainbow:
+            value_net = self.create_mlp(
+                input_size=self.hidden_size[0],
+                output_size=self.num_atoms,
+                hidden_size=self.hidden_size,
+                output_vanish=self.output_vanish,
+                noisy=True,
+            )
+            advantage_net = self.create_mlp(
+                input_size=self.hidden_size[0],
+                output_size=self.num_atoms * self.num_actions,
+                hidden_size=self.hidden_size,
+                output_vanish=self.output_vanish,
+                Noisy=True,
+            )
+            if self.accelerator is None:
+                self.value_net, self.advantage_net = (
+                    value_net.to(self.device),
+                    advantage_net.to(self.device),
+                )
+
+        return feature_net, value_net, advantage_net
+
+    def reset_noise(self):
+        """Resets noise of value and advantage networks."""
+        if self.rainbow:
+            for layer in self.value_net:
+                if isinstance(layer, NoisyLinear):
+                    layer.reset_noise()
+            for layer in self.advantage_net:
+                if isinstance(layer, NoisyLinear):
+                    layer.reset_noise()
 
     def forward(self, x):
         """Returns output of neural network.
@@ -157,7 +296,23 @@ class EvolvableMLP(nn.Module):
             x = torch.FloatTensor(np.array(x))
             if self.accelerator is None:
                 x = x.to(self.device)
-        x = self.net(x)
+
+        batch_size = x.size(0)
+
+        x = self.feature_net(x)
+
+        if self.rainbow:
+            value = self.value_net(x)
+            advantage = self.advantage_net(x)
+
+            value = value.view(batch_size, 1, self.num_atoms)
+            advantage = advantage.view(batch_size, self.num_actions, self.num_atoms)
+
+            x = value + advantage - advantage.mean(1, keepdim=True)
+            x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                -1, self.num_actions, self.num_atoms
+            )
+
         return x
 
     def get_model_dict(self):
@@ -242,9 +397,11 @@ class EvolvableMLP(nn.Module):
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,
+            "num_atoms": self.num_atoms,
             "activation": self.activation,
             "output_activation": self.output_activation,
             "layer_norm": self.layer_norm,
+            "rainbow": self.rainbow,
             "device": self.device,
             "accelerator": self.accelerator,
         }
@@ -266,11 +423,7 @@ class EvolvableMLP(nn.Module):
         # add layer to hyper params
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
-
-            # copy old params to new net
-            new_net = self.create_net()
-            new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
-            self.net = new_net
+            self.recreate_nets()
         else:
             self.add_node()
 
@@ -278,9 +431,7 @@ class EvolvableMLP(nn.Module):
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > 1:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:1]
-            new_net = self.create_net()
-            new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
-            self.net = new_net
+            self.recreate_nets()
         else:
             self.add_node()
 
@@ -301,10 +452,7 @@ class EvolvableMLP(nn.Module):
 
         if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
-            new_net = self.create_net()
-            new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
-
-            self.net = new_net
+            self.recreate_nets()
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
@@ -327,12 +475,28 @@ class EvolvableMLP(nn.Module):
             self.hidden_size[hidden_layer] = (
                 self.hidden_size[hidden_layer] - numb_new_nodes
             )
-            new_net = self.create_net()
-            new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
-
-            self.net = new_net
+            self.recreate_nets()
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
+
+    def recreate_nets(self):
+        """Recreates neural networks."""
+        new_feature_net, new_value_net, new_advantage_net = self.create_net()
+        new_feature_net = self.preserve_parameters(
+            old_net=self.feature_net, new_net=new_feature_net
+        )
+        if self.rainbow:
+            new_value_net = self.preserve_parameters(
+                old_net=self.value_net, new_net=new_value_net
+            )
+            new_advantage_net = self.preserve_parameters(
+                old_net=self.advantage_net, new_net=new_advantage_net
+            )
+        self.feature_net, self.value_net, self.advantage_net = (
+            new_feature_net,
+            new_value_net,
+            new_advantage_net,
+        )
 
     def clone(self):
         """Returns clone of neural net with identical parameters."""

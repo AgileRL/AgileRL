@@ -527,6 +527,7 @@ class EvolvableCNN(nn.Module):
             "multi": self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
+            "rainbow": self.rainbow,
             "device": self.device,
             "accelerator": self.accelerator,
         }

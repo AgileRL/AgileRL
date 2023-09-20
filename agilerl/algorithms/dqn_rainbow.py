@@ -7,6 +7,7 @@ import torch
 import torch.functional as F
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils import clip_grad_norm_
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
@@ -65,6 +66,7 @@ class RainbowDQN:
         tau=1e-3,
         beta=0.4,
         prior_eps=1e-6,
+        num_atoms=50,
         mutation=None,
         double=False,
         device="cpu",
@@ -83,6 +85,7 @@ class RainbowDQN:
         self.tau = tau
         self.beta = beta
         self.prior_eps = prior_eps
+        self.num_atoms = num_atoms
         self.mut = mutation
         self.device = device
         self.accelerator = accelerator
@@ -98,6 +101,9 @@ class RainbowDQN:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
+                output_vanish=False,
+                num_atoms=self.num_atoms,
+                rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -105,6 +111,9 @@ class RainbowDQN:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
+                output_vanish=False,
+                num_atoms=self.num_atoms,
+                rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -119,6 +128,8 @@ class RainbowDQN:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
+                num_atoms=self.num_atoms,
+                rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -130,6 +141,8 @@ class RainbowDQN:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
+                num_atoms=self.num_atoms,
+                rainbow=True,
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -252,6 +265,7 @@ class RainbowDQN:
             self.accelerator.backward(loss)
         else:
             loss.backward()
+        clip_grad_norm_(self.actor.parameters(), 10.0)
         self.optimizer.step()
 
         # soft update target network
