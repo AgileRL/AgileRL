@@ -165,7 +165,11 @@ def train(
             distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
         )
     else:
-        sampler = Sampler(distributed=False, memory=memory)
+        sampler = Sampler(distributed=False, per=per, memory=memory)
+        if n_step_memory is not None:
+            n_step_sampler = Sampler(
+                distributed=False, n_step=True, memory=n_step_memory
+            )
 
     epsilon = eps_start
 
@@ -253,12 +257,17 @@ def train(
                     and len(memory) >= agent.batch_size
                 ):
                     # Sample replay buffer
+                    # Learn according to agent's RL algorithm
                     if per:
                         experiences = sampler.sample(agent.batch_size, agent.beta)
+                        if n_step_memory is not None:
+                            n_step_experiences = n_step_sampler.sample(experiences[6])
+                            experiences += n_step_experiences
+                        idxs, priorities = agent.learn(experiences)
+                        memory.update_priorities(idxs, priorities)
                     else:
                         experiences = sampler.sample(agent.batch_size)
-                    # Learn according to agent's RL algorithm
-                    agent.learn(experiences)
+                        agent.learn(experiences)
 
                 state = next_state
                 score += reward

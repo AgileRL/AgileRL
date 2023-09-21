@@ -94,6 +94,7 @@ def initialPopulation(
                 num_atoms=INIT_HP["NUM_ATOMS"],
                 v_min=INIT_HP["V_MIN"],
                 v_max=INIT_HP["V_MAX"],
+                n_step=INIT_HP["N_STEP"],
                 device=device,
                 accelerator=accelerator,
             )

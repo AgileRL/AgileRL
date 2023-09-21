@@ -45,6 +45,8 @@ class RainbowDQN:
     :type v_min: float, optional
     :param v_max: Maximum value of support, defaults to 200
     :type v_max: float, optional
+    :param n_step: Step number to calculate n-step td error, defaults to 3
+    :type n_step: int, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
     :param double: Use double Q-learning, defaults to False
@@ -74,6 +76,7 @@ class RainbowDQN:
         num_atoms=51,
         v_min=0.0,
         v_max=200.0,
+        n_step=3,
         mutation=None,
         device="cpu",
         accelerator=None,
@@ -94,6 +97,7 @@ class RainbowDQN:
         self.num_atoms = num_atoms
         self.v_min = v_min
         self.v_max = v_max
+        self.n_step = n_step
         self.mut = mutation
         self.device = device
         self.accelerator = accelerator
@@ -225,14 +229,7 @@ class RainbowDQN:
         st, ac, re, ne, do = experiences
         return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
-    def learn(self, experiences):
-        """Updates agent network parameters to learn from experiences.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: List[torch.Tensor[float]]
-        """
-        states, actions, rewards, next_states, dones, weights, idxs = experiences
-
+    def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
         if self.one_hot:
             states = (
                 nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
@@ -245,21 +242,82 @@ class RainbowDQN:
                 .squeeze()
             )
 
-        if self.double:  # Double Q-learning
-            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
-            q_target = self.actor(next_states).gather(dim=1, index=q_idx).detach()
-        else:
-            q_target = (
-                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+        # Categorical DQN algorithm
+        delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
+
+        # Double Q-learning
+        q_idx = self.actor(next_states).argmax(dim=1).unsqueeze(1)
+        q_target = (
+            self.actor_target(next_states, q=False).gather(dim=1, index=q_idx).detach()
+        )
+
+        with torch.no_grad():
+            t_z = rewards + (1 - dones) * gamma * self.support
+            t_z = t_z.clamp(min=self.v_min, max=self.v_max)
+            b = (t_z - self.v_min) / delta_z
+            L = b.floor().long()
+            u = b.ceil().long()
+
+            offset = (
+                torch.linspace(
+                    0, (self.batch_size - 1) * self.num_atoms, self.batch_size
+                )
+                .long()
+                .unsqueeze(1)
+                .expand(self.batch_size, self.num_atoms)
             )
 
-        # target, if terminal then y_j = rewards
-        y_j = rewards + self.gamma * q_target * (1 - dones)
-        q_eval = self.actor(states).gather(1, actions.long())
+            proj_dist = torch.zeros(q_target.size())
 
-        # loss backprop
-        elementwise_loss = self.criterion(q_eval, y_j, reduction="none")
+            if self.accelerator is None:
+                offset = offset.to(self.device)
+                proj_dist = proj_dist.to(self.device)
+
+            proj_dist.view(-1).index_add_(
+                0, (L + offset).view(-1), (q_target * (u.float() - b)).view(-1)
+            )
+            proj_dist.view(-1).index_add_(
+                0, (u + offset).view(-1), (q_target * (b - L.float())).view(-1)
+            )
+
+        q_eval = self.actor(states, q=False).gather(1, actions.long())
+        log_p = torch.log(q_eval)
+
+        # loss
+        elementwise_loss = -(q_eval * log_p).sum(1)
+        return elementwise_loss
+
+    def learn(self, experiences):
+        """Updates agent network parameters to learn from experiences.
+
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
+        :type state: List[torch.Tensor[float]]
+        """
+        (
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+            weights,
+            idxs,
+            n_states,
+            n_actions,
+            n_rewards,
+            n_next_states,
+            n_dones,
+        ) = experiences
+
+        n_gamma = self.gamma**self.n_step
+        elementwise_loss = self._dqn_loss(
+            states, actions, rewards, next_states, dones, self.gamma
+        )
+        n_step_elementwise_loss = self.dqn_loss(
+            n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+        )
+        elementwise_loss += n_step_elementwise_loss
         loss = torch.mean(elementwise_loss * weights)
+
         self.optimizer.zero_grad()
         if self.accelerator is not None:
             self.accelerator.backward(loss)
@@ -276,7 +334,7 @@ class RainbowDQN:
 
         loss_for_prior = elementwise_loss.detach().cpu().numpy()
         new_priorities = loss_for_prior + self.prior_eps
-        self.memory.update_priorities(idxs, new_priorities)
+        return idxs, new_priorities
 
     def softUpdate(self):
         """Soft updates target network."""
@@ -340,6 +398,7 @@ class RainbowDQN:
             num_atoms=self.num_atoms,
             v_min=self.v_min,
             v_max=self.v_max,
+            n_step=self.n_step,
             mutation=self.mut,
             device=self.device,
             accelerator=self.accelerator,
@@ -409,6 +468,7 @@ class RainbowDQN:
                 "num_atoms": self.num_atoms,
                 "v_min": self.v_min,
                 "v_max": self.v_max,
+                "n_step": self.n_step,
                 "mutation": self.mut,
                 "index": self.index,
                 "scores": self.scores,
@@ -447,6 +507,7 @@ class RainbowDQN:
         self.num_atoms = checkpoint["num_atoms"]
         self.v_min = checkpoint["v_min"]
         self.v_max = checkpoint["v_min"]
+        self.n_step = checkpoint["n_step"]
         self.mut = checkpoint["mutation"]
         self.index = checkpoint["index"]
         self.scores = checkpoint["scores"]
