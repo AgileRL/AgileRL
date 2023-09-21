@@ -25,7 +25,7 @@ INIT_HP:
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
