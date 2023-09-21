@@ -218,14 +218,18 @@ def train(
                 if n_step_memory is not None:
                     if swap_channels:
                         one_step_transition = n_step_memory.save2memoryVectEnvs(
-                            state, action, reward, next_state, done
+                            state,
+                            action,
+                            reward,
+                            np.moveaxis(next_state, [3], [1]),
+                            done,
                         )
                     else:
                         one_step_transition = n_step_memory.save2memoryVectEnvs(
                             state,
                             action,
                             reward,
-                            np.moveaxis(next_state, [3], [1]),
+                            next_state,
                             done,
                         )
                     if one_step_transition:

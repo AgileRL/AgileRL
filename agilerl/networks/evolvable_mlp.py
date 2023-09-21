@@ -5,8 +5,8 @@ from typing import List
 
 import numpy as np
 import torch
-import torch.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 
 from agilerl.networks.custom_architecture import GumbelSoftmax
 
@@ -247,7 +247,7 @@ class EvolvableMLP(nn.Module):
     def create_net(self):
         """Creates and returns neural network."""
         feature_net = self.create_mlp(
-            input_size=self.input_size,
+            input_size=self.num_inputs,
             output_size=self.hidden_size[0],
             hidden_size=self.hidden_size,
             output_vanish=False,
@@ -267,10 +267,10 @@ class EvolvableMLP(nn.Module):
             )
             advantage_net = self.create_mlp(
                 input_size=self.hidden_size[0],
-                output_size=self.num_atoms * self.num_actions,
+                output_size=self.num_atoms * self.num_outputs,
                 hidden_size=self.hidden_size,
                 output_vanish=self.output_vanish,
-                Noisy=True,
+                noisy=True,
             )
             if self.accelerator is None:
                 self.value_net, self.advantage_net = (
@@ -312,11 +312,11 @@ class EvolvableMLP(nn.Module):
             advantage = self.advantage_net(x)
 
             value = value.view(batch_size, 1, self.num_atoms)
-            advantage = advantage.view(batch_size, self.num_actions, self.num_atoms)
+            advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
 
             x = value + advantage - advantage.mean(1, keepdim=True)
             x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                -1, self.num_actions, self.num_atoms
+                -1, self.num_outputs, self.num_atoms
             )
             x = x.clamp(min=1e-3)
 
@@ -411,6 +411,8 @@ class EvolvableMLP(nn.Module):
             "activation": self.activation,
             "output_activation": self.output_activation,
             "layer_norm": self.layer_norm,
+            "init_layers": self.init_layers,
+            "output_vanish": self.output_vanish,
             "support": self.support,
             "rainbow": self.rainbow,
             "device": self.device,

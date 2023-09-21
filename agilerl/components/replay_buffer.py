@@ -23,6 +23,7 @@ class ReplayBuffer:
 
     def __init__(self, action_dim, memory_size, field_names, device=None):
         self.n_actions = action_dim
+        self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
         self.experience = namedtuple("Experience", field_names=field_names)
         self.counter = 0  # update cycle counter
@@ -204,7 +205,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :param idxs: Indices to sample
         :type idxs: List[int]
         """
-        experiences = self.memory[idxs]
+        experiences = [self.memory[i] for i in idxs]
 
         states = torch.from_numpy(
             np.stack([e.state for e in experiences if e is not None], axis=0)
@@ -236,15 +237,19 @@ class MultiStepReplayBuffer(ReplayBuffer):
     def _get_n_step_info(self, n_step_buffer, gamma):
         """Return n step reward, next_state, and done."""
         # info of the last transition
-        reward, next_state, done = n_step_buffer[-1][-3:]
+        vect_reward, vect_next_state, vect_done = n_step_buffer[-1][-3:]
 
         for transition in reversed(list(n_step_buffer)[:-1]):
-            r, n_s, d = transition[-3:]
+            vect_r, vect_n_s, vect_d = transition[-3:]
 
-            reward = r + gamma * reward * (1 - d)
-            next_state, done = (n_s, d) if d else (next_state, done)
+            vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
 
-        return reward, next_state, done
+            for i, (n_s, d) in enumerate(zip(vect_n_s, vect_d)):
+                vect_next_state[i], vect_done[i] = (
+                    (n_s, d) if d else (vect_next_state[i], vect_done[i])
+                )
+
+        return vect_reward, vect_next_state, vect_done
 
 
 class PrioritizedReplayBuffer(MultiStepReplayBuffer):
@@ -293,7 +298,7 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         super()._add(state, action, reward, next_state, done)
         self.sum_tree[self.tree_ptr] = self.max_priority**self.alpha
         self.min_tree[self.tree_ptr] = self.max_priority**self.alpha
-        self.tree_ptr = (self.tree_ptr + 1) % self.max_size
+        self.tree_ptr = (self.tree_ptr + 1) % self.memory_size
 
     def sample(self, batch_size, beta=0.4):
         """Returns sample of experiences from memory.
@@ -302,7 +307,7 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         :type batch_size: int
         """
         idxs = self._sample_proprtional(batch_size)
-        experiences = self.memory[idxs]
+        experiences = [self.memory[i] for i in idxs]
 
         states = torch.from_numpy(
             np.stack([e.state for e in experiences if e is not None], axis=0)

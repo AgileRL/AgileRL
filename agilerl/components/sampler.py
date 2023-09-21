@@ -12,6 +12,7 @@ class Sampler:
     ):
         self.distributed = distributed
         self.per = per
+        self.n_step = n_step
         self.memory = memory
         self.dataset = dataset
         self.dataloader = dataloader

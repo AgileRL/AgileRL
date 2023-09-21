@@ -854,6 +854,15 @@ class Mutations:
                 },
                 "critics": [],
             }
+        elif algo == "Rainbow DQN":
+            nets = {
+                "actor": {
+                    "eval": "actor",
+                    "target": "actor_target",
+                    "optimizer": "optimizer_type",
+                },
+                "critics": [],
+            }
         elif algo == "DDPG":
             nets = {
                 "actor": {

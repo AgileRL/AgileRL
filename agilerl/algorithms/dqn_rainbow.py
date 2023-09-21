@@ -3,7 +3,6 @@ import copy
 import dill
 import numpy as np
 import torch
-import torch.functional as F
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
@@ -117,6 +116,7 @@ class RainbowDQN:
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
                 output_vanish=False,
+                init_layers=False,
                 num_atoms=self.num_atoms,
                 support=self.support,
                 rainbow=True,
@@ -128,6 +128,7 @@ class RainbowDQN:
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
                 output_vanish=False,
+                init_layers=False,
                 num_atoms=self.num_atoms,
                 support=self.support,
                 rainbow=True,
@@ -177,8 +178,6 @@ class RainbowDQN:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
             self.optimizer = self.optimizer_type
-
-        self.criterion = F.smooth_l1_loss
 
     def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
@@ -246,10 +245,9 @@ class RainbowDQN:
         delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
 
         # Double Q-learning
-        q_idx = self.actor(next_states).argmax(dim=1).unsqueeze(1)
-        q_target = (
-            self.actor_target(next_states, q=False).gather(dim=1, index=q_idx).detach()
-        )
+        q_idx = self.actor(next_states).argmax(dim=1)
+        q_target = self.actor_target(next_states, q=False).detach()
+        q_target = q_target[torch.arange(q_target.size(0)), q_idx]
 
         with torch.no_grad():
             t_z = rewards + (1 - dones) * gamma * self.support
@@ -280,7 +278,8 @@ class RainbowDQN:
                 0, (u + offset).view(-1), (q_target * (b - L.float())).view(-1)
             )
 
-        q_eval = self.actor(states, q=False).gather(1, actions.long())
+        q_eval = self.actor(states, q=False)
+        q_eval = q_eval[torch.arange(q_eval.size(0)), actions.squeeze().long()]
         log_p = torch.log(q_eval)
 
         # loss
@@ -312,7 +311,7 @@ class RainbowDQN:
         elementwise_loss = self._dqn_loss(
             states, actions, rewards, next_states, dones, self.gamma
         )
-        n_step_elementwise_loss = self.dqn_loss(
+        n_step_elementwise_loss = self._dqn_loss(
             n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
         )
         elementwise_loss += n_step_elementwise_loss
