@@ -90,7 +90,7 @@ class DDPG:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
-                output_activation="tanh",
+                mlp_output_activation="Tanh",
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -98,7 +98,7 @@ class DDPG:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
-                output_activation="tanh",
+                mlp_output_activation="Tanh",
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -129,7 +129,7 @@ class DDPG:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
+                mlp_activation="Tanh",
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -141,7 +141,7 @@ class DDPG:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
+                mlp_activation="Tanh",
                 device=self.device,
                 accelerator=self.accelerator,
             )
@@ -155,7 +155,7 @@ class DDPG:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
+                mlp_activation="Tanh",
                 critic=True,
                 device=self.device,
                 accelerator=self.accelerator,
@@ -168,7 +168,7 @@ class DDPG:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
+                mlp_activation="Tanh",
                 critic=True,
                 device=self.device,
                 accelerator=self.accelerator,

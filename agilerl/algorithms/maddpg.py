@@ -114,9 +114,9 @@ class MADDPG:
             pass
         else:
             if self.discrete_actions:
-                self.net_config["output_activation"] = "gumbel_softmax"
+                self.net_config["output_activation"] = "GumbelSoftmax"
             else:
-                self.net_config["output_activation"] = "softmax"
+                self.net_config["output_activation"] = "Softmax"
 
         # model
         if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
@@ -125,7 +125,7 @@ class MADDPG:
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
                     hidden_size=self.net_config["h_size"],
-                    output_activation=self.net_config["output_activation"],
+                    mlp_output_activation=self.net_config["output_activation"],
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -155,7 +155,7 @@ class MADDPG:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation=self.net_config["output_activation"],
+                    mlp_output_activation=self.net_config["output_activation"],
                     multi=self.multi,
                     n_agents=self.n_agents,
                     device=self.device,
@@ -174,7 +174,8 @@ class MADDPG:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation="tanh",
+                    mlp_activation="Tanh",
+                    mlp_output_activation="Softmax",
                     critic=True,
                     n_agents=self.n_agents,
                     multi=self.multi,

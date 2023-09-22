@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from agilerl.networks.make_evolvable import MakeEvolvable
+from agilerl.networks.make_evolvable_cnn import MakeEvolvable
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
@@ -84,11 +84,7 @@ class DQN:
         self.double = double
 
         if isinstance(self.net_config, nn.Module):
-            self.actor = MakeEvolvable(
-                network=self.net_config,
-                input_tensor=torch.ones(state_dim).unsqueeze(0),
-                device=self.device
-            )
+            self.actor = self.net_config
             self.actor_target = copy.deepcopy(self.actor)
         else:
             # model
@@ -265,8 +261,12 @@ class DQN:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                        state = np.moveaxis(state, [3], [1])
+                            if state.ndim != 4:
+                                state = np.expand_dims(state, 0)
+                            state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
+                    if len(action) == 1:
+                        action = action[0]
                     state, reward, done, _, _ = env.step(action)
                     score += reward
                 rewards.append(score)

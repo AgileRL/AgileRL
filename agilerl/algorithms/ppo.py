@@ -113,9 +113,9 @@ class PPO:
             pass
         else:
             if self.discrete_actions:
-                self.net_config["output_activation"] = "softmax"
+                self.net_config["output_activation"] = "Softmax"
             else:
-                self.net_config["output_activation"] = "tanh"
+                self.net_config["output_activation"] = "Tanh"
 
         # For continuous action spaces
         if not self.discrete_actions:
@@ -129,7 +129,7 @@ class PPO:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
-                output_activation=self.net_config["output_activation"],
+                mlp_output_activation=self.net_config["output_activation"],
                 device=self.device,
                 accelerator=self.accelerator,
             )

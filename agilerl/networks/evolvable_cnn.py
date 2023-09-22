@@ -109,6 +109,8 @@ class EvolvableCNN(nn.Module):
     :type num_actions: int
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
     :type num_atoms: int, optional
+    :param mlp_output_activation: MLP output activation layer, defaults to 'softmax'
+    :type mlp_output_activation: str, optional
     :param mlp_activation: MLP activation layer, defaults to 'relu'
     :type mlp_activation: str, optional
     :param cnn_activation: CNN activation layer, defaults to 'relu'
@@ -142,8 +144,9 @@ class EvolvableCNN(nn.Module):
         hidden_size: List[int],
         num_actions: int,
         num_atoms=51,
-        mlp_activation="relu",
-        cnn_activation="relu",
+        mlp_output_activation="Softmax",
+        mlp_activation="ReLU",
+        cnn_activation="ReLU",
         n_agents=None,
         multi=False,
         layer_norm=False,
@@ -165,6 +168,7 @@ class EvolvableCNN(nn.Module):
         self.num_atoms = num_atoms
         self.mlp_activation = mlp_activation
         self.cnn_activation = cnn_activation
+        self.mlp_output_activation = mlp_output_activation
         self.layer_norm = layer_norm
         self.rainbow = rainbow
         self.critic = critic
@@ -187,20 +191,20 @@ class EvolvableCNN(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            "tanh": nn.Tanh,
-            "gelu": nn.GELU,
-            "relu": nn.ReLU,
-            "elu": nn.ELU,
-            "softsign": nn.Softsign,
-            "sigmoid": nn.Sigmoid,
-            "softmax": nn.Softmax,
-            "gumbel_softmax": GumbelSoftmax,
-            "softplus": nn.Softplus,
-            "lrelu": nn.LeakyReLU,
-            "prelu": nn.PReLU,
+            "Tanh": nn.Tanh,
+            "GELU": nn.GELU,
+            "ReLU": nn.ReLU,
+            "ELU": nn.ELU,
+            "Softsign": nn.Softsign,
+            "Sigmoid": nn.Sigmoid,
+            "Softmax": nn.Softmax,
+            "GumbelSoftmax": GumbelSoftmax,
+            "Softplus": nn.Softplus,
+            "LeakyReLU": nn.LeakyReLU,
+            "PReLU": nn.PReLU,
         }
         return (
-            activation_functions[activation_names](dim=1)
+            activation_functions[activation_names](dim=-1)
             if activation_names == "softmax"
             else activation_functions[activation_names]()
         )
@@ -225,9 +229,15 @@ class EvolvableCNN(nn.Module):
                 net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
                     self.mlp_activation
                 )
+
         net_dict[f"{name}_linear_layer_output"] = NoisyLinear(
             hidden_size[-1], output_size
         )
+
+        net_dict[f"{name}_output_activation"] = self.get_activation(
+            self.mlp_output_activation
+        )
+
         return nn.Sequential(net_dict)
 
     def create_cnn(self, input_size, channel_size, kernel_size, stride_size, name):
@@ -415,7 +425,7 @@ class EvolvableCNN(nn.Module):
             )
 
         else:
-            x = F.softmax(value, dim=-1)
+            x = value
 
         return x
 
