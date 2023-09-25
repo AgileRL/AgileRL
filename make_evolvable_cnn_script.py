@@ -83,7 +83,7 @@ class SimpleCNN(nn.Module):
     
 def main(INIT_HP, MUTATION_PARAMS):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=8)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
 
     # ### Atari environments
     # env = gym.make('PongNoFrameskip-v4')

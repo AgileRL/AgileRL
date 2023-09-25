@@ -86,6 +86,7 @@ class DQN:
         if isinstance(self.net_config, nn.Module):
             self.actor = self.net_config
             self.actor_target = copy.deepcopy(self.actor)
+            self.actor_target.load_state_dict(self.actor.state_dict())
         else:
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron

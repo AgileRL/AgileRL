@@ -50,7 +50,6 @@ class MakeEvolvable(nn.Module):
         # Set the layer counters
         self.conv_counter = -1
         self.lin_counter = -1
-        self.layer_norm = False
         self.mlp_norm = None
         self.cnn_norm = None
 
@@ -191,7 +190,6 @@ class MakeEvolvable(nn.Module):
         ## STORE THE LAYER INDEX OF THE DIFFERENT LAYERS!!!
         def register_hooks(module):
             def forward_hook(module, input, output):
-                class_name = str(module.__class__.__name__)
                 if isinstance(module, nn.modules.conv._ConvNd):
                     self.has_conv_layers = True
                     self.conv_counter += 1
@@ -281,8 +279,7 @@ class MakeEvolvable(nn.Module):
     def create_mlp(self, input_size, output_size, hidden_size, name):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
-        net_dict[f"{name}_linear_layer_0"] = nn.Linear(
-            input_size, hidden_size[0])
+        net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.mlp_norm is not None:
             net_dict[f"{name}_layer_norm_0"] = self.get_normalization(self.mlp_norm, hidden_size[0])
         net_dict[f"{name}_activation_0"] = self.get_activation(self.mlp_activation)
@@ -534,6 +531,7 @@ class MakeEvolvable(nn.Module):
                 "mlp_output_activation": self.mlp_output_activation,
                 "layer_indices": self.layer_indices,
                 "mlp_norm": self.mlp_norm,
+                "cnn_norm": self.cnn_norm,
                 "device": self.device,
                 "accelerator":self.accelerator,
                 "in_channels": self.in_channels,
