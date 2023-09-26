@@ -5,6 +5,7 @@ INIT_HP:
     ALGO: Rainbow DQN           # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
+    NUM_ENVS: 16               # Number of parallel environments for training
     BATCH_SIZE: 256           # Batch size
     LR: 0.001                   # Learning rate
     EPISODES: 1000             # Max no. episodes
@@ -14,6 +15,7 @@ INIT_HP:
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
     N_STEP: 3                  # Step number to calculate td error
+    PER: false                 # Use prioritized experience replay buffer
     ALPHA: 0.6                 # Prioritized replay buffer parameter
     BETA: 0.4                  # Importance sampling coefficient
     TAU: 0.001                  # For soft update of target parameters
@@ -24,6 +26,7 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
+    EVO_LOOP: 3                # Number of evaluation episodes
     EVO_EPOCHS: 20             # Evolution frequency
     WANDB: true               # Log with Weights and Biases
 
@@ -46,4 +49,4 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 1024
 
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+NET_CONFIG: {arch: mlp, h_size: [32]}

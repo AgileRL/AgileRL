@@ -8,6 +8,7 @@ from tqdm import trange
 import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
+from agilerl.utils.utils import calculate_vectorized_scores
 
 
 def train(
@@ -203,7 +204,8 @@ def train(
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
+            rewards, terminations = [], []
+            truncs = []
             for idx_step in range(max_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [3], [1])
@@ -212,7 +214,9 @@ def train(
                     action = agent.getAction(state)
                 else:
                     action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(action)  # Act in environment
+                next_state, reward, done, trunc, _ = env.step(
+                    action
+                )  # Act in environment
 
                 # Save experience to replay buffer
                 if n_step_memory is not None:
@@ -274,9 +278,15 @@ def train(
                         agent.learn(experiences)
 
                 state = next_state
-                score += reward
+                rewards.append(reward)
+                terminations.append(done)
+                truncs.append(trunc)
 
-            agent.scores.append(score)
+            scores = calculate_vectorized_scores(
+                np.array(rewards), np.array(terminations)
+            )
+
+            agent.scores.append(np.mean(scores))
 
             agent.steps[-1] += max_steps
             total_steps += max_steps

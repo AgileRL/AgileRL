@@ -241,15 +241,23 @@ class RainbowDQN:
                 .squeeze()
             )
 
-        # Categorical DQN algorithm
         delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
 
-        # Double Q-learning
-        q_idx = self.actor(next_states).argmax(dim=1)
-        q_target = self.actor_target(next_states, q=False).detach()
-        q_target = q_target[torch.arange(q_target.size(0)), q_idx]
-
         with torch.no_grad():
+            # Double Q-learning
+            next_dist = self.actor_target(next_states, q=False) * self.support
+            next_action = next_dist.sum(2).max(1)[1]
+            next_action = (
+                next_action.unsqueeze(1)
+                .unsqueeze(1)
+                .expand(next_dist.size(0), 1, next_dist.size(2))
+            )
+            next_dist = next_dist.gather(1, next_action).squeeze(1)
+
+            # q_idx = self.actor(next_states).argmax(dim=1)
+            # q_target = self.actor_target(next_states, q=False).detach()
+            # q_target = q_target[torch.arange(q_target.size(0)), q_idx]
+
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
             b = (t_z - self.v_min) / delta_z
@@ -265,57 +273,81 @@ class RainbowDQN:
                 .expand(self.batch_size, self.num_atoms)
             )
 
-            proj_dist = torch.zeros(q_target.size())
+            proj_dist = torch.zeros(next_dist.size())
 
             if self.accelerator is None:
                 offset = offset.to(self.device)
                 proj_dist = proj_dist.to(self.device)
 
             proj_dist.view(-1).index_add_(
-                0, (L + offset).view(-1), (q_target * (u.float() - b)).view(-1)
+                0, (L + offset).view(-1), (next_dist * (u.float() - b)).view(-1)
             )
             proj_dist.view(-1).index_add_(
-                0, (u + offset).view(-1), (q_target * (b - L.float())).view(-1)
+                0, (u + offset).view(-1), (next_dist * (b - L.float())).view(-1)
             )
 
-        q_eval = self.actor(states, q=False)
-        q_eval = q_eval[torch.arange(q_eval.size(0)), actions.squeeze().long()]
-        log_p = torch.log(q_eval)
+        dist = self.actor(states, q=False)
+        actions = actions.unsqueeze(1).expand(actions.size(0), 1, self.num_atoms)
+        dist = dist.gather(1, actions).squeeze(1)
+        dist.data.clamp_(0.01, 0.99)
+        log_p = torch.log(dist)
 
         # loss
-        elementwise_loss = -(q_eval * log_p).sum(1)
+        elementwise_loss = -(proj_dist * log_p).sum(1)
         return elementwise_loss
 
-    def learn(self, experiences):
+    def learn(self, experiences, n_step=True, per=False):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: List[torch.Tensor[float]]
+        :param n_step: Use multi-step learning, defaults to True
+        :type n_step: bool, optional
+        :param per: Use prioritized experience replay buffer, defaults to True
+        :type per: bool, optional
         """
-        (
-            states,
-            actions,
-            rewards,
-            next_states,
-            dones,
-            weights,
-            idxs,
-            n_states,
-            n_actions,
-            n_rewards,
-            n_next_states,
-            n_dones,
-        ) = experiences
+        if per:
+            (
+                states,
+                actions,
+                rewards,
+                next_states,
+                dones,
+                weights,
+                idxs,
+                n_states,
+                n_actions,
+                n_rewards,
+                n_next_states,
+                n_dones,
+            ) = experiences
+            n_gamma = self.gamma**self.n_step
+            elementwise_loss = self._dqn_loss(
+                states, actions, rewards, next_states, dones, self.gamma
+            )
+            n_step_elementwise_loss = self._dqn_loss(
+                n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+            )
+            elementwise_loss += n_step_elementwise_loss
+            loss = torch.mean(elementwise_loss * weights)
 
-        n_gamma = self.gamma**self.n_step
-        elementwise_loss = self._dqn_loss(
-            states, actions, rewards, next_states, dones, self.gamma
-        )
-        n_step_elementwise_loss = self._dqn_loss(
-            n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
-        )
-        elementwise_loss += n_step_elementwise_loss
-        loss = torch.mean(elementwise_loss * weights)
+        else:
+            (
+                states,
+                actions,
+                rewards,
+                next_states,
+                dones,
+            ) = experiences
+            idxs, weights = None, None
+            if n_step:
+                n_gamma = self.gamma**self.n_step
+            else:
+                n_gamma = self.gamma
+            elementwise_loss = self._dqn_loss(
+                states, actions, rewards, next_states, dones, n_gamma
+            )
+            loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
         if self.accelerator is not None:
@@ -365,8 +397,10 @@ class RainbowDQN:
                     if swap_channels:
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state)
-                    state, reward, done, _, _ = env.step(action)
-                    score += reward
+                    state, reward, done, trunc, _ = env.step(action)
+                    score += reward[0]
+                    if done[0] or trunc[0]:
+                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

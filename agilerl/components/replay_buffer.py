@@ -119,6 +119,8 @@ class MultiStepReplayBuffer(ReplayBuffer):
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
+    :param num_envs: Number of parallel environments for training
+    :type num_envs: int
     :param n_step: Step number to calculate n-step td error, defaults to 3
     :type n_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
@@ -128,10 +130,18 @@ class MultiStepReplayBuffer(ReplayBuffer):
     """
 
     def __init__(
-        self, action_dim, memory_size, field_names, n_step=3, gamma=0.99, device=None
+        self,
+        action_dim,
+        memory_size,
+        field_names,
+        num_envs,
+        n_step=3,
+        gamma=0.99,
+        device=None,
     ):
         super().__init__(action_dim, memory_size, field_names, device)
-        self.n_step_buffer = deque(maxlen=n_step)
+        self.num_envs = num_envs
+        self.n_step_buffers = [deque(maxlen=n_step) for i in range(num_envs)]
         self.n_step = n_step
         self.gamma = gamma
 
@@ -149,16 +159,17 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :param done: True if environment episode finished, else False
         :type done: bool
         """
-        transition = (state, action, reward, next_state, done)
-        self.n_step_buffer.append(transition)
+        transition = self.experience(state, action, reward, next_state, done)
+        self.n_step_buffers[0].append(transition)
 
         # single step transition is not ready
-        if len(self.n_step_buffer) < self.n_step:
+        if len(self.n_step_buffers[0]) < self.n_step:
             return ()
 
         # make a n-step transition
-        reward, next_state, done = self._get_n_step_info(self.n_step_buffer, self.gamma)
-        state, action = self.n_step_buffer[0][:2]
+        state, action, reward, next_state, done = self._get_n_step_info(
+            self.n_step_buffers[0], self.gamma
+        )
         self._add(state, action, reward, next_state, done)
         self.counter += 1
 
@@ -178,26 +189,25 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :param dones: True if environment episodes finished, else False, in a batch
         :type dones: List[bool]
         """
-        transition = (states, actions, rewards, next_states, dones)
-        self.n_step_buffer.append(transition)
+        for state, action, reward, next_state, done, buffer in zip(
+            states, actions, rewards, next_states, dones, self.n_step_buffers
+        ):
+            transition = self.experience(state, action, reward, next_state, done)
+            buffer.append(transition)
 
         # single step transition is not ready
-        if len(self.n_step_buffer) < self.n_step:
+        if len(self.n_step_buffers[0]) < self.n_step:
             return ()
+        else:
+            for buffer in self.n_step_buffers:
+                # make a n-step transition
+                state, action, reward, next_state, done = self._get_n_step_info(
+                    buffer, self.gamma
+                )
+                self._add(state, action, reward, next_state, done)
+                self.counter += 1
 
-        # make a n-step transition
-        rewards, next_states, dones = self._get_n_step_info(
-            self.n_step_buffer, self.gamma
-        )
-        states, actions = self.n_step_buffer[0][:2]
-
-        for state, action, reward, next_state, done in zip(
-            states, actions, rewards, next_states, dones
-        ):
-            self._add(state, action, reward, next_state, done)
-            self.counter += 1
-
-        return transition
+            return states, actions, rewards, next_states, dones
 
     def sample_from_indices(self, idxs):
         """Returns sample of experiences from memory using provided indices.
@@ -237,19 +247,23 @@ class MultiStepReplayBuffer(ReplayBuffer):
     def _get_n_step_info(self, n_step_buffer, gamma):
         """Return n step reward, next_state, and done."""
         # info of the last transition
-        vect_reward, vect_next_state, vect_done = n_step_buffer[-1][-3:]
+        t = n_step_buffer[-1]
+        vect_state, vect_action = t.state, t.action
+        vect_reward, vect_next_state, vect_done = t.reward, t.next_state, t.done
 
         for transition in reversed(list(n_step_buffer)[:-1]):
-            vect_r, vect_n_s, vect_d = transition[-3:]
+            vect_r, vect_n_s, vect_d = (
+                transition.reward,
+                transition.next_state,
+                transition.done,
+            )
 
             vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
+            vect_next_state, vect_done = (
+                (vect_n_s, vect_d) if vect_d else (vect_next_state, vect_done)
+            )
 
-            for i, (n_s, d) in enumerate(zip(vect_n_s, vect_d)):
-                vect_next_state[i], vect_done[i] = (
-                    (n_s, d) if d else (vect_next_state[i], vect_done[i])
-                )
-
-        return vect_reward, vect_next_state, vect_done
+        return vect_state, vect_action, vect_reward, vect_next_state, vect_done
 
 
 class PrioritizedReplayBuffer(MultiStepReplayBuffer):
@@ -262,6 +276,8 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
     :type field_names: List[str]
+    :param num_envs: Number of parallel environments for training
+    :type num_envs: int
     :param alpha: Alpha parameter for prioritized replay buffer, defaults to 0.6
     :type alpha: float, optional
     :param n_step: Step number to calculate n-step td error, defaults to 1
@@ -277,12 +293,15 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         action_dim,
         memory_size,
         field_names,
+        num_envs,
         alpha=0.6,
         n_step=1,
         gamma=0.99,
         device=None,
     ):
-        super().__init__(action_dim, memory_size, field_names, n_step, gamma, device)
+        super().__init__(
+            action_dim, memory_size, field_names, num_envs, n_step, gamma, device
+        )
         self.max_priority, self.tree_ptr = 1.0, 0
         self.alpha = alpha
 

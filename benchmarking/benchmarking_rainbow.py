@@ -4,6 +4,7 @@ import yaml
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
+    ReplayBuffer,
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -22,7 +23,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
         state_dim = env.single_observation_space.n
@@ -39,22 +40,46 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    n_step_memory = MultiStepReplayBuffer(
-        action_dim,
-        memory_size=INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        n_step=INIT_HP["N_STEP"],
-        gamma=INIT_HP["GAMMA"],
-        device=device,
-    )
-    memory = PrioritizedReplayBuffer(
-        action_dim,
-        memory_size=INIT_HP["MEMORY_SIZE"],
-        field_names=field_names,
-        alpha=INIT_HP["ALPHA"],
-        gamma=INIT_HP["GAMMA"],
-        device=device,
-    )
+    n_step_memory = None
+    per = False
+    if INIT_HP["PER"]:
+        memory = PrioritizedReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            num_envs=INIT_HP["NUM_ENVS"],
+            alpha=INIT_HP["ALPHA"],
+            gamma=INIT_HP["GAMMA"],
+            device=device,
+        )
+        n_step_memory = MultiStepReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            num_envs=INIT_HP["NUM_ENVS"],
+            n_step=INIT_HP["N_STEP"],
+            gamma=INIT_HP["GAMMA"],
+            device=device,
+        )
+        per = True
+    elif INIT_HP["N_STEP"] > 1:
+        memory = MultiStepReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            num_envs=INIT_HP["NUM_ENVS"],
+            n_step=INIT_HP["N_STEP"],
+            gamma=INIT_HP["GAMMA"],
+            device=device,
+        )
+    else:
+        memory = ReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            device=device,
+        )
+
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -87,6 +112,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
+    # tournament, mutations = None, None
+
     trained_pop, pop_fitnesses = train(
         env,
         INIT_HP["ENV_NAME"],
@@ -94,14 +121,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         agent_pop,
         memory=memory,
         n_step_memory=n_step_memory,
-        per=True,
+        per=per,
         noisy=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
         n_episodes=INIT_HP["EPISODES"],
         evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        evo_loop=INIT_HP["EVO_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
