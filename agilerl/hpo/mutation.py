@@ -427,7 +427,6 @@ class Mutations:
         # Function to change network activation layer
         possible_activations = ["ReLU", "ELU", "GELU"]
         current_activation = network.mlp_activation
-        print("current activation", current_activation)
         # Remove current activation from options to ensure different new
         # activation layer
         possible_activations.remove(current_activation)

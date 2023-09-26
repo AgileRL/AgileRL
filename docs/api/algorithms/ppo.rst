@@ -110,7 +110,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
+  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
 
 Parameters
 ------------

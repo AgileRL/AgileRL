@@ -38,6 +38,8 @@ class DQN:
     :type mutation: str, optional
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -52,7 +54,7 @@ class DQN:
         action_dim,
         one_hot,
         index=0,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config=None,#{"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
         learn_step=5,
@@ -60,6 +62,7 @@ class DQN:
         tau=1e-3,
         mutation=None,
         double=False,
+        actor_network=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -82,11 +85,10 @@ class DQN:
         self.fitness = []
         self.steps = [0]
         self.double = double
+        self.actor_network = actor_network
 
-        if isinstance(self.net_config, nn.Module):
-            self.actor = self.net_config
-            self.actor_target = copy.deepcopy(self.actor)
-            self.actor_target.load_state_dict(self.actor.state_dict())
+        if self.net_config is None:
+            self.actor = actor_network
         else:
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
@@ -97,15 +99,6 @@ class DQN:
                     device=self.device,
                     accelerator=self.accelerator,
                 )
-                self.actor_target = EvolvableMLP(
-                    num_inputs=state_dim[0],
-                    num_outputs=action_dim,
-                    hidden_size=self.net_config["h_size"],
-                    device=self.device,
-                    accelerator=self.accelerator,
-                )
-                self.actor_target.load_state_dict(self.actor.state_dict())
-
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
@@ -118,19 +111,10 @@ class DQN:
                     device=self.device,
                     accelerator=self.accelerator,
                 )
-                self.actor_target = EvolvableCNN(
-                    input_shape=state_dim,
-                    num_actions=action_dim,
-                    channel_size=self.net_config["c_size"],
-                    kernel_size=self.net_config["k_size"],
-                    stride_size=self.net_config["s_size"],
-                    hidden_size=self.net_config["h_size"],
-                    normalize=self.net_config["normalize"],
-                    device=self.device,
-                    accelerator=self.accelerator,
-                )
-                self.actor_target.load_state_dict(self.actor.state_dict())
 
+        # Create the target network by copying the actor network
+        self.actor_target = copy.deepcopy(self.actor)
+        self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         if self.accelerator is not None:
@@ -268,8 +252,10 @@ class DQN:
                     action = self.getAction(state, epsilon=0)
                     if len(action) == 1:
                         action = action[0]
-                    state, reward, done, _, _ = env.step(action)
-                    score += reward
+                    state, reward, done, trunc, _ = env.step(action)
+                    score += reward[0]
+                    if done[0] or trunc[0]:
+                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
@@ -290,6 +276,7 @@ class DQN:
             one_hot=self.one_hot,
             index=index,
             net_config=self.net_config,
+            actor_network=self.actor_network,
             batch_size=self.batch_size,
             lr=self.lr,
             learn_step=self.learn_step,

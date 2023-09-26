@@ -71,7 +71,6 @@ class MakeEvolvable(nn.Module):
         
         self.feature_net, self.value_net, self.net = self.create_nets()
 
-
     def forward(self, x): #
         """Returns output of neural network.
 
@@ -548,7 +547,6 @@ class MakeEvolvable(nn.Module):
      
     def add_mlp_layer(self):
         """Adds a hidden layer to Multi-layer Perceptron."""
-        print("Adding MLP layer")
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
 
@@ -557,7 +555,6 @@ class MakeEvolvable(nn.Module):
             self.add_mlp_node()
 
     def remove_mlp_layer(self):
-        print("Removing MLP layer")
         if len(self.hidden_size) > 1:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:1]
             self.recreate_nets(shrink_params=True)
@@ -572,7 +569,6 @@ class MakeEvolvable(nn.Module):
         :param numb_new_nodes: Number of nodes to add to hidden layer, defaults to None
         :type numb_new_nodes: int, optional
         """
-        print("Adding MLP node.")
         if hidden_layer is None:
             hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
         else:
@@ -594,7 +590,6 @@ class MakeEvolvable(nn.Module):
         :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
         :type numb_new_nodes: int, optional
         """
-        print("Removing MLP Node.")
         if hidden_layer is None:
             hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
         else:
@@ -610,7 +605,6 @@ class MakeEvolvable(nn.Module):
 
     def add_cnn_layer(self):
         """Adds a hidden layer to Convolutional Neural Network."""
-        print("Adding CNN layer")
         # if self.multi:
         #     if len(self.channel_size) < 6:  # HARD LIMIT
         #         self.channel_size += [self.channel_size[-1]]
@@ -669,7 +663,6 @@ class MakeEvolvable(nn.Module):
 
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
-        print("Changing CNN Kernel")
 
         # if self.multi:
         #     if len(self.channel_size) > 1:
@@ -708,7 +701,6 @@ class MakeEvolvable(nn.Module):
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         """
-        print("Adding CNN channel.")
         if hidden_layer is None:
             hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
         else:

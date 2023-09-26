@@ -31,6 +31,8 @@ def initialPopulation(
     one_hot,
     net_config,
     INIT_HP,
+    actor_network=None,
+    critic_network=None,
     population_size=1,
     device="cpu",
     accelerator=None,
@@ -47,6 +49,10 @@ def initialPopulation(
     :type one_hot: bool
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_network: Custom critic network, defaults to None
+    :type critic_network: nn.Module, optional
     :param population_size: Number of agents in population, defaults to 1
     :type population_size: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -70,6 +76,7 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 double=INIT_HP["DOUBLE"],
+                actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -89,6 +96,8 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 policy_freq=INIT_HP["POLICY_FREQ"],
+                actor_network=actor_network,
+                critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -114,6 +123,8 @@ def initialPopulation(
                 max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
                 target_kl=INIT_HP["TARGET_KL"],
                 update_epochs=INIT_HP["UPDATE_EPOCHS"],
+                actor_network=actor_network,
+                critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -153,6 +164,8 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 policy_freq=INIT_HP["POLICY_FREQ"],
+                actor_network=actor_network,
+                critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -238,3 +251,37 @@ def plotPopulationScore(pop):
     plt.xlabel("Steps")
     plt.ylim(bottom=-400)
     plt.show()
+
+def calculate_vectorized_scores(rewards, terminations, include_unterminated=False):
+    episode_rewards = []
+    num_envs, _ = rewards.shape
+    
+    for env_index in range(num_envs):
+        # Find the indices where episodes terminate for the current environment
+        termination_indices = np.where(terminations[env_index] == 1)[0]
+        
+        # If no terminations and include_unterminated is True, sum the entire reward array for this environment
+        if len(termination_indices) == 0:
+            episode_reward = np.sum(rewards[env_index])
+            episode_rewards.append(episode_reward)
+            continue  # Skip to the next environment
+        
+        # Initialize the starting index for segmenting
+        start_index = 0
+        
+        for termination_index in termination_indices:
+            # Sum the rewards for the current episode
+            episode_reward = np.sum(rewards[env_index, start_index:termination_index + 1])
+            
+            # Store the episode reward
+            episode_rewards.append(episode_reward)
+            
+            # Update the starting index for segmenting
+            start_index = termination_index + 1
+        
+        # If include_unterminated is True, sum the rewards from the last termination index to the end
+        if include_unterminated and start_index < len(rewards[env_index]):
+            episode_reward = np.sum(rewards[env_index, start_index:])
+            episode_rewards.append(episode_reward)
+    
+    return episode_rewards
