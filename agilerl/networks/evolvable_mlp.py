@@ -248,7 +248,7 @@ class EvolvableMLP(nn.Module):
         """Creates and returns neural network."""
         feature_net = self.create_mlp(
             input_size=self.num_inputs,
-            output_size=self.hidden_size[0],
+            output_size=self.hidden_size[0] if self.rainbow else self.num_outputs,
             hidden_size=self.hidden_size,
             output_vanish=False,
         )
