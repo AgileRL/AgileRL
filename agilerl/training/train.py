@@ -326,8 +326,8 @@ def train(
                             {
                                 "global_step": total_steps
                                 * accelerator.state.num_processes,
-                                "eval/mean_score": np.mean(mean_scores),
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "train/mean_score": np.mean(mean_scores),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses),
                             }
                         )
@@ -336,8 +336,8 @@ def train(
                     wandb.log(
                         {
                             "global_step": total_steps,
-                            "eval/mean_score": np.mean(mean_scores),
-                            "eval/mean_reward": np.mean(fitnesses),
+                            "train/mean_score": np.mean(mean_scores),
+                            "eval/mean_fitness": np.mean(fitnesses),
                             "eval/best_fitness": np.max(fitnesses),
                         }
                     )

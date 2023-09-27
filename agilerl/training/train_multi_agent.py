@@ -277,8 +277,8 @@ def train_multi_agent(
                             {
                                 "global_step": total_steps
                                 * accelerator.state.num_processes,
-                                "eval/mean_score": np.mean(mean_scores),
-                                "eval/best_score": np.max(
+                                "train/mean_score": np.mean(mean_scores),
+                                "train/best_score": np.max(
                                     [agent.scores[-1] for agent in pop]
                                 ),
                                 "eval/mean_fitness": np.mean(fitnesses),
@@ -290,8 +290,8 @@ def train_multi_agent(
                     wandb.log(
                         {
                             "global_step": total_steps,
-                            "eval/mean_score": np.mean(mean_scores),
-                            "eval/best_score": np.max(
+                            "train/mean_score": np.mean(mean_scores),
+                            "train/best_score": np.max(
                                 [agent.scores[-1] for agent in pop]
                             ),
                             "eval/mean_fitness": np.mean(fitnesses),
