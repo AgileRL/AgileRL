@@ -181,8 +181,6 @@ class RainbowDQN:
 
     def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
         :type state: float or List[float]
@@ -307,28 +305,40 @@ class RainbowDQN:
         :type per: bool, optional
         """
         if per:
-            (
-                states,
-                actions,
-                rewards,
-                next_states,
-                dones,
-                weights,
-                idxs,
-                n_states,
-                n_actions,
-                n_rewards,
-                n_next_states,
-                n_dones,
-            ) = experiences
-            n_gamma = self.gamma**self.n_step
+            if n_step:
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                    n_states,
+                    n_actions,
+                    n_rewards,
+                    n_next_states,
+                    n_dones,
+                ) = experiences
+            else:
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                ) = experiences
             elementwise_loss = self._dqn_loss(
                 states, actions, rewards, next_states, dones, self.gamma
             )
-            n_step_elementwise_loss = self._dqn_loss(
-                n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
-            )
-            elementwise_loss += n_step_elementwise_loss
+            if n_step:
+                n_gamma = self.gamma**self.n_step
+                n_step_elementwise_loss = self._dqn_loss(
+                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                )
+                elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss * weights)
 
         else:
@@ -339,7 +349,7 @@ class RainbowDQN:
                 next_states,
                 dones,
             ) = experiences
-            idxs, weights = None, None
+            idxs, new_priorities = None, None
             if n_step:
                 n_gamma = self.gamma**self.n_step
             else:
@@ -363,8 +373,10 @@ class RainbowDQN:
         self.actor.reset_noise()
         self.actor_target.reset_noise()
 
-        loss_for_prior = elementwise_loss.detach().cpu().numpy()
-        new_priorities = loss_for_prior + self.prior_eps
+        if per:
+            loss_for_prior = elementwise_loss.detach().cpu().numpy()
+            new_priorities = loss_for_prior + self.prior_eps
+
         return idxs, new_priorities
 
     def softUpdate(self):
