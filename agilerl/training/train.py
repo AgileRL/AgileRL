@@ -28,6 +28,7 @@ def train(
     eps_end=0.1,
     eps_decay=0.995,
     target=200.0,
+    n_step=False,
     per=False,
     noisy=False,
     n_step_memory=None,
@@ -36,6 +37,7 @@ def train(
     checkpoint=None,
     checkpoint_path=None,
     wb=False,
+    verbose=True,
     accelerator=None,
 ):
     """The general online RL training function. Returns trained population of agents
@@ -69,7 +71,9 @@ def train(
     :type eps_decay: float, optional
     :param target: Target score for early stopping, defaults to 200.
     :type target: float, optional
-    :param per: Using prioritized experience replayt buffer, defaults to False
+    :param n_step: Use multi-step experience replay buffer, defaults to False
+    :type n_step: bool, optional
+    :param per: Using prioritized experience replay buffer, defaults to False
     :type per: bool, optional
     :param noisy: Using noisy network exploration, defaults to False
     :type noisy: bool, optional
@@ -85,6 +89,8 @@ def train(
     :type checkpoint_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
+    :param verbose: Display training stats, defaults to True
+    :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
@@ -271,11 +277,16 @@ def train(
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[6])
                             experiences += n_step_experiences
-                        idxs, priorities = agent.learn(experiences)
+                        idxs, priorities = agent.learn(
+                            experiences, n_step=n_step, per=per
+                        )
                         memory.update_priorities(idxs, priorities)
                     else:
                         experiences = sampler.sample(agent.batch_size)
-                        agent.learn(experiences)
+                        if n_step:
+                            agent.learn(experiences, n_step=n_step)
+                        else:
+                            agent.learn(experiences)
 
                 state = next_state
                 rewards.append(reward)
@@ -335,18 +346,6 @@ def train(
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
 
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
-            perf_info = f"Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}"
-            pop_info = f"Agents: {agents}, Steps: {num_steps}, Mutations: {muts}"
-            pbar_string = perf_info + ", " + pop_info
-            pbar.set_postfix_str(pbar_string)
-            pbar.update(0)
-
             # Early stop if consistently reaches target
             if (
                 np.all(
@@ -384,6 +383,28 @@ def train(
                 else:
                     elite, pop = tournament.select(pop)
                     pop = mutation.mutation(pop)
+
+            if verbose:
+                fitness = ["%.2f" % fitness for fitness in fitnesses]
+                avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
+                avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
+                agents = [agent.index for agent in pop]
+                num_steps = [agent.steps[-1] for agent in pop]
+                muts = [agent.mut for agent in pop]
+                pbar.update(0)
+
+                print(
+                    f"""
+                    --- Epoch {idx_epi + 1} ---
+                    Fitness:\t\t{fitness}
+                    100 fitness avgs:\t{avg_fitness}
+                    100 score avgs:\t{avg_score}
+                    Agents:\t\t{agents}
+                    Steps:\t\t{num_steps}
+                    Mutations:\t\t{muts}
+                    """,
+                    end="\r",
+                )
 
         # Save model checkpoint
         if checkpoint is not None:
