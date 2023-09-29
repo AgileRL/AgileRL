@@ -120,6 +120,12 @@ def train(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
+    # Detect if environment is vectorised
+    if hasattr(env, "num_envs"):
+        is_vectorised = True 
+    else:
+        is_vectorised = False
+
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -152,8 +158,9 @@ def train(
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is not None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     for idx_epi in pbar:
@@ -175,10 +182,14 @@ def train(
                     state = np.moveaxis(state, [3], [1])
                 # Get next action from agent
                 action, log_prob, _, value = agent.getAction(state)
+                if not is_vectorised:
+                    action = action[0]
+                    log_prob = log_prob[0]
+                    value = value[0]
                 next_state, reward, done, trunc, _ = env.step(
                     action
                 )  # Act in environment
-
+                
                 states.append(state)
                 actions.append(action)
                 log_probs.append(log_prob)

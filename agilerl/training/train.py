@@ -4,10 +4,12 @@ from datetime import datetime
 import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import trange
+import gymnasium as gym
 
 import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
+from agilerl.utils.utils import calculate_vectorized_scores
 
 
 def train(
@@ -84,7 +86,7 @@ def train(
             if accelerator.is_main_process:
                 wandb.init(
                     # set the wandb project where this run will be logged
-                    project="AgileRL",
+                    project="EvoWrappers",
                     name="{}-EvoHPO-{}-{}".format(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
@@ -130,6 +132,7 @@ def train(
                     "params_mut": MUT_P["PARAMS_MUT"],
                     "act_mut": MUT_P["ACT_MUT"],
                     "rl_hp_mut": MUT_P["RL_HP_MUT"],
+                    "details": "No output activation."
                 },
             )
 
@@ -138,6 +141,12 @@ def train(
         if accelerator.is_main_process:
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
+    
+    # Detect if environment is vectorised
+    if hasattr(env, "num_envs"):
+        is_vectorised = True 
+    else:
+        is_vectorised = False
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -181,8 +190,9 @@ def train(
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     for idx_epi in pbar:
@@ -190,21 +200,23 @@ def train(
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
+            rewards, terminations = [], []
             score = 0
             for idx_step in range(max_steps):
                 if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
+                    state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
                 action = agent.getAction(state, epsilon)
+                if not is_vectorised:
+                    action = action[0]
                 next_state, reward, done, _, _ = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
                 if swap_channels:
-                    memory.save2memoryVectEnvs(
-                        state, action, reward, np.moveaxis(next_state, [3], [1]), done
-                    )
+                    memory.save2memory(
+                        state, action, reward, np.moveaxis(next_state, [-1], [-3]), done, is_vectorised)
                 else:
-                    memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+                    memory.save2memory(state, action, reward, next_state, done, is_vectorised)
 
                 # Learn according to learning frequency
                 if (
@@ -216,8 +228,16 @@ def train(
                     # Learn according to agent's RL algorithm
                     agent.learn(experiences)
 
+                if is_vectorised:
+                    terminations.append(done)
+                    rewards.append(reward)
+                else:
+                    score += reward
                 state = next_state
-                score += reward
+
+            if is_vectorised:
+                scores = calculate_vectorized_scores(np.array(rewards), np.array(terminations))
+                score = np.mean(scores)
 
             agent.scores.append(score)
 
@@ -349,3 +369,4 @@ def train(
             wandb.finish()
 
     return pop, pop_fitnesses
+

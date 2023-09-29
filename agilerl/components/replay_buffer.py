@@ -68,7 +68,7 @@ class ReplayBuffer:
 
         return (states, actions, rewards, next_states, dones)
 
-    def save2memory(self, state, action, reward, next_state, done):
+    def save2memorySingleEnv(self, state, action, reward, next_state, done):
         """Saves experience to memory.
 
         :param state: Environment observation
@@ -104,3 +104,28 @@ class ReplayBuffer:
         ):
             self._add(state, action, reward, next_state, done)
             self.counter += 1
+
+
+    def save2memory(self, state, action, reward, next_state, done, is_vectorised):
+        """Applies appropriate save2memory function depending on whether
+        the environment is vectorised or not.
+
+        :param states: Environment observations
+        :type states: float, List[float] or List[List[float]]
+        :param actions: Environment actions
+        :type actions: float, List[float] or List[List[float]]
+        :param rewards: Environment rewards
+        :type rewards: float or List[float]
+        :param next_states: Environment observations for the next state
+        :type next_states: float, List[float] or List[List[float]]
+        :param dones: True if environment episodes finished, else False
+        :type dones: float or List[bool]
+        :param is_vectorised: Boolean flag indicating if the environment has been vectorised
+        :type is_vectorised: bool
+        """
+        if is_vectorised:
+            self.save2memoryVectEnvs(state, action, reward, next_state, done)
+        else:
+            self.save2memorySingleEnv(state, action, reward, next_state, done)
+            
+

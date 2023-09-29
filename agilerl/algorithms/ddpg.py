@@ -310,15 +310,19 @@ class DDPG:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                        if state.ndim != 4:
+                        if not hasattr(env, "num_envs"):
                             state = np.expand_dims(state, 0)
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
-                    if len(action) == 1:
+                    if not hasattr(env, "num_envs"):
                         action = action[0]
                     state, reward, done, trunc, _ = env.step(action)
-                    score += reward[0]
-                    if done[0] or trunc[0]:
+                    if hasattr(env, "num_envs"):
+                        done = done[0]
+                        trunc = trunc[0]
+                        reward = reward[0]
+                    score += reward
+                    if done or trunc:
                         break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
