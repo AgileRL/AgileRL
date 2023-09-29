@@ -132,7 +132,7 @@ class EvolvableMLP(nn.Module):
         num_atoms=50,
         activation="relu",
         output_activation=None,
-        layer_norm=False,
+        layer_norm=True,
         output_vanish=True,
         init_layers=True,
         stored_values=None,

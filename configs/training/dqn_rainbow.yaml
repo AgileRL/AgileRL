@@ -14,7 +14,7 @@ INIT_HP:
     MEMORY_SIZE: 100000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
-    N_STEP: 3                  # Step number to calculate td error
+    N_STEP: 1                  # Step number to calculate td error
     PER: false                 # Use prioritized experience replay buffer
     ALPHA: 0.6                 # Prioritized replay buffer parameter
     BETA: 0.4                  # Importance sampling coefficient
@@ -31,12 +31,12 @@ INIT_HP:
     WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
-    NO_MUT: 0.4                            # No mutation
-    ARCH_MUT: 0.2                          # Architecture mutation
-    NEW_LAYER: 0.2                         # New layer mutation
-    PARAMS_MUT: 0                        # Network parameters mutation
-    ACT_MUT: 0.2                             # Activation layer mutation
-    RL_HP_MUT: 0.2                         # Learning HP mutation
+    NO_MUT: 0.1                            # No mutation
+    ARCH_MUT: 0                          # Architecture mutation
+    NEW_LAYER: 0                         # New layer mutation
+    PARAMS_MUT: 0.5                        # Network parameters mutation
+    ACT_MUT: 0.5                            # Activation layer mutation
+    RL_HP_MUT: 0                         # Learning HP mutation
   # Learning HPs to choose from
     RL_HP_SELECTION: [lr, batch_size]
     MUT_SD: 0.1                            # Mutation strength

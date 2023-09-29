@@ -252,10 +252,6 @@ class RainbowDQN:
             )
             next_dist = next_dist.gather(1, next_action).squeeze(1)
 
-            # q_idx = self.actor(next_states).argmax(dim=1)
-            # q_target = self.actor_target(next_states, q=False).detach()
-            # q_target = q_target[torch.arange(q_target.size(0)), q_idx]
-
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
             b = (t_z - self.v_min) / delta_z

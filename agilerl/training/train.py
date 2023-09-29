@@ -316,7 +316,7 @@ def train(
             ]
             pop_fitnesses.append(fitnesses)
 
-            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+            mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
             if wb:
                 if accelerator is not None:

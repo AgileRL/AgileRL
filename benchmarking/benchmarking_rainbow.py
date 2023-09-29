@@ -41,8 +41,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     n_step_memory = None
-    per = False
-    if INIT_HP["PER"]:
+    per = INIT_HP["PER"]
+    n_step = True if INIT_HP["N_STEP"] > 1 else False
+    if per:
         memory = PrioritizedReplayBuffer(
             action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
@@ -52,17 +53,17 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
             gamma=INIT_HP["GAMMA"],
             device=device,
         )
-        n_step_memory = MultiStepReplayBuffer(
-            action_dim,
-            memory_size=INIT_HP["MEMORY_SIZE"],
-            field_names=field_names,
-            num_envs=INIT_HP["NUM_ENVS"],
-            n_step=INIT_HP["N_STEP"],
-            gamma=INIT_HP["GAMMA"],
-            device=device,
-        )
-        per = True
-    elif INIT_HP["N_STEP"] > 1:
+        if n_step:
+            n_step_memory = MultiStepReplayBuffer(
+                action_dim,
+                memory_size=INIT_HP["MEMORY_SIZE"],
+                field_names=field_names,
+                num_envs=INIT_HP["NUM_ENVS"],
+                n_step=INIT_HP["N_STEP"],
+                gamma=INIT_HP["GAMMA"],
+                device=device,
+            )
+    elif n_step:
         memory = MultiStepReplayBuffer(
             action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
@@ -112,8 +113,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    # tournament, mutations = None, None
-
     trained_pop, pop_fitnesses = train(
         env,
         INIT_HP["ENV_NAME"],
@@ -121,6 +120,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         agent_pop,
         memory=memory,
         n_step_memory=n_step_memory,
+        n_step=n_step,
         per=per,
         noisy=True,
         INIT_HP=INIT_HP,
