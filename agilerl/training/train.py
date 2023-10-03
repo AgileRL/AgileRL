@@ -243,10 +243,7 @@ def train(
                             done,
                         )
                     if one_step_transition:
-                        state, action, reward, next_state, done = one_step_transition
-                        memory.save2memoryVectEnvs(
-                            state, action, reward, next_state, done
-                        )
+                        memory.save2memoryVectEnvs(*one_step_transition)
                 else:
                     if swap_channels:
                         memory.save2memoryVectEnvs(

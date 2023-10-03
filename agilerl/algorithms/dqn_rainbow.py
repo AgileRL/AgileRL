@@ -115,6 +115,7 @@ class RainbowDQN:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
+                output_activation="relu",
                 output_vanish=False,
                 init_layers=False,
                 num_atoms=self.num_atoms,
@@ -127,6 +128,7 @@ class RainbowDQN:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
+                output_activation="relu",
                 output_vanish=False,
                 init_layers=False,
                 num_atoms=self.num_atoms,
@@ -146,6 +148,7 @@ class RainbowDQN:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
+                output_activation="relu",
                 num_atoms=self.num_atoms,
                 support=self.support,
                 rainbow=True,
@@ -160,6 +163,7 @@ class RainbowDQN:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
+                output_activation="relu",
                 num_atoms=self.num_atoms,
                 support=self.support,
                 rainbow=True,
@@ -547,7 +551,7 @@ class RainbowDQN:
         self.prior_eps = checkpoint["prior_eps"]
         self.num_atoms = checkpoint["num_atoms"]
         self.v_min = checkpoint["v_min"]
-        self.v_max = checkpoint["v_min"]
+        self.v_max = checkpoint["v_max"]
         self.n_step = checkpoint["n_step"]
         self.mut = checkpoint["mutation"]
         self.index = checkpoint["index"]

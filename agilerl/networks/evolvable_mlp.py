@@ -195,7 +195,13 @@ class EvolvableMLP(nn.Module):
         return layer
 
     def create_mlp(
-        self, input_size, output_size, hidden_size, output_vanish, noisy=False
+        self,
+        input_size,
+        output_size,
+        hidden_size,
+        output_vanish,
+        output_activation,
+        noisy=False,
     ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
@@ -239,8 +245,8 @@ class EvolvableMLP(nn.Module):
             output_layer.weight.data.mul_(0.1)
             output_layer.bias.data.mul_(0.1)
         net_dict["linear_layer_output"] = output_layer
-        if self.output_activation is not None:
-            net_dict["activation_output"] = self.get_activation(self.output_activation)
+        if output_activation is not None:
+            net_dict["activation_output"] = self.get_activation(output_activation)
         net = nn.Sequential(net_dict)
         return net
 
@@ -248,9 +254,10 @@ class EvolvableMLP(nn.Module):
         """Creates and returns neural network."""
         feature_net = self.create_mlp(
             input_size=self.num_inputs,
-            output_size=self.hidden_size[0] if self.rainbow else self.num_outputs,
+            output_size=self.hidden_size[-1] if self.rainbow else self.num_outputs,
             hidden_size=self.hidden_size,
             output_vanish=False,
+            output_activation=self.output_activation,
         )
 
         if self.accelerator is None:
@@ -259,17 +266,19 @@ class EvolvableMLP(nn.Module):
         value_net, advantage_net = None, None
         if self.rainbow:
             value_net = self.create_mlp(
-                input_size=self.hidden_size[0],
+                input_size=self.hidden_size[-1],
                 output_size=self.num_atoms,
-                hidden_size=self.hidden_size,
+                hidden_size=[self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
+                output_activation=None,
                 noisy=True,
             )
             advantage_net = self.create_mlp(
-                input_size=self.hidden_size[0],
+                input_size=self.hidden_size[-1],
                 output_size=self.num_atoms * self.num_outputs,
-                hidden_size=self.hidden_size,
+                hidden_size=[self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
+                output_activation=None,
                 noisy=True,
             )
             if self.accelerator is None:
