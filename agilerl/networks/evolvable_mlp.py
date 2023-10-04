@@ -270,7 +270,7 @@ class EvolvableMLP(nn.Module):
             new_net = self.preserve_parameters(old_net=self.net, new_net=new_net)
             self.net = new_net
         else:
-            self.add_node()
+            self.add_mlp_node()
 
     def remove_mlp_layer(self):
         """Removes a hidden layer from neural network."""
@@ -280,7 +280,7 @@ class EvolvableMLP(nn.Module):
             new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
             self.net = new_net
         else:
-            self.add_node()
+            self.add_mlp_node()
 
     def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
         """Adds nodes to hidden layer of neural network.

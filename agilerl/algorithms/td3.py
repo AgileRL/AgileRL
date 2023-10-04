@@ -9,6 +9,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class TD3:
@@ -44,8 +45,8 @@ class TD3:
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
-    :param critic_network: Custom critic network, defaults to None
-    :type critic_network: nn.Module, optional
+    :param critic_networks: List of two custom critic networks (one for each of TD3's two critics), defaults to None
+    :type critic_networks: List[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -62,7 +63,7 @@ class TD3:
         max_action,
         expl_noise=0.1,
         index=0,
-        net_config=None, #{"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
         learn_step=5,
@@ -71,7 +72,7 @@ class TD3:
         mutation=None,
         policy_freq=2,
         actor_network=None,
-        critic_network=None,
+        critic_networks=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -91,7 +92,7 @@ class TD3:
         self.max_action = max_action
         self.expl_noise = expl_noise
         self.actor_network = actor_network
-        self.critic_network = critic_network
+        self.critic_networks = critic_networks
         self.device = device
         self.accelerator = accelerator
 
@@ -100,10 +101,11 @@ class TD3:
         self.fitness = []
         self.steps = [0]
 
-        if self.net_config is None:
+        if self.actor_network is not None and self.critic_networks is not None:
             self.actor = actor_network
-            self.critic_1 = critic_network 
-            self.critic_2 = critic_network        
+            self.critic_1 = critic_networks[0]
+            self.critic_2 = critic_networks[-1]        
+            self.net_config = None
         else:
             # model
             # TD3 employs two critic networks
@@ -570,26 +572,38 @@ class TD3:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.arch == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
-            self.critic_1 = EvolvableMLP(**checkpoint["critic_1_init_dict"])
-            self.critic_target_1 = EvolvableMLP(
+        if self.net_config is not None:
+            if self.arch == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+                self.critic_1 = EvolvableMLP(**checkpoint["critic_1_init_dict"])
+                self.critic_target_1 = EvolvableMLP(
+                    **checkpoint["critic_target_1_init_dict"]
+                )
+                self.critic_2 = EvolvableMLP(**checkpoint["critic_2_init_dict"])
+                self.critic_target_2 = EvolvableMLP(
+                    **checkpoint["critic_target_2_init_dict"]
+                )
+            elif self.arch == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+                self.critic_1 = EvolvableCNN(**checkpoint["critic_1_init_dict"])
+                self.critic_target_1 = EvolvableCNN(
+                    **checkpoint["critic_target_1_init_dict"]
+                )
+                self.critic_2 = EvolvableCNN(**checkpoint["critic_2_init_dict"])
+                self.critic_target_2 = EvolvableCNN(
+                    **checkpoint["critic_target_2_init_dict"]
+                )
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+            self.critic_1 = MakeEvolvable(**checkpoint["critic_1_init_dict"])
+            self.critic_target_1 = MakeEvolvable(
                 **checkpoint["critic_target_1_init_dict"]
             )
-            self.critic_2 = EvolvableMLP(**checkpoint["critic_2_init_dict"])
-            self.critic_target_2 = EvolvableMLP(
-                **checkpoint["critic_target_2_init_dict"]
-            )
-        elif self.arch == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
-            self.critic_1 = EvolvableCNN(**checkpoint["critic_1_init_dict"])
-            self.critic_target_1 = EvolvableCNN(
-                **checkpoint["critic_target_1_init_dict"]
-            )
-            self.critic_2 = EvolvableCNN(**checkpoint["critic_2_init_dict"])
-            self.critic_target_2 = EvolvableCNN(
+            self.critic_2 = MakeEvolvable(**checkpoint["critic_2_init_dict"])
+            self.critic_target_2 = MakeEvolvable(
                 **checkpoint["critic_target_2_init_dict"]
             )
         self.lr = checkpoint["lr"]

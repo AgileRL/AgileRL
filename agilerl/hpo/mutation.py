@@ -95,7 +95,7 @@ class Mutations:
         self.min_learn_step = min_learn_step
         self.max_learn_step = max_learn_step
 
-        if agent_ids is not None:
+        if algo in ["MADDPG", "MATD3"]:
             self.multi_agent = True
         else:
             self.multi_agent = False

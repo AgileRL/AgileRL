@@ -54,7 +54,7 @@ class DQN:
         action_dim,
         one_hot,
         index=0,
-        net_config=None, #{"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
         learn_step=5,
@@ -87,8 +87,9 @@ class DQN:
         self.double = double
         self.actor_network = actor_network
 
-        if self.net_config is None:
+        if self.actor_network is not None:
             self.actor = actor_network
+            self.net_config = None
         else:
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
@@ -116,6 +117,8 @@ class DQN:
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        self.arch = self.net_config["arch"] if self.net_config is not None else self.actor.arch
 
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
@@ -370,13 +373,17 @@ class DQN:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.net_config["arch"] == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
-        elif self.net_config["arch"] == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
-        self.lr = checkpoint["lr"]
+        if self.net_config is not None:
+            if self.net_config["arch"] == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+            elif self.net_config["arch"] == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+            self.lr = checkpoint["lr"]
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])

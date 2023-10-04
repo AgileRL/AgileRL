@@ -94,7 +94,7 @@ def train(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="AgileRL",
+                project="EvoWrappers",
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
@@ -179,7 +179,7 @@ def train(
 
             for idx_step in range(max_steps):
                 if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
+                    state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
                 action, log_prob, _, value = agent.getAction(state)
                 if not is_vectorised:
@@ -199,6 +199,9 @@ def train(
 
                 state = next_state
                 score += reward
+
+            if swap_channels:
+                next_state = np.moveaxis(next_state, [-1], [-3])
 
             agent.scores.append(score)
 

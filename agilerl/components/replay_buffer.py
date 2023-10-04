@@ -106,7 +106,7 @@ class ReplayBuffer:
             self.counter += 1
 
 
-    def save2memory(self, state, action, reward, next_state, done, is_vectorised):
+    def save2memory(self, state, action, reward, next_state, done, is_vectorised=False):
         """Applies appropriate save2memory function depending on whether
         the environment is vectorised or not.
 

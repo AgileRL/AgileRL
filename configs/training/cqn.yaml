@@ -2,9 +2,9 @@
 # Define initial hyperparameters
 INIT_HP:
     ENV_NAME: CartPole-v1   # Gym environment name
-    DATASET: data/cartpole/cartpole_random_v1.1.0.h5 # Offline RL dataset
+    DATASET: /projects/2023/evo_wrappers/AgileRL/data/cartpole/cartpole_v1.1.0.h5 # Offline RL dataset
     ALGO: CQN                                         # Algorithm
-    DOUBLE: true
+    DOUBLE: True
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     BATCH_SIZE: 256           # Batch size
@@ -15,12 +15,12 @@ INIT_HP:
     MEMORY_SIZE: 100000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
-    TAU: 1e-3                  # For soft update of target parameters
+    TAU: 0.001                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: true               # Log with Weights and Biases
+    WANDB: False               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

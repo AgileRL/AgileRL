@@ -9,6 +9,7 @@ from torch.distributions import Categorical, MultivariateNormal
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class PPO:
@@ -122,9 +123,10 @@ class PPO:
             if self.accelerator is None:
                 self.action_var = self.action_var.to(self.device)
 
-        if self.net_config is None:
+        if self.actor_network is not None and self.critic_network is not None:
             self.actor = actor_network
             self.critic = critic_network
+            self.net_config = None
         else:
             # Set up network output activations
             if "output_activation" in self.net_config.keys():
@@ -172,7 +174,7 @@ class PPO:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation="tanh",
+                    mlp_activation="Tanh",
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -217,6 +219,9 @@ class PPO:
             )
 
         if len(state.size()) < 2:
+            state = state.unsqueeze(0)
+
+        if self.arch == "cnn" and state.dim() <= 3:
             state = state.unsqueeze(0)
 
         return state.float()
@@ -562,12 +567,16 @@ class PPO:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.arch == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
-        elif self.arch == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+        if self.net_config is not None:
+            if self.arch == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
+            elif self.arch == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.critic = MakeEvolvable(**checkpoint["critic_init_dict"])
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(
             [
