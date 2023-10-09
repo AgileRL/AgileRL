@@ -233,7 +233,9 @@ def initialPopulation(
     return population
 
 
-def calculate_vectorized_scores(rewards, terminations, include_unterminated=False):
+def calculate_vectorized_scores(
+    rewards, terminations, include_unterminated=False, only_first_episode=True
+):
     episode_rewards = []
     num_envs, _ = rewards.shape
 
@@ -241,7 +243,7 @@ def calculate_vectorized_scores(rewards, terminations, include_unterminated=Fals
         # Find the indices where episodes terminate for the current environment
         termination_indices = np.where(terminations[env_index] == 1)[0]
 
-        # If no terminations and include_unterminated is True, sum the entire reward array for this environment
+        # If no terminations, sum the entire reward array for this environment
         if len(termination_indices) == 0:
             episode_reward = np.sum(rewards[env_index])
             episode_rewards.append(episode_reward)
@@ -259,11 +261,19 @@ def calculate_vectorized_scores(rewards, terminations, include_unterminated=Fals
             # Store the episode reward
             episode_rewards.append(episode_reward)
 
+            # If only the first episode is required, break after processing it
+            if only_first_episode:
+                break
+
             # Update the starting index for segmenting
             start_index = termination_index + 1
 
         # If include_unterminated is True, sum the rewards from the last termination index to the end
-        if include_unterminated and start_index < len(rewards[env_index]):
+        if (
+            not only_first_episode
+            and include_unterminated
+            and start_index < len(rewards[env_index])
+        ):
             episode_reward = np.sum(rewards[env_index, start_index:])
             episode_rewards.append(episode_reward)
 

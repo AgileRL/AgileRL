@@ -420,6 +420,7 @@ class Mutations:
                         individual, critic["eval"], offspring_critic.to(self.device)
                     )
 
+        self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "act"
         return individual
 
@@ -483,6 +484,7 @@ class Mutations:
                     self.algo["actor"]["eval"],
                     offspring_actor.to(self.device),
                 )
+        self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"
         return individual
 

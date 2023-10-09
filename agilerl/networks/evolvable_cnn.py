@@ -146,6 +146,7 @@ class EvolvableCNN(nn.Module):
         num_atoms=51,
         mlp_activation="relu",
         cnn_activation="relu",
+        mlp_output_activation="relu",
         n_agents=None,
         multi=False,
         layer_norm=False,
@@ -167,6 +168,7 @@ class EvolvableCNN(nn.Module):
         self.num_actions = num_actions
         self.num_atoms = num_atoms
         self.mlp_activation = mlp_activation
+        self.mlp_output_activation = mlp_output_activation
         self.cnn_activation = cnn_activation
         self.layer_norm = layer_norm
         self.support = support
@@ -209,19 +211,34 @@ class EvolvableCNN(nn.Module):
             else activation_functions[activation_names]()
         )
 
-    def create_mlp(self, input_size, output_size, hidden_size, name):
+    def create_mlp(
+        self,
+        input_size,
+        output_size,
+        hidden_size,
+        name,
+        output_activation,
+        noisy=False,
+    ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
-        net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+        if noisy:
+            net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+        else:
+            net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.layer_norm:
             net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0])
-        net_dict[f"{name}_activation_0"] = self.get_activation(self.mlp_activation)
-
+        net_dict["activation_0"] = self.get_activation(self.mlp_activation)
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
-                    hidden_size[l_no - 1], hidden_size[l_no]
-                )
+                if noisy:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
+                else:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
                 if self.layer_norm:
                     net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(
                         hidden_size[l_no]
@@ -229,10 +246,17 @@ class EvolvableCNN(nn.Module):
                 net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
                     self.mlp_activation
                 )
-        net_dict[f"{name}_linear_layer_output"] = NoisyLinear(
-            hidden_size[-1], output_size
-        )
-        return nn.Sequential(net_dict)
+        if noisy:
+            output_layer = NoisyLinear(hidden_size[-1], output_size)
+        else:
+            output_layer = nn.Linear(hidden_size[-1], output_size)
+        net_dict[f"{name}_linear_layer_output"] = output_layer
+        if output_activation is not None:
+            net_dict[f"{name}_activation_output"] = self.get_activation(
+                output_activation
+            )
+        net = nn.Sequential(net_dict)
+        return net
 
     def create_cnn(self, input_size, channel_size, kernel_size, stride_size, name):
         """Creates and returns convolutional neural network."""
@@ -330,12 +354,16 @@ class EvolvableCNN(nn.Module):
                 output_size=self.num_atoms,
                 hidden_size=self.hidden_size,
                 name="value",
+                output_activation=None,
+                noisy=True,
             )
             advantage_net = self.create_mlp(
                 input_size,
                 output_size=self.num_atoms * self.num_actions,
                 hidden_size=self.hidden_size,
                 name="advantage",
+                output_activation=None,
+                noisy=True,
             )
             if self.accelerator is not None:
                 feature_net, value_net, advantage_net = self.accelerator.prepare(
@@ -354,6 +382,7 @@ class EvolvableCNN(nn.Module):
                     output_size=1,
                     hidden_size=self.hidden_size,
                     name="value",
+                    output_activation=self.mlp_output_activation,
                 )
             else:
                 value_net = self.create_mlp(
@@ -361,6 +390,7 @@ class EvolvableCNN(nn.Module):
                     output_size=self.num_actions,
                     hidden_size=self.hidden_size,
                     name="value",
+                    output_activation=self.mlp_output_activation,
                 )
             advantage_net = None
             if self.accelerator is None:
