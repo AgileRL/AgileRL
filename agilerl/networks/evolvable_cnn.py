@@ -5,7 +5,6 @@ from typing import List
 
 import numpy as np
 import torch
-import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -121,6 +120,8 @@ class EvolvableCNN(nn.Module):
     :type layer_norm: bool, optional
     :param stored_values: Stored network weights, defaults to None
     :type stored_values: numpy.array(), optional
+    :param support: Atoms support tensor, defaults to None
+    :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
     :type rainbow: bool, optional
     :param critic: CNN is a critic network, defaults to False
@@ -144,10 +145,12 @@ class EvolvableCNN(nn.Module):
         num_atoms=51,
         mlp_activation="relu",
         cnn_activation="relu",
+        mlp_output_activation="relu",
         n_agents=None,
         multi=False,
         layer_norm=False,
         stored_values=None,
+        support=None,
         rainbow=False,
         critic=False,
         normalize=True,
@@ -164,8 +167,10 @@ class EvolvableCNN(nn.Module):
         self.num_actions = num_actions
         self.num_atoms = num_atoms
         self.mlp_activation = mlp_activation
+        self.mlp_output_activation = mlp_output_activation
         self.cnn_activation = cnn_activation
         self.layer_norm = layer_norm
+        self.support = support
         self.rainbow = rainbow
         self.critic = critic
         self.normalize = normalize
@@ -205,19 +210,34 @@ class EvolvableCNN(nn.Module):
             else activation_functions[activation_names]()
         )
 
-    def create_mlp(self, input_size, output_size, hidden_size, name):
+    def create_mlp(
+        self,
+        input_size,
+        output_size,
+        hidden_size,
+        name,
+        output_activation,
+        noisy=False,
+    ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
-        net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+        if noisy:
+            net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+        else:
+            net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.layer_norm:
             net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0])
-        net_dict[f"{name}_activation_0"] = self.get_activation(self.mlp_activation)
-
+        net_dict["activation_0"] = self.get_activation(self.mlp_activation)
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
-                    hidden_size[l_no - 1], hidden_size[l_no]
-                )
+                if noisy:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
+                else:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
                 if self.layer_norm:
                     net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(
                         hidden_size[l_no]
@@ -225,10 +245,17 @@ class EvolvableCNN(nn.Module):
                 net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
                     self.mlp_activation
                 )
-        net_dict[f"{name}_linear_layer_output"] = NoisyLinear(
-            hidden_size[-1], output_size
-        )
-        return nn.Sequential(net_dict)
+        if noisy:
+            output_layer = NoisyLinear(hidden_size[-1], output_size)
+        else:
+            output_layer = nn.Linear(hidden_size[-1], output_size)
+        net_dict[f"{name}_linear_layer_output"] = output_layer
+        if output_activation is not None:
+            net_dict[f"{name}_activation_output"] = self.get_activation(
+                output_activation
+            )
+        net = nn.Sequential(net_dict)
+        return net
 
     def create_cnn(self, input_size, channel_size, kernel_size, stride_size, name):
         """Creates and returns convolutional neural network."""
@@ -302,20 +329,17 @@ class EvolvableCNN(nn.Module):
             name="feature",
         )
 
-        if self.multi:
-            input_size = (
-                feature_net(
-                    autograd.Variable(torch.zeros(1, *self.input_shape).unsqueeze(2))
+        with torch.no_grad():
+            if self.multi:
+                input_size = (
+                    feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
+                    .view(1, -1)
+                    .size(1)
                 )
-                .view(1, -1)
-                .size(1)
-            )
-        else:
-            input_size = (
-                feature_net(autograd.Variable(torch.zeros(1, *self.input_shape)))
-                .view(1, -1)
-                .size(1)
-            )
+            else:
+                input_size = (
+                    feature_net(torch.zeros(1, *self.input_shape)).view(1, -1).size(1)
+                )
 
         if self.critic:
             input_size += self.num_actions
@@ -326,12 +350,16 @@ class EvolvableCNN(nn.Module):
                 output_size=self.num_atoms,
                 hidden_size=self.hidden_size,
                 name="value",
+                output_activation=None,
+                noisy=True,
             )
             advantage_net = self.create_mlp(
                 input_size,
                 output_size=self.num_atoms * self.num_actions,
                 hidden_size=self.hidden_size,
                 name="advantage",
+                output_activation=None,
+                noisy=True,
             )
             if self.accelerator is not None:
                 feature_net, value_net, advantage_net = self.accelerator.prepare(
@@ -350,6 +378,7 @@ class EvolvableCNN(nn.Module):
                     output_size=1,
                     hidden_size=self.hidden_size,
                     name="value",
+                    output_activation=self.mlp_output_activation,
                 )
             else:
                 value_net = self.create_mlp(
@@ -357,6 +386,7 @@ class EvolvableCNN(nn.Module):
                     output_size=self.num_actions,
                     hidden_size=self.hidden_size,
                     name="value",
+                    output_activation=self.mlp_output_activation,
                 )
             advantage_net = None
             if self.accelerator is None:
@@ -379,13 +409,15 @@ class EvolvableCNN(nn.Module):
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
 
-    def forward(self, x, xc=None):
+    def forward(self, x, xc=None, q=True):
         """Returns output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
         :param xc: Actions to be evaluated by critic, defaults to None
         :type xc: torch.Tensor() or np.array, optional
+        :param q: Return Q value if using rainbow, defaults to True
+        :type q: bool, optional
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(x)
@@ -413,6 +445,10 @@ class EvolvableCNN(nn.Module):
             x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
                 -1, self.num_actions, self.num_atoms
             )
+            x = x.clamp(min=1e-3)
+
+            if q:
+                x = torch.sum(x * self.support, dim=2)
 
         else:
             x = F.softmax(value, dim=-1)
@@ -506,6 +542,7 @@ class EvolvableCNN(nn.Module):
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
             "layer_norm": self.layer_norm,
+            "support": self.support,
         }
         return short_dict
 
@@ -521,12 +558,14 @@ class EvolvableCNN(nn.Module):
             "num_actions": self.num_actions,
             "n_agents": self.n_agents,
             "num_atoms": self.num_atoms,
+            "support": self.support,
             "normalize": self.normalize,
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
             "multi": self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
+            "rainbow": self.rainbow,
             "device": self.device,
             "accelerator": self.accelerator,
         }

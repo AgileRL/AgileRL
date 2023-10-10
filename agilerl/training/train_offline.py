@@ -31,6 +31,7 @@ def train(
     checkpoint=None,
     checkpoint_path=None,
     wb=False,
+    verbose=True,
     accelerator=None,
     minari_dataset_id=None,
     remote=False,
@@ -71,6 +72,8 @@ def train(
     :type checkpoint_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
+    :param verbose: Display training stats, defaults to True
+    :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
@@ -94,7 +97,7 @@ def train(
                         "memory_size": INIT_HP["MEMORY_SIZE"],
                         "learn_step": INIT_HP["LEARN_STEP"],
                         "tau": INIT_HP["TAU"],
-                        "pop_size": INIT_HP["POPULATION_SIZE"],
+                        "pop_size": INIT_HP["POP_SIZE"],
                         "no_mut": MUT_P["NO_MUT"],
                         "arch_mut": MUT_P["ARCH_MUT"],
                         "params_mut": MUT_P["PARAMS_MUT"],
@@ -120,7 +123,7 @@ def train(
                     "memory_size": INIT_HP["MEMORY_SIZE"],
                     "learn_step": INIT_HP["LEARN_STEP"],
                     "tau": INIT_HP["TAU"],
-                    "pop_size": INIT_HP["POPULATION_SIZE"],
+                    "pop_size": INIT_HP["POP_SIZE"],
                     "no_mut": MUT_P["NO_MUT"],
                     "arch_mut": MUT_P["ARCH_MUT"],
                     "params_mut": MUT_P["PARAMS_MUT"],
@@ -254,7 +257,7 @@ def train(
                             {
                                 "global_step": total_steps
                                 * accelerator.state.num_processes,
-                                "eval/mean_reward": np.mean(fitnesses),
+                                "eval/mean_fitness": np.mean(fitnesses),
                                 "eval/best_fitness": np.max(fitnesses),
                             }
                         )
@@ -263,7 +266,7 @@ def train(
                     wandb.log(
                         {
                             "global_step": total_steps,
-                            "eval/mean_reward": np.mean(fitnesses),
+                            "eval/mean_fitness": np.mean(fitnesses),
                             "eval/best_fitness": np.max(fitnesses),
                         }
                     )
@@ -271,18 +274,6 @@ def train(
             # Update step counter
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
-
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
-            perf_info = f"Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}"
-            pop_info = f"Agents: {agents}, Steps: {num_steps}, Mutations: {muts}"
-            pbar_string = perf_info + ", " + pop_info
-            pbar.set_postfix_str(pbar_string)
-            pbar.update(0)
 
             # Early stop if consistently reaches target
             if (
@@ -321,6 +312,28 @@ def train(
                 else:
                     elite, pop = tournament.select(pop)
                     pop = mutation.mutation(pop)
+
+            if verbose:
+                fitness = ["%.2f" % fitness for fitness in fitnesses]
+                avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
+                avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
+                agents = [agent.index for agent in pop]
+                num_steps = [agent.steps[-1] for agent in pop]
+                muts = [agent.mut for agent in pop]
+                pbar.update(0)
+
+                print(
+                    f"""
+                    --- Epoch {idx_epi + 1} ---
+                    Fitness:\t\t{fitness}
+                    100 fitness avgs:\t{avg_fitness}
+                    100 score avgs:\t{avg_score}
+                    Agents:\t\t{agents}
+                    Steps:\t\t{num_steps}
+                    Mutations:\t\t{muts}
+                    """,
+                    end="\r",
+                )
 
         if checkpoint is not None:
             if (idx_epi + 1) % checkpoint == 0:
