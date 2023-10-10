@@ -131,7 +131,7 @@ class DQN:
 
         self.criterion = nn.MSELoss()
 
-    def getAction(self, state, epsilon=0):
+    def getAction(self, state, epsilon=0, action_mask=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -140,6 +140,8 @@ class DQN:
         :type state: float or List[float]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: List, optional
         """
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
@@ -157,14 +159,29 @@ class DQN:
 
         # epsilon-greedy
         if random.random() < epsilon:
-            action = np.random.randint(0, self.action_dim, size=state.size()[0])
+            if action_mask is None:
+                action = np.random.randint(0, self.action_dim, size=state.size()[0])
+            else:
+                inv_mask = 1 - action_mask
+
+                available_actions = np.ma.array(
+                    np.arange(0, self.action_dim), mask=inv_mask
+                ).compressed()
+                action = np.random.choice(available_actions, size=state.size()[0])
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
 
-            action = np.argmax(action_values.cpu().data.numpy(), axis=1)
+            if action_mask is None:
+                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
+            else:
+                inv_mask = 1 - action_mask
+                masked_action_values = np.ma.array(
+                    action_values.cpu().data.numpy(), mask=inv_mask
+                )
+                action = np.argmax(masked_action_values, axis=-1)
 
         return action
 

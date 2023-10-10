@@ -15,4 +15,4 @@ We are constantly adding more neural network architectures, with a view to add r
    evolvable_cnn
    evolvable_gpt
    evolvable_bert
-   custom_architecture
+   custom_activation

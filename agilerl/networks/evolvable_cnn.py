@@ -9,7 +9,7 @@ import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agilerl.networks.custom_architecture import GumbelSoftmax
+from agilerl.networks.custom_activation import GumbelSoftmax
 
 
 class NoisyLinear(nn.Module):
@@ -399,6 +399,9 @@ class EvolvableCNN(nn.Module):
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(x)
+
+        if x.dtype != torch.float32:
+            x = x.type(torch.float32)
 
         batch_size = x.size(0)
 

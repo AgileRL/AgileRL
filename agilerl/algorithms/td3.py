@@ -398,7 +398,7 @@ class TD3:
             mutation=self.mut,
             policy_freq=self.policy_freq,
             actor_network=self.actor_network,
-            critic_network=self.critic_network,
+            critic_networks=self.critic_networks,
             device=self.device,
             accelerator=self.accelerator,
             wrap=wrap,

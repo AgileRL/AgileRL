@@ -200,13 +200,10 @@ class MADDPG:
         self.actor_targets = copy.deepcopy(self.actors)
         self.critic_targets = copy.deepcopy(self.critics)
 
-        print("CRITIC TARGETS", self.critic_targets)
-
         # Initialise target network parameters
         for actor, actor_target in zip(self.actors, self.actor_targets):
             actor_target.load_state_dict(actor.state_dict())          
         for critic, critic_target in zip(self.critics, self.critic_targets):
-            print(critic_target)
             critic_target.load_state_dict(critic.state_dict())
 
         self.actor_optimizers_type = [

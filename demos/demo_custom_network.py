@@ -27,7 +27,6 @@ class MLPActor(nn.Module):
 
         # Add output layer with a sigmoid activation
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
-        layers.append(nn.Softmax())  # Sigmoid activation
 
         # Combine all layers into a sequential model
         self.model = nn.Sequential(*layers)

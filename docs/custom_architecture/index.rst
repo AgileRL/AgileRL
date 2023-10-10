@@ -11,11 +11,10 @@ Creating a Custom Evolvable Network
 
 To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output 
 dimensions. Below is an example of a simple multi-layer perceptron that can be used by a DQN agent to solve the Lunar
-Lander environment. The input size is set as the state dimensions and output size the action dimensions.
-Note that when defining the model, all layers are defined using the `torch.nn` module. It's worth 
-noting that, during the model definition, it is imperative to employ the `torch.nn`` module to define all layers instead 
+Lander environment. The input size is set as the state dimensions and output size the action dimensions. It's worth noting 
+that, during the model definition, it is imperative to employ the `torch.nn`` module to define all layers instead 
 of relying on functions from `torch.nn.functional` within the forward() method of the network. This is crucial as the 
-forward hooks implemented can exclusively detect layers derived from `nn.Module`.
+forward hooks implemented will only be able to detect layers derived from `nn.Module`.
 
 .. code-block:: python
     import torch.nn as nn
@@ -47,9 +46,9 @@ the `MakeEvolvable` wrapper.
     action_dim = env.single_action_space.n
 
     actor = MLPActor(state_dim[0], action_dim)
-    evolvable_actor = MakeEvolvable(mlp,
-                                  input_tensor=torch.ones(state_dim[0]),
-                                  device=device)
+    evolvable_actor = MakeEvolvable(actor,
+                                    input_tensor=torch.ones(state_dim[0]),
+                                    device=device)
 
 There are two further considerations to make when defining custom architecture. The first is when instantiating the 
 `initialPopulation` object, you need to set `net_config` to `None` and `actor_network` to `evolvable_mlp`.
@@ -80,7 +79,7 @@ If you are using an algorithm that also uses a single critic (PPO, DDPG), define
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-If the single agent algorithm has more than one critic (e.g. TD3), the pass the `critic_network` argument a list of two critics. An example
+If the single agent algorithm has more than one critic (e.g. TD3), then pass the `critic_network` argument a list of two critics. An example
 is shown below.
 
 .. code-block:: python
@@ -128,8 +127,9 @@ as `evolvable_actor.arch` for single agent algorithms or `evolvable_actors[0].ar
 Compatible Architecture
 ------------
 
-At present, `MakeEvolvable` is compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs).  
-Outlined below is a comprehensive table of PyTorch layers that are currently supported by this wrapper.
+At present, `MakeEvolvable` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The 
+network architecure must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive 
+table of PyTorch layers that are currently supported by this wrapper.
 
 
 .. list-table::
@@ -148,5 +148,32 @@ Outlined below is a comprehensive table of PyTorch layers that are currently sup
      - nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d, nn.LayerNorm
      - nn.Conv2d, nn.Conv3d
      - nn.Linear
-   
+
+.. _compalgos:
+
+Compatible Algorithms
+------------
+
+The following table highlights which AgileRL algorithms are compatible with custom architecture:
+
+.. list-table::
+   :widths: 30, 30, 30, 20, 20
+   :header-rows: 1
+
+   * - **CQL** 
+     - **DQN**
+     - **DDPG**
+     - **TD3**
+     - **PPO**
+     - **MADDPG**
+     - **MATD3**
+     - **ILQL**
+   * - ✔️
+     - ✔️
+     - ✔️
+     - ✔️
+     - ✔️
+     - ✔️
+     - ✔️
+     - ❌
 

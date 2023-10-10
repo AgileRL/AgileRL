@@ -4,7 +4,7 @@ from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
-from agilerl.networks.custom_architecture import GumbelSoftmax
+from agilerl.networks.custom_activation import GumbelSoftmax
 
 
 class EvolvableMLP(nn.Module):
