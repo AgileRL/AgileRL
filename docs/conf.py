@@ -34,9 +34,10 @@ templates_path = ["_templates"]
 
 # -- Options for HTML output
 
+html_title = "AgileRL Documentation"
 html_theme = "furo"
 html_static_path = ["_static"]
-html_favicon = "favicon.ico"
+html_favicon = "_static/favicon.ico"
 html_theme_options = {
     "sidebar_hide_name": True,
     "navigation_depth": 2,
