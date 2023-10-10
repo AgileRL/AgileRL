@@ -34,10 +34,15 @@ templates_path = ["_templates"]
 
 # -- Options for HTML output
 
+html_title = "AgileRL Documentation"
 html_theme = "furo"
 html_static_path = ["_static"]
+html_css_files = ["css/custom.css"]
+html_js_files = ["js/expand_sidebar.js"]
+html_favicon = "_static/favicon.ico"
 html_theme_options = {
     "sidebar_hide_name": True,
+    "navigation_depth": 2,
     "light_logo": "logo_teal.png",
     "dark_logo": "logo_white.png",
     "source_repository": "https://github.com/AgileRL/AgileRL/",
