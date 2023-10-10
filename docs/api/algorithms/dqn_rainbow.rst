@@ -12,8 +12,7 @@ These improvements include:
 * Noisy Nets: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
 * Categorical DQN (C51): A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
 
-
-* Rainbow DQN paper: https://arxiv.org/abs/1710.02298
+Rainbow DQN paper: https://arxiv.org/abs/1710.02298
 
 Can I use it?
 ------------
