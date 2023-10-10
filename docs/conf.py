@@ -38,6 +38,7 @@ html_theme = "furo"
 html_static_path = ["_static"]
 html_theme_options = {
     "sidebar_hide_name": True,
+    "show_navbar_depth": 2,
     "light_logo": "logo_teal.png",
     "dark_logo": "logo_white.png",
     "source_repository": "https://github.com/AgileRL/AgileRL/",
