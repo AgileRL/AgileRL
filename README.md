@@ -84,6 +84,7 @@ accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_on
 
 ## Evolvable algorithms implemented (more coming soon!)
   * DQN
+  * Rainbow DQN
   * DDPG
   * PPO
   * CQL

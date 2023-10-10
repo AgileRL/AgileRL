@@ -5,7 +5,6 @@ from typing import List
 
 import numpy as np
 import torch
-import torch.autograd as autograd
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -330,20 +329,17 @@ class EvolvableCNN(nn.Module):
             name="feature",
         )
 
-        if self.multi:
-            input_size = (
-                feature_net(
-                    autograd.Variable(torch.zeros(1, *self.input_shape).unsqueeze(2))
+        with torch.no_grad():
+            if self.multi:
+                input_size = (
+                    feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
+                    .view(1, -1)
+                    .size(1)
                 )
-                .view(1, -1)
-                .size(1)
-            )
-        else:
-            input_size = (
-                feature_net(autograd.Variable(torch.zeros(1, *self.input_shape)))
-                .view(1, -1)
-                .size(1)
-            )
+            else:
+                input_size = (
+                    feature_net(torch.zeros(1, *self.input_shape)).view(1, -1).size(1)
+                )
 
         if self.critic:
             input_size += self.num_actions
