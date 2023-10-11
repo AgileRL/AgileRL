@@ -8,13 +8,15 @@ INIT_HP:
     NUM_ENVS: 16               # Number of parallel environments for training
     BATCH_SIZE: 256           # Batch size
     LR: 0.001                   # Learning rate
-    EPISODES: 1000             # Max no. episodes
+    EPISODES: 500             # Max no. episodes
     TARGET_SCORE: 200.          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
-    N_STEP: 3                  # Step number to calculate td error
+    # NOTE: If using a population of agents, a stanndard replay buffer
+    # (i.e. not multi-step or prioritized) is best, hence the defaults below
+    N_STEP: 1                  # Step number to calculate td error
     PER: false                 # Use prioritized experience replay buffer
     ALPHA: 0.6                 # Prioritized replay buffer parameter
     BETA: 0.4                  # Importance sampling coefficient
@@ -31,7 +33,7 @@ INIT_HP:
     WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
-    NO_MUT: 0.1                            # No mutation
+    NO_MUT: 0.4                            # No mutation
     ARCH_MUT: 0.2                          # Architecture mutation
     NEW_LAYER: 0.2                         # New layer mutation
     PARAMS_MUT: 0.2                        # Network parameters mutation
