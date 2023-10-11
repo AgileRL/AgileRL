@@ -51,7 +51,7 @@ the `MakeEvolvable` wrapper.
                                     device=device)
 
 There are two further considerations to make when defining custom architecture. The first is when instantiating the 
-`initialPopulation` object, you need to set `net_config` to `None` and `actor_network` to `evolvable_mlp`.
+`initialPopulation` object, you need to set `net_config` to `None` and `actor_network` to `evolvable_actor`.
 
 .. code-block:: python 
     pop = initialPopulation(algo="DQN",  # Algorithm
@@ -141,8 +141,7 @@ table of PyTorch layers that are currently supported by this wrapper.
      - **Normalization**
      - **Convolutional**
      - **Linear**
-   * - nn.MaxPool2d, nn.MaxPool3d, nn.MaxUnpool2d, nn.MaxUnpool3d, nn.AvgPool2d, 
-       nn.AvgPool3d, nn.FractionalMaxPool2d, nn.FractionalMaxPool3d
+   * - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
      - nn.Tanh, nn.Identity, nn.ReLU, nn.ELU, nn.Softsign, nn.Sigmoid, GumbelSoftmax, 
        nn.Softplus, nn.Softmax, nn.LeakyReLU, nn.PReLU, nn.GELU
      - nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d, nn.LayerNorm

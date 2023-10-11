@@ -17,9 +17,9 @@ class MakeEvolvable(nn.Module):
     off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN
     architecture, defaults to None
     :type secondary_input_tensor: torch.Tensor, optional
-    :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
+    :param output_vanish: Vanish output by multiplying by 0.1, defaults to False
     :type output_vanish: bool, optional
-    :param init_layers: Initialise network layers, defaults to True
+    :param init_layers: Initialise network layers, defaults to False
     :type init_layers: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
@@ -34,8 +34,8 @@ class MakeEvolvable(nn.Module):
                  network, 
                  input_tensor, 
                  secondary_input_tensor=None,
-                 output_vanish=True,
-                 init_layers=True,
+                 output_vanish=False,
+                 init_layers=False,
                  device="cpu", 
                  accelerator=None,
                  extra_critic_dims=None,
@@ -157,7 +157,7 @@ class MakeEvolvable(nn.Module):
             'PReLU': nn.PReLU,
             'GELU': nn.GELU}
 
-        return activation_functions[activation_names](dim=-1) if activation_names == 'softmax' else activation_functions[activation_names]()
+        return activation_functions[activation_names](dim=-1) if activation_names == 'Softmax' else activation_functions[activation_names]()
 
     def get_normalization(self, normalization_name, layer_size):
         """Returns normalization layer for corresponding normalization name.
@@ -409,6 +409,11 @@ class MakeEvolvable(nn.Module):
                 channel_size[0])
         if 0 in self.layer_indices["cnn"]["cnn_act"]:
             net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
+        if (self.pooling is not None) and (0 in self.layer_indices["cnn"]["cnn_pool"]):
+                    net_dict[f"{name}_pooling_0"] = self.get_pooling(
+                        self.pooling,
+                        self.pooling_kernel
+                )
 
         if len(channel_size) > 1:
             for l_no in range(1, len(channel_size)):
@@ -550,9 +555,9 @@ class MakeEvolvable(nn.Module):
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
+            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= 1024:  # HARD LIMIT
+        if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
 
             self.recreate_nets()

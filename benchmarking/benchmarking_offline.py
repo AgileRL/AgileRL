@@ -2,20 +2,49 @@ import h5py
 import torch
 import yaml
 
+import sys
+sys.path.append('../')
+
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
+
+import torch.nn as nn
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
 # import sys
 # sys.path.append('../')
 
+class BasicNetActor(nn.Module):
+    def __init__(self, input_size, hidden_sizes, output_size):
+        super(BasicNetActor, self).__init__()
+        layers = []
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
+        # Add input layer
+        layers.append(nn.Linear(input_size, hidden_sizes[0]))
+        layers.append(nn.ReLU())  # Activation function
+
+        # Add hidden layers
+        for i in range(len(hidden_sizes) - 1):
+            layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
+            layers.append(nn.ReLU())  # Activation function
+
+        # Add output layer with a sigmoid activation
+        layers.append(nn.Linear(hidden_sizes[-1], output_size))
+        layers.append(nn.Softmax())  # Sigmoid activation
+
+        # Combine all layers into a sequential model
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.model(x)
+
+def main(INIT_HP, MUTATION_PARAMS): #, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
@@ -34,6 +63,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
+
+    actor = BasicNetActor(state_dim[0], [32,32], action_dim)
+    actor_network = MakeEvolvable(actor,
+                                  input_tensor=torch.ones(state_dim),
+                                  device=device)
 
     dataset = h5py.File(INIT_HP["DATASET"], "r")
 
@@ -57,7 +91,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
         rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        arch=NET_CONFIG["arch"],
+        arch=actor_network.arch,
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
@@ -67,8 +101,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         state_dim,
         action_dim,
         one_hot,
-        NET_CONFIG,
+        None,
         INIT_HP,
+        actor_network,
         INIT_HP["POP_SIZE"],
         device=device,
     )
@@ -102,10 +137,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/cqn.yaml") as file:
+    with open("configs/training/cqn.yaml") as file:
         cqn_config = yaml.safe_load(file)
     INIT_HP = cqn_config["INIT_HP"]
     MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = cqn_config["NET_CONFIG"]
-    DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    # NET_CONFIG = cqn_config["NET_CONFIG"]
+    #DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
+    main(INIT_HP, MUTATION_PARAMS)#, NET_CONFIG)

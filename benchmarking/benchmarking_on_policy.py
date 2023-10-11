@@ -3,7 +3,7 @@ import yaml
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_on_policy import train
+from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -66,7 +66,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    trained_pop, pop_fitnesses = train(
+    trained_pop, pop_fitnesses = train_on_policy(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],
@@ -92,7 +92,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/ppo.yaml") as file:
+    with open("configs/training/ppo.yaml") as file:
         ppo_config = yaml.safe_load(file)
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]

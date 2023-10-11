@@ -6,7 +6,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from agilerl.networks.make_evolvable_cnn import MakeEvolvable
+
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 

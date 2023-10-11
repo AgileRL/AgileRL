@@ -89,7 +89,7 @@ class EvolvableMLP(nn.Module):
 
         return (
             activation_functions[activation_names](dim=-1)
-            if activation_names == "softmax"
+            if activation_names == "Softmax"
             else activation_functions[activation_names]()
         )
 
