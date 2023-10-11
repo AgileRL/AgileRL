@@ -305,7 +305,6 @@ class MakeEvolvable(nn.Module):
         for hook in hooks:
             hook.remove()
 
-
         # Save neural network information as attribtues
         self.num_inputs = in_features_list[0]
         self.num_outputs = out_features_list[-1]
@@ -520,13 +519,18 @@ class MakeEvolvable(nn.Module):
                 "extra_critic_dims": self.extra_critic_dims,
                 "output_vanish": self.output_vanish,
                 "init_layers": self.init_layers,
-                "has_conv_layer": self.has_conv_layers
+                "has_conv_layer": self.has_conv_layers,
+                "arch": self.arch
             }  
         
         return init_dict
      
+    # self.conv_counter
+    # self.lin_counter
+    # 
+
     def add_mlp_layer(self):
-        """Adds a hidden layer to Multi-layer Perceptron."""
+        """Adds a hidden layer to value network."""
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
 
@@ -535,7 +539,7 @@ class MakeEvolvable(nn.Module):
             self.add_mlp_node()
 
     def remove_mlp_layer(self):
-        """Removes a hidden layer from neural network."""
+        """Removes a hidden layer from value network."""
         if len(self.hidden_size) > 1:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:1]
             self.recreate_nets(shrink_params=True)
@@ -543,7 +547,7 @@ class MakeEvolvable(nn.Module):
             self.add_mlp_node()
 
     def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
-        """Adds nodes to hidden layer of Multi-layer Perceptron.
+        """Adds nodes to hidden layer of value network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
         :type hidden_layer: int, optional

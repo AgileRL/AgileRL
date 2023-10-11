@@ -9,7 +9,7 @@ import wandb
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
-def train(
+def train_on_policy(
     env,
     env_name,
     algo,

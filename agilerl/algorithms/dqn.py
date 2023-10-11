@@ -312,7 +312,7 @@ class DQN:
             mutation=self.mut,
             device=self.device,
             accelerator=self.accelerator,
-            wrap=wrap,
+            wrap=wrap
         )
 
         actor = self.actor.clone()

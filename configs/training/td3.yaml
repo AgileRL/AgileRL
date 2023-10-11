@@ -6,7 +6,7 @@ INIT_HP:
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     BATCH_SIZE: 128           # Batch size
-    LR: 1e-4                   # Learning rate
+    LR: 0.001                   # Learning rate
     EPISODES: 1000             # Max no. episodes
     TARGET_SCORE: 200.          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor

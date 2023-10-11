@@ -25,8 +25,8 @@ MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
     ARCH_MUT: 0.2                          # Architecture mutation
     NEW_LAYER: 0.2                         # New layer mutation
-    PARAMS_MUT: 0                        # Network parameters mutation
-    ACT_MUT: 0.2                             # Activation layer mutation
+    PARAMS_MUT: 0                          # Network parameters mutation
+    ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
   # Learning HPs to choose from
     RL_HP_SELECTION: [lr, batch_size]

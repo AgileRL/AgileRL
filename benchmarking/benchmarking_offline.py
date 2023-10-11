@@ -1,19 +1,15 @@
 import h5py
 import torch
 import yaml
-
-import sys
-sys.path.append('../')
+import torch.nn as nn
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
-
-
-import torch.nn as nn
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
@@ -137,7 +133,7 @@ def main(INIT_HP, MUTATION_PARAMS): #, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("configs/training/cqn.yaml") as file:
+    with open("../configs/training/cqn.yaml") as file:
         cqn_config = yaml.safe_load(file)
     INIT_HP = cqn_config["INIT_HP"]
     MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
