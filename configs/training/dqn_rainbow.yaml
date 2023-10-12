@@ -14,7 +14,7 @@ INIT_HP:
     MEMORY_SIZE: 100000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
-    # NOTE: If using a population of agents, a stanndard replay buffer
+    # NOTE: If using a population of agents, a standard replay buffer
     # (i.e. not multi-step or prioritized) is best, hence the defaults below
     N_STEP: 1                  # Step number to calculate td error
     PER: false                 # Use prioritized experience replay buffer
