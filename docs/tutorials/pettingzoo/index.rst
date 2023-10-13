@@ -16,7 +16,7 @@ Examples using PettingZoo
 
 * :ref:`MADDPG for co-operation: simple speaker listener environment<multiagenttraining>`
 
-.. image:: mpe_looped.gif
+.. figure:: mpe_looped.gif
    :height: 400
    :align: center
 
