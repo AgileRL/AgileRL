@@ -8,6 +8,6 @@ We are in the process of adding more tutorials.
 The following tutorials are available:
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    pettingzoo/index

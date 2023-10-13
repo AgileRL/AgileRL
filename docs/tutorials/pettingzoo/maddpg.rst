@@ -2,7 +2,7 @@
 AgileRL Tutorial: Implementing MADDPG
 ====
 
-This tutorial shows how to train an :ref:`MADDPG<maddpg>` agent on the `space invaders<https://pettingzoo.farama.org/environments/atari/space_invaders/>`_ atari environment.
+This tutorial shows how to train an :ref:`MADDPG<maddpg>` agent on the `space invaders <https://pettingzoo.farama.org/environments/atari/space_invaders/>`_ atari environment.
 
 What is MADDPG?
 -----
@@ -33,14 +33,14 @@ Code
 Train multiple agents using MADDPG
 ^^^^^^
 
-The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server<https://discord.com/invite/eB8HyTA2ux>`_.
+The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
-.. literalinclude:: ../../../tutorials/AgileRL/agilerl_maddpg.py
+.. literalinclude:: ../../tutorials/AgileRL/agilerl_maddpg.py
    :language: python
 
 Watch the trained agents play
 ^^^^^
 The following code allows you to load your saved MADDPG alogorithm from the previous training block, test the algorithms performance, and then visualise a number of episodes as a gif.
 
-.. literalinclude:: ../../../tutorials/AgileRL/render_agilerl_maddpg.py
+.. literalinclude:: ../tutorials/AgileRL/render_agilerl_maddpg.py
    :language: python
