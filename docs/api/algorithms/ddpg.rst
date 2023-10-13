@@ -1,3 +1,4 @@
+.. _ddpg:
 Deep Deterministic Policy Gradient (DDPG)
 =========================================
 

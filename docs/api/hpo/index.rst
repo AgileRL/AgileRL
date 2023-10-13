@@ -1,3 +1,4 @@
+.. _hpo:
 Hyperparameter Optimization
 ===========================
 
