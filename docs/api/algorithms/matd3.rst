@@ -1,3 +1,4 @@
+.. _matd3:
 Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 =========================================
 

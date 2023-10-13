@@ -1,3 +1,4 @@
+.. _td3:
 Twin Delayed Deep Deterministic Policy Gradient (TD3)
 =========================================
 

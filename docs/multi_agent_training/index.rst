@@ -1,3 +1,4 @@
+.. _multiagenttraining:
 Multi-Agent Training
 =====
 

@@ -1,3 +1,4 @@
+.. _maddpg:
 Multi-Agent Deep Deterministic Policy Gradient (MADDPG)
 =========================================
 
