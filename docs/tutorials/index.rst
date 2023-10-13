@@ -9,6 +9,5 @@ The following tutorials are available:
 
 .. toctree::
    :maxdepth: 2
-   PettingZoo/index
-   PettingZoo/MADDPG
-   PettingZoo/MATD3
+
+   pettingzoo/index

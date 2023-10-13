@@ -22,7 +22,7 @@ AgileRL is a deep reinforcement learning framework focused on streamlining train
    Fig1: Performance of trained MADDPG algorithm on 6 random episodes
 
 .. toctree::
-   :maxdepth: 3
+   :maxdepth: 2
 
-    MADDPG
-    MATD3
+   maddpg
+   matd3
