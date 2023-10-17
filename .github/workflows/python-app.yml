@@ -28,7 +28,7 @@ jobs:
                   pip install -r requirements.txt
             - name: Lint with ruff
               run: |
-                  ruff --format=github --target-version=py37 --ignore E501 .
+                  ruff --target-version=py37 --ignore E501 .
             - name: Test with pytest
               run: |
                   pytest
