@@ -87,8 +87,8 @@ def train_multi_agent(
             if accelerator.is_main_process:
                 wandb.init(
                     # set the wandb project where this run will be logged
-                    project="EvoMADDPGTesting",
-                    name="{}-MultiAgentEvoHPO-{}-{}".format(
+                    project="AgileRLMultiAgent",
+                    name="{}-MAEvoHPO-{}-{}".format(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
@@ -114,9 +114,8 @@ def train_multi_agent(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                entity="agilerl",
-                project="MADDPG Benchmarking",
-                name="{}-{}-{}-RandomActions".format(
+                project="AgileRLMultiAgent",
+                name="{}-MAEvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata

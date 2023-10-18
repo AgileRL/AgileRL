@@ -275,7 +275,7 @@ class EvolvableMLP(nn.Module):
     def remove_mlp_layer(self):
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > 1:  # HARD LIMIT
-            self.hidden_size = self.hidden_size[:1]
+            self.hidden_size = self.hidden_size[:-1]
             new_net = self.create_net()
             new_net = self.shrink_preserve_parameters(old_net=self.net, new_net=new_net)
             self.net = new_net

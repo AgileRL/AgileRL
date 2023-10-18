@@ -7,7 +7,7 @@ import torch
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
-from agilerl.training.train_unvectorised import train_unvectorised
+#from agilerl.training.train_unvectorised import train_unvectorised
 #from agilerl.training.train_on_policy import train
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.networks.custom_activation import GumbelSoftmax

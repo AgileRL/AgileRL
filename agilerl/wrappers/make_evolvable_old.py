@@ -1,122 +1,101 @@
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
+import torch
+import torch.nn as nn
+from collections import deque
 from collections import OrderedDict
 import numpy as np
 import copy
-from agilerl.networks.custom_activation import GumbelSoftmax
 
+class GumbelSoftmax(nn.Module):
+    """Applies gumbel softmax function element-wise"""
 
-class MakeEvolvable(nn.Module):
-    """Wrapper to make a neural network evolvable
+    @staticmethod
+    def gumbel_softmax(logits, tau=1.0, eps=1e-20):
+        """Implementation of the gumbel softmax activation function
 
-    :param network: Input neural network
-    :type network: nn.Module
-    :param input_tensor: Example input tensor so forward pass can be made to detect the network architecture
-    :type input_tensor: torch.Tensor
-    :param secondary_input_tensor: Second input tensor if network performs forward pass with two tensors, for example,
-    off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN
-    architecture, defaults to None
-    :type secondary_input_tensor: torch.Tensor, optional
-    :param output_vanish: Vanish output by multiplying by 0.1, defaults to False
-    :type output_vanish: bool, optional
-    :param init_layers: Initialise network layers, defaults to False
-    :type init_layers: bool, optional
-    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
-    :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
-    :param extra_critic_dims: Additional action dimensions required by the fully-connected layer when using a secondary input
-    tensor, needed as critic evaluates state and actions. The state (RGB image) is first processed by convolutional layers 
-    before being flattened with the actions and then processed by the fully-connected layer. Only needed in the specific scenario
-    of using an off-policy algorithm with an environment that has RGB image observations, defaults to None
-    """
+        :param logits: Tensor containing unnormalized log probabilities for each class.
+        :type logits: torch.Tensor
+        :param tau: Tau, defaults to 1.0
+        :type tau: float, optional
+        :param eps: Epsilon, defaults to 1e-20
+        :type eps: float, optional
+        """
+        epsilon = torch.rand_like(logits)
+        logits += -torch.log(-torch.log(epsilon + eps) + eps)
+        return F.softmax(logits / tau, dim=-1)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self.gumbel_softmax(input)
+
+class MakeEvolvableOld(nn.Module):
     def __init__(self, 
                  network, 
                  input_tensor, 
-                 secondary_input_tensor=None,
-                 output_vanish=False,
-                 init_layers=False,
+                 init_layers=True,
+                 output_vanish=True,
+                 rand_seed=42,
                  device="cpu", 
                  accelerator=None,
-                 extra_critic_dims=None,
                  **kwargs):
         super().__init__()
 
         self.init_layers = init_layers
         self.output_vanish = output_vanish
+        self.rng = np.random.RandomState(rand_seed)
         self.device = device
         self.accelerator = accelerator
         
-        # Set the layer counters 
+        # Set the layer counters
         self.conv_counter = -1
         self.lin_counter = -1
-        self.extra_critic_dims = extra_critic_dims
-
-        # Set placeholder attributes (needed for init_dict function to work)
         self.mlp_norm = None
-        self.has_conv_layers = False
         self.cnn_norm = None
+
+        # Placeholder convolutional variables (needed for init_dict function to work)
+        self.has_conv_layers = False
         self.pooling = None
         self.pooling_kernel = None
         self.cnn_activation = None
         self.conv_layer_type = None
         self.input_tensor = input_tensor.to(self.device)
-        self.secondary_input_tensor = secondary_input_tensor.to(self.device) if secondary_input_tensor is not None else secondary_input_tensor
-        self.in_channels, self.channel_size, self.kernel_size, \
-        self.stride_size, self.padding = None, None, None, None, None
-
+        self.in_channels, self.channel_size, self.kernel_size \
+        ,self.stride_size, self.padding = None, None, None, None, None
 
         # If first instance, network used to instantiate, upon cloning, init_dict used instead
         if not kwargs:
-            self.detect_architecture(network.to(self.device), self.input_tensor, self.secondary_input_tensor)
+            self.detect_architecture(network.to(self.device), self.input_tensor)
         else:
             for key, value in kwargs.items():
                 setattr(self, key, value)
         
-        self.feature_net, self.value_net = self.create_nets()
+        self.feature_net, self.value_net, self.net = self.create_nets()
 
-    def forward(self, x, xc=None): 
+    def forward(self, x, xc=None): #
         """Returns output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
-        :param xc: Actions to be evaluated by critic, defaults to None
-        :type xc: torch.Tensor() or np.array, optional
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
-
-        if self.accelerator is None:
-            x = x.to(self.device)
-
-        # Check if there is a cnn
-        if self.layer_indices["cnn"]:
-            x = self.feature_net(x)
-            x = x.reshape(x.size(0), -1)
-            # Ensure dtype is float32   
-            if x.dtype != torch.float32:    
-                x = x.type(torch.float32)
-
-        # Concatenate actions if passed to network as a separate tensor
-        if xc is not None:
             if self.accelerator is None:
-                xc = xc.to(self.device)
-            x = torch.cat([x, xc], dim=1) 
+                x = x.to(self.device)
+                if xc is not None:
+                    xc = xc.to(self.device)
+                    x = torch.cat([x, xc], dim=1) 
+    
+        # print("Tensor device", x.device)
+        # for name, param in self.net.named_parameters():
+        #     print(f"Device {name}: ", param.device)
 
-        x = self.value_net(x)
-
+        #### Not sure about this line        
+        x = x.type(torch.float32)
+        x = self.net(x)
         return x
     
     def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
-        """Initialize the weights of a neural network layer using orthogonal initialization and set the biases to a constant value.
-
-        :param layer: Neural network layer
-        :type layer: nn.Module
-        :param std: Standard deviation
-        :type std: float
-        :param bias_const: Bias value
-        :type bias_const: float
-        """
         torch.nn.init.orthogonal_(layer.weight, std)
         torch.nn.init.constant_(layer.bias, bias_const)
         return layer
@@ -124,20 +103,34 @@ class MakeEvolvable(nn.Module):
     def get_pooling(self, pooling_names, kernel_size):
         """Returns pooling layer for corresponding activation name.
 
-        :param pooling_names: Pooling layer name
-        :type pooling_names: str
-        :param kernel_size: Pooling layer kernel size
-        :type kernel_size: List[int] or List[Tuple[int]]
+        :param activation_names: Activation function name
+        :type activation_names: str
         """
         pooling_functions = {
+            "MaxPool1d": nn.MaxPool1d,
             "MaxPool2d": nn.MaxPool2d,
             "MaxPool3d": nn.MaxPool3d,
+            "MaxUnpool1d": nn.MaxUnpool1d,
+            "MaxUnpool2d": nn.MaxUnpool2d,
+            "MaxUnpool3d": nn.MaxUnpool3d,
+            "AvgPool1d": nn.AvgPool1d,
             "AvgPool2d": nn.AvgPool2d,
-            "AvgPool3d": nn.AvgPool3d}
+            "AvgPool3d": nn.AvgPool3d,
+            "FractionalMaxPool2d": nn.FractionalMaxPool2d,
+            "FractionalMaxPool3d": nn.FractionalMaxPool3d,
+            "LPPool1d": nn.LPPool1d,
+            "LPPool2d": nn.LPPool2d,
+            "AdaptiveMaxPool1d": nn.AdaptiveMaxPool1d,
+            "AdaptiveMaxPool2d": nn.AdaptiveMaxPool2d,
+            "AdaptiveMaxPool3d": nn.AdaptiveMaxPool3d,
+            "AdaptiveAvgPool1d": nn.AdaptiveAvgPool1d,
+            "AdaptiveAvgPool2d": nn.AdaptiveAvgPool2d,
+            "AdaptiveAvgPool3d": nn.AdaptiveAvgPool3d
+        }
 
-        return pooling_functions[pooling_names](kernel_size)  
+        return pooling_functions[pooling_names](kernel_size)
 
-    def get_activation(self, activation_names):
+    def get_activation(self, activation_names):#
         """Returns activation function for corresponding activation name.
 
         :param activation_names: Activation function name
@@ -157,7 +150,7 @@ class MakeEvolvable(nn.Module):
             'PReLU': nn.PReLU,
             'GELU': nn.GELU}
 
-        return activation_functions[activation_names](dim=-1) if activation_names == 'Softmax' else activation_functions[activation_names]()
+        return activation_functions[activation_names](dim=1) if activation_names == 'softmax' else activation_functions[activation_names]()
 
     def get_normalization(self, normalization_name, layer_size):
         """Returns normalization layer for corresponding normalization name.
@@ -168,8 +161,10 @@ class MakeEvolvable(nn.Module):
         :param layer_size: int
         """
         normalization_functions = {
+            "BatchNorm1d": nn.BatchNorm1d, 
             "BatchNorm2d": nn.BatchNorm2d, 
             "BatchNorm3d": nn.BatchNorm3d,
+            "InstanceNorm1d": nn.InstanceNorm1d, 
             "InstanceNorm2d": nn.InstanceNorm2d, 
             "InstanceNorm3d": nn.InstanceNorm3d,
             "LayerNorm": nn.LayerNorm}
@@ -182,16 +177,6 @@ class MakeEvolvable(nn.Module):
         
         :param conv_layer_name: Convolutional layer name
         :type conv_layer_name: str
-        :param in_channels: Number of input channels to convolutional layer
-        :type in_channels: int
-        :param out_channels: Number of output channels from convolutional layer
-        :type out_channels: int
-        :param kernel_size: Kernel size of convolutional layer
-        :type kernel_size: int or Tuple[int]
-        :param stride: Stride size of convolutional layer
-        :type stride: int or Tuple[int]
-        :param padding: Convolutional layer padding
-        :type padding: int or Tuple[int]
         """
 
         convolutional_layers = {
@@ -201,16 +186,13 @@ class MakeEvolvable(nn.Module):
 
         return convolutional_layers[conv_layer_name](in_channels, out_channels, kernel_size, stride, padding)
 
-    def detect_architecture(self, network, input_tensor, secondary_input_tensor=None):
-        """Detect the architecture of a neural network.
+    def detect_architecture(self, network, input_tensor):
+        """Determine the architecture of a neural network.
 
         :param network: Neural network whose architecture is being detected
         :type network: nn.Module
-        :param input_tensor: Tensor used to perform forward pass to detect layers
+        :param input_tensor: Tensor that will be passed into the network
         :type input_tensor: torch.Tensor
-        :param secondary_input_tensor: Second tensor used to perform forward pass if forward
-        method of neural network takes two tensors as arguments, defaults to None
-        :type secondary_input_tensor: torch.Tensor, optional
         """
         in_features_list = []
         out_features_list = []
@@ -223,6 +205,7 @@ class MakeEvolvable(nn.Module):
         layer_indices = {"cnn":{},
                          "mlp":{}}
 
+        ## STORE THE LAYER INDEX OF THE DIFFERENT LAYERS!!!
         def register_hooks(module):
             def forward_hook(module, input, output):
 
@@ -236,7 +219,6 @@ class MakeEvolvable(nn.Module):
                     kernel_size_list.append(module.kernel_size)
                     stride_size_list.append(module.stride)
                     padding_list.append(module.padding)
-
                 # Linear layer detection
                 elif isinstance(module, nn.Linear):
                     self.lin_counter += 1
@@ -244,8 +226,8 @@ class MakeEvolvable(nn.Module):
                     out_features_list.append(module.out_features)
 
                 # Normalization layer detection
-                elif isinstance(module, (nn.BatchNorm2d, nn.BatchNorm3d,
-                                         nn.InstanceNorm2d, nn.InstanceNorm3d,
+                elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
+                                         nn.InstanceNorm1d, nn.InstanceNorm2d, nn.InstanceNorm3d,
                                          nn.LayerNorm)):
                     if len(output.shape) <= 2:
                         self.mlp_norm = str(module.__class__.__name__)
@@ -259,8 +241,14 @@ class MakeEvolvable(nn.Module):
                         layer_indices["cnn"]["cnn_norm"].append(self.conv_counter)
 
                 # Pooling layer detection
-                elif isinstance(module, (nn.MaxPool2d, nn.MaxPool3d,
-                                         nn.AvgPool2d, nn.AvgPool3d)):
+                elif isinstance(module, (nn.MaxPool1d, nn.MaxPool2d, nn.MaxPool3d
+                                        ,nn.MaxUnpool1d, nn.MaxUnpool2d, nn.MaxUnpool3d
+                                        ,nn.AvgPool1d, nn.AvgPool2d, nn.AvgPool3d
+                                        ,nn.FractionalMaxPool2d, nn.FractionalMaxPool3d
+                                        ,nn.LPPool1d, nn.LPPool2d, nn.AdaptiveMaxPool1d
+                                        ,nn.AdaptiveMaxPool2d, nn.AdaptiveMaxPool3d
+                                        ,nn.AdaptiveAvgPool1d, nn.AdaptiveAvgPool2d
+                                        ,nn.AdaptiveAvgPool3d)):
                     self.pooling = str(module.__class__.__name__)
                     self.pooling_kernel = module.kernel_size
                     if "cnn_pool" not in layer_indices["cnn"].keys():
@@ -274,9 +262,10 @@ class MakeEvolvable(nn.Module):
 
                 # Detect activation layer (supported currently by AgileRL)
                 elif isinstance(module, (nn.Tanh, nn.Identity, nn.ReLU,
-                                         nn.ELU, nn.Softsign, nn.Sigmoid,
-                                         GumbelSoftmax, nn.Softplus, nn.Softmax,
-                                         nn.LeakyReLU, nn.PReLU, nn.GELU)):
+                                        nn.ELU, nn.Softsign, nn.Sigmoid,
+                                        GumbelSoftmax, nn.Softplus, nn.Softmax,
+                                        nn.LeakyReLU, nn.PReLU, nn.GELU)):
+                    # Catch activation functions
                     if len(output.shape) <= 2:
                         mlp_activations.append(str(module.__class__.__name__))
                     else:
@@ -284,8 +273,6 @@ class MakeEvolvable(nn.Module):
                         if "cnn_act" not in layer_indices["cnn"].keys():
                             layer_indices["cnn"]["cnn_act"] = []
                         layer_indices["cnn"]["cnn_act"].append(self.conv_counter)
-                else:
-                    raise Exception(f"{module} not currently supported, use an alternative layer.")
 
             if not isinstance(module, nn.Sequential) and not isinstance(module, nn.ModuleList)  \
                 and not isinstance(module, type(network)):
@@ -296,16 +283,12 @@ class MakeEvolvable(nn.Module):
 
         # Forward pass to collect network data neccessary to make network evolvable
         with torch.no_grad():
-            if secondary_input_tensor is None:
-                network(input_tensor) 
-            else:
-                network(input_tensor, secondary_input_tensor)
+            network(input_tensor)
 
         # Remove hooks
         for hook in hooks:
             hook.remove()
 
-        # Save neural network information as attribtues
         self.num_inputs = in_features_list[0]
         self.num_outputs = out_features_list[-1]
         self.hidden_size = in_features_list[1:]
@@ -322,44 +305,33 @@ class MakeEvolvable(nn.Module):
         else:
             self.arch = "mlp"
 
-        # Reset the layer counters
+        # print(network_information)
+
         self.conv_counter = -1
         self.lin_counter = -1
 
     def create_mlp(self, input_size, output_size, hidden_size, name):
-        """Creates and returns multi-layer perceptron.
-        
-        :param input_size: Input dimensions to first MLP layer
-        :type input_size: int
-        :param output_size: Output dimensions from last MLP layer
-        :type output_size: int
-        :param hidden_size: Hidden layer sizes
-        :type hidden_size: list[int]
-        :param name: Layer name
-        :type name: str
-        """
+        """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
         net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
-        if self.init_layers:
-            net_dict[f"{name}_linear_layer_0"] = self.layer_init(net_dict[f"{name}_linear_layer_0"])
         if self.mlp_norm is not None:
             net_dict[f"{name}_layer_norm_0"] = self.get_normalization(self.mlp_norm, hidden_size[0])
         net_dict[f"{name}_activation_0"] = self.get_activation(self.mlp_activation)
 
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
+                net_dict[f"{name}linear_layer_{str(l_no)}"] = nn.Linear(
                     hidden_size[l_no - 1], hidden_size[l_no]
                 )
                 if self.init_layers:
-                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = self.layer_init(
+                    net_dict[f"{name}linear_layer_{str(l_no)}"] = self.layer_init(
                         net_dict[f"{name}linear_layer_{str(l_no)}"]
                 )
-                net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                net_dict[f"activation_{str(l_no)}"] = self.get_activation(
                     self.mlp_activation
                 )
                 if (self.mlp_norm is not None) and (l_no in self.layer_indices["mlp"]["mlp_norm"]):
-                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = self.get_normalization(
+                    net_dict[f"layer_norm_{str(l_no)}"] = self.get_normalization(
                         self.mlp_norm,
                         hidden_size[l_no]
                 )
@@ -367,32 +339,61 @@ class MakeEvolvable(nn.Module):
         if self.init_layers:
             output_layer = self.layer_init(output_layer)
 
+        #### Do we need this with this class??
         if self.output_vanish:
             output_layer.weight.data.mul_(0.1)
             output_layer.bias.data.mul_(0.1)
         
         net_dict[f"{name}_linear_layer_output"] = output_layer
         if self.mlp_output_activation is not None:
-            net_dict[f"{name}_activation_output"] = self.get_activation(self.mlp_output_activation)
+            net_dict["activation_output"] = self.get_activation(self.mlp_output_activation)
+
+        return nn.Sequential(net_dict)
+    
+    
+    def create_cnn_original(self, input_size, channel_size, kernel_size, stride_size, padding, name):
+        """Creates and returns convolutional neural network."""
+        net_dict = OrderedDict()
+        net_dict[f"{name}_conv_layer_0"] = nn.Conv2d(
+            in_channels=input_size,
+            out_channels=channel_size[0],
+            kernel_size=kernel_size[0],
+            stride=stride_size[0],
+            padding=padding[0]
+        )
+        if (self.cnn_norm is not None) and (0 in self.layer_indices["cnn"]["cnn_norm"]):
+            net_dict[f"{name}_layer_norm_0"] = self.get_normalization(
+                self.cnn_norm,
+                channel_size[0])
+            net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
+
+        if len(channel_size) > 1:
+            for l_no in range(1, len(channel_size)):
+                net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv2d(
+                    in_channels=channel_size[l_no - 1],
+                    out_channels=channel_size[l_no],
+                    kernel_size=kernel_size[l_no],
+                    stride=stride_size[l_no],
+                    padding=padding[l_no]
+                )
+                if (self.cnn_norm is not None) and (l_no in self.layer_indices["cnn"]["cnn_norm"]):
+                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = self.get_normalization(
+                        self.cnn_norm,
+                        channel_size[l_no])
+                
+                if l_no in self.layer_indices["cnn"]["cnn_act"]:
+                    net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                        self.cnn_activation
+                    )
+                if (self.pooling is not None) and (l_no in self.layer_indices["cnn"]["cnn_pool"]):
+                    net_dict[f"{name}_pooling_{str(l_no)}"] = self.get_pooling(
+                        self.pooling,
+                        self.pooling_kernel)
 
         return nn.Sequential(net_dict)
     
     def create_cnn(self, input_size, channel_size, kernel_size, stride_size, padding, name):
-        """Creates and returns convolutional neural network.
-        
-        :param input_size: Channel size of first layer
-        :type input_size: int
-        :param channel_size: Output channel sizes for each layer
-        :type channel_size: List[int]
-        :param kernel_size: Kernel sizes
-        :type kernel_size: List[int] or List[Tuple[int]]
-        :param stride_size: Stride sizes 
-        :type stride_size: List[int] or List[Tuple[int]]
-        :param padding: Convolutional layer padding
-        :type padding: List[int] or List[Tuple[int]]
-        :param name: Layer name
-        :type name: str
-        """
+        """Creates and returns convolutional neural network."""
         net_dict = OrderedDict()
         net_dict[f"{name}_conv_layer_0"] = self.get_conv_layer(
             self.conv_layer_type,
@@ -406,13 +407,7 @@ class MakeEvolvable(nn.Module):
             net_dict[f"{name}_layer_norm_0"] = self.get_normalization(
                 self.cnn_norm,
                 channel_size[0])
-        if 0 in self.layer_indices["cnn"]["cnn_act"]:
             net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
-        if (self.pooling is not None) and (0 in self.layer_indices["cnn"]["cnn_pool"]):
-                    net_dict[f"{name}_pooling_0"] = self.get_pooling(
-                        self.pooling,
-                        self.pooling_kernel
-                )
 
         if len(channel_size) > 1:
             for l_no in range(1, len(channel_size)):
@@ -427,25 +422,24 @@ class MakeEvolvable(nn.Module):
                 if (self.cnn_norm is not None) and (l_no in self.layer_indices["cnn"]["cnn_norm"]):
                     net_dict[f"{name}_layer_norm_{str(l_no)}"] = self.get_normalization(
                         self.cnn_norm,
-                        channel_size[l_no]
-                )
+                        channel_size[l_no])
+                
                 if l_no in self.layer_indices["cnn"]["cnn_act"]:
                     net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
                         self.cnn_activation
-                )
+                    )
                 if (self.pooling is not None) and (l_no in self.layer_indices["cnn"]["cnn_pool"]):
                     net_dict[f"{name}_pooling_{str(l_no)}"] = self.get_pooling(
                         self.pooling,
-                        self.pooling_kernel
-                )
+                        self.pooling_kernel)
 
         return nn.Sequential(net_dict)
     
     def create_nets(self):
-        """Creates and returns the feature and value net."""
+        """Creates and returns neural networks."""
 
         # Check if any CNN layers otherwise return just a mlp
-        if self.layer_indices["cnn"]:
+        if len(self.layer_indices["cnn"]) != 0:
 
             feature_net = self.create_cnn(
                 self.in_channels,
@@ -455,12 +449,12 @@ class MakeEvolvable(nn.Module):
                 self.padding,
                 name="feature",
             )
+            # print("FEATURE NET")
+            # feature_net = feature_net.to(self.device)
+            # print(feature_net(self.input_tensor).shape)
             
             input_size = (feature_net(torch.zeros(*self.input_tensor.shape))
                           ).to(self.device).view(1,-1).size(1)
-            
-            if self.secondary_input_tensor is not None:
-                input_size += self.extra_critic_dims
         else:
             feature_net = None
             input_size = self.num_inputs
@@ -473,19 +467,117 @@ class MakeEvolvable(nn.Module):
         )
         
         if self.accelerator is None:
-                feature_net = feature_net.to(self.device) if feature_net is not None else feature_net
-                value_net = value_net.to(self.device)
+                self.feature_net = feature_net.to(self.device) if feature_net is not None else feature_net
+                self.value_net = value_net.to(self.device)
+        
+        if len(self.layer_indices["cnn"]) != 0:
+            net = nn.Sequential(
+                feature_net,
+                nn.Flatten(),
+                value_net
+            )
+        else:
+            net = value_net
 
-        return feature_net, value_net
+        return feature_net, value_net, net 
     
+    def get_model_dict(self):
+        """Returns dictionary with model information and weights."""
+        model_dict = self.init_dict
+        model_dict.update(
+            {"stored_values": self.extract_parameters(without_layer_norm=False)}
+        )
+        return model_dict
+    
+    def count_parameters(self, without_layer_norm=False):
+        """Returns number of parameters in neural network.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                count += param.data.cpu().numpy().flatten().shape[0]
+        return count
+    
+    def extract_grad(self, without_layer_norm=False):
+        """Returns current pytorch gradient in same order as genome's flattened
+        parameter vector.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        tot_size = self.count_parameters(without_layer_norm)
+        pvec = np.zeros(tot_size, np.float32)
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                sz = param.grad.data.cpu().numpy().flatten().shape[0]
+                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
+                count += sz
+        return pvec.copy()
+    
+    def extract_parameters(self, without_layer_norm=False):
+        """Returns current flattened neural network weights.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        tot_size = self.count_parameters(without_layer_norm)
+        pvec = np.zeros(tot_size, np.float32)
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                sz = param.data.cpu().detach().numpy().flatten().shape[0]
+                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
+                count += sz
+        return copy.deepcopy(pvec)
+    
+    def inject_parameters(self, pvec, without_layer_norm=False):
+        """Injects a flat vector of neural network parameters into the model's current
+        neural network weights.
+
+        :param pvec: Network weights
+        :type pvec: np.array()
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        count = 0
+
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                sz = param.data.cpu().numpy().flatten().shape[0]
+                raw = pvec[count : count + sz]
+                reshaped = raw.reshape(param.data.cpu().numpy().shape)
+                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
+                    torch.FloatTensor
+                )
+                count += sz
+        return pvec
+    
+    # #### Is this function even relevant?
+    # # @property
+    # # def short_dict(self):
+    # #     """Returns shortened version of model information in dictionary."""
+    # #     short_dict = {
+    # #         "channel_size": self.channel_size,
+    # #         "kernel_size": self.kernel_size,
+    # #         "stride_size": self.stride_size,
+    # #         "hidden_size": self.hidden_size,
+    # #         "num_atoms": self.num_atoms,
+    # #         "mlp_activation": self.mlp_activation,
+    # #         "cnn_activation": self.cnn_activation,
+    # #         "layer_norm": self.layer_norm,
+    # #     }
+    # #     return short_dict
+
     
     @property
     def init_dict(self):
-        """Returns model information in dictionary."""
         init_dict = {
                 "network": None,
                 "input_tensor": self.input_tensor,
-                "secondary_input_tensor": self.secondary_input_tensor,
                 "num_inputs": self.num_inputs,
                 "num_outputs": self.num_outputs,
                 "hidden_size": self.hidden_size,
@@ -504,18 +596,13 @@ class MakeEvolvable(nn.Module):
                 "pooling": self.pooling,
                 "pooling_kernel": self.pooling_kernel,
                 "cnn_activation": self.cnn_activation,
-                "conv_layer_type": self.conv_layer_type,
-                "extra_critic_dims": self.extra_critic_dims,
-                "output_vanish": self.output_vanish,
-                "init_layers": self.init_layers,
-                "has_conv_layer": self.has_conv_layers,
-                "arch": self.arch
+                "cnn_layer_type": self.conv_layer_type
             }  
         
         return init_dict
      
     def add_mlp_layer(self):
-        """Adds a hidden layer to value network."""
+        """Adds a hidden layer to Multi-layer Perceptron."""
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
 
@@ -524,15 +611,14 @@ class MakeEvolvable(nn.Module):
             self.add_mlp_node()
 
     def remove_mlp_layer(self):
-        """Removes a hidden layer from value network."""
         if len(self.hidden_size) > 1:  # HARD LIMIT
-            self.hidden_size = self.hidden_size[:-1]
+            self.hidden_size = self.hidden_size[:1]
             self.recreate_nets(shrink_params=True)
         else:
             self.add_mlp_node()
 
     def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
-        """Adds nodes to hidden layer of value network.
+        """Adds nodes to hidden layer of Multi-layer Perceptron.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
         :type hidden_layer: int, optional
@@ -544,13 +630,12 @@ class MakeEvolvable(nn.Module):
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
         if numb_new_nodes is None:
-            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+            numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
+        if self.hidden_size[hidden_layer] + numb_new_nodes <= 1024:  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
 
             self.recreate_nets()
-
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
     
     def remove_mlp_node(self, hidden_layer=None, numb_new_nodes=None): #
@@ -570,17 +655,16 @@ class MakeEvolvable(nn.Module):
 
         if self.hidden_size[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
             self.hidden_size[hidden_layer] -= numb_new_nodes
-            self.recreate_nets(shrink_params=True)
+            new_net = self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     def add_cnn_layer(self):
         """Adds a hidden layer to Convolutional Neural Network."""
-        if self.conv_layer_type == "Conv3d":
+        if self.conv_layer_type == "conv3d":
             if len(self.channel_size) < 6:  # HARD LIMIT
                 self.channel_size += [self.channel_size[-1]]
                 self.kernel_size += [(1, 3, 3)]
-                self.padding += [self.padding[-1]]
                 stride_size_list = [
                     [4],
                     [4, 2],
@@ -590,11 +674,6 @@ class MakeEvolvable(nn.Module):
                     [2, 1, 2, 1, 2, 1],
                 ]
                 self.stride_size = stride_size_list[len(self.channel_size) - 1]
-
-                # Add in an activation layer after the cnn layer
-                if "cnn_act" not in self.layer_indices["cnn"].keys():
-                    self.layer_indices["cnn"]["cnn_act"] = []
-                self.layer_indices["cnn"]["cnn_act"].append(len(self.channel_size) - 1)
 
                 self.recreate_nets()
             else:
@@ -620,6 +699,20 @@ class MakeEvolvable(nn.Module):
                     self.layer_indices["cnn"]["cnn_act"] = []
                 self.layer_indices["cnn"]["cnn_act"].append(len(self.channel_size) - 1)
 
+                # Generate a random number to decide on 
+                rand_num = self.rng.uniform(0, 1)
+
+                if rand_num < 0.33:
+                    if "cnn_pool" not in self.layer_indices["cnn"].keys():
+                        self.layer_indices["cnn"]["cnn_pool"] = []
+                    self.layer_indices["cnn"]["cnn_pool"].append(len(self.channel_size) - 1)
+                elif 0.33 <= rand_num <= 0.66:
+                    if "cnn_norm" not in self.layer_indices["cnn"].keys():
+                        self.layer_indices["cnn"]["cnn_norm"] = []
+                    self.layer_indices["cnn"]["cnn_norm"].append(len(self.channel_size) - 1)
+                else:
+                    pass
+
                 self.recreate_nets()
             else:
                 self.add_cnn_channel()
@@ -633,26 +726,24 @@ class MakeEvolvable(nn.Module):
                     0
                 ]
                 kernel_size_value = np.random.choice([3, 4, 5, 7])
-                if self.secondary_input_tensor is not None:
+                if self.critic:
                     self.kernel_size[hidden_layer] = tuple(
                         min(kernel_size_value, self.n_agents - 1)
                         if idx == 0
                         else kernel_size_value
                         for idx in range(3)
                     )
-                else:                    
+                else:
                     self.kernel_size[hidden_layer] = tuple(
                         1 if idx == 0 else kernel_size_value for idx in range(3)
                     )
-                print(self.kernel_size)
                 self.recreate_nets()
             else:
                 self.add_cnn_layer()
         else:
             if len(self.channel_size) > 1:
                 hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
-                kernel_size_value = np.random.choice([3, 4, 5, 7])
-                self.kernel_size[hidden_layer] = kernel_size_value, kernel_size_value
+                self.kernel_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
 
                 self.recreate_nets()
             else:
@@ -678,15 +769,11 @@ class MakeEvolvable(nn.Module):
 
             self.recreate_nets()
 
-        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
+    #     return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
     def recreate_nets(self, shrink_params=False):
-        """Recreates neural networks.
-        
-        :param shrink_params: Boolean flag to shrink parameters
-        :type shrink_params: bool
-        """
-        new_feature_net, new_value_net = self.create_nets()
+        """Recreates neural networks."""
+        new_feature_net, new_value_net, new_net = self.create_nets()
         if self.feature_net is not None:
             new_feature_net = self.preserve_parameters(
                 old_net=self.feature_net, new_net=new_feature_net
@@ -699,18 +786,21 @@ class MakeEvolvable(nn.Module):
             new_value_net = self.preserve_parameters(
                 old_net=self.value_net, new_net=new_value_net
             )
-
-        self.feature_net, self.value_net = (
+        new_net = self.preserve_parameters(
+            old_net=self.net, new_net=new_net
+        )
+        self.feature_net, self.value_net, self.net = (
             new_feature_net,
-            new_value_net
+            new_value_net,
+            new_net,
         )
 
-    def clone(self): 
+    def clone(self): #
         """Returns clone of neural net with identical parameters."""
-        clone = MakeEvolvable(**copy.deepcopy(self.init_dict))
+        clone = MakeEvolvableOld(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
-
+    
     def preserve_parameters(self, old_net, new_net):
         """Returns new neural network with copied parameters from old network.
 

@@ -34,8 +34,8 @@ class MakeEvolvable(nn.Module):
                  network, 
                  input_tensor, 
                  secondary_input_tensor=None,
-                 output_vanish=False,
-                 init_layers=False,
+                 output_vanish=True,
+                 init_layers=True,
                  device="cpu", 
                  accelerator=None,
                  extra_critic_dims=None,
@@ -67,7 +67,7 @@ class MakeEvolvable(nn.Module):
 
 
         # If first instance, network used to instantiate, upon cloning, init_dict used instead
-        if not kwargs:
+        if network is None:
             self.detect_architecture(network.to(self.device), self.input_tensor, self.secondary_input_tensor)
         else:
             for key, value in kwargs.items():
@@ -89,7 +89,6 @@ class MakeEvolvable(nn.Module):
         if self.accelerator is None:
             x = x.to(self.device)
 
-        # Check if there is a cnn
         if self.layer_indices["cnn"]:
             x = self.feature_net(x)
             x = x.reshape(x.size(0), -1)
@@ -106,6 +105,36 @@ class MakeEvolvable(nn.Module):
         x = self.value_net(x)
 
         return x
+
+    # def forward(self, x, xc=None): 
+    #     """Returns output of neural network.
+
+    #     :param x: Neural network input
+    #     :type x: torch.Tensor() or np.array
+    #     :param xc: Actions to be evaluated by critic, defaults to None
+    #     :type xc: torch.Tensor() or np.array, optional
+    #     """
+    #     if not isinstance(x, torch.Tensor):
+    #         x = torch.FloatTensor(np.array(x))
+
+    #     if self.accelerator is None:
+    #         x = x.to(self.device)
+
+    #     x = self.feature_net(x)
+    #     x = x.reshape(x.size(0), -1)
+    #     # Ensure dtype is float32   
+    #     if x.dtype != torch.float32:    
+    #         x = x.type(torch.float32)
+
+    #     # Concatenate actions if passed to network as a separate tensor
+    #     if xc is not None:
+    #         if self.accelerator is None:
+    #             xc = xc.to(self.device)
+    #         x = torch.cat([x, xc], dim=1) 
+
+    #     x = self.value_net(x)
+
+    #     return x
     
     def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
         """Initialize the weights of a neural network layer using orthogonal initialization and set the biases to a constant value.
@@ -274,9 +303,9 @@ class MakeEvolvable(nn.Module):
 
                 # Detect activation layer (supported currently by AgileRL)
                 elif isinstance(module, (nn.Tanh, nn.Identity, nn.ReLU,
-                                         nn.ELU, nn.Softsign, nn.Sigmoid,
-                                         GumbelSoftmax, nn.Softplus, nn.Softmax,
-                                         nn.LeakyReLU, nn.PReLU, nn.GELU)):
+                                        nn.ELU, nn.Softsign, nn.Sigmoid,
+                                        GumbelSoftmax, nn.Softplus, nn.Softmax,
+                                        nn.LeakyReLU, nn.PReLU, nn.GELU)):
                     if len(output.shape) <= 2:
                         mlp_activations.append(str(module.__class__.__name__))
                     else:
@@ -304,6 +333,7 @@ class MakeEvolvable(nn.Module):
         # Remove hooks
         for hook in hooks:
             hook.remove()
+
 
         # Save neural network information as attribtues
         self.num_inputs = in_features_list[0]
@@ -348,18 +378,18 @@ class MakeEvolvable(nn.Module):
 
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
+                net_dict[f"{name}linear_layer_{str(l_no)}"] = nn.Linear(
                     hidden_size[l_no - 1], hidden_size[l_no]
                 )
                 if self.init_layers:
-                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = self.layer_init(
+                    net_dict[f"{name}linear_layer_{str(l_no)}"] = self.layer_init(
                         net_dict[f"{name}linear_layer_{str(l_no)}"]
                 )
-                net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
+                net_dict[f"activation_{str(l_no)}"] = self.get_activation(
                     self.mlp_activation
                 )
                 if (self.mlp_norm is not None) and (l_no in self.layer_indices["mlp"]["mlp_norm"]):
-                    net_dict[f"{name}_layer_norm_{str(l_no)}"] = self.get_normalization(
+                    net_dict[f"layer_norm_{str(l_no)}"] = self.get_normalization(
                         self.mlp_norm,
                         hidden_size[l_no]
                 )
@@ -373,7 +403,7 @@ class MakeEvolvable(nn.Module):
         
         net_dict[f"{name}_linear_layer_output"] = output_layer
         if self.mlp_output_activation is not None:
-            net_dict[f"{name}_activation_output"] = self.get_activation(self.mlp_output_activation)
+            net_dict["activation_output"] = self.get_activation(self.mlp_output_activation)
 
         return nn.Sequential(net_dict)
     
@@ -462,7 +492,7 @@ class MakeEvolvable(nn.Module):
             if self.secondary_input_tensor is not None:
                 input_size += self.extra_critic_dims
         else:
-            feature_net = None
+            feature_net = nn.Identity()
             input_size = self.num_inputs
 
         value_net = self.create_mlp(
@@ -473,11 +503,22 @@ class MakeEvolvable(nn.Module):
         )
         
         if self.accelerator is None:
-                feature_net = feature_net.to(self.device) if feature_net is not None else feature_net
+                feature_net = feature_net.to(self.device) if feature_net is not None else None
                 value_net = value_net.to(self.device)
 
         return feature_net, value_net
     
+    def count_parameters(self, without_layer_norm=False):
+        """Returns number of parameters in neural network.
+
+        :param without_layer_norm: Exclude normalization layers, defaults to False
+        :type without_layer_norm: bool, optional
+        """
+        count = 0
+        for name, param in self.named_parameters():
+            if not without_layer_norm or "layer_norm" not in name:
+                count += param.data.cpu().numpy().flatten().shape[0]
+        return count
     
     @property
     def init_dict(self):
@@ -508,14 +549,13 @@ class MakeEvolvable(nn.Module):
                 "extra_critic_dims": self.extra_critic_dims,
                 "output_vanish": self.output_vanish,
                 "init_layers": self.init_layers,
-                "has_conv_layer": self.has_conv_layers,
-                "arch": self.arch
+                "has_conv_layer": self.has_conv_layers
             }  
         
         return init_dict
      
     def add_mlp_layer(self):
-        """Adds a hidden layer to value network."""
+        """Adds a hidden layer to Multi-layer Perceptron."""
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
 
@@ -524,15 +564,15 @@ class MakeEvolvable(nn.Module):
             self.add_mlp_node()
 
     def remove_mlp_layer(self):
-        """Removes a hidden layer from value network."""
+        """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > 1:  # HARD LIMIT
-            self.hidden_size = self.hidden_size[:-1]
+            self.hidden_size = self.hidden_size[:1]
             self.recreate_nets(shrink_params=True)
         else:
             self.add_mlp_node()
 
     def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
-        """Adds nodes to hidden layer of value network.
+        """Adds nodes to hidden layer of Multi-layer Perceptron.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
         :type hidden_layer: int, optional
@@ -651,8 +691,7 @@ class MakeEvolvable(nn.Module):
         else:
             if len(self.channel_size) > 1:
                 hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
-                kernel_size_value = np.random.choice([3, 4, 5, 7])
-                self.kernel_size[hidden_layer] = kernel_size_value, kernel_size_value
+                self.kernel_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
 
                 self.recreate_nets()
             else:
@@ -687,8 +726,7 @@ class MakeEvolvable(nn.Module):
         :type shrink_params: bool
         """
         new_feature_net, new_value_net = self.create_nets()
-        if self.feature_net is not None:
-            new_feature_net = self.preserve_parameters(
+        new_feature_net = self.preserve_parameters(
                 old_net=self.feature_net, new_net=new_feature_net
             )
         if shrink_params:
@@ -702,15 +740,19 @@ class MakeEvolvable(nn.Module):
 
         self.feature_net, self.value_net = (
             new_feature_net,
-            new_value_net
+            new_value_net,
         )
+
 
     def clone(self): 
         """Returns clone of neural net with identical parameters."""
         clone = MakeEvolvable(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
+        #clone.load_state_dict(self.state_dict())
+        clone.value_net.load_state_dict(self.value_net.state_dict())
+        # if self.feature_net is not None:
+        clone.feature_net.load_state_dict(self.feature_net.state_dict())
         return clone
-
+    
     def preserve_parameters(self, old_net, new_net):
         """Returns new neural network with copied parameters from old network.
 

@@ -86,7 +86,7 @@ def train(
             if accelerator.is_main_process:
                 wandb.init(
                     # set the wandb project where this run will be logged
-                    project="EvoWrappers",
+                    project="AgileRL",
                     name="{}-EvoHPO-{}-{}".format(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
@@ -112,7 +112,7 @@ def train(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="EvoWrappers",
+                project="AgileRL",
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),

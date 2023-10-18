@@ -371,8 +371,8 @@ class EvolvableCNN(nn.Module):
             advantage_net = None
             if self.accelerator is None:
                 (
-                    self.feature_net,
-                    self.value_net,
+                    feature_net,
+                    value_net,
                 ) = feature_net.to(
                     self.device
                 ), value_net.to(self.device)

@@ -9,6 +9,7 @@ import torch
 import os
 import sys
 from pettingzoo.mpe import simple_speaker_listener_v4
+import inspect
 
 sys.path.append('../')
 
@@ -23,18 +24,21 @@ from agilerl.networks.custom_activation import GumbelSoftmax
 from agilerl.training.train import train
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
-
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 from pettingzoo.atari import pong_v3
 
 from networks import ClipReward,  BasicNetCritic,  \
-SimpleCNNCritic, MultiCNNActor, MultiCNNCritic
+SimpleCNNCritic, MultiCNNActor, MultiCNNCritic, BasicNetActor, SoftmaxActor
+
+from agilerl.algorithms.dqn import DQN
+from agilerl.algorithms.ddpg import DDPG
 
 import torch.nn as nn
 
-class BasicNetActor(nn.Module):
+class BasicNetActor12(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
-        super(BasicNetActor, self).__init__()
+        super(BasicNetActor12, self).__init__()
         layers = []
 
         # Add input layer with LayerNorm
@@ -110,20 +114,131 @@ class SimpleCNNActor(nn.Module):
         x = self.softmax(x)
         return x
 
+import numpy as np
+
+def are_networks_cloning(net1, net2):
+    """
+    Check if two neural networks are cloning correctly by comparing their parameters.
+
+    Args:
+    net1 (nn.Module): The first neural network.
+    net2 (nn.Module): The second neural network to compare with net1.
+
+    Returns:
+    bool: True if the networks are cloning correctly, False otherwise.
+    """
+
+    # Get the parameters of the two networks
+    params_net1 = net1.state_dict()
+    params_net2 = net2.state_dict()
+
+    # Check if the keys (layer names) are the same in both networks
+    if set(params_net1.keys()) != set(params_net2.keys()):
+        return False
+
+    # Compare the parameters of each layer
+    for key in params_net1.keys():
+        if not np.array_equal(params_net1[key].cpu().numpy(), params_net2[key].cpu().numpy()):
+            return False
+
+    # If all checks pass, the networks are cloning correctly
+    return True
+
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-network_actor = BasicNetActor(6 ,[64], 4)
+## Instantiate actors and critics
+network_actor = BasicNetActor(6 ,[64, 64], 4)
 actor = MakeEvolvable(network_actor,
                       input_tensor=torch.ones(6),
                       device=device)
 
-network_cnn_actor = SimpleCNNActor(4)
-cnn_actor = MakeEvolvable(network_cnn_actor,
-                          input_tensor=torch.ones(4, 84, 84).unsqueeze(0),
-                          device=device)
-critic = None
+network_critic = BasicNetCritic(4,[64, 64], 1)
+critic = MakeEvolvable(network_critic, torch.ones(4),device=device)
 
-print(cnn_actor)
-print(actor)
+## Instantiate agents
+dqn = DQN(6, 4, False, net_config=None, actor_network=actor)
+dqn_clone = dqn.clone()
+ddpg = DDPG(6, 4, False, net_config=None, actor_network=actor, critic_network=critic)
+
+
+## Create clones
+dqn_clone = dqn.clone()
+ddpg_clone = ddpg.clone()
+ddpg_clone_2 = ddpg_clone.clone()
+
+
+new_actor = actor.clone()
+value_net = dqn.actor.value_net
+value_net_dict = dict(dqn.actor.value_net.named_parameters())
+dqn.actor.hidden_size = dqn.actor.hidden_size[:-1]
+dqn.actor.recreate_nets(shrink_params=True)
+new_value_net = dqn.actor.value_net
+
+for key, param in value_net.named_parameters():
+        print(key, param.shape)
+
+for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+             print("-"*50, key, "-"*50)
+             print("new param", param.shape)
+             print("old_param", value_net_dict[key].shape)
+
+# network = EvolvableMLP(num_inputs=6,
+#                            num_outputs=4,
+#                            hidden_size=[32, 32],
+#                            device=device)
+    
+# value_net = network.net
+# print(value_net)
+# value_net_dict = dict(value_net.named_parameters())
+
+# network.add_mlp_layer()
+
+# new_value_net = network.net
+# print(new_value_net)
+# for key, param in new_value_net.named_parameters():
+#     if key in value_net_dict.keys():
+#         print(torch.equal(param, value_net_dict[key]))
+        
+
+#
+# for layer_1, layer_2 in zip(network_actor.children(), actor.children()):
+#     if isinstance(layer_1, nn.Sequential):
+#         for layer_1_ in layer_1:
+#             print(layer_1_)
+
+
+# def layer_unpacking(network):
+#     layer_list = []
+#     for layer in network.children():
+#         if isinstance(layer, nn.Sequential):
+#             layer_unpacking(layer)
+#         else:
+#             layer_list.append(layer)
+    
+#     yield layer
+
+
+# def unpack_network(model):
+#     layer_list = []
+#     for layer in model.children():
+
+#         if isinstance(layer, nn.Sequential):
+#             # If it's an nn.Sequential, recursively unpack its children
+#             layer_list.extend(unpack_network(layer))
+#         else:
+#             if isinstance(layer, nn.Flatten):
+#                 pass
+#             else:
+#                 layer_list.append(layer)
+
+#     return layer_list
+
+# print(unpack_network(actor))
+# print(unpack_network(network_actor))
+
+# for x, y in zip(unpack_network(actor), unpack_network(network_actor)):
+#     print(str(x)==str(y))
+

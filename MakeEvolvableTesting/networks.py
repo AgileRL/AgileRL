@@ -27,7 +27,31 @@ class BasicNetActor(nn.Module):
 
         # Add output layer with a sigmoid activation
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
-        #layers.append(nn.Softmax())  # Sigmoid activation
+        layers.append(nn.Tanh())  # Sigmoid activation
+
+        # Combine all layers into a sequential model
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.model(x)
+    
+class SoftmaxActor(nn.Module):
+    def __init__(self, input_size, hidden_sizes, output_size):
+        super(SoftmaxActor, self).__init__()
+        layers = []
+
+        # Add input layer
+        layers.append(nn.Linear(input_size, hidden_sizes[0]))
+        layers.append(nn.ReLU())  # Activation function
+
+        # Add hidden layers
+        for i in range(len(hidden_sizes) - 1):
+            layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
+            layers.append(nn.ReLU())  # Activation function
+
+        # Add output layer with a sigmoid activation
+        layers.append(nn.Linear(hidden_sizes[-1], output_size))
+        layers.append(nn.Softmax())  # Output activation
 
         # Combine all layers into a sequential model
         self.model = nn.Sequential(*layers)
