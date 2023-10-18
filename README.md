@@ -357,7 +357,7 @@ env.close()
 ### On-policy reinforcement learning
 While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences collected using a different or previous policy, we have still chosen to include an efficient, evolvable PPO implementation in AgileRL. This algorithm can be used in a variety of settings, with both discrete and continuous actions, and is widely popular across domains including robotics, games, finance, and RLHF.
 
-The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer.
+The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer. It also requires some different hyperparameters, shown below in the custom loop.
 
 The easiest way to train a population of agents using PPO is to use our online training function:
 
@@ -396,11 +396,19 @@ NET_CONFIG = {
 }
 
 INIT_HP = {
-    "POPULATION_SIZE": 4,  # Population size
-    "DOUBLE": True,  # Use double Q-learning
+    "POPULATION_SIZE": 6,  # Population size
+    "DISCRETE_ACTIONS": True,  # Discrete action space
     "BATCH_SIZE": 128,  # Batch size
     "LR": 1e-3,  # Learning rate
     "GAMMA": 0.99,  # Discount factor
+    "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
+    "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+    "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
+    "ENT_COEF": 0.01,  # Entropy coefficient
+    "VF_COEF": 0.5,  # Value function coefficient
+    "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+    "TARGET_KL": None, # Target KL divergence threshold
+    "UPDATE_EPOCHS": 4,  # Number of policy update epochs
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     "CHANNELS_LAST": False,
 }

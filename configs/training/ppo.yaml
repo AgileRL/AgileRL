@@ -19,7 +19,6 @@ INIT_HP:
     MAX_GRAD_NORM: 0.5         # Maximum norm for gradient clipping
     TARGET_KL:                 # Target KL divergence threshold
     UPDATE_EPOCHS: 4           # Number of policy update epochs
-    MEMORY_SIZE: 100000        # Max memory buffer size
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
