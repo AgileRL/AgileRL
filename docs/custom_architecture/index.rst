@@ -167,6 +167,7 @@ The following table highlights which AgileRL algorithms are compatible with cust
      - **MADDPG**
      - **MATD3**
      - **ILQL**
+     - **Rainbow-DQN**
    * - ✔️
      - ✔️
      - ✔️
@@ -174,5 +175,6 @@ The following table highlights which AgileRL algorithms are compatible with cust
      - ✔️
      - ✔️
      - ✔️
+     - ❌
      - ❌
 

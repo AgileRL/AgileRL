@@ -4,14 +4,15 @@ import nntplib
 import torch
 import pytest
 import torch.nn as nn
-from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.wrappers.make_evolvable_new import MakeEvolvable
 from agilerl.wrappers.make_evolvable_old import MakeEvolvableOld
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from tests.helper_functions import unpack_network
 
 class TwoArgCNN(nn.Module):
     def __init__(self):
         super(TwoArgCNN, self).__init__()
-
+    
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(in_channels=4, out_channels=16, kernel_size=(1,3,3), stride=4)    # W: 160, H: 210
         self.conv2 = nn.Conv3d(in_channels=16, out_channels=32, kernel_size=(1,3,3), stride=2)   # W:
@@ -29,7 +30,6 @@ class TwoArgCNN(nn.Module):
         # Define softmax for classification
         self.softmax = nn.Softmax(dim=1)
         self.tanh = nn.Tanh()
-
 
     def forward(self, x, xc):
         # Forward pass through convolutional layers
@@ -55,7 +55,8 @@ def simple_mlp():
         nn.ReLU(),
         nn.Linear(20, 10),
         nn.ReLU(),
-        nn.Linear(10, 1)
+        nn.Linear(10, 1),
+        nn.Tanh()
     )
     return network
 
@@ -95,29 +96,34 @@ def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 ######### Test instantiation #########
-
 # The class can be instantiated with all the required parameters and no errors occur.
-@pytest.mark.parametrize("network, input_tensor, expected_result", [
-    ('simple_mlp', torch.randn(1, 10), MakeEvolvable),
-    ('simple_cnn', torch.randn(1, 3, 64, 64), MakeEvolvable)
+@pytest.mark.parametrize("network, input_tensor", [
+    ('simple_mlp', torch.randn(1, 10)),
+    ('simple_cnn', torch.randn(1, 3, 64, 64))
 ] )
-def test_instantiation_with_required_parameters(network, input_tensor, expected_result, request):
+def test_instantiation_with_required_parameters(network, input_tensor, request):
     network = request.getfixturevalue(network)
     evolvable_network = MakeEvolvable(network, input_tensor)
-    assert isinstance(evolvable_network, expected_result)
+    assert isinstance(evolvable_network, MakeEvolvable)
+    assert str(unpack_network(evolvable_network)) == str(unpack_network(network))
 
-@pytest.mark.skip
+
 # The class can be instantiated with minimal parameters and default values are assigned correctly.
 def test_instantiation_with_minimal_parameters():
     network = nn.Sequential(
-        nn.Linear(10, 1)
+        nn.Linear(10, 20),
+        nn.Linear(20, 20),
+        nn.ReLU(),
+        nn.Linear(20, 1),
+        nn.ReLU()
     )
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(network, input_tensor)
     assert isinstance(evolvable_network, MakeEvolvable)
+    assert str(unpack_network(evolvable_network)) == str(unpack_network(network)), str(unpack_network(evolvable_network))
+
 
 ######### Test forward #########
-
 @pytest.mark.parametrize("network, input_tensor, secondary_input_tensor, expected_result", [
     ('simple_mlp', torch.randn(1, 10), None, (1,1)),
     ('simple_cnn', torch.randn(1, 3, 64, 64), None, (1, 1)),
@@ -132,7 +138,12 @@ def test_forward_method(network, input_tensor, secondary_input_tensor, expected_
         evolvable_network = MakeEvolvable(network, input_tensor, secondary_input_tensor, device, extra_critic_dims=2)
         actual_output = network.forward(input_tensor, secondary_input_tensor)
     output_shape = actual_output.shape
+    if secondary_input_tensor is not None:
+        print(str(unpack_network(network)))
+        print(str(unpack_network(evolvable_network)))
     assert output_shape == expected_result
+
+
 
 # The forward() method can handle different types of input tensors (e.g., numpy array, torch tensor).
 def test_forward_method_with_different_input_types(simple_mlp):
@@ -144,12 +155,13 @@ def test_forward_method_with_different_input_types(simple_mlp):
     assert isinstance(output1, torch.Tensor)
     assert isinstance(output2, torch.Tensor)
 
+
 # The forward() method can handle different types of normalization layers (e.g., BatchNorm2d, InstanceNorm3d).
 def test_forward_with_different_normalization_layers():
     network = nn.Sequential(
         nn.Linear(10, 20),
+        nn.LayerNorm(20),
         nn.ReLU(),
-        nn.BatchNorm2d(20),
         nn.Linear(20, 10),
         nn.ReLU(),
         nn.Linear(10, 1)
@@ -157,107 +169,146 @@ def test_forward_with_different_normalization_layers():
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(network, input_tensor)
     output = evolvable_network.forward(input_tensor)
-    assert isinstance(output, torch.Tensor)
 
+    print(str(unpack_network(evolvable_network)) )
+    print(str(unpack_network(network)))
+
+    assert isinstance(output, torch.Tensor)
+    assert str(unpack_network(evolvable_network)) == str(unpack_network(network))
 
 ######### Test detect architecture function #########
 
-nn.Sequential(
-        nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),  # Input channels: 3 (for RGB images), Output channels: 16
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2),
-        nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),  # Input channels: 16, Output channels: 32
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2),
-        nn.Flatten(),  # Flatten the 2D feature map to a 1D vector
-        nn.Linear(32 * 16 * 16, 128),  # Fully connected layer with 128 output features
-        nn.ReLU(),
-        nn.Linear(128, 1)  # Output layer with num_classes output features
-    )
 
 # Detects architecture of a neural network with convolutional layers and without normalization layers
-def test_detect_architecture_conv_layers_no_norm(simple_cnn, device):
-    input_tensor = torch.randn(1, 3, 64, 64)
-    make_evolvable = MakeEvolvable(simple_cnn, input_tensor, secondary_input_tensor=None, device=device)
+def test_detect_architecture_mlp_simple(device):
+    net = nn.Sequential(nn.Linear(4,16), nn.ReLU(), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1))
+    evolvable_net = MakeEvolvable(net, torch.randn(1, 4), device=device)
+    assert evolvable_net.mlp_layer_info == {'activation_layers': {0: 'ReLU', 1: 'ReLU'}}
+    assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
 
-    assert make_evolvable.arch == "cnn"
-    assert make_evolvable.in_channels == 3
-    assert make_evolvable.channel_size == [16, 32]
-    assert make_evolvable.kernel_size == [(3, 3), (3, 3)]
-    assert make_evolvable.stride_size == [(1, 1), (1, 1)]
-    assert make_evolvable.padding == [(1, 1), (1, 1)]
-    assert make_evolvable.layer_indices == {'cnn': {'cnn_act': [0, 1], 'cnn_pool': [0, 1]}, 'mlp': {}}, f"{make_evolvable.layer_indices}"
-    assert make_evolvable.has_conv_layers == True
-    assert make_evolvable.conv_layer_type == "Conv2d"
-    assert make_evolvable.cnn_activation == "ReLU"
-    assert make_evolvable.cnn_norm == None
-    assert make_evolvable.pooling == "MaxPool2d"
-    assert make_evolvable.pooling_kernel == 2
-    assert make_evolvable.mlp_activation == "ReLU"
-    assert make_evolvable.mlp_output_activation == None
-    assert make_evolvable.mlp_norm == None
 
-# Detects architecture of a neural network with fully-connected layers and without activation layers
-def test_detect_architecture_fc_layers_no_act(simple_mlp, device):
+def test_detect_architecture_medium(device):
+    net = nn.Sequential(nn.Linear(4,16), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1), nn.Tanh())
+    evolvable_net = MakeEvolvable(net, torch.randn(1, 4), device=device)
+    assert evolvable_net.mlp_layer_info == {'activation_layers': {1: 'ReLU', 2: "Tanh"}}
+    assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
 
-    input_tensor = torch.randn(1, 10)
-    secondary_input_tensor = torch.randn(1, 10)
-
-    make_evolvable = MakeEvolvable(simple_mlp, input_tensor, device=device)
-
-    assert make_evolvable.arch == "mlp"
-    assert make_evolvable.num_inputs == 10
-    assert make_evolvable.num_outputs == 1
-    assert make_evolvable.hidden_size == [20, 10]
-    assert make_evolvable.mlp_output_activation == None
-    assert make_evolvable.mlp_activation == "ReLU"
-    assert make_evolvable.mlp_norm == None
-    assert make_evolvable.layer_indices == {"cnn": {}, "mlp": {}}
-    assert make_evolvable.has_conv_layers == False
-    assert make_evolvable.conv_layer_type == None
-    assert make_evolvable.cnn_activation == None
-    assert make_evolvable.cnn_norm == None
-    assert make_evolvable.pooling == None
-    assert make_evolvable.pooling_kernel == None
-    assert make_evolvable.mlp_norm == None
-    assert make_evolvable.in_channels == None
-    assert make_evolvable.channel_size == None
-    assert make_evolvable.kernel_size == None
-    assert make_evolvable.stride_size == None
-    assert make_evolvable.padding == None
+def test_detect_architecture_complex(device):
+    net = nn.Sequential(nn.Linear(4,16), nn.LayerNorm(16), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1), nn.Tanh())
+    evolvable_net = MakeEvolvable(net, torch.randn(1, 4), device=device)
+    assert evolvable_net.mlp_layer_info == {'activation_layers': {1: 'ReLU', 2: 'Tanh'}, 'norm_layers': {0: 'LayerNorm'}}, evolvable_net.mlp_layer_info
+    assert str(unpack_network(net)) == str(unpack_network(evolvable_net))
 
 # Test if network after detect arch has the same arch as original network
+@pytest.mark.parametrize("network, input_tensor",
+                         [
+                             ('simple_mlp', torch.randn(1, 10)),
+                             ('simple_cnn', torch.randn(1, 3, 64, 64)),
+                         ])
+def test_detect_architecture_networks_the_same(network, input_tensor, device, request):
+    network = request.getfixturevalue(network)
+    evolvable_network = MakeEvolvable(network, input_tensor, device=device)
+    assert str(unpack_network(network)) == str(unpack_network(evolvable_network))
 
 
-######### Test create_mlp #########
-
-######### Test create_cnn #########
-
-######### Test create_nets #########
-
-######### Test init_dict #########
-
-######### Test add_mlp_layer #########
-def test_add_mlp_layer(simple_mlp):
+def test_add_mlp_layer_simple(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
-    evolvable_network = MakeEvolvable(simple_mlp, input_tensor)
+    evolvable_network = MakeEvolvable(simple_mlp, input_tensor, device=device)
+    value_net = evolvable_network.value_net
+    value_net_dict = dict(value_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {0: 'ReLU', 1: 'ReLU', 2: 'Tanh'}}, evolvable_network.mlp_layer_info
     evolvable_network.add_mlp_layer()
+    new_value_net = evolvable_network.value_net
     assert len(evolvable_network.hidden_size) == initial_num_layers + 1
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {0: 'ReLU', 1: 'ReLU', 2: 'ReLU', 3: 'Tanh'}}, evolvable_network.mlp_layer_info
+    for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+            assert(torch.equal(param, value_net_dict[key]))
+
+def test_add_mlp_layer_medium(device):
+    network = nn.Sequential(nn.Linear(4,16), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1), nn.Tanh())
+    evolvable_network = MakeEvolvable(network, torch.randn(1, 4), device=device)
+    value_net = evolvable_network.value_net
+    value_net_dict = dict(value_net.named_parameters())
+    initial_num_layers = len(evolvable_network.hidden_size)
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {1: 'ReLU', 2: 'Tanh'}}, evolvable_network.mlp_layer_info
+    evolvable_network.add_mlp_layer()
+    new_value_net = evolvable_network.value_net
+    assert len(evolvable_network.hidden_size) == initial_num_layers + 1
+    assert evolvable_network.mlp_layer_info == {"activation_layers":{1 : "ReLU", 2: "ReLU", 3: "Tanh"}}, evolvable_network.mlp_layer_info
+    for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+            assert(torch.equal(param, value_net_dict[key]))
+
+def test_add_mlp_layer_complex(device):
+    net = nn.Sequential(nn.Linear(4,16), nn.LayerNorm(16), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1), nn.Tanh())
+    evolvable_network = MakeEvolvable(net, torch.randn(1, 4), device=device)
+    value_net = evolvable_network.value_net
+    value_net_dict = dict(value_net.named_parameters())
+    initial_num_layers = len(evolvable_network.hidden_size)
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {1: 'ReLU', 2: 'Tanh'}, 'norm_layers': {0: 'LayerNorm'}}, evolvable_network.mlp_layer_info
+    evolvable_network.add_mlp_layer()
+    new_value_net = evolvable_network.value_net
+    assert len(evolvable_network.hidden_size) == initial_num_layers + 1
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {1: 'ReLU', 2: 'ReLU', 3: 'Tanh'}, 'norm_layers': {0: 'LayerNorm'}}, evolvable_network.mlp_layer_info
+    for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+            assert(torch.equal(param, value_net_dict[key]))
+
 
 ######### Test remove_mlp_layer #########
-def test_remove_mlp_layer(simple_mlp):
+def test_remove_mlp_layer_simple(simple_mlp_2, device):
     input_tensor = torch.randn(1, 10)
-    evolvable_network = MakeEvolvable(simple_mlp, input_tensor)
+    evolvable_network = MakeEvolvable(simple_mlp_2, input_tensor, device=device)
+    value_net = evolvable_network.value_net
+    value_net_dict = dict(value_net.named_parameters())
     initial_num_layers = len(evolvable_network.hidden_size)
+    assert evolvable_network.mlp_layer_info == {"activation_layers":{0 : "ReLU", 1: "ReLU"}}
     evolvable_network.remove_mlp_layer()
+    new_value_net = evolvable_network.value_net
     assert len(evolvable_network.hidden_size) == initial_num_layers - 1
+    assert evolvable_network.mlp_layer_info == {"activation_layers":{0 : "ReLU"}}, evolvable_network.mlp_layer_info
+    for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+            torch.testing.assert_close(param, value_net_dict[key])
+
+def test_remove_mlp_layer_medium(device):
+    network = nn.Sequential(nn.Linear(4,16), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1), nn.Tanh())
+    evolvable_network = MakeEvolvable(network, torch.randn(1, 4), device=device)
+    value_net = evolvable_network.value_net
+    value_net_dict = dict(value_net.named_parameters())
+    initial_num_layers = len(evolvable_network.hidden_size)
+    assert evolvable_network.mlp_layer_info == {"activation_layers":{1 : "ReLU", 2: "Tanh"}}, evolvable_network.mlp_layer_info
+    evolvable_network.remove_mlp_layer()
+    new_value_net = evolvable_network.value_net
+    assert len(evolvable_network.hidden_size) == initial_num_layers - 1
+    assert evolvable_network.mlp_layer_info == {"activation_layers":{1: "Tanh"}}, evolvable_network.mlp_layer_info
+    for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+            assert(torch.equal(param, value_net_dict[key]))
+
+def test_remove_mlp_layer_complex(device):
+    net = nn.Sequential(nn.Linear(4,16), nn.LayerNorm(16), nn.Linear(16,16), nn.ReLU(), nn.Linear(16,1), nn.Tanh())
+    evolvable_network = MakeEvolvable(net, torch.randn(1, 4), device=device)
+    value_net = evolvable_network.value_net
+    value_net_dict = dict(value_net.named_parameters())
+    initial_num_layers = len(evolvable_network.hidden_size)
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {1: 'ReLU', 2: 'Tanh'}, 'norm_layers': {0: 'LayerNorm'}}, evolvable_network.mlp_layer_info
+    evolvable_network.remove_mlp_layer()
+    new_value_net = evolvable_network.value_net
+    assert len(evolvable_network.hidden_size) == initial_num_layers - 1
+    assert evolvable_network.mlp_layer_info == {'activation_layers': {1: 'Tanh'}, 'norm_layers': {0: 'LayerNorm'}}, evolvable_network.mlp_layer_info
+    for key, param in new_value_net.named_parameters():
+        if key in value_net_dict.keys():
+            assert(torch.equal(param, value_net_dict[key]))
+
 
 ######### Test add_mlp_node #########
-def test_add_mlp_node_fixed(simple_mlp):
+def test_add_mlp_node_fixed(simple_mlp, device):
     
     input_tensor = torch.randn(1, 10)
-    evolvable_network = MakeEvolvable(simple_mlp, input_tensor)
+    evolvable_network = MakeEvolvable(simple_mlp, input_tensor, device=device)
 
     # Test adding a new node to a specific layer
     hidden_layer = 1
@@ -269,11 +320,12 @@ def test_add_mlp_node_fixed(simple_mlp):
     assert result['hidden_layer'] == hidden_layer
     assert result['numb_new_nodes'] == numb_new_nodes
 
+
 ######### Test remove_mlp_node #########
-def test_remove_mlp_node(simple_mlp_2):
+def test_remove_mlp_node(simple_mlp_2, device):
    
     input_tensor = torch.randn(1, 10)
-    evolvable_network = MakeEvolvable(simple_mlp_2, input_tensor)
+    evolvable_network = MakeEvolvable(simple_mlp_2, input_tensor, device=device)
 
     # Check the initial number of nodes in the hidden layers
     assert len(evolvable_network.hidden_size) == 2
@@ -290,10 +342,11 @@ def test_remove_mlp_node(simple_mlp_2):
     # Check that the number of nodes in the first hidden layer has decreased by 5
     assert evolvable_network.hidden_size[0] == 123
 
+
 ######### Test add_cnn_layer #########
-def test_add_cnn_layer(simple_cnn):
+def test_add_cnn_layer(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
-    evolvable_network = MakeEvolvable(simple_cnn, input_tensor)
+    evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
 
     # Check the initial number of layers
     assert len(evolvable_network.channel_size) == 2
@@ -303,12 +356,17 @@ def test_add_cnn_layer(simple_cnn):
 
     # Check if a new layer has been added
     assert len(evolvable_network.channel_size) == 3
+    print(evolvable_network.cnn_layer_info)
+    assert evolvable_network.cnn_layer_info == {'activation_layers': {0: 'ReLU', 1: 'ReLU', 2: 'ReLU'}, "conv_layer_type": "Conv2d", "pooling_layers": \
+                                                {0: {"name": "MaxPool2d","kernel": 2, "stride": 2, "padding": 0}, 1: {"name": "MaxPool2d", "kernel": 2, \
+                                                "stride": 2, "padding": 0 }}}, evolvable_network.cnn_layer_info
+
 
 ######### Test change_cnn_kernel #########
-def test_change_cnn_kernel(simple_cnn):
+def test_change_cnn_kernel(simple_cnn, device):
     
     input_tensor = torch.randn(1, 3, 64, 64)
-    evolvable_network = MakeEvolvable(simple_cnn, input_tensor)
+    evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
 
     # Check initial kernel sizes
     assert evolvable_network.kernel_size == [(3, 3), (3, 3)]
@@ -322,14 +380,11 @@ def test_change_cnn_kernel(simple_cnn):
     # Check if kernel size has changed
     assert evolvable_network.kernel_size != [(3, 3), (3, 3)], evolvable_network.kernel_size
 
-# Add in a test for 3d convolutions
-
-######### Test add_cnn_channel #########
 
 ######### Test recreate_nets #########
-def test_recreate_nets_parameters_preserved(simple_mlp):
+def test_recreate_nets_parameters_preserved(simple_mlp, device):
     input_tensor = torch.randn(1, 10)
-    evolvable_network = MakeEvolvable(simple_mlp, input_tensor)
+    evolvable_network = MakeEvolvable(simple_mlp, input_tensor, device=device)
 
     value_net = evolvable_network.value_net
     value_net_dict = dict(value_net.named_parameters())
@@ -368,28 +423,9 @@ def test_recreate_nets_parameters_shrink_preserved(device):
 
     for key, param in new_value_net.named_parameters():
         if key in value_net_dict.keys():
-            print("----------------", key, "-------------------")
             print(param, value_net_dict[key])
             torch.testing.assert_close(param, value_net_dict[key])
 
-
-# def test_recreate_nets_net_config(device):
-    
-#     network = EvolvableMLP(num_inputs=6,
-#                            num_outputs=4,
-#                            hidden_size=[32, 32],
-#                            device=device)
-    
-#     value_net = network.net
-#     value_net_dict = dict(value_net.named_parameters())
-
-#     network.add_mlp_layer()
-
-#     new_value_net = network.net
-    
-#     for key, param in new_value_net.named_parameters():
-#         if key in value_net_dict.keys():
-#             assert(torch.equal(param, value_net_dict[key]))
 
 
 ######### Test clone #########
@@ -410,234 +446,3 @@ def test_clone_method_with_equal_state_dicts(network, input_tensor, secondary_in
     assert isinstance(clone_network, MakeEvolvable)
     assert str(evolvable_network.state_dict()) == str(clone_network.state_dict())
 
-# Test clone after modifying arch to see if original layers still have same params
-
-
-######### Test shrink_preserve_parameters #########
-
-
-
-
-
-
-
-
-
-
-
-#### Detect archtiecture tests
-# @pytest.mark.parametrize("network, input_tensor, secondary_input_tensor", [
-#     ('simple_mlp', torch.randn(1, 10), None),
-#     ('simple_cnn', torch.randn(1, 3, 64, 64), None,),
-#     ('two_arg_cnn', torch.randn(1, 4, 160, 210, 160),  torch.randn(1,2)) 
-# ] )
-# def test_detect_architecture_basic_layers(network, input_tensor, secondary_input_tensor, request, device):
-#     network = request.getfixturevalue(network)
-#     if secondary_input_tensor is None:
-#         evolvable_network = MakeEvolvable(network, input_tensor, device=device)
-#     else:
-#         evolvable_network = MakeEvolvable(network, input_tensor, secondary_input_tensor, device=device, extra_critic_dims=2)
-#     for _ in zip(network.named_parameters(), evolvable_network.named_parameters())
-
-
-
-
-# # The add_mlp_node() method successfully adds a new node to a specific layer in the MLP network.
-
-
-# # The change_cnn_kernel() method successfully changes the kernel size of a specific layer in the CNN network.
-
-
-# # The remove_mlp_node() method successfully removes a node from a specific layer in the MLP network.
-
-
-# # The forward() method can handle different types of activation functions (e.g., Tanh, ReLU, Softmax).
-# def test_forward_method_with_different_activation_functions(self):
-#     network = nn.Sequential(
-#         nn.Linear(10, 20),
-#         nn.ReLU(),
-#         nn.Linear(20, 10),
-#         nn.ReLU(),
-#         nn.Linear(10, 1)
-#     )
-#     input_tensor = torch.randn(1, 10)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-
-#     # Test with Tanh activation
-#     evolvable_network.mlp_activation = 'Tanh'
-#     output = evolvable_network.forward(input_tensor)
-#     assert isinstance(output, torch.Tensor)
-
-#     # Test with ReLU activation
-#     evolvable_network.mlp_activation = 'ReLU'
-#     output = evolvable_network.forward(input_tensor)
-#     assert isinstance(output, torch.Tensor)
-
-#     # Test with Softmax activation
-#     evolvable_network.mlp_activation = 'Softmax'
-#     output = evolvable_network.forward(input_tensor)
-#     assert isinstance(output, torch.Tensor)
-
-# # The forward() method can handle different types of convolutional layers (e.g., Conv2d, Conv3d).
-# def test_forward_method_with_different_conv_layers(self):
-#     network = nn.Sequential(
-#         nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.Linear(128, 10)
-#     )
-#     input_tensor = torch.randn(1, 3, 32, 32)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-#     output = evolvable_network.forward(input_tensor)
-#     assert output.shape == (1, 10)
-#     assert isinstance(output, torch.Tensor)
-#     assert output.dtype == torch.float32
-
-# # The recreate_nets() method successfully recreates the feature and value networks with updated architecture.
-# def test_recreate_nets_fixed(self):
-#     network = nn.Sequential(
-#         nn.Linear(10, 20),
-#         nn.ReLU(),
-#         nn.Linear(20, 10),
-#         nn.ReLU(),
-#         nn.Linear(10, 1)
-#     )
-#     input_tensor = torch.randn(1, 10)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-
-#     # Modify the architecture
-#     evolvable_network.hidden_size = [32, 64, 128]
-#     evolvable_network.recreate_nets()
-
-#     # Check if the value network has been recreated with the updated architecture
-#     assert isinstance(evolvable_network.value_net, nn.Sequential)
-#     assert len(evolvable_network.value_net) == 4
-#     assert isinstance(evolvable_network.value_net[0], nn.Linear)
-#     assert isinstance(evolvable_network.value_net[1], nn.ReLU)
-#     assert isinstance(evolvable_network.value_net[2], nn.Linear)
-#     assert isinstance(evolvable_network.value_net[3], nn.Linear)
-
-# # The add_cnn_channel() method successfully adds a new channel to a specific layer in the CNN network.
-# def test_add_cnn_channel(self):
-#     network = nn.Sequential(
-#         nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU()
-#     )
-#     input_tensor = torch.randn(1, 3, 32, 32)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-
-#     # Check the initial number of channels in the first convolutional layer
-#     assert evolvable_network.channel_size[0] == 16
-
-#     # Add a new channel to the first convolutional layer
-#     evolvable_network.add_cnn_channel(hidden_layer=0, numb_new_channels=8)
-
-#     # Check if a new channel has been added to the first convolutional layer
-#     assert evolvable_network.channel_size[0] == 24
-
-#     # Add a new channel to the second convolutional layer
-#     evolvable_network.add_cnn_channel(hidden_layer=1, numb_new_channels=16)
-
-#     # Check if a new channel has been added to the second convolutional layer
-#     assert evolvable_network.channel_size[1] == 48
-
-#     # Add a new channel to the third convolutional layer
-#     evolvable_network.add_cnn_channel(hidden_layer=2, numb_new_channels=32)
-
-#     # Check if a new channel has been added to the third convolutional layer
-#     assert evolvable_network.channel_size[2] == 96
-
-# # The init_dict property returns a dictionary with all the necessary information to recreate the model.
-# def test_init_dict_property(self):
-#     network = nn.Sequential(
-#         nn.Linear(10, 20),
-#         nn.ReLU(),
-#         nn.Linear(20, 10),
-#         nn.ReLU(),
-#         nn.Linear(10, 1)
-#     )
-#     input_tensor = torch.randn(1, 10)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-#     init_dict = evolvable_network.init_dict
-#     assert isinstance(init_dict, dict)
-#     assert init_dict['network'] is None
-#     assert init_dict['input_tensor'] is input_tensor
-#     assert init_dict['num_inputs'] == 10
-#     assert init_dict['num_outputs'] == 1
-#     assert init_dict['hidden_size'] == [20, 10]
-#     assert init_dict['mlp_activation'] == 'ReLU'
-#     assert init_dict['mlp_output_activation'] is None
-#     assert init_dict['layer_indices'] == {'cnn': {}, 'mlp': {}}
-#     assert init_dict['mlp_norm'] is None
-#     assert init_dict['cnn_norm'] is None
-#     assert init_dict['device'] == 'cpu'
-#     assert init_dict['accelerator'] is None
-#     assert init_dict['in_channels'] is None
-#     assert init_dict['channel_size'] is None
-#     assert init_dict['kernel_size'] is None
-#     assert init_dict['stride_size'] is None
-#     assert init_dict['padding'] is None
-#     assert init_dict['pooling'] is None
-#     assert init_dict['pooling_kernel'] is None
-#     assert init_dict['cnn_activation'] is None
-#     assert init_dict['conv_layer_type'] is None
-#     assert init_dict['extra_critic_dims'] is None
-#     assert init_dict['output_vanish'] is False
-#     assert init_dict['init_layers'] is False
-#     assert init_dict['has_conv_layer'] is False
-#     assert init_dict['arch'] == 'mlp'
-
-# # The forward() method can handle different types of pooling layers (e.g., MaxPool2d, AvgPool3d).
-# def test_forward_with_different_pooling_layers(self):
-#     network = nn.Sequential(
-#         nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.MaxPool2d(kernel_size=2, stride=2),
-#         nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.AvgPool2d(kernel_size=2, stride=2),
-#         nn.Flatten(),
-#         nn.Linear(32 * 7 * 7, 10),
-#         nn.Softmax(dim=-1)
-#     )
-#     input_tensor = torch.randn(1, 3, 28, 28)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-
-#     # Test MaxPool2d
-#     x = torch.randn(1, 3, 28, 28)
-#     output = evolvable_network.forward(x)
-#     assert output.shape == (1, 10)
-
-#     # Test AvgPool2d
-#     x = torch.randn(1, 3, 28, 28)
-#     output = evolvable_network.forward(x)
-#     assert output.shape == (1, 10)
-
-#     # Test MaxPool3d
-#     network = nn.Sequential(
-#         nn.Conv3d(3, 16, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2)),
-#         nn.Conv3d(16, 32, kernel_size=3, stride=1, padding=1),
-#         nn.ReLU(),
-#         nn.AvgPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2)),
-#         nn.Flatten(),
-#         nn.Linear(32 * 7 * 7 * 7, 10),
-#         nn.Softmax(dim=-1)
-#     )
-#     input_tensor = torch.randn(1, 3, 28, 28, 28)
-#     evolvable_network = MakeEvolvable(network, input_tensor)
-
-#     x = torch.randn(1, 3, 28, 28, 28)
-#     output = evolvable_network.forward(x)
-#     assert output.shape == (1, 10)
-
-#     # Test AvgPool3d
-#     x = torch.randn(1, 3, 28, 28, 28)
-#     output = evolvable_network.forward(x)
-#     assert output.shape == (1, 10)

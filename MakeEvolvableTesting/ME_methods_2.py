@@ -13,7 +13,7 @@ import inspect
 
 sys.path.append('../')
 
-from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.wrappers.make_evolvable_new import MakeEvolvable
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
@@ -29,7 +29,7 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from pettingzoo.atari import pong_v3
 
 from networks import ClipReward,  BasicNetCritic,  \
-SimpleCNNCritic, MultiCNNActor, MultiCNNCritic, BasicNetActor, SoftmaxActor
+SimpleCNNCritic, MultiCNNActor, MultiCNNCritic, BasicNetActor, SoftmaxActor, BasicNetActorDQN
 
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ddpg import DDPG
@@ -81,7 +81,7 @@ class SimpleCNNActor(nn.Module):
         self.pool = nn.MaxPool2d(kernel_size=4, stride=2, padding=2)
 
         # Define fully connected layers
-        self.fc1 = nn.Linear(2048, 256)  # Assuming input images are 128x128
+        self.fc1 = nn.Linear(512, 256)  # Assuming input images are 128x128
         self.fc2 = nn.Linear(256, num_classes)
 
         # Define activation function
@@ -97,7 +97,7 @@ class SimpleCNNActor(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)  # Batch Normalization
         x = self.relu1(x)
-        #x = self.pool(x)  # Apply max-pooling
+        x = self.pool(x)  # Apply max-pooling
 
         x = self.conv2(x)
         x = self.bn2(x)  # Batch Normalization
@@ -113,49 +113,16 @@ class SimpleCNNActor(nn.Module):
         x = self.fc2(x)
         return x
 
-import numpy as np
 
-def are_networks_cloning(net1, net2):
-    """
-    Check if two neural networks are cloning correctly by comparing their parameters.
-
-    Args:
-    net1 (nn.Module): The first neural network.
-    net2 (nn.Module): The second neural network to compare with net1.
-
-    Returns:
-    bool: True if the networks are cloning correctly, False otherwise.
-    """
-
-    # Get the parameters of the two networks
-    params_net1 = net1.state_dict()
-    params_net2 = net2.state_dict()
-
-    # Check if the keys (layer names) are the same in both networks
-    if set(params_net1.keys()) != set(params_net2.keys()):
-        return False
-
-    # Compare the parameters of each layer
-    for key in params_net1.keys():
-        if not np.array_equal(params_net1[key].cpu().numpy(), params_net2[key].cpu().numpy()):
-            return False
-
-    # If all checks pass, the networks are cloning correctly
-    return True
 
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 ## Instantiate actors and critics
-network_actor = nn.Sequential(
-        nn.Linear(10, 10),
-        nn.ReLU(),
-        nn.Linear(10, 1),
-        nn.ReLU()
-    )
+network_actor = SoftmaxActor(4, [16, 16], 6)
 actor = MakeEvolvable(network_actor,
-                      input_tensor=torch.ones(10),
+                      input_tensor=torch.ones(1, 4),
                       device=device)
 
 network_cnn_actor = SimpleCNNActor(1)
@@ -166,96 +133,38 @@ actor_cnn = MakeEvolvable(network_cnn_actor,
 network_critic = BasicNetCritic(4,[64, 64], 1)
 critic = MakeEvolvable(network_critic, torch.ones(4),device=device)
 
-## Instantiate agents
-# dqn = DQN(6, 4, False, net_config=None, actor_network=actor)
-# dqn_clone = dqn.clone()
-# ddpg = DDPG(6, 4, False, net_config=None, actor_network=actor, critic_network=critic)
+
+def unpack_network(model):
+    """Unpacks an nn.Sequential type model"""
+    layer_list = []
+    for layer in model.children():
+
+        if isinstance(layer, nn.Sequential):
+            # If it's an nn.Sequential, recursively unpack its children
+            layer_list.extend(unpack_network(layer))
+        else:
+            if isinstance(layer, nn.Flatten):
+                pass
+            else:
+                layer_list.append(layer)
+
+    return layer_list
 
 
 print(network_actor)
-print(actor.mlp_layer_info["activation_layers"][0])
+print(actor)
+print(actor.mlp_layer_info)
 
-# ## Create clones
-# dqn_clone = dqn.clone()
-# ddpg_clone = ddpg.clone()
-# ddpg_clone_2 = ddpg_clone.clone()
+actor.add_mlp_layer()
 
+print(actor)
+print(actor.mlp_layer_info)
 
-# new_actor = actor.clone()
-# value_net = dqn.actor.value_net
-# value_net_dict = dict(dqn.actor.value_net.named_parameters())
-# dqn.actor.hidden_size = dqn.actor.hidden_size[:-1]
-# dqn.actor.recreate_nets(shrink_params=True)
-# new_value_net = dqn.actor.value_net
+actor.remove_mlp_layer()
 
-# for key, param in value_net.named_parameters():
-#         print(key, param.shape)
-
-# for key, param in new_value_net.named_parameters():
-#         if key in value_net_dict.keys():
-#              print("-"*50, key, "-"*50)
-#              print("new param", param.shape)
-#              print("old_param", value_net_dict[key].shape)
-
-# network = EvolvableMLP(num_inputs=6,
-#                            num_outputs=4,
-#                            hidden_size=[32, 32],
-#                            device=device)
-    
-# value_net = network.net
-# print(value_net)
-# value_net_dict = dict(value_net.named_parameters())
-
-# network.add_mlp_layer()
-
-# new_value_net = network.net
-# print(new_value_net)
-# for key, param in new_value_net.named_parameters():
-#     if key in value_net_dict.keys():
-#         print(torch.equal(param, value_net_dict[key]))
-        
-
-#
-# for layer_1, layer_2 in zip(network_actor.children(), actor.children()):
-#     if isinstance(layer_1, nn.Sequential):
-#         for layer_1_ in layer_1:
-#             print(layer_1_)
+print(actor)
+print(actor.mlp_layer_info)
 
 
-# def layer_unpacking(network):
-#     layer_list = []
-#     for layer in network.children():
-#         if isinstance(layer, nn.Sequential):
-#             layer_unpacking(layer)
-#         else:
-#             layer_list.append(layer)
-    
-#     yield layer
-
-
-# def unpack_network(model):
-#     layer_list = []
-#     for layer in model.children():
-
-#         if isinstance(layer, nn.Sequential):
-#             # If it's an nn.Sequential, recursively unpack its children
-#             layer_list.extend(unpack_network(layer))
-#         else:
-#             if isinstance(layer, nn.Flatten):
-#                 pass
-#             else:
-#                 layer_list.append(layer)
-
-#     return layer_list
-
-# print(unpack_network(actor))
-# print(unpack_network(network_actor))
-
-# print("ACTOR")
-# print(actor)
-# print("NETWORK ACTOR")
-# print(network_actor)
-# print(str(unpack_network(actor)))
-# print(str(unpack_network(network_actor)))
     
 

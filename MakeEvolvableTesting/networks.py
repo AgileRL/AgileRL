@@ -10,6 +10,30 @@ class ClipReward(gym.RewardWrapper):
     def reward(self, reward: float) -> float:
         # Clip the reward to the range (-1, 1)
         return np.sign(float(reward))
+    
+class BasicNetActorDQN(nn.Module):
+    def __init__(self, input_size, hidden_sizes, output_size):
+        super(BasicNetActorDQN, self).__init__()
+        layers = []
+
+        # Add input layer
+        layers.append(nn.Linear(input_size, hidden_sizes[0]))
+        layers.append(nn.ReLU())  # Activation function
+
+        # Add hidden layers
+        for i in range(len(hidden_sizes) - 1):
+            layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
+            layers.append(nn.ReLU())  # Activation function
+
+        # Add output layer with a sigmoid activation
+        layers.append(nn.Linear(hidden_sizes[-1], output_size))
+        #layers.append(nn.Tanh())  # Sigmoid activation
+
+        # Combine all layers into a sequential model
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.model(x)
 
 class BasicNetActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):

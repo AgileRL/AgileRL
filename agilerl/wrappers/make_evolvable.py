@@ -783,7 +783,3 @@ class MakeEvolvable(nn.Module):
                                 :min_0, :min_1
                             ]
         return new_net
-
-
-
-

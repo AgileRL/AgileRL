@@ -10,14 +10,14 @@ INIT_HP:
     EPISODES: 6000             # Max no. episodes
     TARGET_SCORE: 100          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.95                # Discount factor
-    MEMORY_SIZE: 100000        # Max memory buffer size
+    MEMORY_SIZE: 1_000_000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 5              # Learning frequency
     TAU: 0.01                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
-    EVO_EPOCHS: 20             # Evolution frequency
+    EVO_EPOCHS: 2             # Evolution frequency
     WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
@@ -39,6 +39,6 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 1024
 
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+MLP: {arch: mlp, h_size: [64, 64]}
 
 DISTRIBUTED_TRAINING: false
