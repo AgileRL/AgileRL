@@ -14,11 +14,18 @@ from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train import train
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
-from networks import ClipReward, BasicNetActor, BasicNetCritic, SimpleCNNActor, \
-SimpleCNNCritic, MultiCNNActor, MultiCNNCritic, SoftmaxActor, BasicNetActorDQN
+from networks import (
+    ClipReward,
+    BasicNetActor,
+    BasicNetCritic,
+    SimpleCNNActor,
+    SimpleCNNCritic,
+    SoftmaxActor,
+    BasicNetActorDQN,
+)
 
 
-def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None): 
+def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if not multi:
@@ -58,14 +65,13 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             max_action = float(env.single_action_space.high[0])
             INIT_HP["MAX_ACTION"] = max_action
 
-
         if INIT_HP["ALGO"] == "TD3":
             max_action = float(env.single_action_space.high[0])
             INIT_HP["MAX_ACTION"] = max_action
-        
+
         if NET_CONFIG is not None:
-            actor=None
-            critic=None
+            actor = None
+            critic = None
         else:
             NET_CONFIG = None
 
@@ -73,63 +79,95 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             if atari:
                 # DQN
                 network_actor = SimpleCNNActor(action_dims)
-                actor = MakeEvolvable(network_actor,
-                                    input_tensor=torch.ones(4, 84, 84).unsqueeze(0),
-                                    device=device)
+                actor = MakeEvolvable(
+                    network_actor,
+                    input_tensor=torch.ones(4, 84, 84).unsqueeze(0),
+                    device=device,
+                )
                 critic = None
                 if INIT_HP["ALGO"] in ["TD3", "DDPG"]:
                     pass
                 elif INIT_HP["ALGO"] == "PPO":
                     network_critic = SimpleCNNCritic(1)
-                    critic = MakeEvolvable(network_critic,
-                                           input_tensor=torch.ones(4, 84, 84).unsqueeze(0),
-                                           device=device)
-                
+                    critic = MakeEvolvable(
+                        network_critic,
+                        input_tensor=torch.ones(4, 84, 84).unsqueeze(0),
+                        device=device,
+                    )
+
             else:
                 # DQN
                 if INIT_HP["ALGO"] == "DQN":
-                    network_actor_dqn = BasicNetActorDQN(state_dims[0] ,[64, 64], action_dims)
-                    actor = MakeEvolvable(network_actor_dqn,
-                                        input_tensor=torch.ones(state_dims[0]),
-                                        device=device)
+                    network_actor_dqn = BasicNetActorDQN(
+                        state_dims[0], [64, 64], action_dims
+                    )
+                    actor = MakeEvolvable(
+                        network_actor_dqn,
+                        input_tensor=torch.ones(state_dims[0]),
+                        device=device,
+                    )
                     critic = None
-                if INIT_HP["ALGO"] =="DDPG":
-                    network_actor_ddpg = BasicNetActor(state_dims[0] ,[64, 64], action_dims)
-                    actor = MakeEvolvable(network_actor_ddpg,
-                                        input_tensor=torch.ones(state_dims[0]),
-                                        device=device)
-                    network_critic = BasicNetCritic(state_dims[0] + action_dims, [64, 64], 1)
-                    critic = MakeEvolvable(network_critic,
-                                        torch.ones(state_dims[0] + action_dims),
-                                        device=device)
+                if INIT_HP["ALGO"] == "DDPG":
+                    network_actor_ddpg = BasicNetActor(
+                        state_dims[0], [64, 64], action_dims
+                    )
+                    actor = MakeEvolvable(
+                        network_actor_ddpg,
+                        input_tensor=torch.ones(state_dims[0]),
+                        device=device,
+                    )
+                    network_critic = BasicNetCritic(
+                        state_dims[0] + action_dims, [64, 64], 1
+                    )
+                    critic = MakeEvolvable(
+                        network_critic,
+                        torch.ones(state_dims[0] + action_dims),
+                        device=device,
+                    )
                 elif INIT_HP["ALGO"] == "TD3":
-                    network_actor_td3 = BasicNetActor(state_dims[0] ,[64, 64], action_dims)
-                    actor = MakeEvolvable(network_actor_td3,
-                                        input_tensor=torch.ones(state_dims[0]),
-                                        device=device)
-                    network_critic = BasicNetCritic(state_dims[0] + action_dims, [64, 64], 1)
-                    critic_1 = MakeEvolvable(network_critic,
-                                        torch.ones(state_dims[0] + action_dims),
-                                        device=device)
-                    critic_2 = MakeEvolvable(network_critic,
-                                        torch.ones(state_dims[0] + action_dims),
-                                        device=device)
+                    network_actor_td3 = BasicNetActor(
+                        state_dims[0], [64, 64], action_dims
+                    )
+                    actor = MakeEvolvable(
+                        network_actor_td3,
+                        input_tensor=torch.ones(state_dims[0]),
+                        device=device,
+                    )
+                    network_critic = BasicNetCritic(
+                        state_dims[0] + action_dims, [64, 64], 1
+                    )
+                    critic_1 = MakeEvolvable(
+                        network_critic,
+                        torch.ones(state_dims[0] + action_dims),
+                        device=device,
+                    )
+                    critic_2 = MakeEvolvable(
+                        network_critic,
+                        torch.ones(state_dims[0] + action_dims),
+                        device=device,
+                    )
                     critic = [critic_1, critic_2]
                 elif INIT_HP["ALGO"] == "PPO":
-                    network_actor_dqn = SoftmaxActor(state_dims[0] ,[64, 64], action_dims)
-                    actor = MakeEvolvable(network_actor_dqn,
-                                        input_tensor=torch.ones(state_dims[0]),
-                                        device=device)
+                    network_actor_dqn = SoftmaxActor(
+                        state_dims[0], [64, 64], action_dims
+                    )
+                    actor = MakeEvolvable(
+                        network_actor_dqn,
+                        input_tensor=torch.ones(state_dims[0]),
+                        device=device,
+                    )
                     network_critic = BasicNetCritic(state_dims[0], [32, 32], 1)
-                    critic = MakeEvolvable(network_critic,
-                                           torch.ones(state_dims[0]),
-                                           device=device)
-                
+                    critic = MakeEvolvable(
+                        network_critic, torch.ones(state_dims[0]), device=device
+                    )
 
         if INIT_HP["ALGO"] != "PPO":
             field_names = ["state", "action", "reward", "next_state", "done"]
             memory = ReplayBuffer(
-                action_dims, INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
+                action_dims,
+                INIT_HP["MEMORY_SIZE"],
+                field_names=field_names,
+                device=device,
             )
         if NET_CONFIG is None:
             arch = actor.arch
@@ -140,7 +178,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         ####
         if atari:
             env = pong_v3.parallel_env(num_players=2)
-            
+
             # Environment processing for image based observations
             env = ss.frame_skip_v0(env, 4)
             env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
@@ -167,8 +205,12 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         except Exception:
             action_dims = [env.action_space(agent).shape[0] for agent in env.agents]
             INIT_HP["DISCRETE_ACTIONS"] = False
-            INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
-            INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
+            INIT_HP["MAX_ACTION"] = [
+                env.action_space(agent).high for agent in env.agents
+            ]
+            INIT_HP["MIN_ACTION"] = [
+                env.action_space(agent).low for agent in env.agents
+            ]
 
         if INIT_HP["CHANNELS_LAST"]:
             state_dims = [
@@ -187,42 +229,53 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             total_state_dims = sum(state_dim[0] for state_dim in state_dims)
             total_actions = sum(action_dims)
             actor = [
-                MakeEvolvable(SoftmaxActor(state_dim[0], [64, 64], action_dim),
-                              input_tensor=torch.ones(state_dim[0]),
-                              device=device)
+                MakeEvolvable(
+                    SoftmaxActor(state_dim[0], [64, 64], action_dim),
+                    input_tensor=torch.ones(state_dim[0]),
+                    device=device,
+                )
                 for action_dim, state_dim in zip(action_dims, state_dims)
             ]
             if INIT_HP["ALGO"] == "MADDPG":
                 critic = [
-                    MakeEvolvable(BasicNetCritic(total_state_dims + total_actions, [64, 64], 1),
-                                input_tensor=torch.ones(total_state_dims + total_actions),
-                                device=device)
+                    MakeEvolvable(
+                        BasicNetCritic(total_state_dims + total_actions, [64, 64], 1),
+                        input_tensor=torch.ones(total_state_dims + total_actions),
+                        device=device,
+                    )
                     for _ in range(INIT_HP["N_AGENTS"])
                 ]
             elif INIT_HP["ALGO"] == "MATD3":
                 critics_1 = [
-                    MakeEvolvable(BasicNetCritic(total_state_dims + total_actions, [64, 64], 1),
-                                input_tensor=torch.ones(total_state_dims + total_actions),
-                                device=device)
+                    MakeEvolvable(
+                        BasicNetCritic(total_state_dims + total_actions, [64, 64], 1),
+                        input_tensor=torch.ones(total_state_dims + total_actions),
+                        device=device,
+                    )
                     for _ in range(INIT_HP["N_AGENTS"])
                 ]
                 critics_2 = [
-                    MakeEvolvable(BasicNetCritic(total_state_dims + total_actions, [64, 64], 1),
-                                input_tensor=torch.ones(total_state_dims + total_actions),
-                                device=device)
+                    MakeEvolvable(
+                        BasicNetCritic(total_state_dims + total_actions, [64, 64], 1),
+                        input_tensor=torch.ones(total_state_dims + total_actions),
+                        device=device,
+                    )
                     for _ in range(INIT_HP["N_AGENTS"])
                 ]
                 critic = [critics_1, critics_2]
 
         field_names = ["state", "action", "reward", "next_state", "done"]
         memory = MultiAgentReplayBuffer(
-            INIT_HP["MEMORY_SIZE"], field_names=field_names, agent_ids=INIT_HP["AGENT_IDS"] , device=device
+            INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            agent_ids=INIT_HP["AGENT_IDS"],
+            device=device,
         )
         if NET_CONFIG is None:
-            arch=actor[0].arch
+            arch = actor[0].arch
         else:
             arch = NET_CONFIG["arch"]
-        
+
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -249,12 +302,12 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         state_dims,
         action_dims,
         one_hot,
-        net_config=NET_CONFIG, 
+        net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
-        device=device
+        device=device,
     )
 
     if INIT_HP["ALGO"] in ["MATD3", "MADDPG"]:
@@ -315,7 +368,6 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             wb=INIT_HP["WANDB"],
         )
 
-
     printHyperparams(trained_pop)
     # plotPopulationScore(trained_pop)
 
@@ -327,108 +379,146 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
 if __name__ == "__main__":
     dqn = True
-    ppo = True 
-    ddpg = True 
-    td3 = True 
-    maddpg = True 
+    ppo = True
+    ddpg = True
+    td3 = True
+    maddpg = True
     matd3 = True
     standard = True
     atari = False
 
     if dqn:
-        with open("/projects/2023/evo_wrappers/AgileRL/configs/training/dqn.yaml") as file:
+        with open(
+            "/projects/2023/evo_wrappers/AgileRL/configs/training/dqn.yaml"
+        ) as file:
             dqn_config = yaml.safe_load(file)
         INIT_HP = dqn_config["INIT_HP"]
         MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
         net_config_mlp = dqn_config["MLP"]
         net_config_cnn = dqn_config["CNN"]
         if standard:
-            print("-"*20, "DQN Lunar Lander using make evolvable","-"*20)
+            print("-" * 20, "DQN Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-"*20, "DQN Lunar Lander using net_config","-"*20)
+            print("-" * 20, "DQN Lunar Lander using net_config", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
         if atari:
-            print("-"*20, "DQN Atari using make evolvable","-"*20)
+            print("-" * 20, "DQN Atari using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
-            print("-"*20, "DQN Atari using net_config","-"*20)
+            print("-" * 20, "DQN Atari using net_config", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
 
     if ppo:
-        with open("/projects/2023/evo_wrappers/AgileRL/configs/training/ppo.yaml") as file:
+        with open(
+            "/projects/2023/evo_wrappers/AgileRL/configs/training/ppo.yaml"
+        ) as file:
             ppo_config = yaml.safe_load(file)
         INIT_HP = ppo_config["INIT_HP"]
         MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
         net_config_mlp = ppo_config["MLP"]
         net_config_cnn = ppo_config["CNN"]
         if standard:
-            print("-"*20, "PPO Lunar Lander using make evolvable","-"*20)
+            print("-" * 20, "PPO Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-"*20, "PPO Lunar Lander using net_config","-"*20)
+            print("-" * 20, "PPO Lunar Lander using net_config", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
         if atari:
-            print("-"*20, "PPO Atari using make evolvable","-"*20)
+            print("-" * 20, "PPO Atari using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
-            print("-"*20, "PPO Atari using net_config","-"*20)
+            print("-" * 20, "PPO Atari using net_config", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
-            
+
     if ddpg:
-        with open("/projects/2023/evo_wrappers/AgileRL/configs/training/ddpg.yaml") as file:
+        with open(
+            "/projects/2023/evo_wrappers/AgileRL/configs/training/ddpg.yaml"
+        ) as file:
             ddpg_config = yaml.safe_load(file)
         INIT_HP = ddpg_config["INIT_HP"]
         MUTATION_PARAMS = ddpg_config["MUTATION_PARAMS"]
         net_config_mlp = ddpg_config["MLP"]
         if standard:
-            print("-"*20, "DDPG Lunar Lander using make evolvable","-"*20)
+            print("-" * 20, "DDPG Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-"*20, "DDPG Lunar Lander using net_config","-"*20)
+            print("-" * 20, "DDPG Lunar Lander using net_config", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
-            
+
     if td3:
-        with open("/projects/2023/evo_wrappers/AgileRL/configs/training/td3.yaml") as file:
+        with open(
+            "/projects/2023/evo_wrappers/AgileRL/configs/training/td3.yaml"
+        ) as file:
             td3_config = yaml.safe_load(file)
         INIT_HP = td3_config["INIT_HP"]
         MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
         net_config_mlp = td3_config["MLP"]
         if standard:
-            print("-"*20, "TD3 Lunar Lander using make evolvable","-"*20)
+            print("-" * 20, "TD3 Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-"*20, "TD3 Lunar Lander using net_config","-"*20)
+            print("-" * 20, "TD3 Lunar Lander using net_config", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 
     if maddpg:
-        with open("/projects/2023/evo_wrappers/AgileRL/configs/training/maddpg.yaml") as file:
+        with open(
+            "/projects/2023/evo_wrappers/AgileRL/configs/training/maddpg.yaml"
+        ) as file:
             maddpg_config = yaml.safe_load(file)
         INIT_HP = maddpg_config["INIT_HP"]
         MUTATION_PARAMS = maddpg_config["MUTATION_PARAMS"]
         net_config_mlp = maddpg_config["MLP"]
         if standard:
-            print("-"*20, "MADDPG simple speaker listener using make evolvable","-"*20)
+            print(
+                "-" * 20,
+                "MADDPG simple speaker listener using make evolvable",
+                "-" * 20,
+            )
             main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=None)
-            print("-"*20, "MADDPG simple speaker listener using net_config","-"*20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=net_config_mlp)
+            print("-" * 20, "MADDPG simple speaker listener using net_config", "-" * 20)
+            main(
+                INIT_HP,
+                MUTATION_PARAMS,
+                atari=False,
+                multi=True,
+                NET_CONFIG=net_config_mlp,
+            )
         if atari:
-            print("-"*20, "MADDPG Atari using make evolvable","-"*20)
+            print("-" * 20, "MADDPG Atari using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, multi=True, NET_CONFIG=None)
-            print("-"*20, "MADDPG Atari using net_config","-"*20)
-            main(INIT_HP, MUTATION_PARAMS, atari=True, multi=True, NET_CONFIG=net_config_cnn)
+            print("-" * 20, "MADDPG Atari using net_config", "-" * 20)
+            main(
+                INIT_HP,
+                MUTATION_PARAMS,
+                atari=True,
+                multi=True,
+                NET_CONFIG=net_config_cnn,
+            )
 
     if matd3:
-        with open("/projects/2023/evo_wrappers/AgileRL/configs/training/matd3.yaml") as file:
+        with open(
+            "/projects/2023/evo_wrappers/AgileRL/configs/training/matd3.yaml"
+        ) as file:
             matd3_config = yaml.safe_load(file)
         INIT_HP = matd3_config["INIT_HP"]
         MUTATION_PARAMS = matd3_config["MUTATION_PARAMS"]
         net_config_mlp = matd3_config["MLP"]
         if standard:
-            print("-"*20, "MATD3 simple speaker listener using make evolvable","-"*20)
+            print(
+                "-" * 20, "MATD3 simple speaker listener using make evolvable", "-" * 20
+            )
             main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=None)
-            print("-"*20, "MATD3 simple speaker listener using net_config","-"*20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=net_config_mlp)
+            print("-" * 20, "MATD3 simple speaker listener using net_config", "-" * 20)
+            main(
+                INIT_HP,
+                MUTATION_PARAMS,
+                atari=False,
+                multi=True,
+                NET_CONFIG=net_config_mlp,
+            )
         if atari:
-            print("-"*20, "MATD3 Atari using make evolvable","-"*20)
+            print("-" * 20, "MATD3 Atari using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, multi=True, NET_CONFIG=None)
-            print("-"*20, "MATD3 Atari using net_config","-"*20)
-            main(INIT_HP, MUTATION_PARAMS, atari=True, multi=True, NET_CONFIG=net_config_cnn)
-
-
-
-    
+            print("-" * 20, "MATD3 Atari using net_config", "-" * 20)
+            main(
+                INIT_HP,
+                MUTATION_PARAMS,
+                atari=True,
+                multi=True,
+                NET_CONFIG=net_config_cnn,
+            )

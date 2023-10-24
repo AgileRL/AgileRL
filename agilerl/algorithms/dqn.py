@@ -7,9 +7,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class DQN:
@@ -119,7 +119,9 @@ class DQN:
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
@@ -267,10 +269,10 @@ class DQN:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                            # Handle unvectorised Atari environment
-                            if not hasattr(env, "num_envs"):
-                                state = np.expand_dims(state, 0)
-                            state = np.moveaxis(state, [3], [1])
+                        # Handle unvectorised Atari environment
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
+                        state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
                     # Handle unvectorised Atari environment
                     if not hasattr(env, "num_envs"):
@@ -312,7 +314,7 @@ class DQN:
             mutation=self.mut,
             device=self.device,
             accelerator=self.accelerator,
-            wrap=wrap
+            wrap=wrap,
         )
 
         actor = self.actor.clone()

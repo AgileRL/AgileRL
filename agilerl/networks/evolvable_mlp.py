@@ -1,9 +1,11 @@
 import copy
 from collections import OrderedDict
 from typing import List
+
 import numpy as np
 import torch
 import torch.nn as nn
+
 from agilerl.networks.custom_activation import GumbelSoftmax
 
 
@@ -84,7 +86,7 @@ class EvolvableMLP(nn.Module):
             "Softmax": nn.Softmax,
             "LeakyReLU": nn.LeakyReLU,
             "PReLU": nn.PReLU,
-            "GELU": nn.GELU
+            "GELU": nn.GELU,
         }
 
         return (
@@ -136,7 +138,9 @@ class EvolvableMLP(nn.Module):
 
         net_dict["linear_layer_output"] = output_layer
         if self.mlp_output_activation is not None:
-            net_dict["activation_output"] = self.get_activation(self.mlp_output_activation)
+            net_dict["activation_output"] = self.get_activation(
+                self.mlp_output_activation
+            )
 
         net = nn.Sequential(net_dict)
 

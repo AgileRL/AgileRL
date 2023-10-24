@@ -105,7 +105,7 @@ def train_on_policy(
                     "batch_size": INIT_HP["BATCH_SIZE"],
                     "lr": INIT_HP["LR"],
                     "gamma": INIT_HP["GAMMA"],
-                    "pop_size": INIT_HP["TOURN_SIZE"],
+                    "pop_size": INIT_HP["POP_SIZE"],
                     "no_mut": MUT_P["NO_MUT"],
                     "arch_mut": MUT_P["ARCH_MUT"],
                     "params_mut": MUT_P["PARAMS_MUT"],
@@ -122,7 +122,7 @@ def train_on_policy(
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
-        is_vectorised = True 
+        is_vectorised = True
     else:
         is_vectorised = False
 
@@ -189,7 +189,7 @@ def train_on_policy(
                 next_state, reward, done, trunc, _ = env.step(
                     action
                 )  # Act in environment
-                
+
                 states.append(state)
                 actions.append(action)
                 log_probs.append(log_prob)

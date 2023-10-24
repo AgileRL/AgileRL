@@ -179,7 +179,9 @@ class PPO:
                     accelerator=self.accelerator,
                 )
 
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         self.optimizer_type = optim.Adam(
             [

@@ -4,7 +4,6 @@ from datetime import datetime
 import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import trange
-import gymnasium as gym
 
 import wandb
 from agilerl.components.replay_data import ReplayDataset
@@ -132,7 +131,7 @@ def train(
                     "params_mut": MUT_P["PARAMS_MUT"],
                     "act_mut": MUT_P["ACT_MUT"],
                     "rl_hp_mut": MUT_P["RL_HP_MUT"],
-                    "details": "No output activation."
+                    "details": "No output activation.",
                 },
             )
 
@@ -141,10 +140,10 @@ def train(
         if accelerator.is_main_process:
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
-    
+
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
-        is_vectorised = True 
+        is_vectorised = True
     else:
         is_vectorised = False
 
@@ -214,9 +213,17 @@ def train(
                 # Save experience to replay buffer
                 if swap_channels:
                     memory.save2memory(
-                        state, action, reward, np.moveaxis(next_state, [-1], [-3]), done, is_vectorised)
+                        state,
+                        action,
+                        reward,
+                        np.moveaxis(next_state, [-1], [-3]),
+                        done,
+                        is_vectorised,
+                    )
                 else:
-                    memory.save2memory(state, action, reward, next_state, done, is_vectorised)
+                    memory.save2memory(
+                        state, action, reward, next_state, done, is_vectorised
+                    )
 
                 # Learn according to learning frequency
                 if (
@@ -236,7 +243,9 @@ def train(
                 state = next_state
 
             if is_vectorised:
-                scores = calculate_vectorized_scores(np.array(rewards), np.array(terminations))
+                scores = calculate_vectorized_scores(
+                    np.array(rewards), np.array(terminations)
+                )
                 score = np.mean(scores)
 
             agent.scores.append(score)
@@ -369,4 +378,3 @@ def train(
             wandb.finish()
 
     return pop, pop_fitnesses
-

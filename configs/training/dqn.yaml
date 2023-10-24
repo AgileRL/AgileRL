@@ -5,7 +5,7 @@ INIT_HP:
     ALGO: DQN                                         # Algorithm
     DOUBLE: true
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    CHANNELS_LAST: False
+    CHANNELS_LAST: false
     BATCH_SIZE: 256           # Batch size
     LR: 0.001                   # Learning rate
     EPISODES: 1000             # Max no. episodes

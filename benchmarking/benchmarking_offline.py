@@ -1,7 +1,7 @@
 import h5py
 import torch
-import yaml
 import torch.nn as nn
+import yaml
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -16,9 +16,10 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 # import sys
 # sys.path.append('../')
 
+
 class BasicNetActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
-        super(BasicNetActor, self).__init__()
+        super().__init__()
         layers = []
 
         # Add input layer
@@ -40,7 +41,8 @@ class BasicNetActor(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-def main(INIT_HP, MUTATION_PARAMS): #, NET_CONFIG):
+
+def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
@@ -60,10 +62,10 @@ def main(INIT_HP, MUTATION_PARAMS): #, NET_CONFIG):
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    actor = BasicNetActor(state_dim[0], [32,32], action_dim)
-    actor_network = MakeEvolvable(actor,
-                                  input_tensor=torch.ones(state_dim),
-                                  device=device)
+    actor = BasicNetActor(state_dim[0], [32, 32], action_dim)
+    actor_network = MakeEvolvable(
+        actor, input_tensor=torch.ones(state_dim), device=device
+    )
 
     dataset = h5py.File(INIT_HP["DATASET"], "r")
 
@@ -138,5 +140,5 @@ if __name__ == "__main__":
     INIT_HP = cqn_config["INIT_HP"]
     MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
     # NET_CONFIG = cqn_config["NET_CONFIG"]
-    #DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS)#, NET_CONFIG)
+    # DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
+    main(INIT_HP, MUTATION_PARAMS)  # , NET_CONFIG)

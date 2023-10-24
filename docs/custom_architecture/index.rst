@@ -2,25 +2,25 @@ Using Custom Architecture
 =====
 
 In all other AgileRL tutorials, the networks used by the agents have been consistently defined with a network configuration
-dictionary. Alternatively, it is also possible for a user to define their own custom architecture and add evolvable 
-functionality through the `MakeEvolvable` wrapper. 
+dictionary. Alternatively, it is also possible for a user to define their own custom architecture and add evolvable
+functionality through the `MakeEvolvable` wrapper.
 
 .. _createcustnet:
 Creating a Custom Evolvable Network
 ------------
 
-To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output 
+To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output
 dimensions. Below is an example of a simple multi-layer perceptron that can be used by a DQN agent to solve the Lunar
-Lander environment. The input size is set as the state dimensions and output size the action dimensions. It's worth noting 
-that, during the model definition, it is imperative to employ the `torch.nn`` module to define all layers instead 
-of relying on functions from `torch.nn.functional` within the forward() method of the network. This is crucial as the 
+Lander environment. The input size is set as the state dimensions and output size the action dimensions. It's worth noting
+that, during the model definition, it is imperative to employ the `torch.nn`` module to define all layers instead
+of relying on functions from `torch.nn.functional` within the forward() method of the network. This is crucial as the
 forward hooks implemented will only be able to detect layers derived from `nn.Module`.
 
 .. code-block:: python
     import torch.nn as nn
     import torch
 
-    
+
     class MLPActor(nn.Module):
         def __init__(self, input_size, output_size):
             super(MLPActor, self).__init__()
@@ -34,12 +34,12 @@ forward hooks implemented will only be able to detect layers derived from `nn.Mo
             x = self.relu(self.linear_layer_1(x))
             x = self.softmax(self.linear_layer_2(x))
             return x
-            
+
 
 To make this network evolvable, simply instantiate an MLP Actor object and then pass it, along with an input tensor into
 the `MakeEvolvable` wrapper.
 
-.. code-block:: python 
+.. code-block:: python
     from agilerl.wrappers.make_evolvable import MakeEvolvable
 
     state_dim = env.single_observation_space.shape
@@ -50,29 +50,29 @@ the `MakeEvolvable` wrapper.
                                     input_tensor=torch.randn(state_dim[0]),
                                     device=device)
 
-There are two further considerations to make when defining custom architecture. The first is when instantiating the 
+There are two further considerations to make when defining custom architecture. The first is when instantiating the
 `initialPopulation` object, you need to set `net_config` to `None` and `actor_network` to `evolvable_actor`.
 
-.. code-block:: python 
+.. code-block:: python
     pop = initialPopulation(algo="DQN",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
                             one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None 
+                            net_config=None,  # Network configuration set as None
                             actor_network=evolvable_actor, # Custom evolvable actor
                             INIT_HP=INIT_HP,  # Initial hyperparameters
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the 
+If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the
 `initialPopulation` class, again setting `net_config` to `None`.
 
-.. code-block:: python 
+.. code-block:: python
     pop = initialPopulation(algo="DDPG",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
                             one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None 
+                            net_config=None,  # Network configuration set as None
                             actor_network=evolvable_actor, # Custom evolvable actor
                             critic_network=evolvable_critic, # Custom evolvable critic
                             INIT_HP=INIT_HP,  # Initial hyperparameters
@@ -87,14 +87,14 @@ is shown below.
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
                             one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None 
+                            net_config=None,  # Network configuration set as None
                             actor_network=evolvable_actor, # Custom evolvable actor
                             critic_network=[evolvable_critic_1, evolvable_critic_2], # Custom evolvable critic
                             INIT_HP=INIT_HP,  # Initial hyperparameters
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-Finally, if you are using a multi-agent algorithm, define `actor_network` and `critic_network` as lists containing networks 
+Finally, if you are using a multi-agent algorithm, define `actor_network` and `critic_network` as lists containing networks
 for each agent in the multi-agent environment. The example below outlines how this would work for a two agent environment.
 
 .. code-block:: python
@@ -112,23 +112,23 @@ for each agent in the multi-agent environment. The example below outlines how th
                             state_dim=state_dim,  # State dimensions
                             action_dim=action_dim,  # Action dimensions
                             one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None 
+                            net_config=None,  # Network configuration set as None
                             actor_network=evolvable_actors, # Custom evolvable actor
                             critic_network=evolvable_critics, # Custom evolvable critic
                             INIT_HP=INIT_HP,  # Initial hyperparameters
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-The only other consideration that needs to be made is when instantiating the `Mutations` class. The `arch` argument should be set 
-as `evolvable_actor.arch` for single agent algorithms or `evolvable_actors[0].arch` for multi-agent algorithms. 
+The only other consideration that needs to be made is when instantiating the `Mutations` class. The `arch` argument should be set
+as `evolvable_actor.arch` for single agent algorithms or `evolvable_actors[0].arch` for multi-agent algorithms.
 
 .. _comparch:
 
 Compatible Architecture
 ------------
 
-At present, `MakeEvolvable` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The 
-network architecure must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive 
+At present, `MakeEvolvable` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
+network architecture must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive
 table of PyTorch layers that are currently supported by this wrapper.
 
 
@@ -136,13 +136,13 @@ table of PyTorch layers that are currently supported by this wrapper.
    :widths: 30, 30, 30, 20, 20
    :header-rows: 1
 
-   * - **Pooling** 
+   * - **Pooling**
      - **Activation**
      - **Normalization**
      - **Convolutional**
      - **Linear**
    * - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
-     - nn.Tanh, nn.Identity, nn.ReLU, nn.ELU, nn.Softsign, nn.Sigmoid, GumbelSoftmax, 
+     - nn.Tanh, nn.Identity, nn.ReLU, nn.ELU, nn.Softsign, nn.Sigmoid, GumbelSoftmax,
        nn.Softplus, nn.Softmax, nn.LeakyReLU, nn.PReLU, nn.GELU
      - nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d, nn.LayerNorm
      - nn.Conv2d, nn.Conv3d
@@ -159,7 +159,7 @@ The following table highlights which AgileRL algorithms are compatible with cust
    :widths: 30, 30, 30, 20, 20
    :header-rows: 1
 
-   * - **CQL** 
+   * - **CQL**
      - **DQN**
      - **DDPG**
      - **TD3**
@@ -177,4 +177,3 @@ The following table highlights which AgileRL algorithms are compatible with cust
      - ✔️
      - ❌
      - ❌
-

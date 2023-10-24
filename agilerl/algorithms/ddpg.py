@@ -149,7 +149,9 @@ class DDPG:
         self.actor_optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.critic_optimizer_type = optim.Adam(self.critic.parameters(), lr=self.lr)
 
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.actor_optimizer = self.actor_optimizer_type
@@ -269,7 +271,7 @@ class DDPG:
 
         # update actor and targets every policy_freq episodes
         if len(self.scores) % self.policy_freq == 0:
-            if self.arch =="mlp":
+            if self.arch == "mlp":
                 input_combined = torch.cat([states, self.actor.forward(states)], 1)
                 actor_loss = -self.critic(input_combined).mean()
             elif self.arch == "cnn":
@@ -492,12 +494,16 @@ class DDPG:
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
                 self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
-                self.critic_target = EvolvableMLP(**checkpoint["critic_target_init_dict"])
+                self.critic_target = EvolvableMLP(
+                    **checkpoint["critic_target_init_dict"]
+                )
             elif self.arch == "cnn":
                 self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
                 self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
-                self.critic_target = EvolvableCNN(**checkpoint["critic_target_init_dict"])
+                self.critic_target = EvolvableCNN(
+                    **checkpoint["critic_target_init_dict"]
+                )
         else:
             self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
             self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])

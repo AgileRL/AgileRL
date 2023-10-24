@@ -148,7 +148,9 @@ class MATD3:
                         device=self.device,
                         accelerator=self.accelerator,
                     )
-                    for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)
+                    for (action_dim, state_dim) in zip(
+                        self.action_dims, self.state_dims
+                    )
                 ]
                 self.critics_1 = [
                     EvolvableMLP(
@@ -186,7 +188,9 @@ class MATD3:
                         device=self.device,
                         accelerator=self.accelerator,
                     )
-                    for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)
+                    for (action_dim, state_dim) in zip(
+                        self.action_dims, self.state_dims
+                    )
                 ]
                 self.critics_1 = [
                     EvolvableCNN(
@@ -227,7 +231,11 @@ class MATD3:
                 ]
 
         # Assign architecture
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actors[0].arch
+        self.arch = (
+            self.net_config["arch"]
+            if self.net_config is not None
+            else self.actors[0].arch
+        )
 
         # Create target networks
         self.actor_targets = copy.deepcopy(self.actors)
@@ -237,10 +245,9 @@ class MATD3:
         # Initialise target network parameters
         for actor, actor_target in zip(self.actors, self.actor_targets):
             actor_target.load_state_dict(actor.state_dict())
-        for critic_1, critic_2, critic_target_1, critic_target_2 in zip(self.critics_1,
-                                                                        self.critics_2,
-                                                                        self.critic_targets_1,
-                                                                        self.critic_targets_2):
+        for critic_1, critic_2, critic_target_1, critic_target_2 in zip(
+            self.critics_1, self.critics_2, self.critic_targets_1, self.critic_targets_2
+        ):
             critic_target_1.load_state_dict(critic_1.state_dict())
             critic_target_2.load_state_dict(critic_2.state_dict())
 
@@ -968,23 +975,23 @@ class MATD3:
             ]
             self.actor_targets = [
                 MakeEvolvable(**checkpoint["actor_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
             self.critics_1 = [
                 MakeEvolvable(**checkpoint["critics_1_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
             self.critic_targets_1 = [
                 MakeEvolvable(**checkpoint["critic_targets_1_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
             self.critics_2 = [
                 MakeEvolvable(**checkpoint["critics_2_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
             self.critic_targets_2 = [
                 MakeEvolvable(**checkpoint["critic_targets_2_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
         self.lr = checkpoint["lr"]
         self.actor_optimizers = [

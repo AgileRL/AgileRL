@@ -820,7 +820,7 @@ class Mutations:
                 setattr(
                     individual,
                     self.algo["actor"]["eval"],
-                    offspring_actor.to(self.device)
+                    offspring_actor.to(self.device),
                 )
             for offspring_critic, critic in zip(
                 offspring_critics, self.algo["critics"]

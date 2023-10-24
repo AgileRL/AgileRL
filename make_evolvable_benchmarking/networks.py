@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import gymnasium as gym
 
+
 class ClipReward(gym.RewardWrapper):
     def __init__(self, env):
         super().__init__(env)
@@ -10,10 +11,11 @@ class ClipReward(gym.RewardWrapper):
     def reward(self, reward: float) -> float:
         # Clip the reward to the range (-1, 1)
         return np.sign(float(reward))
-    
+
+
 class BasicNetActorDQN(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
-        super(BasicNetActorDQN, self).__init__()
+        super().__init__()
         layers = []
 
         # Add input layer
@@ -27,7 +29,7 @@ class BasicNetActorDQN(nn.Module):
 
         # Add output layer with a sigmoid activation
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
-        #layers.append(nn.Tanh())  # Sigmoid activation
+        # layers.append(nn.Tanh())  # Sigmoid activation
 
         # Combine all layers into a sequential model
         self.model = nn.Sequential(*layers)
@@ -35,9 +37,10 @@ class BasicNetActorDQN(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+
 class BasicNetActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
-        super(BasicNetActor, self).__init__()
+        super().__init__()
         layers = []
 
         # Add input layer
@@ -58,10 +61,11 @@ class BasicNetActor(nn.Module):
 
     def forward(self, x):
         return self.model(x)
-    
+
+
 class SoftmaxActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
-        super(SoftmaxActor, self).__init__()
+        super().__init__()
         layers = []
 
         # Add input layer
@@ -83,9 +87,10 @@ class SoftmaxActor(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+
 class BasicNetCritic(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
-        super(BasicNetCritic, self).__init__()
+        super().__init__()
         layers = []
 
         # Add input layer
@@ -99,7 +104,7 @@ class BasicNetCritic(nn.Module):
 
         # Add output layer with a sigmoid activation
         layers.append(nn.Linear(hidden_sizes[-1], output_size))
-        #layers.append(nn.Sigmoid())  # Sigmoid activation
+        # layers.append(nn.Sigmoid())  # Sigmoid activation
 
         # Combine all layers into a sequential model
         self.model = nn.Sequential(*layers)
@@ -107,14 +112,18 @@ class BasicNetCritic(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-    
+
 class SimpleCNNActor(nn.Module):
     def __init__(self, num_classes):
-        super(SimpleCNNActor, self).__init__()
+        super().__init__()
 
         # Define the convolutional layers
-        self.conv1 = nn.Conv2d(in_channels=4, out_channels=16, kernel_size=8, stride=4)    # W: 160, H: 210
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)   # W:
+        self.conv1 = nn.Conv2d(
+            in_channels=4, out_channels=16, kernel_size=8, stride=4
+        )  # W: 160, H: 210
+        self.conv2 = nn.Conv2d(
+            in_channels=16, out_channels=32, kernel_size=4, stride=2
+        )  # W:
 
         # Define the max-pooling layers
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -143,20 +152,25 @@ class SimpleCNNActor(nn.Module):
         x = self.fc2(x)
         x = self.softmax(x)
         return x
-    
+
+
 class SimpleCNNCritic(nn.Module):
     def __init__(self, num_classes):
-        super(SimpleCNNCritic, self).__init__()
+        super().__init__()
 
         # Define the convolutional layers
-        self.conv1 = nn.Conv2d(in_channels=4, out_channels=16, kernel_size=8, stride=4)    # W: 160, H: 210
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)   # W:
+        self.conv1 = nn.Conv2d(
+            in_channels=4, out_channels=16, kernel_size=8, stride=4
+        )  # W: 160, H: 210
+        self.conv2 = nn.Conv2d(
+            in_channels=16, out_channels=32, kernel_size=4, stride=2
+        )  # W:
 
         # Define the max-pooling layers
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         # Define fully connected layers
-        self.fc1 = nn.Linear(2592, 256)  
+        self.fc1 = nn.Linear(2592, 256)
         self.fc2 = nn.Linear(256, num_classes)
 
         # Define activation function
@@ -182,14 +196,18 @@ class SimpleCNNCritic(nn.Module):
         x = self.softmax(x)
 
         return x
-    
+
 
 class MultiCNNActor(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
         # Define the convolutional layers
-        self.conv1 = nn.Conv3d(in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4)    # W: 160, H: 210
-        self.conv2 = nn.Conv3d(in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2)   
+        self.conv1 = nn.Conv3d(
+            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+        )  # W: 160, H: 210
+        self.conv2 = nn.Conv3d(
+            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+        )
 
         # Define the max-pooling layers
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -218,20 +236,25 @@ class MultiCNNActor(nn.Module):
         x = self.fc2(x)
         x = self.softmax(x)
         return x
-    
+
+
 class MultiCNNCritic(nn.Module):
     def __init__(self, num_classes, num_agents):
-        super(MultiCNNCritic, self).__init__()
+        super().__init__()
 
         # Define the convolutional layers
-        self.conv1 = nn.Conv3d(in_channels=4, out_channels=16, kernel_size=(1,3,3), stride=4)    # W: 160, H: 210
-        self.conv2 = nn.Conv3d(in_channels=16, out_channels=32, kernel_size=(1,3,3), stride=2)   # W:
+        self.conv1 = nn.Conv3d(
+            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+        )  # W: 160, H: 210
+        self.conv2 = nn.Conv3d(
+            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+        )  # W:
 
         # Define the max-pooling layers
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         # Define fully connected layers
-        self.fc1 = nn.Linear(3202, 256)  
+        self.fc1 = nn.Linear(3202, 256)
         self.fc2 = nn.Linear(256, num_classes)
 
         # Define activation function

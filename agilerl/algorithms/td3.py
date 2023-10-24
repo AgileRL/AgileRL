@@ -170,7 +170,6 @@ class TD3:
                     device=self.device,
                     accelerator=self.accelerator,
                 )
-                
 
         self.actor_target = copy.deepcopy(self.actor)
         self.critic_target_1 = copy.deepcopy(self.critic_1)
@@ -186,7 +185,9 @@ class TD3:
             self.critic_2.parameters(), lr=self.lr
         )
 
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.actor_optimizer = self.actor_optimizer_type
@@ -287,7 +288,7 @@ class TD3:
             next_input_combined = torch.cat([next_states, next_actions], 1)
             q_value_next_state_1 = self.critic_target_1(next_input_combined)
             q_value_next_state_2 = self.critic_target_2(next_input_combined)
-        elif self.arch== "cnn":
+        elif self.arch == "cnn":
             q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
             q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)

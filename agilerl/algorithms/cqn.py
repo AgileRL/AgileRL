@@ -121,7 +121,9 @@ class CQN:
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type

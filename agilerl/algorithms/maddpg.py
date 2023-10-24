@@ -11,6 +11,7 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+
 class MADDPG:
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
 
@@ -80,7 +81,7 @@ class MADDPG:
         tau=0.01,
         mutation=None,
         actor_networks=None,
-        critic_networks=None, 
+        critic_networks=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -142,7 +143,9 @@ class MADDPG:
                         device=self.device,
                         accelerator=self.accelerator,
                     )
-                    for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)
+                    for (action_dim, state_dim) in zip(
+                        self.action_dims, self.state_dims
+                    )
                 ]
 
                 self.critics = [
@@ -172,7 +175,9 @@ class MADDPG:
                         device=self.device,
                         accelerator=self.accelerator,
                     )
-                    for (action_dim, state_dim) in zip(self.action_dims, self.state_dims)
+                    for (action_dim, state_dim) in zip(
+                        self.action_dims, self.state_dims
+                    )
                 ]
                 self.critics = [
                     EvolvableCNN(
@@ -194,15 +199,19 @@ class MADDPG:
                     for state_dim in self.state_dims
                 ]
         # Assign architecture
-        self.arch = self.net_config["arch"] if self.net_config is not None else self.actors[0].arch
+        self.arch = (
+            self.net_config["arch"]
+            if self.net_config is not None
+            else self.actors[0].arch
+        )
 
-        # Create target networks 
+        # Create target networks
         self.actor_targets = copy.deepcopy(self.actors)
         self.critic_targets = copy.deepcopy(self.critics)
 
         # Initialise target network parameters
         for actor, actor_target in zip(self.actors, self.actor_targets):
-            actor_target.load_state_dict(actor.state_dict())          
+            actor_target.load_state_dict(actor.state_dict())
         for critic, critic_target in zip(self.critics, self.critic_targets):
             critic_target.load_state_dict(critic.state_dict())
 
@@ -781,15 +790,15 @@ class MADDPG:
             ]
             self.actor_targets = [
                 MakeEvolvable(**checkpoint["actor_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
             self.critics = [
                 MakeEvolvable(**checkpoint["critics_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
             self.critic_targets = [
                 MakeEvolvable(**checkpoint["critic_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
+                for idx, _ in enumerate(self.agent_ids)
             ]
         self.lr = checkpoint["lr"]
         self.actor_optimizers = [

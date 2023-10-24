@@ -4,7 +4,7 @@ INIT_HP:
     ENV_NAME: CartPole-v1   # Gym environment name
     DATASET: /projects/2023/evo_wrappers/AgileRL/data/cartpole/cartpole_v1.1.0.h5 # Offline RL dataset
     ALGO: CQN                                         # Algorithm
-    DOUBLE: True
+    DOUBLE: true
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     BATCH_SIZE: 256           # Batch size
@@ -20,7 +20,7 @@ INIT_HP:
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: False               # Log with Weights and Biases
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
