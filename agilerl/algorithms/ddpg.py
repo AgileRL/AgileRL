@@ -417,6 +417,7 @@ class DDPG:
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
         clone.scores = copy.deepcopy(self.scores)
+
         return clone
 
     def wrap_models(self):
