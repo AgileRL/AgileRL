@@ -12,12 +12,12 @@ INIT_HP:
     GAMMA: 0.95                # Discount factor
     MEMORY_SIZE: 1_000_000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
-    LEARN_STEP: 5              # Learning frequency
+    LEARN_STEP: 100            # Learning frequency
     TAU: 0.01                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
-    EVO_EPOCHS: 2             # Evolution frequency
+    EVO_EPOCHS: 20             # Evolution frequency
     WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
@@ -33,7 +33,7 @@ MUTATION_PARAMS:
     RAND_SEED: 42                          # Random seed
     MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
     MAX_LR: 0.01
-    MIN_LEARN_STEP: 1
+    MIN_LEARN_STEP: 20
     MAX_LEARN_STEP: 200
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024

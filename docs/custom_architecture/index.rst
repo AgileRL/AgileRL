@@ -47,7 +47,7 @@ the `MakeEvolvable` wrapper.
 
     actor = MLPActor(state_dim[0], action_dim)
     evolvable_actor = MakeEvolvable(actor,
-                                    input_tensor=torch.ones(state_dim[0]),
+                                    input_tensor=torch.randn(state_dim[0]),
                                     device=device)
 
 There are two further considerations to make when defining custom architecture. The first is when instantiating the 
@@ -102,7 +102,7 @@ for each agent in the multi-agent environment. The example below outlines how th
     evolvable_actors = [actor_network_1, actor_network_2]
     evolvable_critics = [critic_network_1, critic_network_2]
 
-    # For MATD3, "critics" will be a list of 2 lists as MATD3 uses an extra critic than MADDPG
+    # For MATD3, "critics" will be a list of 2 lists as MATD3 uses one more critic than MADDPG
     evolvable_actors = [actor_network_1, actor_network_2]
     evolvable_critics = [[critic_1_network_1, critic_1_network_2],
                          [critic_2_network_1, critic_2_network_2]]

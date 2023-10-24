@@ -34,8 +34,6 @@ MUTATION_PARAMS:
     RAND_SEED: 24                          # Random seed
     MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
     MAX_LR: 0.01
-    MIN_LEARN_STEP: 1
-    MAX_LEARN_STEP: 200
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 

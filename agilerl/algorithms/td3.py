@@ -103,7 +103,7 @@ class TD3:
 
         if self.actor_network is not None and self.critic_networks is not None:
             self.actor = actor_network
-            self.critic_1, self.critic_2 = critic_networks       
+            self.critic_1, self.critic_2 = critic_networks
             self.net_config = None
         else:
             # model

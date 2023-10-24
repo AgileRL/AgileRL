@@ -4,9 +4,7 @@ import nntplib
 import torch
 import pytest
 import torch.nn as nn
-from agilerl.wrappers.make_evolvable_new import MakeEvolvable
-from agilerl.wrappers.make_evolvable_old import MakeEvolvableOld
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import unpack_network
 
 class TwoArgCNN(nn.Module):

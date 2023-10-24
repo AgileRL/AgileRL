@@ -1,27 +1,19 @@
-import torch.nn as nn
-import numpy as np
-import os
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-from tqdm import trange
 import torch
+import gymnasium as gym
+from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
+import yaml
+import supersuit as ss
+from pettingzoo.mpe import simple_speaker_listener_v4
+from pettingzoo.atari import pong_v3
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.networks.custom_activation import GumbelSoftmax
 from agilerl.training.train import train
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
-from pettingzoo.mpe import simple_speaker_listener_v4
-import gymnasium as gym
-from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
-import yaml
-import supersuit as ss
-import torch.nn as nn
-
-from pettingzoo.atari import pong_v3
-
 from networks import ClipReward, BasicNetActor, BasicNetCritic, SimpleCNNActor, \
 SimpleCNNCritic, MultiCNNActor, MultiCNNCritic, SoftmaxActor, BasicNetActorDQN
 
@@ -30,6 +22,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if not multi:
+        ####
         if not atari:
             env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=8)
             try:
@@ -76,6 +69,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         else:
             NET_CONFIG = None
 
+            ####
             if atari:
                 # DQN
                 network_actor = SimpleCNNActor(action_dims)
@@ -143,6 +137,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             arch = NET_CONFIG["arch"]
 
     else:
+        ####
         if atari:
             env = pong_v3.parallel_env(num_players=2)
             
@@ -183,8 +178,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         INIT_HP["N_AGENTS"] = env.num_agents
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
+        ####
         if atari:
-            # CNNS for multi need adding in
             pass
 
         else:
@@ -274,7 +269,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             net_config=NET_CONFIG,
             swap_channels=INIT_HP["CHANNELS_LAST"],
             n_episodes=INIT_HP["EPISODES"],
-            max_steps=5,
+            max_steps=500,
             evo_epochs=INIT_HP["EVO_EPOCHS"],
             evo_loop=1,
             target=INIT_HP["TARGET_SCORE"],
@@ -292,7 +287,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             MUT_P=MUTATION_PARAMS,
             swap_channels=INIT_HP["CHANNELS_LAST"],
             n_episodes=INIT_HP["EPISODES"],
-            max_steps=5,
+            max_steps=500,
             evo_epochs=INIT_HP["EVO_EPOCHS"],
             evo_loop=1,
             target=INIT_HP["TARGET_SCORE"],
@@ -309,15 +304,14 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             memory=memory,
             INIT_HP=INIT_HP,
             MUT_P=MUTATION_PARAMS,
-            actor=actor,
             swap_channels=INIT_HP["CHANNELS_LAST"],
             n_episodes=INIT_HP["EPISODES"],
             max_steps=500,
             evo_epochs=INIT_HP["EVO_EPOCHS"],
             evo_loop=1,
             target=INIT_HP["TARGET_SCORE"],
-            tournament=None,#tournament,
-            mutation=None,#mutations,
+            tournament=tournament,
+            mutation=mutations,
             wb=INIT_HP["WANDB"],
         )
 
@@ -333,11 +327,11 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
 if __name__ == "__main__":
     dqn = True
-    ppo = False
-    ddpg = False 
-    td3 = False 
-    maddpg = False
-    matd3 = False
+    ppo = True 
+    ddpg = True 
+    td3 = True 
+    maddpg = True 
+    matd3 = True
     standard = True
     atari = False
 
@@ -347,12 +341,12 @@ if __name__ == "__main__":
         INIT_HP = dqn_config["INIT_HP"]
         MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
         net_config_mlp = dqn_config["MLP"]
-        #net_config_cnn = dqn_config["CNN"]
+        net_config_cnn = dqn_config["CNN"]
         if standard:
             print("-"*20, "DQN Lunar Lander using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            #print("-"*20, "DQN Lunar Lander using net_config","-"*20)
-            #main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+            print("-"*20, "DQN Lunar Lander using net_config","-"*20)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
         if atari:
             print("-"*20, "DQN Atari using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
@@ -365,12 +359,12 @@ if __name__ == "__main__":
         INIT_HP = ppo_config["INIT_HP"]
         MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
         net_config_mlp = ppo_config["MLP"]
-        #net_config_cnn = ppo_config["CNN"]
+        net_config_cnn = ppo_config["CNN"]
         if standard:
             print("-"*20, "PPO Lunar Lander using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            #print("-"*20, "PPO Lunar Lander using net_config","-"*20)
-            #main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+            print("-"*20, "PPO Lunar Lander using net_config","-"*20)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
         if atari:
             print("-"*20, "PPO Atari using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
@@ -386,8 +380,8 @@ if __name__ == "__main__":
         if standard:
             print("-"*20, "DDPG Lunar Lander using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            #print("-"*20, "DDPG Lunar Lander using net_config","-"*20)
-            #main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+            print("-"*20, "DDPG Lunar Lander using net_config","-"*20)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
             
     if td3:
         with open("/projects/2023/evo_wrappers/AgileRL/configs/training/td3.yaml") as file:
@@ -398,8 +392,8 @@ if __name__ == "__main__":
         if standard:
             print("-"*20, "TD3 Lunar Lander using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            #print("-"*20, "TD3 Lunar Lander using net_config","-"*20)
-            #main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+            print("-"*20, "TD3 Lunar Lander using net_config","-"*20)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 
     if maddpg:
         with open("/projects/2023/evo_wrappers/AgileRL/configs/training/maddpg.yaml") as file:
@@ -410,8 +404,8 @@ if __name__ == "__main__":
         if standard:
             print("-"*20, "MADDPG simple speaker listener using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=None)
-            #print("-"*20, "MADDPG simple speaker listener using net_config","-"*20)
-            #main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=net_config_mlp)
+            print("-"*20, "MADDPG simple speaker listener using net_config","-"*20)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=net_config_mlp)
         if atari:
             print("-"*20, "MADDPG Atari using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, multi=True, NET_CONFIG=None)
@@ -427,8 +421,8 @@ if __name__ == "__main__":
         if standard:
             print("-"*20, "MATD3 simple speaker listener using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=None)
-           # print("-"*20, "MATD3 simple speaker listener using net_config","-"*20)
-            #main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=net_config_mlp)
+            print("-"*20, "MATD3 simple speaker listener using net_config","-"*20)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, multi=True, NET_CONFIG=net_config_mlp)
         if atari:
             print("-"*20, "MATD3 Atari using make evolvable","-"*20)
             main(INIT_HP, MUTATION_PARAMS, atari=True, multi=True, NET_CONFIG=None)
