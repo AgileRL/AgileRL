@@ -384,7 +384,6 @@ class MakeEvolvable(nn.Module):
             ]
         else:
             self.mlp_output_activation = None
-
         activation_function_set = set(mlp_layer_info["activation_layers"].values())
         if self.mlp_output_activation is not None:
             activation_function_set.remove(self.mlp_output_activation)
