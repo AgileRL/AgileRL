@@ -199,7 +199,7 @@ def train_multi_agent(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
+            state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
             if swap_channels:
                 state = {
@@ -210,8 +210,16 @@ def train_multi_agent(
             for _ in range(max_steps):
                 total_steps += 1
                 # Get next action from agent
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, truncation, _ = env.step(
+                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
+                env_defined_actions = (
+                    info["env_defined_actions"]
+                    if "env_defined_actions" in info.keys()
+                    else None
+                )
+                action = agent.getAction(
+                    state, epsilon, agent_mask, env_defined_actions
+                )
+                next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
 

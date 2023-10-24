@@ -211,7 +211,7 @@ class MADDPG:
 
         self.criterion = nn.MSELoss()
 
-    def getAction(self, states, epsilon=0):
+    def getAction(self, states, epsilon=0, agent_mask=None, env_defined_actions=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -220,7 +220,26 @@ class MADDPG:
         :type state: Dict[str, numpy.Array]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
+        :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
+        :type agent_mask: Dict[str, bool]
+        :param env_defined_actions: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
+        :type env_defined_actions: Dict[str, bool]
         """
+        # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
+        if agent_mask is None:
+            agent_ids = self.agent_ids
+            actors = self.actors
+        else:
+            agent_ids = [agent for agent in agent_mask.keys() if agent_mask[agent]]
+            states = {
+                agent: states[agent] for agent in agent_mask.keys() if agent_mask[agent]
+            }
+            actors = [
+                actor
+                for agent, actor in zip(agent_mask.keys(), self.actors)
+                if agent_mask[agent]
+            ]
+
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
 
@@ -245,9 +264,7 @@ class MADDPG:
             states = [state.unsqueeze(2) for state in states]
 
         actions = {}
-        for idx, (agent_id, state, actor) in enumerate(
-            zip(self.agent_ids, states, self.actors)
-        ):
+        for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
             if random.random() < epsilon:
                 if self.discrete_actions:
                     action = np.random.randint(0, self.action_dims[idx])
@@ -281,6 +298,11 @@ class MADDPG:
                         action, self.min_action[idx][0], self.max_action[idx][0]
                     )
             actions[agent_id] = action
+
+        if env_defined_actions is not None:
+            for agent in env_defined_actions.keys():
+                if not agent_mask[agent]:
+                    actions.update({agent: env_defined_actions[agent]})
 
         return actions
 
@@ -491,7 +513,7 @@ class MADDPG:
         with torch.no_grad():
             rewards = []
             for i in range(loop):
-                state, _ = env.reset()
+                state, info = env.reset()
                 agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
                 score = 0
                 for _ in range(max_steps):
@@ -500,7 +522,20 @@ class MADDPG:
                             agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
                             for agent_id, s in state.items()
                         }
-                    action = self.getAction(state, epsilon=0)
+                    agent_mask = (
+                        info["agent_mask"] if "agent_mask" in info.keys() else None
+                    )
+                    env_defined_actions = (
+                        info["env_defined_actions"]
+                        if "env_defined_actions" in info.keys()
+                        else None
+                    )
+                    action = self.getAction(
+                        state,
+                        epsilon=0,
+                        agent_mask=agent_mask,
+                        env_defined_actions=env_defined_actions,
+                    )
                     state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r
