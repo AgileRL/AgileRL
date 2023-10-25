@@ -1,11 +1,18 @@
-.. _td3:
-Twin Delayed Deep Deterministic Policy Gradient (TD3)
-=========================================
+Rainbow DQN
+=====================
 
-TD3 is an extension of DDPG that addresses overestimation bias by introducing an extra
-critic network, delayed actor network updates, and action noise regularization.
+Rainbow DQN is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance.
+These improvements include:
 
-* TD3 paper: https://arxiv.org/abs/1802.09477
+* Double DQN (DDQN): Addresses the overestimation bias of Q-values by using two networks to decouple the selection and evaluation of the action in the Q-learning target.
+* Prioritized Experience Replay: Instead of uniformly sampling from the replay buffer, it samples more important transitions more frequently based on the magnitude of their temporal difference (TD) error.
+* Dueling Networks: Splits the Q-network into two separate streams — one for estimating the state value function and another for estimating the advantages for each action. They are then combined to produce Q-values.
+* Multi-step Learning (n-step returns): Instead of using just the immediate reward for learning, it uses multi-step returns which consider a sequence of future rewards.
+* Distributional RL: Instead of estimating the expected value of the cumulative future reward, it predicts the entire distribution of the cumulative future reward.
+* Noisy Nets: Adds noise directly to the weights of the network, providing a way to explore the environment without the need for epsilon-greedy exploration.
+* Categorical DQN (C51): A specific form of distributional RL where the continuous range of possible cumulative future rewards is discretized into a fixed set of categories.
+
+Rainbow DQN paper: https://arxiv.org/abs/1710.02298
 
 Can I use it?
 ------------
@@ -18,10 +25,10 @@ Can I use it?
      - Action
      - Observation
    * - Discrete
-     - ❌
+     - ✔️
      - ✔️
    * - Continuous
-     - ✔️
+     - ❌
      - ✔️
 
 Example
@@ -32,11 +39,10 @@ Example
   import gymnasium as gym
   from agilerl.utils import makeVectEnvs
   from agilerl.components.replay_buffer import ReplayBuffer
-  from agilerl.algorithms.td3 import TD3
+  from agilerl.algorithms.dqn_rainbow import RainbowDQN
 
   # Create environment and Experience Replay Buffer
-  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=1)
-  max_action = float(env.single_action_space.high[0])
+  env = makeVectEnvs('LunarLander-v2', num_envs=1)
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
@@ -56,7 +62,7 @@ Example
   field_names = ["state", "action", "reward", "next_state", "done"]
   memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
 
-  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, max_action=max_action)   # Create TD3 agent
+  agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create agent
 
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
@@ -76,7 +82,7 @@ Example
           experiences = memory.sample(agent.batch_size) # Sample replay buffer
           agent.learn(experiences)    # Learn according to agent's RL algorithm
 
-To configure the network architecture, pass a dict to the TD3 ``net_config`` field. For an MLP, this can be as simple as:
+To configure the network architecture, pass a dict to the DQN ``net_config`` field. For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -100,11 +106,11 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create TD3 agent
+  agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create agent
 
 Parameters
 ------------
 
-.. autoclass:: agilerl.algorithms.td3.TD3
+.. autoclass:: agilerl.algorithms.dqn_rainbow.RainbowDQN
   :members:
   :inherited-members:

@@ -12,7 +12,7 @@ copyright = "2023, AgileRL"
 author = "Nick Ustaran-Anderegg"
 
 release = "0.1"
-version = "0.1.6"
+version = "0.1.12"
 
 # -- General configuration
 
@@ -34,8 +34,12 @@ templates_path = ["_templates"]
 
 # -- Options for HTML output
 
+html_title = "AgileRL Documentation"
 html_theme = "furo"
 html_static_path = ["_static"]
+html_css_files = ["css/custom.css"]
+html_js_files = ["js/expand_sidebar.js"]
+html_favicon = "_static/favicon.ico"
 html_theme_options = {
     "sidebar_hide_name": True,
     "light_logo": "logo_teal.png",

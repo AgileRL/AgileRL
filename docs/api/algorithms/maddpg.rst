@@ -1,3 +1,4 @@
+.. _maddpg:
 Multi-Agent Deep Deterministic Policy Gradient (MADDPG)
 =========================================
 
@@ -32,6 +33,25 @@ continuous relaxation of discrete action spaces in multi-agent reinforcement lea
 decision-making in complex environments with discrete choices. If you would like to customise the mlp output activation function,
 you can define it within the network configuration using the key "output_activation". User definition for the output activation is however,
 unnecessary, as the algorithm will select the appropriate function given the environments action space.
+
+Agent Masking
+-------------
+
+If you need to take actions from agents at different timesteps, you can use agent masking to only retrieve new actions for certain agents. This
+can be defined by your environment, and should be returned in 'info' as a dictionary. Info must contain two dictionaries - one named 'agent_mask',
+which contains a boolean value for whether an action should be returned for each agent, and another named 'env_defined_actions', which contains
+the actions for each agent that a new action is not generated for. This is handled automatically by the AgileRL multi-agent training function, but
+can be implemented in a custom loop as follows:
+
+.. code-block:: python
+
+    info = {'agent_mask': {'speaker_0': True, 'listener_0': False},
+            'env_defined_actions': {'speaker_0': None, 'listener_0': [0,0,0,0,0]}}
+
+.. code-block:: python
+
+    state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
+    action = agent.getAction(state, epsilon, info['agent_mask'], info['env_defined_actions'])
 
 Example
 ------------

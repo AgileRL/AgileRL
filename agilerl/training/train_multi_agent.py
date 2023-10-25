@@ -33,6 +33,7 @@ def train_multi_agent(
     checkpoint=None,
     checkpoint_path=None,
     wb=False,
+    verbose=True,
     accelerator=None,
 ):
     """The general online multi-agent RL training function. Returns trained population of agents
@@ -78,6 +79,8 @@ def train_multi_agent(
     :type checkpoint_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
+    :param verbose: Display training stats, defaults to True
+    :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: Hugging Face accelerate.Accelerator(), optional
     """
@@ -129,7 +132,7 @@ def train_multi_agent(
                     "memory_size": INIT_HP["MEMORY_SIZE"],
                     "learn_step": INIT_HP["LEARN_STEP"],
                     "tau": INIT_HP["TAU"],
-                    "pop_size": INIT_HP["TOURN_SIZE"],
+                    "pop_size": INIT_HP["POP_SIZE"],
                     "no_mut": MUT_P["NO_MUT"],
                     "arch_mut": MUT_P["ARCH_MUT"],
                     "params_mut": MUT_P["PARAMS_MUT"],
@@ -195,7 +198,7 @@ def train_multi_agent(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
+            state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
             if swap_channels:
                 state = {
@@ -206,8 +209,16 @@ def train_multi_agent(
             for _ in range(max_steps):
                 total_steps += 1
                 # Get next action from agent
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, truncation, _ = env.step(
+                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
+                env_defined_actions = (
+                    info["env_defined_actions"]
+                    if "env_defined_actions" in info.keys()
+                    else None
+                )
+                action = agent.getAction(
+                    state, epsilon, agent_mask, env_defined_actions
+                )
+                next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
 
@@ -273,8 +284,8 @@ def train_multi_agent(
                             {
                                 "global_step": total_steps
                                 * accelerator.state.num_processes,
-                                "eval/mean_score": np.mean(mean_scores),
-                                "eval/best_score": np.max(
+                                "train/mean_score": np.mean(mean_scores),
+                                "train/best_score": np.max(
                                     [agent.scores[-1] for agent in pop]
                                 ),
                                 "eval/mean_fitness": np.mean(fitnesses),
@@ -286,8 +297,8 @@ def train_multi_agent(
                     wandb.log(
                         {
                             "global_step": total_steps,
-                            "eval/mean_score": np.mean(mean_scores),
-                            "eval/best_score": np.max(
+                            "train/mean_score": np.mean(mean_scores),
+                            "train/best_score": np.max(
                                 [agent.scores[-1] for agent in pop]
                             ),
                             "eval/mean_fitness": np.mean(fitnesses),
@@ -308,18 +319,6 @@ def train_multi_agent(
             # Update step counter
             for agent in pop:
                 agent.steps.append(agent.steps[-1])
-
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
-            perf_info = f"Fitness: {fitness}, 100 fitness avgs: {avg_fitness}, 100 score avgs: {avg_score}"
-            pop_info = f"Agents: {agents}, Steps: {num_steps}, Mutations: {muts}"
-            pbar_string = perf_info + ", " + pop_info
-            pbar.set_postfix_str(pbar_string)
-            pbar.update(0)
 
             # Early stop if consistently reaches target
             if (
@@ -358,6 +357,28 @@ def train_multi_agent(
                 else:
                     elite, pop = tournament.select(pop)
                     pop = mutation.mutation(pop)
+
+            if verbose:
+                fitness = ["%.2f" % fitness for fitness in fitnesses]
+                avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
+                avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
+                agents = [agent.index for agent in pop]
+                num_steps = [agent.steps[-1] for agent in pop]
+                muts = [agent.mut for agent in pop]
+                pbar.update(0)
+
+                print(
+                    f"""
+                    --- Epoch {idx_epi + 1} ---
+                    Fitness:\t\t{fitness}
+                    100 fitness avgs:\t{avg_fitness}
+                    100 score avgs:\t{avg_score}
+                    Agents:\t\t{agents}
+                    Steps:\t\t{num_steps}
+                    Mutations:\t\t{muts}
+                    """,
+                    end="\r",
+                )
 
         # Save model checkpoint
         if checkpoint is not None:

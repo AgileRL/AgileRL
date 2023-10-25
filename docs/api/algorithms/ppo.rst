@@ -48,11 +48,12 @@ Example
       action_dim = env.single_action_space.shape[0]       # Continuous action space
 
   channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+  discrete_actions = False # Discrete action space
 
   if channels_last:
       state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create PPO agent
+  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions)   # Create PPO agent
 
   num_episodes = 10  # Number of episodes
   max_steps = 100  # Max steps per episode
@@ -110,7 +111,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
+  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions, net_config=NET_CONFIG)   # Create PPO agent
 
 Parameters
 ------------

@@ -2,12 +2,12 @@
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png height="120">
 </p>
-<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.<br>Join the <a href="https://discord.gg/eB8HyTA2ux">Discord Server</a> to collaborate.</p>
+<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://docs.agilerl.com">documentation</a>.<br>Join the <a href="https://discord.gg/eB8HyTA2ux">Discord Server</a> to collaborate.</p>
 
 <div align="center">
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://agilerl.readthedocs.io/en/latest/?badge=latest)
+[![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://docs.agilerl.com/en/latest/?badge=latest)
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
@@ -84,6 +84,7 @@ accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_on
 
 ## Evolvable algorithms implemented (more coming soon!)
   * DQN
+  * Rainbow DQN
   * DDPG
   * PPO
   * CQL
@@ -356,7 +357,7 @@ env.close()
 ### On-policy reinforcement learning
 While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences collected using a different or previous policy, we have still chosen to include an efficient, evolvable PPO implementation in AgileRL. This algorithm can be used in a variety of settings, with both discrete and continuous actions, and is widely popular across domains including robotics, games, finance, and RLHF.
 
-The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer.
+The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer. It also requires some different hyperparameters, shown below in the custom loop.
 
 The easiest way to train a population of agents using PPO is to use our online training function:
 
@@ -395,11 +396,19 @@ NET_CONFIG = {
 }
 
 INIT_HP = {
-    "POPULATION_SIZE": 4,  # Population size
-    "DOUBLE": True,  # Use double Q-learning
+    "POPULATION_SIZE": 6,  # Population size
+    "DISCRETE_ACTIONS": True,  # Discrete action space
     "BATCH_SIZE": 128,  # Batch size
     "LR": 1e-3,  # Learning rate
     "GAMMA": 0.99,  # Discount factor
+    "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
+    "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
+    "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
+    "ENT_COEF": 0.01,  # Entropy coefficient
+    "VF_COEF": 0.5,  # Value function coefficient
+    "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
+    "TARGET_KL": None, # Target KL divergence threshold
+    "UPDATE_EPOCHS": 4,  # Number of policy update epochs
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     "CHANNELS_LAST": False,
 }
@@ -1159,4 +1168,4 @@ The easiest training loop implementation is to use our ```training.train_multi_a
                                                 wb=INIT_HP["WANDB"])                     # Weights and Biases tracking
 
 ```
-View <a href="https://agilerl.readthedocs.io/en/latest/">documentation</a>.
+View <a href="https://docs.agilerl.com">documentation</a>.

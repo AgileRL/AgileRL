@@ -420,7 +420,7 @@ class Mutations:
                         individual, critic["eval"], offspring_critic.to(self.device)
                     )
 
-        self.reinit_opt(individual)
+        self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "act"
         return individual
 
@@ -481,6 +481,7 @@ class Mutations:
                     self.algo["actor"]["eval"],
                     offspring_actor.to(self.device),
                 )
+        self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"
         return individual
 
@@ -844,6 +845,15 @@ class Mutations:
         """
         # Function to return dictionary with names of agent networks to allow mutation
         if algo == "DQN":
+            nets = {
+                "actor": {
+                    "eval": "actor",
+                    "target": "actor_target",
+                    "optimizer": "optimizer_type",
+                },
+                "critics": [],
+            }
+        elif algo == "Rainbow DQN":
             nets = {
                 "actor": {
                     "eval": "actor",

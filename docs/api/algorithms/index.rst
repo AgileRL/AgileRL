@@ -5,6 +5,7 @@ Reinforcement learning algorithms implemented: (More coming soon!)
     * CQL
     * DDPG
     * DQN
+    * Rainbow DQN
     * ILQL
     * PPO
     * TD3
@@ -19,6 +20,7 @@ We are constantly adding more algorithms, with a view to add hierarchical and mu
    cql
    ddpg
    dqn
+   dqn_rainbow
    ilql
    ppo
    td3

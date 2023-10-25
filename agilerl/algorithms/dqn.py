@@ -171,6 +171,7 @@ class DQN:
                     np.arange(0, self.action_dim), mask=inv_mask
                 ).compressed()
                 action = np.random.choice(available_actions, size=state.size()[0])
+
         else:
             self.actor.eval()
             with torch.no_grad():
@@ -240,6 +241,8 @@ class DQN:
 
         # soft update target network
         self.softUpdate()
+
+        return loss.item()
 
     def softUpdate(self):
         """Soft updates target network."""
