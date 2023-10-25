@@ -247,6 +247,8 @@ class DQN:
         # soft update target network
         self.softUpdate()
 
+        return loss.item()
+
     def softUpdate(self):
         """Soft updates target network."""
         for eval_param, target_param in zip(
