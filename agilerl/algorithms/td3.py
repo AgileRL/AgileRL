@@ -349,7 +349,7 @@ class TD3:
         """
         with torch.no_grad():
             rewards = []
-            for i in range(loop):
+            for _ in range(loop):
                 state = env.reset()[0]
                 score = 0
                 for idx_step in range(max_steps):
