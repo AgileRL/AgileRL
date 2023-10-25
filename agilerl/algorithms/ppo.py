@@ -414,7 +414,7 @@ class PPO:
         """
         with torch.no_grad():
             rewards = []
-            for _ in range(loop):
+            for i in range(loop):
                 state = env.reset()[0]
                 score = 0
                 for idx_step in range(max_steps):
