@@ -11,7 +11,7 @@
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
-**_NEW: AgileRL now supports distributed training and multi-agent reinforcement learning!_**
+**_NEW: AgileRL now supports custom architectures and pre-trained models with the new `MakeEvolvable` wrapper!_**
 
 </div>
 
@@ -29,7 +29,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 ## Table of Contents
   * [Benchmarks](#benchmarks)
   * [Get Started](#get-started)
-  * [Algorithms implemented](#algorithms-implemented-more-coming-soon)
+  * [Algorithms implemented](#evolvable-algorithms-implemented-more-coming-soon)
   * [Train an agent on a Gym environment (Online)](#train-an-agent-on-a-gym-environment-online)
     + [Off-policy Reinforcement Learning](#off-policy-reinforcement-learning)
     + [Custom Off-policy Training Loop](#custom-off-policy-training-loop)
