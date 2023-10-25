@@ -111,7 +111,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions, net_config=NET_CONFIG)   # Create DQN agent
+  agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions, net_config=NET_CONFIG)   # Create PPO agent
 
 Parameters
 ------------

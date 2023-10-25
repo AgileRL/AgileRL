@@ -9,6 +9,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class TD3:
@@ -42,6 +43,10 @@ class TD3:
     :type mutation: str, optional
     :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_networks: List of two custom critic networks (one for each of TD3's two critics), defaults to None
+    :type critic_networks: List[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -66,6 +71,8 @@ class TD3:
         tau=0.005,
         mutation=None,
         policy_freq=2,
+        actor_network=None,
+        critic_networks=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -84,6 +91,8 @@ class TD3:
         self.policy_freq = policy_freq
         self.max_action = max_action
         self.expl_noise = expl_noise
+        self.actor_network = actor_network
+        self.critic_networks = critic_networks
         self.device = device
         self.accelerator = accelerator
 
@@ -92,150 +101,92 @@ class TD3:
         self.fitness = []
         self.steps = [0]
 
-        # model
-        # TD3 employs two critic networks
-        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                output_activation="tanh",
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                output_activation="tanh",
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
+        if self.actor_network is not None and self.critic_networks is not None:
+            self.actor = actor_network
+            self.critic_1, self.critic_2 = critic_networks
+            self.net_config = None
+        else:
+            # model
+            # TD3 employs two critic networks
+            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                self.actor = EvolvableMLP(
+                    num_inputs=state_dim[0],
+                    num_outputs=action_dim,
+                    hidden_size=self.net_config["h_size"],
+                    mlp_output_activation="Tanh",
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+                self.critic_1 = EvolvableMLP(
+                    num_inputs=state_dim[0] + action_dim,
+                    num_outputs=1,
+                    hidden_size=self.net_config["h_size"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+                self.critic_2 = EvolvableMLP(
+                    num_inputs=state_dim[0] + action_dim,
+                    num_outputs=1,
+                    hidden_size=self.net_config["h_size"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                self.actor = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_activation="Tanh",
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+                self.critic_1 = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_activation="Tanh",
+                    critic=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+                self.critic_2 = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_activation="Tanh",
+                    critic=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
 
-            self.critic_1 = EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
-                num_outputs=1,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.critic_target_1 = EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
-                num_outputs=1,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-
-            self.critic_2 = EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
-                num_outputs=1,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.critic_target_2 = EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
-                num_outputs=1,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-
-            self.critic_target_1.load_state_dict(self.critic_1.state_dict())
-            self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-
-        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-            self.actor = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
-
-            self.critic_1 = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                critic=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.critic_target_1 = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                critic=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-
-            self.critic_2 = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                critic=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.critic_target_2 = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                critic=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-
-            self.critic_target_1.load_state_dict(self.critic_1.state_dict())
-            self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-
+        self.actor_target = copy.deepcopy(self.actor)
+        self.critic_target_1 = copy.deepcopy(self.critic_1)
+        self.critic_target_2 = copy.deepcopy(self.critic_2)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.critic_target_1.load_state_dict(self.critic_1.state_dict())
+        self.critic_target_2.load_state_dict(self.critic_2.state_dict())
         self.actor_optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.critic_1_optimizer_type = optim.Adam(
             self.critic_1.parameters(), lr=self.lr
         )
         self.critic_2_optimizer_type = optim.Adam(
             self.critic_2.parameters(), lr=self.lr
+        )
+
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
         if self.accelerator is not None:
@@ -319,11 +270,11 @@ class TD3:
                 .squeeze()
             )
 
-        if self.net_config["arch"] == "mlp":
+        if self.arch == "mlp":
             input_combined = torch.cat([states, actions], 1)
             q_value_1 = self.critic_1(input_combined)
             q_value_2 = self.critic_2(input_combined)
-        elif self.net_config["arch"] == "cnn":
+        elif self.arch == "cnn":
             q_value_1 = self.critic_1(states, actions)
             q_value_2 = self.critic_2(states, actions)
 
@@ -333,11 +284,11 @@ class TD3:
         next_actions = next_actions + noise
 
         # Compute the target, y_j, making use of twin critic networks
-        if self.net_config["arch"] == "mlp":
+        if self.arch == "mlp":
             next_input_combined = torch.cat([next_states, next_actions], 1)
             q_value_next_state_1 = self.critic_target_1(next_input_combined)
             q_value_next_state_2 = self.critic_target_2(next_input_combined)
-        elif self.net_config["arch"] == "cnn":
+        elif self.arch == "cnn":
             q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
             q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
@@ -358,10 +309,10 @@ class TD3:
 
         # update actor and targets every policy_freq episodes
         if len(self.scores) % self.policy_freq == 0:
-            if self.net_config["arch"] == "mlp":
+            if self.arch == "mlp":
                 input_combined = torch.cat([states, self.actor.forward(states)], 1)
                 actor_loss = -self.critic_1(input_combined).mean()
-            elif self.net_config["arch"] == "cnn":
+            elif self.arch == "cnn":
                 actor_loss = -self.critic_1(states, self.actor.forward(states)).mean()
 
             # actor loss backprop
@@ -403,10 +354,20 @@ class TD3:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
-                    state, reward, done, _, _ = env.step(action)
+                    if not hasattr(env, "num_envs"):
+                        action = action[0]
+                    state, reward, done, trunc, _ = env.step(action)
+                    if hasattr(env, "num_envs"):
+                        done = done[0]
+                        trunc = trunc[0]
+                        reward = reward[0]
                     score += reward
+                    if done or trunc:
+                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
@@ -436,6 +397,8 @@ class TD3:
             tau=self.tau,
             mutation=self.mut,
             policy_freq=self.policy_freq,
+            actor_network=self.actor_network,
+            critic_networks=self.critic_networks,
             device=self.device,
             accelerator=self.accelerator,
             wrap=wrap,
@@ -609,26 +572,38 @@ class TD3:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.net_config["arch"] == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
-            self.critic_1 = EvolvableMLP(**checkpoint["critic_1_init_dict"])
-            self.critic_target_1 = EvolvableMLP(
+        if self.net_config is not None:
+            if self.arch == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+                self.critic_1 = EvolvableMLP(**checkpoint["critic_1_init_dict"])
+                self.critic_target_1 = EvolvableMLP(
+                    **checkpoint["critic_target_1_init_dict"]
+                )
+                self.critic_2 = EvolvableMLP(**checkpoint["critic_2_init_dict"])
+                self.critic_target_2 = EvolvableMLP(
+                    **checkpoint["critic_target_2_init_dict"]
+                )
+            elif self.arch == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+                self.critic_1 = EvolvableCNN(**checkpoint["critic_1_init_dict"])
+                self.critic_target_1 = EvolvableCNN(
+                    **checkpoint["critic_target_1_init_dict"]
+                )
+                self.critic_2 = EvolvableCNN(**checkpoint["critic_2_init_dict"])
+                self.critic_target_2 = EvolvableCNN(
+                    **checkpoint["critic_target_2_init_dict"]
+                )
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+            self.critic_1 = MakeEvolvable(**checkpoint["critic_1_init_dict"])
+            self.critic_target_1 = MakeEvolvable(
                 **checkpoint["critic_target_1_init_dict"]
             )
-            self.critic_2 = EvolvableMLP(**checkpoint["critic_2_init_dict"])
-            self.critic_target_2 = EvolvableMLP(
-                **checkpoint["critic_target_2_init_dict"]
-            )
-        elif self.net_config["arch"] == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
-            self.critic_1 = EvolvableCNN(**checkpoint["critic_1_init_dict"])
-            self.critic_target_1 = EvolvableCNN(
-                **checkpoint["critic_target_1_init_dict"]
-            )
-            self.critic_2 = EvolvableCNN(**checkpoint["critic_2_init_dict"])
-            self.critic_target_2 = EvolvableCNN(
+            self.critic_2 = MakeEvolvable(**checkpoint["critic_2_init_dict"])
+            self.critic_target_2 = MakeEvolvable(
                 **checkpoint["critic_target_2_init_dict"]
             )
         self.lr = checkpoint["lr"]

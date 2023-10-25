@@ -9,7 +9,7 @@ import wandb
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
-def train(
+def train_on_policy(
     env,
     env_name,
     algo,
@@ -97,7 +97,7 @@ def train(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="AgileRL",
+                project="EvoWrappers",
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
@@ -122,6 +122,12 @@ def train(
         if accelerator.is_main_process:
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
+
+    # Detect if environment is vectorised
+    if hasattr(env, "num_envs"):
+        is_vectorised = True
+    else:
+        is_vectorised = False
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -155,8 +161,9 @@ def train(
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is not None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     for idx_epi in pbar:
@@ -175,9 +182,13 @@ def train(
 
             for idx_step in range(max_steps):
                 if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
+                    state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
                 action, log_prob, _, value = agent.getAction(state)
+                if not is_vectorised:
+                    action = action[0]
+                    log_prob = log_prob[0]
+                    value = value[0]
                 next_state, reward, done, trunc, _ = env.step(
                     action
                 )  # Act in environment
@@ -191,6 +202,9 @@ def train(
 
                 state = next_state
                 score += reward
+
+            if swap_channels:
+                next_state = np.moveaxis(next_state, [-1], [-3])
 
             agent.scores.append(score)
 

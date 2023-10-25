@@ -146,6 +146,7 @@ def train(
                     "params_mut": MUT_P["PARAMS_MUT"],
                     "act_mut": MUT_P["ACT_MUT"],
                     "rl_hp_mut": MUT_P["RL_HP_MUT"],
+                    "details": "No output activation.",
                 },
             )
 
@@ -154,6 +155,12 @@ def train(
         if accelerator.is_main_process:
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
+
+    # Detect if environment is vectorised
+    if hasattr(env, "num_envs"):
+        is_vectorised = True
+    else:
+        is_vectorised = False
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -201,8 +208,9 @@ def train(
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     for idx_epi in pbar:
@@ -210,16 +218,18 @@ def train(
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
-            rewards, terminations = [], []
-            truncs = []
+            rewards, terminations, truncs = [], [], []
+            score = 0
             for idx_step in range(max_steps):
                 if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
+                    state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
                 if noisy:
                     action = agent.getAction(state)
                 else:
                     action = agent.getAction(state, epsilon)
+                if not is_vectorised:
+                    action = action[0]
                 next_state, reward, done, trunc, _ = env.step(
                     action
                 )  # Act in environment
@@ -231,7 +241,7 @@ def train(
                             state,
                             action,
                             reward,
-                            np.moveaxis(next_state, [3], [1]),
+                            np.moveaxis(next_state, [-1], [-3]),
                             done,
                         )
                     else:
@@ -246,16 +256,17 @@ def train(
                         memory.save2memoryVectEnvs(*one_step_transition)
                 else:
                     if swap_channels:
-                        memory.save2memoryVectEnvs(
+                        memory.save2memory(
                             state,
                             action,
                             reward,
-                            np.moveaxis(next_state, [3], [1]),
+                            np.moveaxis(next_state, [-1], [-3]),
                             done,
+                            is_vectorised,
                         )
                     else:
-                        memory.save2memoryVectEnvs(
-                            state, action, reward, next_state, done
+                        memory.save2memory(
+                            state, action, reward, next_state, done, is_vectorised
                         )
 
                 if per:
@@ -285,16 +296,21 @@ def train(
                         else:
                             agent.learn(experiences)
 
+                if is_vectorised:
+                    terminations.append(done)
+                    rewards.append(reward)
+                    truncs.append(trunc)
+                else:
+                    score += reward
                 state = next_state
-                rewards.append(reward)
-                terminations.append(done)
-                truncs.append(trunc)
 
-            scores = calculate_vectorized_scores(
-                np.array(rewards), np.array(terminations)
-            )
+            if is_vectorised:
+                scores = calculate_vectorized_scores(
+                    np.array(rewards), np.array(terminations)
+                )
+                score = np.mean(scores)
 
-            agent.scores.append(np.mean(scores))
+            agent.scores.append(score)
 
             agent.steps[-1] += max_steps
             total_steps += max_steps

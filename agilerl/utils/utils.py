@@ -32,6 +32,8 @@ def initialPopulation(
     one_hot,
     net_config,
     INIT_HP,
+    actor_network=None,
+    critic_network=None,
     population_size=1,
     device="cpu",
     accelerator=None,
@@ -48,6 +50,10 @@ def initialPopulation(
     :type one_hot: bool
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_network: Custom critic network, defaults to None
+    :type critic_network: nn.Module, optional
     :param population_size: Number of agents in population, defaults to 1
     :type population_size: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -71,6 +77,7 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 double=INIT_HP["DOUBLE"],
+                actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -114,6 +121,8 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 policy_freq=INIT_HP["POLICY_FREQ"],
+                actor_network=actor_network,
+                critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -139,6 +148,8 @@ def initialPopulation(
                 max_grad_norm=INIT_HP["MAX_GRAD_NORM"],
                 target_kl=INIT_HP["TARGET_KL"],
                 update_epochs=INIT_HP["UPDATE_EPOCHS"],
+                actor_network=actor_network,
+                critic_network=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -158,6 +169,7 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 double=INIT_HP["DOUBLE"],
+                actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -178,6 +190,8 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 policy_freq=INIT_HP["POLICY_FREQ"],
+                actor_network=actor_network,
+                critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -201,6 +215,8 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 discrete_actions=INIT_HP["DISCRETE_ACTIONS"],
+                actor_networks=actor_network,
+                critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
             )
@@ -225,6 +241,8 @@ def initialPopulation(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 discrete_actions=INIT_HP["DISCRETE_ACTIONS"],
+                actor_networks=actor_network,
+                critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
             )

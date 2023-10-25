@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agilerl.networks.custom_architecture import GumbelSoftmax
+from agilerl.networks.custom_activation import GumbelSoftmax
 
 
 class NoisyLinear(nn.Module):
@@ -102,10 +102,10 @@ class EvolvableMLP(nn.Module):
     :type hidden_size: List[int]
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
     :type num_atoms: int, optional
-    :param activation: Activation layer, defaults to 'relu'
-    :type activation: str, optional
-    :param output_activation: Output activation layer, defaults to None
-    :type output_activation: str, optional
+    :param mlp_activation: Activation layer, defaults to 'relu'
+    :type mlp_activation: str, optional
+    :param mlp_output_activation: Output activation layer, defaults to None
+    :type mlp_output_activation: str, optional
     :param layer_norm: Normalization between layers, defaults to False
     :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
@@ -130,8 +130,8 @@ class EvolvableMLP(nn.Module):
         num_outputs: int,
         hidden_size: List[int],
         num_atoms=50,
-        activation="relu",
-        output_activation=None,
+        mlp_activation="ReLU",
+        mlp_output_activation=None,
         layer_norm=True,
         output_vanish=True,
         init_layers=True,
@@ -145,8 +145,8 @@ class EvolvableMLP(nn.Module):
 
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
-        self.activation = activation
-        self.output_activation = output_activation
+        self.mlp_activation = mlp_activation
+        self.mlp_output_activation = mlp_output_activation
         self.layer_norm = layer_norm
         self.output_vanish = output_vanish
         self.init_layers = init_layers
@@ -169,23 +169,23 @@ class EvolvableMLP(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            "tanh": nn.Tanh,
-            "linear": nn.Identity,
-            "relu": nn.ReLU,
-            "elu": nn.ELU,
-            "softsign": nn.Softsign,
-            "sigmoid": nn.Sigmoid,
-            "gumbel_softmax": GumbelSoftmax,
-            "softplus": nn.Softplus,
-            "softmax": nn.Softmax,
-            "lrelu": nn.LeakyReLU,
-            "prelu": nn.PReLU,
-            "gelu": nn.GELU,
+            "Tanh": nn.Tanh,
+            "Identity": nn.Identity,
+            "ReLU": nn.ReLU,
+            "ELU": nn.ELU,
+            "Softsign": nn.Softsign,
+            "Sigmoid": nn.Sigmoid,
+            "GumbelSoftmax": GumbelSoftmax,
+            "Softplus": nn.Softplus,
+            "Softmax": nn.Softmax,
+            "LeakyReLU": nn.LeakyReLU,
+            "PReLU": nn.PReLU,
+            "GELU": nn.GELU,
         }
 
         return (
-            activation_functions[activation_names](dim=1)
-            if activation_names == "softmax"
+            activation_functions[activation_names](dim=-1)
+            if activation_names == "Softmax"
             else activation_functions[activation_names]()
         )
 
@@ -213,7 +213,7 @@ class EvolvableMLP(nn.Module):
             net_dict["linear_layer_0"] = self.layer_init(net_dict["linear_layer_0"])
         if self.layer_norm:
             net_dict["layer_norm_0"] = nn.LayerNorm(hidden_size[0])
-        net_dict["activation_0"] = self.get_activation(self.activation)
+        net_dict["activation_0"] = self.get_activation(self.mlp_activation)
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
                 if noisy:
@@ -233,7 +233,7 @@ class EvolvableMLP(nn.Module):
                         hidden_size[l_no]
                     )
                 net_dict[f"activation_{str(l_no)}"] = self.get_activation(
-                    self.activation
+                    self.mlp_activation
                 )
         if noisy:
             output_layer = NoisyLinear(hidden_size[-1], output_size)
@@ -257,7 +257,7 @@ class EvolvableMLP(nn.Module):
             output_size=self.hidden_size[-1] if self.rainbow else self.num_outputs,
             hidden_size=self.hidden_size,
             output_vanish=False,
-            output_activation=self.output_activation,
+            output_activation=self.mlp_output_activation,
         )
 
         if self.accelerator is None:
@@ -417,8 +417,8 @@ class EvolvableMLP(nn.Module):
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,
             "num_atoms": self.num_atoms,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
+            "mlp_activation": self.mlp_activation,
+            "mlp_output_activation": self.mlp_output_activation,
             "layer_norm": self.layer_norm,
             "init_layers": self.init_layers,
             "output_vanish": self.output_vanish,
@@ -434,30 +434,30 @@ class EvolvableMLP(nn.Module):
         """Returns shortened version of model information in dictionary."""
         short_dict = {
             "hidden_size": self.hidden_size,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
+            "mlp_activation": self.mlp_activation,
+            "mlp_output_activation": self.mlp_output_activation,
             "layer_norm": self.layer_norm,
         }
         return short_dict
 
-    def add_layer(self):
+    def add_mlp_layer(self):
         """Adds a hidden layer to neural network."""
         # add layer to hyper params
         if len(self.hidden_size) < 3:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
             self.recreate_nets()
         else:
-            self.add_node()
+            self.add_mlp_node()
 
-    def remove_layer(self):
+    def remove_mlp_layer(self):
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > 1:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
             self.recreate_nets()
         else:
-            self.add_node()
+            self.add_mlp_node()
 
-    def add_node(self, hidden_layer=None, numb_new_nodes=None):
+    def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
         """Adds nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -478,7 +478,7 @@ class EvolvableMLP(nn.Module):
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    def remove_node(self, hidden_layer=None, numb_new_nodes=None):
+    def remove_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None

@@ -41,5 +41,6 @@ Contents
    offline_training/index
    multi_agent_training/index
    distributed_training/index
+   custom_architecure/index
    tutorials/index
    api/index

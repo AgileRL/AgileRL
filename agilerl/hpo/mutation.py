@@ -95,7 +95,7 @@ class Mutations:
         self.min_learn_step = min_learn_step
         self.max_learn_step = max_learn_step
 
-        if agent_ids is not None:
+        if algo in ["MADDPG", "MATD3"]:
             self.multi_agent = True
         else:
             self.multi_agent = False
@@ -426,11 +426,8 @@ class Mutations:
 
     def _permutate_activation(self, network):
         # Function to change network activation layer
-        possible_activations = ["relu", "elu", "gelu"]
-        if self.arch == "cnn":
-            current_activation = network.mlp_activation
-        else:  # mlp
-            current_activation = network.activation
+        possible_activations = ["ReLU", "ELU", "GELU"]
+        current_activation = network.mlp_activation
         # Remove current activation from options to ensure different new
         # activation layer
         possible_activations.remove(current_activation)
@@ -442,7 +439,7 @@ class Mutations:
             net_dict["mlp_activation"] = new_activation
             net_dict["cnn_activation"] = new_activation
         else:  # mlp, gpt or bert
-            net_dict["activation"] = new_activation
+            net_dict["mlp_activation"] = new_activation
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
         network = new_network
@@ -672,49 +669,49 @@ class Mutations:
                 if rand_numb < self.new_layer_prob:
                     if self.rng.uniform(0, 1) < 0.5:
                         for offspring_actor in offspring_actors:
-                            offspring_actor.add_layer()
+                            offspring_actor.add_mlp_layer()
                         for offspring_critics in offspring_critics_list:
                             for offspring_critic in offspring_critics:
-                                offspring_critic.add_layer()
+                                offspring_critic.add_mlp_layer()
                     else:
                         for offspring_actor in offspring_actors:
-                            offspring_actor.remove_layer()
+                            offspring_actor.remove_mlp_layer()
                         for offspring_critics in offspring_critics_list:
                             for offspring_critic in offspring_critics:
-                                offspring_critic.remove_layer()
+                                offspring_critic.remove_mlp_layer()
                 else:
                     if self.rng.uniform(0, 1) < 0.5:
                         if len(offspring_critics_list) == 1:
                             for offspring_actor, offspring_critic in zip(
                                 offspring_actors, offspring_critics_list[0]
                             ):
-                                node_dict = offspring_actor.add_node()
-                                offspring_critic.add_node(**node_dict)
+                                node_dict = offspring_actor.add_mlp_node()
+                                offspring_critic.add_mlp_node(**node_dict)
                         else:
                             for (
                                 offspring_actor,
                                 offspring_critic_1,
                                 offspring_critic_2,
                             ) in zip(offspring_actors, *offspring_critics_list):
-                                node_dict = offspring_actor.add_node()
-                                offspring_critic_1.add_node(**node_dict)
-                                offspring_critic_2.add_node(**node_dict)
+                                node_dict = offspring_actor.add_mlp_node()
+                                offspring_critic_1.add_mlp_node(**node_dict)
+                                offspring_critic_2.add_mlp_node(**node_dict)
                     else:
                         if len(offspring_critics_list) == 1:
                             for offspring_actor, offspring_critic in zip(
                                 offspring_actors, offspring_critics_list[0]
                             ):
-                                node_dict = offspring_actor.remove_node()
-                                offspring_critic.remove_node(**node_dict)
+                                node_dict = offspring_actor.remove_mlp_node()
+                                offspring_critic.remove_mlp_node(**node_dict)
                         else:
                             for (
                                 offspring_actor,
                                 offspring_critic_1,
                                 offspring_critic_2,
                             ) in zip(offspring_actors, *offspring_critics_list):
-                                node_dict = offspring_actor.add_node()
-                                offspring_critic_1.remove_node(**node_dict)
-                                offspring_critic_2.remove_node(**node_dict)
+                                node_dict = offspring_actor.add_mlp_node()
+                                offspring_critic_1.remove_mlp_node(**node_dict)
+                                offspring_critic_2.remove_mlp_node(**node_dict)
 
             if self.accelerator is None:
                 offspring_actors = [
@@ -801,22 +798,22 @@ class Mutations:
             else:  # mlp or gpt
                 if rand_numb < self.new_layer_prob:
                     if self.rng.uniform(0, 1) < 0.5:
-                        offspring_actor.add_layer()
+                        offspring_actor.add_mlp_layer()
                         for offspring_critic in offspring_critics:
-                            offspring_critic.add_layer()
+                            offspring_critic.add_mlp_layer()
                     else:
-                        offspring_actor.remove_layer()
+                        offspring_actor.remove_mlp_layer()
                         for offspring_critic in offspring_critics:
-                            offspring_critic.remove_layer()
+                            offspring_critic.remove_mlp_layer()
                 else:
                     if self.rng.uniform(0, 1) < 0.5:
-                        node_dict = offspring_actor.add_node()
+                        node_dict = offspring_actor.add_mlp_node()
                         for offspring_critic in offspring_critics:
-                            offspring_critic.add_node(**node_dict)
+                            offspring_critic.add_mlp_node(**node_dict)
                     else:
-                        node_dict = offspring_actor.remove_node()
+                        node_dict = offspring_actor.remove_mlp_node()
                         for offspring_critic in offspring_critics:
-                            offspring_critic.remove_node(**node_dict)
+                            offspring_critic.remove_mlp_node(**node_dict)
 
             if self.accelerator is not None:
                 setattr(individual, self.algo["actor"]["eval"], offspring_actor)

@@ -9,6 +9,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class DQN:
@@ -38,6 +39,8 @@ class DQN:
     :type mutation: str, optional
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -60,6 +63,7 @@ class DQN:
         tau=1e-3,
         mutation=None,
         double=False,
+        actor_network=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -82,51 +86,42 @@ class DQN:
         self.fitness = []
         self.steps = [0]
         self.double = double
+        self.actor_network = actor_network
 
-        # model
-        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
+        if self.actor_network is not None:
+            self.actor = actor_network
+            self.net_config = None
+        else:
+            # model
+            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                self.actor = EvolvableMLP(
+                    num_inputs=state_dim[0],
+                    num_outputs=action_dim,
+                    hidden_size=self.net_config["h_size"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                self.actor = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
 
-        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-            self.actor = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
-
+        # Create the target network by copying the actor network
+        self.actor_target = copy.deepcopy(self.actor)
+        self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
@@ -247,6 +242,8 @@ class DQN:
         # soft update target network
         self.softUpdate()
 
+        return loss.item()
+
     def softUpdate(self):
         """Soft updates target network."""
         for eval_param, target_param in zip(
@@ -275,10 +272,22 @@ class DQN:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
+                        # Handle unvectorised Atari environment
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
                         state = np.moveaxis(state, [3], [1])
                     action = self.getAction(state, epsilon=0)
-                    state, reward, done, _, _ = env.step(action)
+                    # Handle unvectorised Atari environment
+                    if not hasattr(env, "num_envs"):
+                        action = action[0]
+                    state, reward, done, trunc, _ = env.step(action)
+                    if hasattr(env, "num_envs"):
+                        done = done[0]
+                        trunc = trunc[0]
+                        reward = reward[0]
                     score += reward
+                    if done or trunc:
+                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
@@ -299,6 +308,7 @@ class DQN:
             one_hot=self.one_hot,
             index=index,
             net_config=self.net_config,
+            actor_network=self.actor_network,
             batch_size=self.batch_size,
             lr=self.lr,
             learn_step=self.learn_step,
@@ -386,13 +396,17 @@ class DQN:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.net_config["arch"] == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
-        elif self.net_config["arch"] == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
-        self.lr = checkpoint["lr"]
+        if self.net_config is not None:
+            if self.net_config["arch"] == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+            elif self.net_config["arch"] == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+            self.lr = checkpoint["lr"]
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])

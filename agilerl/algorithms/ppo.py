@@ -9,6 +9,7 @@ from torch.distributions import Categorical, MultivariateNormal
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class PPO:
@@ -50,6 +51,10 @@ class PPO:
     :type target_kl: float, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
+    :param critic_network: Custom critic network, defaults to None
+    :type critic_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -78,6 +83,8 @@ class PPO:
         max_grad_norm=0.5,
         target_kl=None,
         update_epochs=4,
+        actor_network=None,
+        critic_network=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -100,6 +107,8 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
         self.update_epochs = update_epochs
+        self.actor_network = actor_network
+        self.critic_network = critic_network
         self.device = device
         self.accelerator = accelerator
 
@@ -108,64 +117,71 @@ class PPO:
         self.fitness = []
         self.steps = [0]
 
-        # Set up network output activations
-        if "output_activation" in self.net_config.keys():
-            pass
-        else:
-            if self.discrete_actions:
-                self.net_config["output_activation"] = "softmax"
-            else:
-                self.net_config["output_activation"] = "tanh"
-
         # For continuous action spaces
         if not self.discrete_actions:
             self.action_var = torch.full((action_dim,), action_std_init**2)
             if self.accelerator is None:
                 self.action_var = self.action_var.to(self.device)
 
-        # model
-        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                output_activation=self.net_config["output_activation"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.critic = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=1,
-                hidden_size=self.net_config["h_size"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
+        if self.actor_network is not None and self.critic_network is not None:
+            self.actor = actor_network
+            self.critic = critic_network
+            self.net_config = None
+        else:
+            # Set up network output activations
+            if "output_activation" in self.net_config.keys():
+                pass
+            else:
+                if self.discrete_actions:
+                    self.net_config["output_activation"] = "Softmax"
+                else:
+                    self.net_config["output_activation"] = "Tanh"
+            # model
+            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                self.actor = EvolvableMLP(
+                    num_inputs=state_dim[0],
+                    num_outputs=action_dim,
+                    hidden_size=self.net_config["h_size"],
+                    mlp_output_activation=self.net_config["output_activation"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+                self.critic = EvolvableMLP(
+                    num_inputs=state_dim[0],
+                    num_outputs=1,
+                    hidden_size=self.net_config["h_size"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                self.actor = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_activation=self.net_config["output_activation"],
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+                self.critic = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=1,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_activation="Tanh",
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
 
-        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-            self.actor = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation=self.net_config["output_activation"],
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.critic = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=1,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_activation="tanh",
-                device=self.device,
-                accelerator=self.accelerator,
-            )
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         self.optimizer_type = optim.Adam(
             [
@@ -205,6 +221,9 @@ class PPO:
             )
 
         if len(state.size()) < 2:
+            state = state.unsqueeze(0)
+
+        if self.arch == "cnn" and state.dim() <= 3:
             state = state.unsqueeze(0)
 
         return state.float()
@@ -400,11 +419,19 @@ class PPO:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
                         state = np.moveaxis(state, [3], [1])
                     action, _, _, _ = self.getAction(state)
+                    if not hasattr(env, "num_envs"):
+                        action = action[0]
                     state, reward, done, trunc, info = env.step(action)
-                    score += reward[0]
-                    if done[0] or trunc[0]:
+                    if hasattr(env, "num_envs"):
+                        done = done[0]
+                        trunc = trunc[0]
+                        reward = reward[0]
+                    score += reward
+                    if done or trunc:
                         break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
@@ -438,6 +465,8 @@ class PPO:
             max_grad_norm=self.max_grad_norm,
             target_kl=self.target_kl,
             update_epochs=self.update_epochs,
+            actor_network=self.actor_network,
+            critic_network=self.critic_network,
             mutation=self.mut,
             device=self.device,
             accelerator=self.accelerator,
@@ -540,12 +569,16 @@ class PPO:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.net_config["arch"] == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
-        elif self.net_config["arch"] == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+        if self.net_config is not None:
+            if self.arch == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
+            elif self.arch == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.critic = MakeEvolvable(**checkpoint["critic_init_dict"])
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(
             [

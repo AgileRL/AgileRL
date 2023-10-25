@@ -5,20 +5,20 @@ INIT_HP:
     ALGO: TD3                                         # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
-    BATCH_SIZE: 128           # Batch size
-    LR: 1e-4                   # Learning rate
+    BATCH_SIZE: 128            # Batch size
+    LR: 0.001                  # Learning rate
     EPISODES: 1000             # Max no. episodes
-    TARGET_SCORE: 200.          # Early training stop at avg score of last 100 episodes
+    TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
-    TAU: 0.005                  # For soft update of target parameters
+    TAU: 0.005                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: true               # Log with Weights and Biases
+    WANDB: true                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -33,10 +33,8 @@ MUTATION_PARAMS:
     RAND_SEED: 42                          # Random seed
     MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
     MAX_LR: 0.01
-    MIN_LEARN_STEP: 1
-    MAX_LEARN_STEP: 200
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+MLP: {arch: mlp, h_size: [64, 64]}

@@ -222,8 +222,9 @@ def train(
     total_steps = 0
 
     # Pre-training mutation
-    if mutation is not None:
-        pop = mutation.mutation(pop, pre_training_mut=True)
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     for idx_epi in pbar:

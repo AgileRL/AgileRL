@@ -22,14 +22,14 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 6                # Population size
-    EVO_EPOCHS: 5             # Evolution frequency
-    WANDB: true               # Log with Weights and Biases
+    EVO_EPOCHS: 20             # Evolution frequency
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
     ARCH_MUT: 0.2                          # Architecture mutation
     NEW_LAYER: 0.2                         # New layer mutation
-    PARAMS_MUT: 0                          # Network parameters mutation
+    PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
   # Learning HPs to choose from
@@ -41,4 +41,4 @@ MUTATION_PARAMS:
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+MLP: {arch: mlp, h_size: [64, 64]}
