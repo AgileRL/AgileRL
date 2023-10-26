@@ -137,15 +137,15 @@ table of PyTorch layers that are currently supported by this wrapper.
    :header-rows: 1
 
    * - **Pooling**
-     - **Activation**
-     - **Normalization**
-     - **Convolutional**
-     - **Linear**
-   * - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
+     - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
+   * - **Activation**
      - nn.Tanh, nn.Identity, nn.ReLU, nn.ELU, nn.Softsign, nn.Sigmoid, GumbelSoftmax,
        nn.Softplus, nn.Softmax, nn.LeakyReLU, nn.PReLU, nn.GELU
+   * - **Normalization**
      - nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d, nn.LayerNorm
+   * - **Convolutional**
      - nn.Conv2d, nn.Conv3d
+   * - **Linear**
      - nn.Linear
 
 .. _compalgos:

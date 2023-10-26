@@ -397,7 +397,7 @@ class RainbowDQN:
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():
