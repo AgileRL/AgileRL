@@ -135,7 +135,7 @@ Compatible Architecture
 
 At present, ``MakeEvolvable`` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
 network architecture must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive
-table of PyTorch layers that are currently supported by this wrapper.
+table of PyTorch layers that are currently supported by this wrapper:
 
 
 .. list-table::
@@ -146,23 +146,23 @@ table of PyTorch layers that are currently supported by this wrapper.
    * - **Layer Type**
      - **PyTorch Compatibility**
    * - **Pooling**
-     - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
+     - ``nn.MaxPool2d``, ``nn.MaxPool3d``, ``nn.AvgPool2d``, ``nn.AvgPool3d``
    * - **Activation**
-     - nn.Tanh, nn.Identity, nn.ReLU, nn.ELU, nn.Softsign, nn.Sigmoid, GumbelSoftmax,
-       nn.Softplus, nn.Softmax, nn.LeakyReLU, nn.PReLU, nn.GELU
+     - ``nn.Tanh``, ``nn.Identity``, ``nn.ReLU``, ``nn.ELU``, ``nn.Softsign``, ``nn.Sigmoid``, ``GumbelSoftmax``,
+       ``nn.Softplus``, ``nn.Softmax``, ``nn.LeakyReLU``, ``nn.PReLU``, ``nn.GELU``
    * - **Normalization**
-     - nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d, nn.LayerNorm
+     - ``nn.BatchNorm2d``, ``nn.BatchNorm3d``, ``nn.InstanceNorm2d``, ``nn.InstanceNorm3d``, ``nn.LayerNorm``
    * - **Convolutional**
-     - nn.Conv2d, nn.Conv3d
+     - ``nn.Conv2d``, ``nn.Conv3d``
    * - **Linear**
-     - nn.Linear
+     - ``nn.Linear``
 
 .. _compalgos:
 
 Compatible Algorithms
 ------------
 
-The following table highlights which AgileRL algorithms are compatible with custom architecture:
+The following table highlights which AgileRL algorithms are currently compatible with custom architecture:
 
 .. list-table::
    :widths: 5, 5, 5, 5, 5, 5, 5, 5, 5
