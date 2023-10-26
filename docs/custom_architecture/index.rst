@@ -141,6 +141,7 @@ table of PyTorch layers that are currently supported by this wrapper.
 .. list-table::
    :widths: 25, 50
    :header-rows: 1
+   :align: left
 
    * - **Layer Type**
      - **PyTorch Compatibility**
