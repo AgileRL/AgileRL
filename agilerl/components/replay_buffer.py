@@ -16,7 +16,7 @@ class ReplayBuffer:
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
-    :type field_names: List[str]
+    :type field_names: list[str]
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to None
     :type device: str, optional
     """
@@ -75,13 +75,13 @@ class ReplayBuffer:
         """Saves experience to memory.
 
         :param state: Environment observation
-        :type state: float or List[float]
+        :type state: float or list[float]
         :param action: Action in environment
-        :type action: float or List[float]
+        :type action: float or list[float]
         :param reward: Reward from environment
         :type reward: float
         :param next_state: Environment observation of next state
-        :type next_state: float or List[float]
+        :type next_state: float or list[float]
         :param done: True if environment episode finished, else False
         :type done: bool
         """
@@ -92,15 +92,15 @@ class ReplayBuffer:
         """Saves multiple experiences to memory.
 
         :param states: Multiple environment observations in a batch
-        :type states: List[float] or List[List[float]]
+        :type states: list[float] or list[list[float]]
         :param actions: Multiple actions in environment a batch
-        :type actions: List[float] or List[List[float]]
+        :type actions: list[float] or list[list[float]]
         :param rewards: Multiple rewards from environment in a batch
-        :type rewards: List[float]
+        :type rewards: list[float]
         :param next_states: Multiple environment observations of next states in a batch
-        :type next_states: List[float] or List[List[float]]
+        :type next_states: list[float] or list[list[float]]
         :param dones: True if environment episodes finished, else False, in a batch
-        :type dones: List[bool]
+        :type dones: list[bool]
         """
         for state, action, reward, next_state, done in zip(
             states, actions, rewards, next_states, dones
@@ -113,15 +113,15 @@ class ReplayBuffer:
         the environment is vectorised or not.
 
         :param states: Environment observations
-        :type states: float, List[float] or List[List[float]]
+        :type states: float, list[float] or list[list[float]]
         :param actions: Environment actions
-        :type actions: float, List[float] or List[List[float]]
+        :type actions: float, list[float] or list[list[float]]
         :param rewards: Environment rewards
-        :type rewards: float or List[float]
+        :type rewards: float or list[float]
         :param next_states: Environment observations for the next state
-        :type next_states: float, List[float] or List[List[float]]
+        :type next_states: float, list[float] or list[list[float]]
         :param dones: True if environment episodes finished, else False
-        :type dones: float or List[bool]
+        :type dones: float or list[bool]
         :param is_vectorised: Boolean flag indicating if the environment has been vectorised
         :type is_vectorised: bool
         """
@@ -140,7 +140,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
-    :type field_names: List[str]
+    :type field_names: list[str]
     :param num_envs: Number of parallel environments for training
     :type num_envs: int
     :param n_step: Step number to calculate n-step td error, defaults to 3
@@ -171,13 +171,13 @@ class MultiStepReplayBuffer(ReplayBuffer):
         """Saves experience to memory.
 
         :param state: Environment observation
-        :type state: float or List[float]
+        :type state: float or list[float]
         :param action: Action in environment
-        :type action: float or List[float]
+        :type action: float or list[float]
         :param reward: Reward from environment
         :type reward: float
         :param next_state: Environment observation of next state
-        :type next_state: float or List[float]
+        :type next_state: float or list[float]
         :param done: True if environment episode finished, else False
         :type done: bool
         """
@@ -201,15 +201,15 @@ class MultiStepReplayBuffer(ReplayBuffer):
         """Saves multiple experiences to memory.
 
         :param states: Multiple environment observations in a batch
-        :type states: List[float] or List[List[float]]
+        :type states: list[float] or list[list[float]]
         :param actions: Multiple actions in environment a batch
-        :type actions: List[float] or List[List[float]]
+        :type actions: list[float] or list[list[float]]
         :param rewards: Multiple rewards from environment in a batch
-        :type rewards: List[float]
+        :type rewards: list[float]
         :param next_states: Multiple environment observations of next states in a batch
-        :type next_states: List[float] or List[List[float]]
+        :type next_states: list[float] or list[list[float]]
         :param dones: True if environment episodes finished, else False, in a batch
-        :type dones: List[bool]
+        :type dones: list[bool]
         """
         for state, action, reward, next_state, done, buffer in zip(
             states, actions, rewards, next_states, dones, self.n_step_buffers
@@ -235,7 +235,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         """Returns sample of experiences from memory using provided indices.
 
         :param idxs: Indices to sample
-        :type idxs: List[int]
+        :type idxs: list[int]
         """
         experiences = [self.memory[i] for i in idxs]
 
@@ -297,7 +297,7 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
-    :type field_names: List[str]
+    :type field_names: list[str]
     :param num_envs: Number of parallel environments for training
     :type num_envs: int
     :param alpha: Alpha parameter for prioritized replay buffer, defaults to 0.6

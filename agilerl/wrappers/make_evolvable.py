@@ -15,9 +15,9 @@ class MakeEvolvable(nn.Module):
     :type network: nn.Module
     :param input_tensor: Example input tensor so forward pass can be made to detect the network architecture
     :type input_tensor: torch.Tensor
-    :param secondary_input_tensor: Second input tensor if network performs forward pass with two tensors, for example,
-    off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN
-    architecture, defaults to None
+    :param secondary_input_tensor: Second input tensor if network performs forward pass with two tensors, for example, \
+        off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN \
+        architecture, defaults to None
     :type secondary_input_tensor: torch.Tensor, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to False
     :type output_vanish: bool, optional
@@ -26,11 +26,16 @@ class MakeEvolvable(nn.Module):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
-    :param extra_critic_dims: Additional action dimensions required by the fully-connected layer when using a secondary input
-    tensor, needed as critic evaluates state and actions. The state (RGB image) is first processed by convolutional layers
-    before being flattened with the actions and then processed by the fully-connected layer. Only needed in the specific scenario
-    of using an off-policy algorithm with an environment that has RGB image observations, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    :param extra_critic_dims: Needed
+
+
+
+
+    Additional action dimensions required by the fully-connected layer when using a secondary input
+        tensor, needed as critic evaluates state and actions. The state (RGB image) is first processed by convolutional layers
+        before being flattened with the actions and then processed by the fully-connected layer. Only needed in the specific scenario
+        of using an off-policy algorithm with an environment that has RGB image observations, defaults to None
     :type extra_critic_dims: int, optional
     """
 
@@ -486,13 +491,13 @@ class MakeEvolvable(nn.Module):
         :param input_size: Channel size of first layer
         :type input_size: int
         :param channel_size: Output channel sizes for each layer
-        :type channel_size: List[int]
+        :type channel_size: list[int]
         :param kernel_size: Kernel sizes
-        :type kernel_size: List[int] or List[Tuple[int]]
+        :type kernel_size: list[int] or list[Tuple[int]]
         :param stride_size: Stride sizes
-        :type stride_size: List[int] or List[Tuple[int]]
+        :type stride_size: list[int] or list[Tuple[int]]
         :param padding: Convolutional layer padding
-        :type padding: List[int] or List[Tuple[int]]
+        :type padding: list[int] or list[Tuple[int]]
         :param name: Layer name
         :type name: str
         """

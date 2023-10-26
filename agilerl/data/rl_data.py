@@ -42,15 +42,15 @@ class SepcifiedTokenReward(TokenReward):
 @dataclass
 class DataPoint:
     raw_str: str
-    tokens: List[int]
-    state_idxs: List[int]
-    action_idxs: List[int]
-    rewards: List[float]
-    terminals: List[int]
-    utterance_state_idxs: List[int]
-    utterance_action_idxs: List[int]
-    utterance_rewards: List[float]
-    utterance_terminals: List[int]
+    tokens: list[int]
+    state_idxs: list[int]
+    action_idxs: list[int]
+    rewards: list[float]
+    terminals: list[int]
+    utterance_state_idxs: list[int]
+    utterance_action_idxs: list[int]
+    utterance_rewards: list[float]
+    utterance_terminals: list[int]
     meta: Optional[Dict[str, Any]] = None
 
     def to_tensors(self, device, max_length: Optional[int]):

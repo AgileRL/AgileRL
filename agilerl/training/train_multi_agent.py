@@ -46,7 +46,7 @@ def train_multi_agent(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: List[object]
+    :type pop: list[object]
     :param memory: Experience Replay Buffer
     :type memory: object
     :param swap_channels: Swap image channels dimension from last to first
@@ -82,7 +82,7 @@ def train_multi_agent(
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     """
     if wb:
         if accelerator is not None:

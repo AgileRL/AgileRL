@@ -20,7 +20,7 @@ class Mutations:
     :param rl_hp: Relative probability of learning hyperparameter mutation
     :type rl_hp: float
     :param rl_hp_selection: Learning hyperparameter mutations to choose from
-    :type rl_hp_selection: List[str]
+    :type rl_hp_selection: list[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
     :param min_lr: Minimum learning rate in the hyperparameter search space
@@ -36,7 +36,7 @@ class Mutations:
     :param max_batch_size: Maximum batch size in the hyperparameter search space
     :type max_batch_size: int, optional
     :param agents_id: List of agent ID's for multi-agent algorithms
-    :type agents_id: List[str]
+    :type agents_id: list[str]
     :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
     :type arch: str, optional
     :param rand_seed: Random seed for repeatability, defaults to None
@@ -44,7 +44,7 @@ class Mutations:
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     """
 
     def __init__(
@@ -121,7 +121,7 @@ class Mutations:
         """Returns mutated population.
 
         :param population: Population of agents
-        :type population: List[object]
+        :type population: list[object]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
         """

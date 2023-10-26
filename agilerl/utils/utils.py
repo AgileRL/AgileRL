@@ -59,7 +59,7 @@ def initialPopulation(
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     """
     population = []
 
@@ -302,7 +302,7 @@ def printHyperparams(pop):
     """Prints current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
-    :type pop: List[object]
+    :type pop: list[object]
     """
 
     for agent in pop:
@@ -317,7 +317,7 @@ def plotPopulationScore(pop):
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents
-    :type pop: List[object]
+    :type pop: list[object]
     """
     plt.figure()
     for agent in pop:

@@ -43,7 +43,7 @@ class TournamentSelection:
         """Returns best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
-        :type population: List[object]
+        :type population: list[object]
         """
         elite, rank, max_id = self._elitism(population)
 

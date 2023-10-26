@@ -58,7 +58,7 @@ class PPO:
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -205,7 +205,7 @@ class PPO:
         """Prepares state for forward pass through neural network.
 
         :param state: Observation of environment
-        :type state: np.Array() or List
+        :type state: np.Array() or list
         """
         if not isinstance(state, torch.Tensor):
             state = torch.from_numpy(state).float()
@@ -234,7 +234,7 @@ class PPO:
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
-        :type state: float or List[float]
+        :type state: float or list[float]
         :param action: Action in environment to evaluate, defaults to None
         :type action: torch.Tensor(), optional
         :param grad: Calculate gradients on actions, defaults to False
@@ -285,7 +285,7 @@ class PPO:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, rewards, next_states, dones in that order.
-        :type experience: List[torch.Tensor[float]]
+        :type experience: list[torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2

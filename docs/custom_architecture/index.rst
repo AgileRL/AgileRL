@@ -12,7 +12,7 @@ Creating a Custom Evolvable Network
 To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output
 dimensions. Below is an example of a simple multi-layer perceptron that can be used by a DQN agent to solve the Lunar
 Lander environment. The input size is set as the state dimensions and output size the action dimensions. It's worth noting
-that, during the model definition, it is imperative to employ the ``torch.nn```` module to define all layers instead
+that, during the model definition, it is imperative to employ the ``torch.nn`` module to define all layers instead
 of relying on functions from ``torch.nn.functional`` within the forward() method of the network. This is crucial as the
 forward hooks implemented will only be able to detect layers derived from ``nn.Module``.
 
@@ -26,14 +26,13 @@ forward hooks implemented will only be able to detect layers derived from ``nn.M
         def __init__(self, input_size, output_size):
             super(MLPActor, self).__init__()
 
-            self.linear_layer_1 = nn.Linear(input_size, 32)
-            self.linear_layer_2 = nn.Linear(32, output_size)
+            self.linear_layer_1 = nn.Linear(input_size, 64)
+            self.linear_layer_2 = nn.Linear(64, output_size)
             self.relu = nn.ReLU()
-            self.softmax = nn.Softmax(dim=-1)
 
         def forward(self, x):
             x = self.relu(self.linear_layer_1(x))
-            x = self.softmax(self.linear_layer_2(x))
+            x = self.linear_layer_2(x)
             return x
 
 
@@ -83,8 +82,7 @@ If you are using an algorithm that also uses a single critic (PPO, DDPG), define
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics. An example
-is shown below.
+If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics.
 
 .. code-block:: python
 
