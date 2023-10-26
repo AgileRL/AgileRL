@@ -136,6 +136,8 @@ table of PyTorch layers that are currently supported by this wrapper.
    :widths: 25, 50
    :header-rows: 1
 
+   * - **Layer Type**
+     - **PyTorch Compatibility**
    * - **Pooling**
      - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
    * - **Activation**
@@ -159,15 +161,15 @@ The following table highlights which AgileRL algorithms are compatible with cust
    :widths: 5, 5, 5, 5, 5, 5, 5, 5, 5
    :header-rows: 1
 
-   * - **CQL**
-     - **DQN**
-     - **DDPG**
-     - **TD3**
-     - **PPO**
-     - **MADDPG**
-     - **MATD3**
-     - **ILQL**
-     - **Rainbow-DQN**
+   * - CQL
+     - DQN
+     - DDPG
+     - TD3
+     - PPO
+     - MADDPG
+     - MATD3
+     - ILQL
+     - Rainbow-DQN
    * - ✔️
      - ✔️
      - ✔️
