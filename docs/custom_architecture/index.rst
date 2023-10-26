@@ -133,7 +133,7 @@ table of PyTorch layers that are currently supported by this wrapper.
 
 
 .. list-table::
-   :widths: 30, 30, 30, 20, 20
+   :widths: 25, 50
    :header-rows: 1
 
    * - **Pooling**
@@ -156,7 +156,7 @@ Compatible Algorithms
 The following table highlights which AgileRL algorithms are compatible with custom architecture:
 
 .. list-table::
-   :widths: 30, 30, 30, 20, 20
+   :widths: 5, 5, 5, 5, 5, 5, 5, 5, 5
    :header-rows: 1
 
    * - **CQL**
