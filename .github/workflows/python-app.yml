@@ -37,13 +37,10 @@ jobs:
                   ruff check --target-version=py37 --ignore E501 .
             - name: Run isort
               run: |
-                  isort --profile black
+                  isort . --profile black
             - name: Run pyupgrade
               run: |
                   pyupgrade --py38-plus
             - name: Test with pytest
               run: |
                   pytest
-            - name: Run yamlfmt
-              run: |
-                  yamlfmt
