@@ -1,13 +1,14 @@
 Using Custom Architecture
-=====
+=========================
 
 In all other AgileRL tutorials, the networks used by the agents have been consistently defined with a network configuration
 dictionary. Alternatively, it is also possible for a user to define their own custom architecture and add evolvable
 functionality through the ``MakeEvolvable`` wrapper.
 
 .. _createcustnet:
+
 Creating a Custom Evolvable Network
-------------
+-----------------------------------
 
 To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output
 dimensions. Below is an example of a simple multi-layer perceptron that can be used by a DQN agent to solve the Lunar
@@ -129,7 +130,7 @@ as ``evolvable_actor.arch`` for single agent algorithms or ``evolvable_actors[0]
 .. _comparch:
 
 Compatible Architecture
-------------
+-----------------------
 
 At present, ``MakeEvolvable`` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
 network architecture must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive
@@ -158,7 +159,7 @@ table of PyTorch layers that are currently supported by this wrapper:
 .. _compalgos:
 
 Compatible Algorithms
-------------
+---------------------
 
 The following table highlights which AgileRL algorithms are currently compatible with custom architecture:
 

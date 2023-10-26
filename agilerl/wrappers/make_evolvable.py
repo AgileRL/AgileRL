@@ -27,15 +27,7 @@ class MakeEvolvable(nn.Module):
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param extra_critic_dims: Needed
-
-
-
-
-    Additional action dimensions required by the fully-connected layer when using a secondary input
-        tensor, needed as critic evaluates state and actions. The state (RGB image) is first processed by convolutional layers
-        before being flattened with the actions and then processed by the fully-connected layer. Only needed in the specific scenario
-        of using an off-policy algorithm with an environment that has RGB image observations, defaults to None
+    :param extra_critic_dims: Critic action dimensions, needed when using CNNs with actor-critic algorithms, defaults to None
     :type extra_critic_dims: int, optional
     """
 
