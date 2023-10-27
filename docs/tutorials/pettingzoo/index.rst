@@ -25,5 +25,6 @@ Examples using PettingZoo
 .. toctree::
    :maxdepth: 2
 
+   dqn
    maddpg
    matd3
