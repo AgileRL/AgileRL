@@ -1,3 +1,4 @@
+.. _dqn:
 Deep Q-Learning (DQN)
 =====================
 
