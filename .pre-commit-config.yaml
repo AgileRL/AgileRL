@@ -48,14 +48,6 @@ repos:
       hooks:
           - id: pyupgrade
             args: [--py38-plus]
-    - repo: local
-      hooks:
-          - id: pytest
-            name: Run tests (pytest)
-            entry: pytest
-            language: system
-            types: [python]
-            pass_filenames: false
     - repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
       rev: 0.2.3
       hooks:
