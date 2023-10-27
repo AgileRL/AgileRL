@@ -5,6 +5,7 @@ description = "AgileRL is a deep reinforcement learning library focused on impro
 authors = ["Nick Ustaran-Anderegg <dev@agilerl.com>"]
 license = "Apache 2.0"
 readme = "README.md"
+exclude = ["tutorials"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
