@@ -794,6 +794,13 @@ To train against an old version of our agent, we create a pool of opponents. At 
                opponent_pool.append(opp)
 
 
+A sample lesson config for self-play training could be defined as follows:
+
+.. collapse:: Lesson 4
+
+   .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson4.yaml
+      :language: yaml
+
 It could also be possible to train an agent through self-play only, without using any previous lessons in the curriculum. This would require significant training time, but could ultimately result in better performance than other methods, and could avoid some of the mistakes discussed in `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_.
 
 Training loop
