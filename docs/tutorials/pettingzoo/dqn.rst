@@ -57,25 +57,27 @@ Imports
 
 Importing the following packages, functions and classes will enable us to run the tutorial.
 
-.. code-block:: python
+.. collapse:: Imports
 
-   import copy
-   import os
-   import random
-   from collections import deque
-   from datetime import datetime
+   .. code-block:: python
 
-   import numpy as np
-   import torch
-   import wandb
-   import yaml
-   from agilerl.components.replay_buffer import ReplayBuffer
-   from agilerl.hpo.mutation import Mutations
-   from agilerl.hpo.tournament import TournamentSelection
-   from agilerl.utils.utils import initialPopulation
-   from tqdm import tqdm, trange
+      import copy
+      import os
+      import random
+      from collections import deque
+      from datetime import datetime
 
-   from pettingzoo.classic import connect_four_v3
+      import numpy as np
+      import torch
+      import wandb
+      import yaml
+      from agilerl.components.replay_buffer import ReplayBuffer
+      from agilerl.hpo.mutation import Mutations
+      from agilerl.hpo.tournament import TournamentSelection
+      from agilerl.utils.utils import initialPopulation
+      from tqdm import tqdm, trange
+
+      from pettingzoo.classic import connect_four_v3
 
 Curriculum Learning
 ^^^^^^^^^^^^^^^^^^^
