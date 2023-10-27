@@ -29,6 +29,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 ## Table of Contents
   * [Benchmarks](#benchmarks)
   * [Get Started](#get-started)
+  * [Tutorials](#tutorials)
   * [Algorithms implemented](#evolvable-algorithms-implemented-more-coming-soon)
   * [Train an agent on a Gym environment (Online)](#train-an-agent-on-a-gym-environment-online)
     + [Off-policy Reinforcement Learning](#off-policy-reinforcement-learning)
@@ -81,6 +82,11 @@ cd demos
 accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_online_distributed.py
 ```
 > Note: If you are running demo or benchmarking scripts in development mode, without having installed AgileRL, you will need to uncomment two lines at the beginning of the file.
+
+## Tutorials
+We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent tasks, such as training DQN to 
+play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs <a href="https://docs.agilerl.com/en/latest/tutorials/index.html">here</a>. 
+Our demo files also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
 
 ## Evolvable algorithms implemented (more coming soon!)
   * DQN
