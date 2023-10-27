@@ -1,22 +1,24 @@
 Using Custom Architecture
-=====
+=========================
 
 In all other AgileRL tutorials, the networks used by the agents have been consistently defined with a network configuration
 dictionary. Alternatively, it is also possible for a user to define their own custom architecture and add evolvable
-functionality through the `MakeEvolvable` wrapper.
+functionality through the ``MakeEvolvable`` wrapper.
 
 .. _createcustnet:
+
 Creating a Custom Evolvable Network
-------------
+-----------------------------------
 
 To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output
 dimensions. Below is an example of a simple multi-layer perceptron that can be used by a DQN agent to solve the Lunar
 Lander environment. The input size is set as the state dimensions and output size the action dimensions. It's worth noting
-that, during the model definition, it is imperative to employ the `torch.nn`` module to define all layers instead
-of relying on functions from `torch.nn.functional` within the forward() method of the network. This is crucial as the
-forward hooks implemented will only be able to detect layers derived from `nn.Module`.
+that, during the model definition, it is imperative to employ the ``torch.nn`` module to define all layers instead
+of relying on functions from ``torch.nn.functional`` within the forward() method of the network. This is crucial as the
+forward hooks implemented will only be able to detect layers derived from ``nn.Module``.
 
 .. code-block:: python
+
     import torch.nn as nn
     import torch
 
@@ -25,21 +27,21 @@ forward hooks implemented will only be able to detect layers derived from `nn.Mo
         def __init__(self, input_size, output_size):
             super(MLPActor, self).__init__()
 
-            self.linear_layer_1 = nn.Linear(input_size, 32)
-            self.linear_layer_2 = nn.Linear(32, output_size)
+            self.linear_layer_1 = nn.Linear(input_size, 64)
+            self.linear_layer_2 = nn.Linear(64, output_size)
             self.relu = nn.ReLU()
-            self.softmax = nn.Softmax(dim=-1)
 
         def forward(self, x):
             x = self.relu(self.linear_layer_1(x))
-            x = self.softmax(self.linear_layer_2(x))
+            x = self.linear_layer_2(x)
             return x
 
 
 To make this network evolvable, simply instantiate an MLP Actor object and then pass it, along with an input tensor into
-the `MakeEvolvable` wrapper.
+the ``MakeEvolvable`` wrapper.
 
 .. code-block:: python
+
     from agilerl.wrappers.make_evolvable import MakeEvolvable
 
     state_dim = env.single_observation_space.shape
@@ -51,9 +53,10 @@ the `MakeEvolvable` wrapper.
                                     device=device)
 
 There are two further considerations to make when defining custom architecture. The first is when instantiating the
-`initialPopulation` object, you need to set `net_config` to `None` and `actor_network` to `evolvable_actor`.
+``initialPopulation`` object, you need to set ``net_config`` to ``None`` and ``actor_network`` to ``evolvable_actor``.
 
 .. code-block:: python
+
     pop = initialPopulation(algo="DQN",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
@@ -65,9 +68,10 @@ There are two further considerations to make when defining custom architecture. 
                             device=device)
 
 If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the
-`initialPopulation` class, again setting `net_config` to `None`.
+``initialPopulation`` class, again setting ``net_config`` to ``None``.
 
 .. code-block:: python
+
     pop = initialPopulation(algo="DDPG",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
@@ -79,10 +83,10 @@ If you are using an algorithm that also uses a single critic (PPO, DDPG), define
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-If the single agent algorithm has more than one critic (e.g. TD3), then pass the `critic_network` argument a list of two critics. An example
-is shown below.
+If the single agent algorithm has more than one critic (e.g. TD3), then pass the ``critic_network`` argument a list of two critics.
 
 .. code-block:: python
+
     pop = initialPopulation(algo="TD3",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
@@ -94,10 +98,11 @@ is shown below.
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-Finally, if you are using a multi-agent algorithm, define `actor_network` and `critic_network` as lists containing networks
+Finally, if you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks
 for each agent in the multi-agent environment. The example below outlines how this would work for a two agent environment.
 
 .. code-block:: python
+
     # For MADDPG
     evolvable_actors = [actor_network_1, actor_network_2]
     evolvable_critics = [critic_network_1, critic_network_2]
@@ -119,55 +124,58 @@ for each agent in the multi-agent environment. The example below outlines how th
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-The only other consideration that needs to be made is when instantiating the `Mutations` class. The `arch` argument should be set
-as `evolvable_actor.arch` for single agent algorithms or `evolvable_actors[0].arch` for multi-agent algorithms.
+The only other consideration that needs to be made is when instantiating the ``Mutations`` class. The ``arch`` argument should be set
+as ``evolvable_actor.arch`` for single agent algorithms or ``evolvable_actors[0].arch`` for multi-agent algorithms.
 
 .. _comparch:
 
 Compatible Architecture
-------------
+-----------------------
 
-At present, `MakeEvolvable` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
+At present, ``MakeEvolvable`` is currently compatible with PyTorch multi-layer perceptrons (MLPs) and convolutional neural networks (CNNs). The
 network architecture must also be sequential, that is, the output of one layer serves as the input to the next layer. Outlined below is a comprehensive
-table of PyTorch layers that are currently supported by this wrapper.
+table of PyTorch layers that are currently supported by this wrapper:
 
 
 .. list-table::
-   :widths: 30, 30, 30, 20, 20
+   :widths: 25, 50
    :header-rows: 1
+   :align: left
 
+   * - **Layer Type**
+     - **PyTorch Compatibility**
    * - **Pooling**
-     - **Activation**
-     - **Normalization**
-     - **Convolutional**
-     - **Linear**
-   * - nn.MaxPool2d, nn.MaxPool3d, nn.AvgPool2d, nn.AvgPool3d
-     - nn.Tanh, nn.Identity, nn.ReLU, nn.ELU, nn.Softsign, nn.Sigmoid, GumbelSoftmax,
-       nn.Softplus, nn.Softmax, nn.LeakyReLU, nn.PReLU, nn.GELU
-     - nn.BatchNorm2d, nn.BatchNorm3d, nn.InstanceNorm2d, nn.InstanceNorm3d, nn.LayerNorm
-     - nn.Conv2d, nn.Conv3d
-     - nn.Linear
+     - ``nn.MaxPool2d``, ``nn.MaxPool3d``, ``nn.AvgPool2d``, ``nn.AvgPool3d``
+   * - **Activation**
+     - ``nn.Tanh``, ``nn.Identity``, ``nn.ReLU``, ``nn.ELU``, ``nn.Softsign``, ``nn.Sigmoid``, ``GumbelSoftmax``,
+       ``nn.Softplus``, ``nn.Softmax``, ``nn.LeakyReLU``, ``nn.PReLU``, ``nn.GELU``
+   * - **Normalization**
+     - ``nn.BatchNorm2d``, ``nn.BatchNorm3d``, ``nn.InstanceNorm2d``, ``nn.InstanceNorm3d``, ``nn.LayerNorm``
+   * - **Convolutional**
+     - ``nn.Conv2d``, ``nn.Conv3d``
+   * - **Linear**
+     - ``nn.Linear``
 
 .. _compalgos:
 
 Compatible Algorithms
-------------
+---------------------
 
-The following table highlights which AgileRL algorithms are compatible with custom architecture:
+The following table highlights which AgileRL algorithms are currently compatible with custom architecture:
 
 .. list-table::
-   :widths: 30, 30, 30, 20, 20
+   :widths: 5, 5, 5, 5, 5, 5, 5, 5, 5
    :header-rows: 1
 
-   * - **CQL**
-     - **DQN**
-     - **DDPG**
-     - **TD3**
-     - **PPO**
-     - **MADDPG**
-     - **MATD3**
-     - **ILQL**
-     - **Rainbow-DQN**
+   * - CQL
+     - DQN
+     - DDPG
+     - TD3
+     - PPO
+     - MADDPG
+     - MATD3
+     - ILQL
+     - Rainbow-DQN
    * - ✔️
      - ✔️
      - ✔️

@@ -2,9 +2,8 @@ import os
 from datetime import datetime
 
 import numpy as np
-from tqdm import trange
-
 import wandb
+from tqdm import trange
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -40,7 +39,7 @@ def train_on_policy(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: List[object]
+    :type pop: list[object]
     :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
@@ -66,7 +65,7 @@ def train_on_policy(
     :param verbose: Display training stats, defaults to True
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     """
     if wb:
         if accelerator is not None:

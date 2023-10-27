@@ -6,7 +6,6 @@ Parameters
 
 .. autoclass:: agilerl.networks.evolvable_gpt.EvolvableGPT
   :members:
-  :inherited-members:
 
 .. autoclass:: agilerl.networks.evolvable_gpt.LayerNorm
   :members:

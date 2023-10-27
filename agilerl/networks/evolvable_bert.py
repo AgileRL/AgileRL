@@ -13,9 +13,9 @@ class EvolvableBERT(nn.Module):
     """The Evolvable BERT class.
 
     :param encoder_layers: Encoder layer(s) hidden size
-    :type encoder_layers: List[int]
+    :type encoder_layers: list[int]
     :param decoder_layers: Decoder layer(s) hidden size
-    :type decoder_layers: List[int]
+    :type decoder_layers: list[int]
     :param end2end: End to end transformer, using positional and token embeddings, defaults to True
     :type end2end: bool, optional
     :param src_vocab_size: Source vocabulary size, defaults to 10837

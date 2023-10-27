@@ -16,15 +16,15 @@ class MATD3:
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
 
     :param state_dims: State observation dimensions for each agent
-    :type state_dims: List[tuple]
+    :type state_dims: list[tuple]
     :param action_dims: Action dimensions for each agent
-    :type action_dims: List[int]
+    :type action_dims: list[int]
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
     :param n_agents: Number of agents
     :type n_agents: int
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: List[str]
+    :type agent_ids: list[str]
     :param max_action: Upper bound of the action space
     :type max_action: float
     :param min_action: Lower bound of the action space
@@ -52,13 +52,13 @@ class MATD3:
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: List[nn.Module], optional
+    :type actor_networks: list[nn.Module], optional
     :param critic_networks: List containing two lists of custom critic networks, defaults to None
-    :type critic_networks: List[List[nn.Module]], optional
+    :type critic_networks: list[list[nn.Module]], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -385,7 +385,7 @@ class MATD3:
         """Remove first dim created by dataloader.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: List[torch.Tensor[float]]
+        :type state: list[torch.Tensor[float]]
         """
         st, ac, re, ne, do = experiences
         return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
@@ -624,7 +624,7 @@ class MATD3:
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean. Defaults to 3
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():

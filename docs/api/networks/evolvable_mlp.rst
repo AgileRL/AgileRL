@@ -6,4 +6,3 @@ Parameters
 
 .. autoclass:: agilerl.networks.evolvable_mlp.EvolvableMLP
   :members:
-  :inherited-members:

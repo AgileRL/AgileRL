@@ -95,15 +95,15 @@ class EvolvableCNN(nn.Module):
     """The Evolvable Convolutional Neural Network class.
 
     :param input_shape: Input shape
-    :type input_shape: List[int]
+    :type input_shape: list[int]
     :param channel_size: CNN channel size
-    :type channel_size: List[int]
+    :type channel_size: list[int]
     :param kernel_size: Comvolution kernel size
-    :type kernel_size: List[int]
+    :type kernel_size: list[int]
     :param stride_size: Convolution stride size
-    :type stride_size: List[int]
+    :type stride_size: list[int]
     :param hidden_size: Hidden layer(s) size
-    :type hidden_size: List[int]
+    :type hidden_size: list[int]
     :param num_actions: Action dimension
     :type num_actions: int
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
@@ -133,7 +133,7 @@ class EvolvableCNN(nn.Module):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     """
 
     def __init__(

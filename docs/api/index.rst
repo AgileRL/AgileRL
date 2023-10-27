@@ -8,5 +8,6 @@ API
    components/index
    hpo/index
    networks/index
+   wrappers/index
    train
    utils

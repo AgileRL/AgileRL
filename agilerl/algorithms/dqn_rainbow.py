@@ -53,7 +53,7 @@ class RainbowDQN:
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Hugging Face accelerate.Accelerator(), optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -187,9 +187,9 @@ class RainbowDQN:
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
-        :type state: float or List[float]
+        :type state: float or list[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: List, optional
+        :type action_mask: list, optional
         """
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
@@ -225,7 +225,7 @@ class RainbowDQN:
         """Remove first dim created by dataloader.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: List[torch.Tensor[float]]
+        :type state: list[torch.Tensor[float]]
         """
         st, ac, re, ne, do = experiences
         return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
@@ -298,7 +298,7 @@ class RainbowDQN:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: List[torch.Tensor[float]]
+        :type state: list[torch.Tensor[float]]
         :param n_step: Use multi-step learning, defaults to True
         :type n_step: bool, optional
         :param per: Use prioritized experience replay buffer, defaults to True
@@ -397,7 +397,7 @@ class RainbowDQN:
         :type swap_channels: bool, optional
         :param max_steps: Maximum number of testing steps, defaults to 500
         :type max_steps: int, optional
-        :param loop: Number of testing loops/epsiodes to complete. The returned score is the mean over these tests. Defaults to 3
+        :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
         :type loop: int, optional
         """
         with torch.no_grad():

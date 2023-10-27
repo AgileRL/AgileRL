@@ -1,4 +1,4 @@
-Make Evolvable Wrapper
+Make Evolvable
 ======================================
 
 Parameters
@@ -6,4 +6,3 @@ Parameters
 
 .. autoclass:: agilerl.wrappers.make_evolvable.MakeEvolvable
   :members:
-  :inherited-members:
