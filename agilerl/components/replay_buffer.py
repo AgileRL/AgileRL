@@ -35,7 +35,7 @@ class ReplayBuffer:
 
     def _add(self, *args):
         """Adds experience to memory."""
-        e = self.experience(*args[0])
+        e = self.experience(*args)
         self.memory.append(e)
 
     def _process_transition(self, experiences, np_array=False):
@@ -82,7 +82,7 @@ class ReplayBuffer:
         :param *args: Variable length argument list. Contains transition elements in consistent order,
             e.g. state, action, reward, next_state, done
         """
-        self._add(args)
+        self._add(*args)
         self.counter += 1
 
     def save2memoryVectEnvs(self, *args):
@@ -92,7 +92,7 @@ class ReplayBuffer:
             e.g. states, actions, rewards, next_states, dones
         """
         for transition in zip(*args):
-            self._add(transition)
+            self._add(*transition)
             self.counter += 1
 
     def save2memory(self, *args, is_vectorised=False):
@@ -105,9 +105,9 @@ class ReplayBuffer:
         :type is_vectorised: bool
         """
         if is_vectorised:
-            self.save2memoryVectEnvs(args)
+            self.save2memoryVectEnvs(*args)
         else:
-            self.save2memorySingleEnv(args)
+            self.save2memorySingleEnv(*args)
 
 
 class MultiStepReplayBuffer(ReplayBuffer):
@@ -192,7 +192,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
             for buffer in self.n_step_buffers:
                 # make a n-step transition
                 single_step_args = self._get_n_step_info(buffer, self.gamma)
-                self._add([*single_step_args])
+                self._add(*single_step_args)
                 self.counter += 1
 
             return args
