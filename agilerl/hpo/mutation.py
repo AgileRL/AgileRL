@@ -39,6 +39,8 @@ class Mutations:
     :type agents_id: list[str]
     :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
     :type arch: str, optional
+    :param mutate_elite: Mutate elite member of population, defaults to True
+    :type mutate_elite: bool, optional
     :param rand_seed: Random seed for repeatability, defaults to None
     :type rand_seed: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -66,6 +68,7 @@ class Mutations:
         max_batch_size=1024,
         agent_ids=None,
         arch="mlp",
+        mutate_elite=True,
         rand_seed=None,
         device="cpu",
         accelerator=None,
@@ -85,6 +88,7 @@ class Mutations:
         self.rl_hp_mut = rl_hp  # Learning HP mutation
         self.rl_hp_selection = rl_hp_selection  # Learning HPs to choose from
         self.mutation_sd = mutation_sd  # Mutation strength
+        self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
         self.agent_ids = agent_ids
@@ -160,6 +164,11 @@ class Mutations:
         mutation_choice = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
+
+        # If not mutating elite member of population (first in list from tournament selection),
+        # set this as the first mutation choice
+        if not self.mutate_elite:
+            mutation_choice[0] = self.no_mutation
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
