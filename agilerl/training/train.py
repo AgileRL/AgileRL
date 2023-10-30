@@ -2,10 +2,10 @@ import os
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.utils.utils import calculate_vectorized_scores

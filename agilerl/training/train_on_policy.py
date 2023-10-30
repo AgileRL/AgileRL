@@ -2,8 +2,9 @@ import os
 from datetime import datetime
 
 import numpy as np
-import wandb
 from tqdm import trange
+
+import wandb
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
