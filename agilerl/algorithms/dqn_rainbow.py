@@ -115,7 +115,7 @@ class RainbowDQN:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
-                output_activation="relu",
+                mlp_output_activation="ReLU",
                 output_vanish=False,
                 init_layers=False,
                 num_atoms=self.num_atoms,
@@ -128,7 +128,7 @@ class RainbowDQN:
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 hidden_size=self.net_config["h_size"],
-                output_activation="relu",
+                mlp_output_activation="ReLU",
                 output_vanish=False,
                 init_layers=False,
                 num_atoms=self.num_atoms,
@@ -148,7 +148,7 @@ class RainbowDQN:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
-                mlp_output_activation="relu",
+                mlp_output_activation="ReLU",
                 num_atoms=self.num_atoms,
                 support=self.support,
                 rainbow=True,
@@ -163,7 +163,7 @@ class RainbowDQN:
                 stride_size=self.net_config["s_size"],
                 hidden_size=self.net_config["h_size"],
                 normalize=self.net_config["normalize"],
-                mlp_output_activation="relu",
+                mlp_output_activation="ReLU",
                 num_atoms=self.num_atoms,
                 support=self.support,
                 rainbow=True,
@@ -286,7 +286,7 @@ class RainbowDQN:
 
         dist = self.actor(states, q=False)
         actions = actions.unsqueeze(1).expand(actions.size(0), 1, self.num_atoms)
-        dist = dist.gather(1, actions).squeeze(1)
+        dist = dist.gather(1, actions.long()).squeeze(1)
         dist.data.clamp_(0.01, 0.99)
         log_p = torch.log(dist)
 
