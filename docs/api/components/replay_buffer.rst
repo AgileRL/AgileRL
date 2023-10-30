@@ -27,3 +27,11 @@ Parameters
 .. autoclass:: agilerl.components.replay_buffer.ReplayBuffer
   :members:
   :inherited-members:
+
+.. autoclass:: agilerl.components.replay_buffer.MultiStepReplayBuffer
+  :members:
+  :inherited-members:
+
+.. autoclass:: agilerl.components.replay_buffer.PrioritizedReplayBuffer
+  :members:
+  :inherited-members:
