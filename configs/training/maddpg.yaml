@@ -37,7 +37,6 @@ MUTATION_PARAMS:
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 
-
-MLP: {arch: mlp, h_size: [64, 64]}
+NET_CONFIG: {arch: mlp, h_size: [64, 64]}
 
 DISTRIBUTED_TRAINING: false

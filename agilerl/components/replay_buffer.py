@@ -11,8 +11,8 @@ class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -22,7 +22,11 @@ class ReplayBuffer:
     """
 
     def __init__(self, action_dim, memory_size, field_names, device=None):
-        self.n_actions = action_dim
+        assert action_dim > 0, "Action dimension must be greater than zero."
+        assert memory_size > 0, "Mmeory size must be greater than zero."
+        assert len(field_names) > 0, "Field names must contain at least one field name."
+
+        self.action_dim = action_dim
         self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
         self.field_names = field_names
@@ -43,21 +47,15 @@ class ReplayBuffer:
         transition = {}
         for field in self.field_names:
             ts = [getattr(e, field) for e in experiences if e is not None]
+            ts = np.vstack(ts)
 
             # Handle numpy stacking
-            if field in ["state", "next_state"]:
-                ts = np.stack(ts, axis=0)
-            elif field in ["done", "termination", "truncation"]:
-                ts = np.vstack(ts).astype(np.uint8)
-            else:
-                ts = np.vstack(ts)
+            if field in ["done", "termination", "truncation"]:
+                ts = ts.astype(np.uint8)
 
             if not np_array:
                 # Handle torch tensor creation
-                if field in ["actions"]:
-                    ts = torch.from_numpy(ts)
-                else:
-                    ts = torch.from_numpy(ts).float()
+                ts = torch.from_numpy(ts).float()
 
                 # Place on device
                 if self.device is not None:
@@ -114,8 +112,8 @@ class MultiStepReplayBuffer(ReplayBuffer):
     """The Multi-step Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -224,7 +222,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
             vect_r, vect_n_s, vect_d = (
                 ts.reward,
                 ts.next_state,
-                ts.done,
+                ts.done if "done" in transition.keys() else ts.termination,
             )
 
             vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
@@ -248,8 +246,8 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     """The Prioritized Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']

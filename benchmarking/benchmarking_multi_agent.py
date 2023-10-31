@@ -113,13 +113,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     )
 
     agent_pop = initialPopulation(
-        INIT_HP["ALGO"],
-        state_dim,
-        action_dim,
-        one_hot,
-        NET_CONFIG,
-        INIT_HP,
-        INIT_HP["POP_SIZE"],
+        algo=INIT_HP["ALGO"],
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        net_config=NET_CONFIG,
+        INIT_HP=INIT_HP,
+        population_size=INIT_HP["POP_SIZE"],
         device=device,
         accelerator=accelerator,
     )
