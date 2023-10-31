@@ -43,14 +43,11 @@ class ReplayBuffer:
         transition = {}
         for field in self.field_names:
             ts = [getattr(e, field) for e in experiences if e is not None]
+            ts = np.vstack(ts)
 
             # Handle numpy stacking
-            if field in ["state", "next_state"]:
-                ts = np.stack(ts, axis=0)
-            elif field in ["done", "termination", "truncation"]:
-                ts = np.vstack(ts).astype(np.uint8)
-            else:
-                ts = np.vstack(ts)
+            if field in ["done", "termination", "truncation"]:
+                ts = ts.astype(np.uint8)
 
             if not np_array:
                 # Handle torch tensor creation
