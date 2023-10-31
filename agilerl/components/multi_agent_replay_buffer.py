@@ -23,7 +23,8 @@ class MultiAgentReplayBuffer:
     def __init__(self, memory_size, field_names, agent_ids, device=None):
         self.memory = memory_size
         self.memory = deque(maxlen=memory_size)
-        self.experience = namedtuple("Experience", field_names=field_names)
+        self.field_names = field_names
+        self.experience = namedtuple("Experience", field_names=self.field_names)
         self.counter = 0
         self.device = device
         self.agent_ids = agent_ids
@@ -31,9 +32,41 @@ class MultiAgentReplayBuffer:
     def __len__(self):
         return len(self.memory)
 
-    def _add(self, state, action, reward, next_state, done):
-        e = self.experience(state, action, reward, next_state, done)
+    def _add(self, *args):
+        """Adds experience to memory."""
+        e = self.experience(*args)
         self.memory.append(e)
+
+    def _process_transition(self, experiences, np_array=False):
+        """Returns transition dictionary from experiences."""
+        transition = {}
+        for field in self.field_names:
+            field_dict = {}
+            for agent_id in self.agent_ids:
+                ts = [getattr(e, field)[agent_id] for e in experiences if e is not None]
+
+                # Handle numpy stacking
+                if field in ["state", "next_state", "action"]:
+                    ts = np.stack(ts)
+                elif field in ["done", "termination", "truncation"]:
+                    ts = np.vstack(ts).astype(np.uint8)
+                else:
+                    ts = np.vstack(ts)
+
+                if not np_array:
+                    # Handle torch tensor creation
+                    if field in ["actions"]:
+                        ts = torch.from_numpy(ts)
+                    else:
+                        ts = torch.from_numpy(ts).float()
+
+                    # Place on device
+                    if self.device is not None:
+                        ts = ts.to(self.device)
+
+                field_dict[agent_id] = ts
+            transition[field] = field_dict
+        return transition
 
     def sample(self, batch_size):
         """Returns sample of experiences from memory.
@@ -42,91 +75,14 @@ class MultiAgentReplayBuffer:
         :type batch_size: int
         """
         experiences = random.sample(self.memory, k=batch_size)
+        transition = self._process_transition(experiences)
+        return tuple(transition.values())
 
-        if self.device is not None:
-            states = {
-                agent_id: torch.from_numpy(
-                    np.stack([e.state[agent_id] for e in experiences])
-                ).to(self.device)
-                for agent_id in self.agent_ids
-            }
-            actions = {
-                agent_id: torch.from_numpy(
-                    np.stack([e.action[agent_id] for e in experiences])
-                ).to(self.device)
-                for agent_id in self.agent_ids
-            }
-            rewards = {
-                agent_id: torch.from_numpy(
-                    np.vstack([e.reward[agent_id] for e in experiences])
-                )
-                .float()
-                .to(self.device)
-                for agent_id in self.agent_ids
-            }
-            next_states = {
-                agent_id: torch.from_numpy(
-                    np.stack([e.next_state[agent_id] for e in experiences])
-                )
-                .float()
-                .to(self.device)
-                for agent_id in self.agent_ids
-            }
-            dones = {
-                agent_id: torch.from_numpy(
-                    np.vstack([e.done[agent_id] for e in experiences]).astype(np.uint8)
-                )
-                .float()
-                .to(self.device)
-                for agent_id in self.agent_ids
-            }
-        else:
-            states = {
-                agent_id: torch.from_numpy(
-                    np.stack([e.state[agent_id] for e in experiences])
-                )
-                for agent_id in self.agent_ids
-            }
-            actions = {
-                agent_id: torch.from_numpy(
-                    np.stack([e.action[agent_id] for e in experiences])
-                )
-                for agent_id in self.agent_ids
-            }
-            rewards = {
-                agent_id: torch.from_numpy(
-                    np.vstack([e.reward[agent_id] for e in experiences])
-                ).float()
-                for agent_id in self.agent_ids
-            }
-            next_states = {
-                agent_id: torch.from_numpy(
-                    np.stack([e.next_state[agent_id] for e in experiences])
-                ).float()
-                for agent_id in self.agent_ids
-            }
-            dones = {
-                agent_id: torch.from_numpy(
-                    np.vstack([e.done[agent_id] for e in experiences]).astype(np.uint8)
-                ).float()
-                for agent_id in self.agent_ids
-            }
-
-        return states, actions, rewards, next_states, dones
-
-    def save2memory(self, state, action, reward, next_state, done):
+    def save2memory(self, *args):
         """Saves experience to memory.
 
-        :param state: Environment observation
-        :type state: Dict[str, numpy.Array]
-        :param action: Action in environment
-        :type action: Dict[str, numpy.Array]
-        :param reward: Reward from environment
-        :type reward: dict[str, int]
-        :param next_state: Environment observation of next state
-        :type next_state: Dict[str, numpy.Array]
-        :param done: True if environment episode finished, else False
-        :type done: Dict[str, bool]
+        :param *args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,
+            e.g. states, actions, rewards, next_states, dones
         """
-        self._add(state, action, reward, next_state, done)
+        self._add(*args)
         self.counter += 1
