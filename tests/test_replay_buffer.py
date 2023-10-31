@@ -440,7 +440,7 @@ def test_sample_experiences_from_memory_with_indices():
 def test_returns_tuple_of_n_step_reward_next_state_and_done():
     n_step_buffer = deque(maxlen=5)
     gamma = 0.9
-    field_names = ["state", "action", "reward", "next_state", "done"]
+    field_names = ["state", "action", "reward", "next_state", "termination"]
 
     # Create a namedtuple to represent a transition
     Transition = namedtuple("Transition", field_names)
