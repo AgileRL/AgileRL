@@ -21,6 +21,10 @@ class MultiAgentReplayBuffer:
     """
 
     def __init__(self, memory_size, field_names, agent_ids, device=None):
+        assert memory_size > 0, "Mmeory size must be greater than zero."
+        assert len(field_names) > 0, "Field names must contain at least one field name."
+        assert len(agent_ids) > 0, "Agent ids must contain at least one agent id."
+
         self.memory = memory_size
         self.memory = deque(maxlen=memory_size)
         self.field_names = field_names
@@ -46,19 +50,14 @@ class MultiAgentReplayBuffer:
                 ts = [getattr(e, field)[agent_id] for e in experiences if e is not None]
 
                 # Handle numpy stacking
-                if field in ["state", "next_state", "action"]:
-                    ts = np.stack(ts)
-                elif field in ["done", "termination", "truncation"]:
-                    ts = np.vstack(ts).astype(np.uint8)
-                else:
-                    ts = np.vstack(ts)
+                ts = np.vstack(ts)
+
+                if field in ["done", "termination", "truncation"]:
+                    ts = ts.astype(np.uint8)
 
                 if not np_array:
                     # Handle torch tensor creation
-                    if field in ["actions"]:
-                        ts = torch.from_numpy(ts)
-                    else:
-                        ts = torch.from_numpy(ts).float()
+                    ts = torch.from_numpy(ts).float()
 
                     # Place on device
                     if self.device is not None:

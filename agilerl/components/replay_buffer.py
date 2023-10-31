@@ -55,10 +55,7 @@ class ReplayBuffer:
 
             if not np_array:
                 # Handle torch tensor creation
-                if field in ["actions"]:
-                    ts = torch.from_numpy(ts)
-                else:
-                    ts = torch.from_numpy(ts).float()
+                ts = torch.from_numpy(ts).float()
 
                 # Place on device
                 if self.device is not None:
