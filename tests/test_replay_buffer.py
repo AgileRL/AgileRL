@@ -1,9 +1,12 @@
+from collections import deque, namedtuple
+
 import numpy as np
 import torch
 
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
 
 
+##### ReplayBuffer class tests #####
 # Can create an instance of ReplayBuffer with valid arguments
 def test_create_instance_with_valid_arguments():
     action_dim = 2
@@ -255,3 +258,228 @@ def test_process_single_transition_from_experiences():
     assert transition["action"].shape == (len(experiences), action_dim)
     assert isinstance(transition["reward"], torch.Tensor)
     assert transition["reward"].shape == (len(experiences), 1)
+
+
+##### MultiStepReplayBuffer class tests #####
+# Initializes the MultiStepReplayBuffer class with the given parameters.
+def test_initializes_replay_buffer_with_given_parameters():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 2
+    n_step = 5
+    gamma = 0.95
+    device = "cuda"
+
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, n_step, gamma, device
+    )
+
+    assert replay_buffer.n_actions == action_dim
+    assert replay_buffer.memory_size == memory_size
+    assert replay_buffer.field_names == field_names
+    assert replay_buffer.num_envs == num_envs
+    assert replay_buffer.n_step == n_step
+    assert replay_buffer.gamma == gamma
+    assert replay_buffer.device == device
+
+
+# Can save a single environment transition to memory
+def test_save_single_env_transition():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    n_step = 3
+    gamma = 0.99
+
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, n_step, gamma
+    )
+
+    state = np.array([1, 2, 3, 4])
+    action = np.array([0, 1, 0, 1])
+    reward = np.array([0.1])
+    next_state = np.array([5, 6, 7, 8])
+    done = np.array([False])
+
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+
+    assert len(replay_buffer.memory) == 0
+    assert len(replay_buffer.n_step_buffers[0]) == 1
+
+    replay_buffer.save2memorySingleEnv(state, action, reward, next_state, done)
+
+    assert len(replay_buffer.memory) == 0
+    assert len(replay_buffer.n_step_buffers[0]) == 2
+
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+
+    assert len(replay_buffer.memory) == num_envs
+    assert len(replay_buffer.n_step_buffers[0]) == n_step
+
+
+# Can save vectorized environment transitions to memory
+def test_save_multiple_env_transitions():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 2
+    n_step = 2
+    gamma = 0.99
+
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, n_step, gamma
+    )
+
+    state = np.array([[1, 2, 3, 4], [9, 10, 11, 12]])
+    action = np.array([[0, 1, 0, 1], [1, 0, 1, 0]])
+    reward = np.array([[0.1], [0.5]])
+    next_state = np.array([[5, 6, 7, 8], [13, 14, 15, 16]])
+    done = np.array([[False], [True]])
+
+    replay_buffer.save2memory(
+        state, action, reward, next_state, done, is_vectorised=True
+    )
+
+    assert len(replay_buffer.memory) == 0
+    assert len(replay_buffer.n_step_buffers[0]) == 1
+    assert len(replay_buffer.n_step_buffers[1]) == 1
+
+    one_step_transition = replay_buffer.save2memoryVectEnvs(
+        state, action, reward, next_state, done
+    )
+
+    assert len(replay_buffer.memory) == num_envs
+    assert len(replay_buffer.n_step_buffers[0]) == n_step
+    assert len(replay_buffer.n_step_buffers[1]) == n_step
+    assert len(one_step_transition) == len(field_names)
+    assert one_step_transition[0].shape == (num_envs, 4)
+    assert one_step_transition[1].shape == (num_envs, 4)
+    assert one_step_transition[2].shape == (num_envs, 1)
+    assert one_step_transition[3].shape == (num_envs, 4)
+    assert one_step_transition[4].shape == (num_envs, 1)
+
+
+# Can sample experiences from memory
+def test_sample_nstep_experiences_from_memory():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    n_step = 3
+    gamma = 0.99
+
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, n_step, gamma
+    )
+
+    state = np.array([1, 2, 3, 4])
+    action = np.array([0, 1, 0, 1])
+    reward = np.array([0.1])
+    next_state = np.array([5, 6, 7, 8])
+    done = np.array([False])
+
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+
+    batch_size = 2
+    experiences = replay_buffer.sample(batch_size)
+
+    assert experiences[0].shape == (batch_size, 4)
+    assert experiences[1].shape == (batch_size, 4)
+    assert experiences[2].shape == (batch_size, 1)
+    assert experiences[3].shape == (batch_size, 4)
+    assert experiences[4].shape == (batch_size, 1)
+
+
+# Can sample experiences from memory using provided indices
+def test_sample_experiences_from_memory_with_indices():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    n_step = 3
+    gamma = 0.99
+
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, n_step, gamma
+    )
+
+    state = np.array([1, 2, 3, 4])
+    action = np.array([0, 1, 0, 1])
+    reward = np.array([0.1])
+    next_state = np.array([5, 6, 7, 8])
+    done = np.array([False])
+
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+
+    indices = [0]
+    experiences = replay_buffer.sample_from_indices(indices)
+
+    assert len(experiences) == len(field_names)
+    assert experiences[0].shape == (len(indices),) + state.shape
+    assert experiences[1].shape == (len(indices),) + action.shape
+    assert experiences[2].shape == (len(indices),) + reward.shape
+    assert experiences[3].shape == (len(indices),) + next_state.shape
+    assert experiences[4].shape == (len(indices),) + done.shape
+
+
+# Can return transition with n-step rewards
+def test_returns_tuple_of_n_step_reward_next_state_and_done():
+    n_step_buffer = deque(maxlen=5)
+    gamma = 0.9
+    field_names = ["state", "action", "reward", "next_state", "done"]
+
+    # Create a namedtuple to represent a transition
+    Transition = namedtuple("Transition", field_names)
+
+    # Add some transitions to the n_step_buffer
+    n_step_buffer.append(Transition([0, 0, 0], 0, 1, [0, 0, 0], False))
+    n_step_buffer.append(Transition([1, 1, 1], 1, 2, [1, 1, 1], False))
+    n_step_buffer.append(Transition([2, 2, 2], 0, 3, [2, 2, 2], True))
+    n_step_buffer.append(Transition([3, 3, 3], 1, 4, [3, 3, 3], False))
+    n_step_buffer.append(Transition([4, 4, 4], 0, 5, [4, 4, 4], False))
+
+    # Create an instance of the MultiStepReplayBuffer class
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim=1, memory_size=100, field_names=field_names, num_envs=1
+    )
+
+    # Invoke the _get_n_step_info method
+    result = replay_buffer._get_n_step_info(n_step_buffer, gamma)
+
+    assert isinstance(result, tuple)
+    assert len(result) == len(field_names)
+
+
+# Can calculate n-step reward using n-step buffer and gamma
+def test_calculates_n_step_reward():
+    n_step_buffer = deque(maxlen=5)
+    gamma = 0.9
+    field_names = ["state", "action", "reward", "next_state", "done"]
+
+    # Create a namedtuple to represent a transition
+    Transition = namedtuple("Transition", field_names)
+
+    # Add some transitions to the n_step_buffer
+    n_step_buffer.append(Transition([0, 0, 0], 0, 1, [0, 0, 0], False))
+    n_step_buffer.append(Transition([1, 1, 1], 1, 2, [1, 1, 1], False))
+    n_step_buffer.append(Transition([2, 2, 2], 0, 3, [2, 2, 2], False))
+    n_step_buffer.append(Transition([3, 3, 3], 1, 4, [3, 3, 3], False))
+    n_step_buffer.append(Transition([4, 4, 4], 0, 5, [4, 4, 4], True))
+
+    # Create an instance of the MultiStepReplayBuffer class
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim=3, memory_size=100, field_names=field_names, num_envs=1
+    )
+
+    # Invoke the _get_n_step_info method
+    result = replay_buffer._get_n_step_info(n_step_buffer, gamma)
+
+    expected_reward = 1 + gamma * (2 + gamma * (3 + gamma * (4 + gamma * 5)))
+    assert np.array_equal(result[2], np.array([[expected_reward]]))
