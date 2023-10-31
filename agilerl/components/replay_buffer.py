@@ -222,7 +222,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
             vect_r, vect_n_s, vect_d = (
                 ts.reward,
                 ts.next_state,
-                ts.done,
+                ts.done if "done" in transition.keys() else ts.termination,
             )
 
             vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
