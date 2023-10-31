@@ -1,9 +1,16 @@
+import random
 from collections import deque, namedtuple
 
 import numpy as np
+import pytest
 import torch
 
-from agilerl.components.replay_buffer import MultiStepReplayBuffer, ReplayBuffer
+from agilerl.components.replay_buffer import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
+from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
 
 ##### ReplayBuffer class tests #####
@@ -16,7 +23,7 @@ def test_create_instance_with_valid_arguments():
 
     buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
 
-    assert buffer.n_actions == action_dim
+    assert buffer.action_dim == action_dim
     assert buffer.memory_size == memory_size
     assert buffer.field_names == field_names
     assert buffer.device == device
@@ -262,20 +269,20 @@ def test_process_single_transition_from_experiences():
 
 ##### MultiStepReplayBuffer class tests #####
 # Initializes the MultiStepReplayBuffer class with the given parameters.
-def test_initializes_replay_buffer_with_given_parameters():
+def test_initializes_nstep_replay_buffer_with_given_parameters():
     action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 2
     n_step = 5
     gamma = 0.95
-    device = "cuda"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     replay_buffer = MultiStepReplayBuffer(
         action_dim, memory_size, field_names, num_envs, n_step, gamma, device
     )
 
-    assert replay_buffer.n_actions == action_dim
+    assert replay_buffer.action_dim == action_dim
     assert replay_buffer.memory_size == memory_size
     assert replay_buffer.field_names == field_names
     assert replay_buffer.num_envs == num_envs
@@ -483,3 +490,209 @@ def test_calculates_n_step_reward():
 
     expected_reward = 1 + gamma * (2 + gamma * (3 + gamma * (4 + gamma * 5)))
     assert np.array_equal(result[2], np.array([[expected_reward]]))
+
+
+##### PrioritizedReplayBuffer class tests #####
+# Can initialize object with given parameters
+def test_initializes_pe_replay_buffer_with_given_parameters():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    alpha = 0.6
+    n_step = 1
+    gamma = 0.99
+    device = "cpu"
+
+    replay_buffer = PrioritizedReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+    )
+
+    assert replay_buffer.action_dim == action_dim
+    assert replay_buffer.memory_size == memory_size
+    assert replay_buffer.field_names == field_names
+    assert replay_buffer.num_envs == num_envs
+    assert replay_buffer.alpha == alpha
+    assert replay_buffer.n_step == n_step
+    assert replay_buffer.gamma == gamma
+    assert replay_buffer.device == device
+
+
+# Can add experience to replay buffer
+def test_add_experience_to_per_memory():
+    action_dim = 4
+    memory_size = 1000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    alpha = 0.6
+    n_step = 1
+    gamma = 0.99
+    device = "cpu"
+
+    buffer = PrioritizedReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+    )
+    buffer._add(1, 2, 3, 4, 5)
+
+    assert len(buffer.memory) == 1
+    assert buffer.memory[0] == (1, 2, 3, 4, 5)
+
+
+# Save experience to memory and retrieve it
+def test_save_and_sample_experience():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    alpha = 0.6
+    n_step = 1
+    gamma = 0.99
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    replay_buffer = PrioritizedReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+    )
+
+    state = np.random.rand(4)
+    action = np.random.randint(0, action_dim)
+    reward = np.random.rand()
+    next_state = np.random.rand(4)
+    done = False
+
+    replay_buffer.save2memorySingleEnv(state, action, reward, next_state, done)
+
+    batch_size = 1
+    transition = replay_buffer.sample(batch_size)
+
+    assert len(transition) == 7
+    assert len(transition[0]) == batch_size
+    assert isinstance(transition[0], torch.Tensor)
+    assert isinstance(transition[1], torch.Tensor)
+    assert isinstance(transition[2], torch.Tensor)
+    assert isinstance(transition[3], torch.Tensor)
+    assert isinstance(transition[4], torch.Tensor)
+    assert isinstance(transition[5], torch.Tensor)
+    assert isinstance(transition[6], list)
+
+
+# Update priorities of sampled transitions
+def test_update_priorities():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 1
+    alpha = 0.6
+    n_step = 1
+    gamma = 0.99
+    device = "cpu"
+
+    replay_buffer = PrioritizedReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+    )
+
+    state = np.array([1, 2, 3, 4])
+    action = np.array([0, 1, 0, 1])
+    reward = np.array([0.1])
+    next_state = np.array([5, 6, 7, 8])
+    done = np.array([False])
+
+    replay_buffer.save2memory(state, action, reward, next_state, done)
+
+    transition = replay_buffer.sample(1)
+
+    idxs = transition[-1]
+    priorities = [np.random.rand()]
+
+    replay_buffer.update_priorities(idxs, priorities)
+
+    updated_transition = replay_buffer.sample_from_indices(idxs)
+
+    state = torch.from_numpy(state).float()
+    action = torch.from_numpy(action)
+    reward = torch.from_numpy(reward).float()
+    next_state = torch.from_numpy(next_state).float()
+    done = torch.from_numpy(done.astype(np.uint8)).float()
+
+    assert torch.equal(updated_transition[0][0], state)
+    assert torch.equal(updated_transition[1][0], action)
+    assert torch.equal(updated_transition[2][0], reward)
+    assert torch.equal(updated_transition[3][0], next_state)
+    assert torch.equal(updated_transition[4][0], done)
+
+
+# Proportions are calculated based on sum_tree
+def test_proportions_calculated_based_on_sum_tree():
+    buffer = PrioritizedReplayBuffer(
+        action_dim=4,
+        memory_size=1000,
+        field_names=["state", "action", "reward", "next_state", "done"],
+        num_envs=1,
+    )
+    batch_size = 32
+    indices = buffer._sample_proprtional(batch_size)
+    p_total = buffer.sum_tree.sum(0, len(buffer) - 1)
+    segment = p_total / batch_size
+    for i, idx in enumerate(indices):
+        a = segment * i
+        b = segment * (i + 1)
+        upperbound = random.uniform(a, b)
+        assert buffer.sum_tree.retrieve(upperbound) == idx
+
+
+# Calculates the weight of the experience at idx
+def test_calculate_weight_normal_case():
+    buffer = PrioritizedReplayBuffer(
+        action_dim=4,
+        memory_size=1000,
+        field_names=["state", "action", "reward", "next_state", "done"],
+        num_envs=1,
+    )
+
+    state = np.array([1, 2, 3, 4])
+    action = np.array([0, 1, 0, 1])
+    reward = np.array([0.1])
+    next_state = np.array([5, 6, 7, 8])
+    done = np.array([False])
+
+    buffer.save2memory(state, action, reward, next_state, done)
+
+    idx = 0
+    beta = 0.4
+
+    p_sample = p_min = 1.0
+
+    weight = buffer._calculate_weight(idx, beta)
+
+    assert weight == pytest.approx(p_sample ** (-0.4) / (p_min ** (-0.4)), abs=1e-6)
+
+
+# Calculates weight from pre-set values
+def test_calculate_weight_parameterized():
+    buffer = PrioritizedReplayBuffer(
+        action_dim=4,
+        memory_size=1000,
+        field_names=["state", "action", "reward", "next_state", "done"],
+        num_envs=1,
+    )
+
+    state = np.array([1, 2, 3, 4])
+    action = np.array([0, 1, 0, 1])
+    reward = np.array([0.1])
+    next_state = np.array([5, 6, 7, 8])
+    done = np.array([False])
+
+    buffer.save2memory(state, action, reward, next_state, done)
+
+    buffer.sum_tree = SumSegmentTree(128)
+    buffer.sum_tree[0] = 0.5
+    buffer.sum_tree[1] = 0.3
+    buffer.sum_tree[2] = 0.2
+    buffer.min_tree = MinSegmentTree(128)
+    buffer.min_tree[0] = 0.2
+    buffer.min_tree[1] = 0.1
+    buffer.min_tree[2] = 0.05
+    buffer.max_priority = 1.0
+    beta = 0.4
+    weight = (0.5 ** (-0.4)) / (0.05 ** (-0.4))
+
+    assert buffer._calculate_weight(0, beta) == pytest.approx(weight, abs=1e-6)

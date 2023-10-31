@@ -11,8 +11,8 @@ class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -22,7 +22,7 @@ class ReplayBuffer:
     """
 
     def __init__(self, action_dim, memory_size, field_names, device=None):
-        self.n_actions = action_dim
+        self.action_dim = action_dim
         self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
         self.field_names = field_names
@@ -111,8 +111,8 @@ class MultiStepReplayBuffer(ReplayBuffer):
     """The Multi-step Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -245,8 +245,8 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     """The Prioritized Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
