@@ -95,14 +95,14 @@ def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
     )
 
     agent_pop = initialPopulation(
-        INIT_HP["ALGO"],
-        state_dim,
-        action_dim,
-        one_hot,
-        None,
-        INIT_HP,
-        actor_network,
-        INIT_HP["POP_SIZE"],
+        algo=INIT_HP["ALGO"],
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        net_config=None,
+        actor_network=actor_network,
+        INIT_HP=INIT_HP,
+        population_size=INIT_HP["POP_SIZE"],
         device=device,
     )
 
