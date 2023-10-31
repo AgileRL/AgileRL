@@ -22,6 +22,10 @@ class ReplayBuffer:
     """
 
     def __init__(self, action_dim, memory_size, field_names, device=None):
+        assert action_dim > 0, "Action dimension must be greater than zero."
+        assert memory_size > 0, "Mmeory size must be greater than zero."
+        assert len(field_names) > 0, "Field names must contain at least one field name."
+
         self.action_dim = action_dim
         self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
