@@ -152,9 +152,6 @@ def test_forward_method(
         )
         actual_output = network.forward(input_tensor, secondary_input_tensor)
     output_shape = actual_output.shape
-    if secondary_input_tensor is not None:
-        print(str(unpack_network(network)))
-        print(str(unpack_network(evolvable_network)))
     assert output_shape == expected_result
 
 
@@ -182,10 +179,6 @@ def test_forward_with_different_normalization_layers():
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(network, input_tensor)
     output = evolvable_network.forward(input_tensor)
-
-    print(str(unpack_network(evolvable_network)))
-    print(str(unpack_network(network)))
-
     assert isinstance(output, torch.Tensor)
     assert str(unpack_network(evolvable_network)) == str(unpack_network(network))
 
@@ -538,21 +531,13 @@ def test_recreate_nets_parameters_shrink_preserved(device):
     value_net = evolvable_network.value_net
     value_net_dict = dict(value_net.named_parameters())
 
-    print(evolvable_network.hidden_size)
-
-    print(evolvable_network)
-
     # Modify the architecture
     evolvable_network.hidden_size = evolvable_network.hidden_size[:-1]
-    print(evolvable_network.hidden_size)
-
-    print(evolvable_network)
     evolvable_network.recreate_nets(shrink_params=True)
     new_value_net = evolvable_network.value_net
 
     for key, param in new_value_net.named_parameters():
         if key in value_net_dict.keys():
-            print(param, value_net_dict[key])
             torch.testing.assert_close(param, value_net_dict[key])
 
 
@@ -587,7 +572,5 @@ def test_clone_method_with_equal_state_dicts(
             extra_critic_dims=2,
         )
     clone_network = evolvable_network.clone()
-    print(evolvable_network.state_dict().keys())
-    print(clone_network.state_dict().keys())
     assert isinstance(clone_network, MakeEvolvable)
     assert str(evolvable_network.state_dict()) == str(clone_network.state_dict())
