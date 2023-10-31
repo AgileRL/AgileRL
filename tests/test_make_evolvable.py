@@ -436,7 +436,6 @@ def test_add_cnn_layer(simple_cnn, device):
 
     # Check if a new layer has been added
     assert len(evolvable_network.channel_size) == 3
-    print(evolvable_network.cnn_layer_info)
     assert evolvable_network.cnn_layer_info == {
         "activation_layers": {0: "ReLU", 1: "ReLU", 2: "ReLU"},
         "conv_layer_type": "Conv2d",
@@ -446,6 +445,47 @@ def test_add_cnn_layer(simple_cnn, device):
         },
     }, evolvable_network.cnn_layer_info
 
+######### Test remove_cnn_layer #########
+def test_remove_cnn_layer(simple_cnn, device):
+    input_tensor = torch.randn(1, 3, 64, 64)
+    evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
+
+    # Check the initial number of layers
+    assert len(evolvable_network.channel_size) == 2
+
+    # Remove a CNN layer
+    evolvable_network.remove_cnn_layer()
+
+    # Check if a layer has been removed
+    assert len(evolvable_network.channel_size) == 1
+    assert evolvable_network.cnn_layer_info == {
+        "activation_layers": {0: "ReLU"},
+        "conv_layer_type": "Conv2d",
+        "pooling_layers": {
+            0: {"name": "MaxPool2d", "kernel": 2, "stride": 2, "padding": 0}
+        },
+    }, evolvable_network.cnn_layer_info
+
+######### Test add_cnn_channel #########
+def test_add_cnn_channel(simple_cnn, device):
+    input_tensor = torch.randn(1, 3, 64, 64)
+    evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
+    numb_new_channels = 16
+    layer = 1
+    original_channel_size = evolvable_network.channel_size[layer]
+    evolvable_network.add_cnn_channel(hidden_layer=layer, numb_new_channels=numb_new_channels)
+    assert evolvable_network.channel_size[layer] == original_channel_size + 16
+
+######### Test remove_cnn_channel #########
+def test_remove_cnn_channel(simple_cnn, device):
+    input_tensor = torch.randn(1, 3, 64, 64)
+    evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
+    numb_new_channels = 8
+    layer = 1
+    original_channel_size = evolvable_network.channel_size[layer]
+    evolvable_network.min_channel_size = 16
+    evolvable_network.remove_cnn_channel(hidden_layer=layer, numb_new_channels=numb_new_channels)
+    assert evolvable_network.channel_size[layer] == original_channel_size - 8
 
 ######### Test change_cnn_kernel #########
 def test_change_cnn_kernel(simple_cnn, device):

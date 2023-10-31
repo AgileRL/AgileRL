@@ -114,14 +114,28 @@ class EvolvableCNN(nn.Module):
     :type mlp_activation: str, optional
     :param cnn_activation: CNN activation layer, defaults to 'relu'
     :type cnn_activation: str, optional
+    :param min_hidden_layers: Minimum number of hidden layers the fully connected layer will shrink down to, defaults to 1
+    :type min_hidden_layers: int, optional 
+    :param max_hidden_layers: Maximum number of hidden layers the fully connected layer will expand to, defaults to 3
+    :type max_hidden_layers: int, optional
+    :param min_mlp_nodes: Minimum number of nodes a layer can have within the fully connected layer, defaults to 64
+    :type min_mlp_nodes: int, optional
+    :param max_mlp_nodes: Maximum number of nodes a layer can have within the fully connected layer, defaults to 1024
+    :type max_mlp_nodes: int, optional
+    :param min_cnn_hidden_layers: Minimum number of hidden layers the convolutional layer will shrink down to, defaults to 1
+    :type min_cnn_hidden_layers: int, optional
+    :param max_cnn_hidden_layers: Maximum number of hidden layers the convolutional layer will expand to, defaults to 6
+    :type max_cnn_hidden_layers: int, optional
+    :param min_channel_size: Minimum number of channels a convolutional layer can have, defaults to 32
+    :type min_channel_size: int, optional
+    :param max_channel_size: Maximum number of channels a convolutional layer can have, defaults to 256
+    :type max_channel_size: int, optional
     :param n_agents: Number of agents, defaults to None
     :type n_agents: int, optional
     :param multi: Boolean flag to indicate if this is a multi-agent problem, defaults to False
     :type multi: bool, optional
     :param layer_norm: Normalization between layers, defaults to False
     :type layer_norm: bool, optional
-    :param stored_values: Stored network weights, defaults to None
-    :type stored_values: numpy.array(), optional
     :param support: Atoms support tensor, defaults to None
     :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
@@ -148,10 +162,17 @@ class EvolvableCNN(nn.Module):
         mlp_output_activation="Softmax",
         mlp_activation="ReLU",
         cnn_activation="ReLU",
+        min_hidden_layers=1,
+        max_hidden_layers=3,
+        min_mlp_nodes=64,
+        max_mlp_nodes=1024,
+        min_cnn_hidden_layers=1,
+        max_cnn_hidden_layers=6,
+        min_channel_size=32,
+        max_channel_size=256,
         n_agents=None,
         multi=False,
         layer_norm=False,
-        stored_values=None,
         support=None,
         rainbow=False,
         critic=False,
@@ -171,7 +192,14 @@ class EvolvableCNN(nn.Module):
         self.mlp_activation = mlp_activation
         self.mlp_output_activation = mlp_output_activation
         self.cnn_activation = cnn_activation
-        self.mlp_output_activation = mlp_output_activation
+        self.min_hidden_layers = min_hidden_layers
+        self.max_hidden_layers = max_hidden_layers
+        self.min_mlp_nodes = min_mlp_nodes
+        self.max_mlp_nodes = max_mlp_nodes
+        self.min_cnn_hidden_layers = min_cnn_hidden_layers
+        self.max_cnn_hidden_layers = max_cnn_hidden_layers
+        self.min_channel_size = min_channel_size
+        self.max_channel_size = max_channel_size
         self.layer_norm = layer_norm
         self.support = support
         self.rainbow = rainbow
@@ -184,9 +212,6 @@ class EvolvableCNN(nn.Module):
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
-
-        if stored_values is not None:
-            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -461,14 +486,6 @@ class EvolvableCNN(nn.Module):
 
         return x
 
-    def get_model_dict(self):
-        """Returns dictionary with model information and weights."""
-        model_dict = self.init_dict
-        model_dict.update(
-            {"stored_values": self.extract_parameters(without_layer_norm=False)}
-        )
-        return model_dict
-
     def count_parameters(self, without_layer_norm=False):
         """Returns number of parameters in neural network.
 
@@ -481,81 +498,10 @@ class EvolvableCNN(nn.Module):
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
 
-    def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened
-        parameter vector.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
-                count += sz
-        return pvec.copy()
-
-    def extract_parameters(self, without_layer_norm=False):
-        """Returns current flattened neural network weights.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
-                count += sz
-        return copy.deepcopy(pvec)
-
-    def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current
-        neural network weights.
-
-        :param pvec: Network weights
-        :type pvec: np.array()
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        count = 0
-
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count : count + sz]
-                reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
-                    torch.FloatTensor
-                )
-                count += sz
-        return pvec
-
-    @property
-    def short_dict(self):
-        """Returns shortened version of model information in dictionary."""
-        short_dict = {
-            "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
-            "stride_size": self.stride_size,
-            "hidden_size": self.hidden_size,
-            "num_atoms": self.num_atoms,
-            "mlp_activation": self.mlp_activation,
-            "cnn_activation": self.cnn_activation,
-            "layer_norm": self.layer_norm,
-            "support": self.support,
-        }
-        return short_dict
-
     @property
     def init_dict(self):
         """Returns model information in dictionary."""
-        initdict = {
+        init_dict = {
             "input_shape": self.input_shape,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
@@ -568,6 +514,15 @@ class EvolvableCNN(nn.Module):
             "normalize": self.normalize,
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
+            "mlp_output_activation": self.mlp_output_activation,
+            "min_hidden_layers": self.min_hidden_layers,
+            "max_hidden_layers": self.max_hidden_layers,
+            "min_mlp_nodes": self.min_mlp_nodes,
+            "max_mlp_nodes": self.max_mlp_nodes,
+            "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
+            "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
+            "min_channel_size": self.min_channel_size,
+            "max_channel_size": self.max_channel_size,   
             "multi": self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
@@ -575,13 +530,21 @@ class EvolvableCNN(nn.Module):
             "device": self.device,
             "accelerator": self.accelerator,
         }
-        return initdict
+        return init_dict
 
     def add_mlp_layer(self):
-        """Adds a hidden layer to Multi-layer Perceptron."""
-        if len(self.hidden_size) < 3:  # HARD LIMIT
+        """Adds a hidden layer to fully connected layer."""
+        if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
 
+            self.recreate_nets()
+        else:
+            self.add_mlp_node()
+
+    def remove_mlp_layer(self):
+        """Removes a hidden layer from fully connected layer."""
+        if len(self.hidden_size) > self.min_hidden_layers:
+            self.hidden_size = self.hidden_size[:-1]
             self.recreate_nets()
         else:
             self.add_mlp_node()
@@ -601,51 +564,75 @@ class EvolvableCNN(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= 1024:  # HARD LIMIT
+        if self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes:  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
 
             self.recreate_nets()
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
+    
+    def remove_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
+        """Removes nodes from hidden layer of fully connected layer.
+        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
+        :type numb_new_nodes: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+
+        if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:  # HARD LIMIT
+            self.hidden_size[hidden_layer] = (
+                self.hidden_size[hidden_layer] - numb_new_nodes
+            )
+            self.recreate_nets()
+
+        return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
+
 
     def add_cnn_layer(self):
-        """Adds a hidden layer to Convolutional Neural Network."""
-        if self.multi:
-            if len(self.channel_size) < 6:  # HARD LIMIT
-                self.channel_size += [self.channel_size[-1]]
+        """Adds a hidden layer to convolutional neural network."""
+        if len(self.channel_size) < self.max_cnn_hidden_layers:  # HARD LIMIT
+            self.channel_size += [self.channel_size[-1]]
+            if self.multi:
                 self.kernel_size += [(1, 3, 3)]
-                stride_size_list = [
-                    [4],
-                    [4, 2],
-                    [4, 2, 1],
-                    [2, 2, 2, 1],
-                    [2, 1, 2, 1, 2],
-                    [2, 1, 2, 1, 2, 1],
-                ]
-                self.stride_size = stride_size_list[len(self.channel_size) - 1]
-
-                self.recreate_nets()
             else:
-                self.add_cnn_channel()
-
-        else:
-            if len(self.channel_size) < 6:  # HARD LIMIT
-                self.channel_size += [self.channel_size[-1]]
                 self.kernel_size += [3]
+            stride_size_list = [
+                [4],
+                [4, 2],
+                [4, 2, 1],
+                [2, 2, 2, 1],
+                [2, 1, 2, 1, 2],
+                [2, 1, 2, 1, 2, 1],
+            ]
+            self.stride_size = stride_size_list[len(self.channel_size) - 1]
 
-                stride_size_list = [
-                    [4],
-                    [4, 2],
-                    [4, 2, 1],
-                    [2, 2, 2, 1],
-                    [2, 1, 2, 1, 2],
-                    [2, 1, 2, 1, 2, 1],
-                ]
-                self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            self.recreate_nets()
+        else:
+            self.add_cnn_channel()
 
-                self.recreate_nets()
-            else:
-                self.add_cnn_channel()
-
+    def remove_cnn_layer(self):
+        """Removes a hidden layer from convolutional neural network."""
+        if len(self.channel_size) > self.min_cnn_hidden_layers:
+            self.channel_size = self.channel_size[:-1]
+            self.kernel_size = self.kernel_size[:-1]
+            stride_size_list = [
+                [4],
+                [4, 2],
+                [4, 2, 1],
+                [2, 2, 2, 1],
+                [2, 1, 2, 1, 2],
+                [2, 1, 2, 1, 2, 1],
+            ]
+            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            self.recreate_nets()
+        else:
+            self.add_cnn_channel()
+        
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
 
@@ -681,7 +668,7 @@ class EvolvableCNN(nn.Module):
                 self.add_cnn_layer()
 
     def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
-        """Adds channel to hidden layer of Convolutional Neural Network.
+        """Adds channel to hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
         :type hidden_layer: int, optional
@@ -695,8 +682,30 @@ class EvolvableCNN(nn.Module):
         if numb_new_channels is None:
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if self.channel_size[hidden_layer] + numb_new_channels <= 256:  # HARD LIMIT
+        if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:  # HARD LIMIT
             self.channel_size[hidden_layer] += numb_new_channels
+
+            self.recreate_nets()
+
+        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
+    
+    def remove_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
+        """Remove channel from hidden layer of convolutional neural network.
+        
+        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
+        :type numb_new_channels: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
+        if numb_new_channels is None:
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+
+        if self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size:  # HARD LIMIT
+            self.channel_size[hidden_layer] -= numb_new_channels
 
             self.recreate_nets()
 
