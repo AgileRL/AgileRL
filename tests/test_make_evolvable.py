@@ -145,12 +145,14 @@ def test_forward_method(
     network = request.getfixturevalue(network)
     if secondary_input_tensor is None:
         evolvable_network = MakeEvolvable(network, input_tensor, device=device)
-        actual_output = evolvable_network.forward(input_tensor)
+        with torch.no_grad():
+            actual_output = evolvable_network.forward(input_tensor)
     else:
         evolvable_network = MakeEvolvable(
             network, input_tensor, secondary_input_tensor, device, extra_critic_dims=2
         )
-        actual_output = network.forward(input_tensor, secondary_input_tensor)
+        with torch.no_grad():
+            actual_output = network.forward(input_tensor, secondary_input_tensor)
     output_shape = actual_output.shape
     assert output_shape == expected_result
 
@@ -160,8 +162,9 @@ def test_forward_method_with_different_input_types(simple_mlp):
     input_tensor = torch.randn(1, 10)
     numpy_array = input_tensor.numpy()
     evolvable_network = MakeEvolvable(simple_mlp, input_tensor)
-    output1 = evolvable_network.forward(input_tensor)
-    output2 = evolvable_network.forward(numpy_array)
+    with torch.no_grad():
+        output1 = evolvable_network.forward(input_tensor)
+        output2 = evolvable_network.forward(numpy_array)
     assert isinstance(output1, torch.Tensor)
     assert isinstance(output2, torch.Tensor)
 
@@ -178,7 +181,8 @@ def test_forward_with_different_normalization_layers():
     )
     input_tensor = torch.randn(1, 10)
     evolvable_network = MakeEvolvable(network, input_tensor)
-    output = evolvable_network.forward(input_tensor)
+    with torch.no_grad():
+        output = evolvable_network.forward(input_tensor)
     assert isinstance(output, torch.Tensor)
     assert str(unpack_network(evolvable_network)) == str(unpack_network(network))
 

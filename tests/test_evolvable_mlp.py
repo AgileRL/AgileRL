@@ -93,13 +93,14 @@ def test_returns_correct_activation_function_for_all_supported_names(device):
             (torch.randn(1, 100), 100, 3, [8, 8, 8, 8, 8, 8 ,8], (1, 3))
         ]
 )
-def test_instantiation(input_tensor, num_inputs, num_outputs, hidden_size, output_size, device):
+def test_forward(input_tensor, num_inputs, num_outputs, hidden_size, output_size, device):
     evolvable_mlp = EvolvableMLP(num_inputs=num_inputs, 
                                  num_outputs=num_outputs, 
                                  hidden_size=hidden_size,
                                  device=device)
     input_tensor = input_tensor.to(device)
-    output_tensor = evolvable_mlp.forward(input_tensor)
+    with torch.no_grad():
+        output_tensor = evolvable_mlp.forward(input_tensor)
     assert output_tensor.shape == output_size
 
 
@@ -163,7 +164,6 @@ def test_remove_mlp_layer(num_inputs, num_outputs, hidden_size, device):
     initial_hidden_size = len(evolvable_mlp.hidden_size)
     initial_net = evolvable_mlp.feature_net
     initial_net_dict = dict(initial_net.named_parameters())
-    print(evolvable_mlp)
     evolvable_mlp.remove_mlp_layer()
     new_net = evolvable_mlp.feature_net
     if initial_hidden_size > 1:
