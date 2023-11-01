@@ -17,6 +17,11 @@ class TournamentSelection:
     """
 
     def __init__(self, tournament_size, elitism, population_size, evo_step):
+        assert tournament_size > 0, "Tournament size must be greater than zero."
+        assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
+        assert population_size > 0, "Population size must be greater than zero."
+        assert evo_step > 0, "Evo step must be greater than zero."
+
         self.tournament_size = tournament_size
         self.elitism = elitism
         self.population_size = population_size
