@@ -2,13 +2,25 @@ import torch
 import torch.nn as nn
 import pytest 
 import copy
+import numpy as np
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
+from agilerl.networks.evolvable_cnn import NoisyLinear
 
 ######### Define fixtures #########
 @pytest.fixture
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+def test_noisy_linear(device):
+    noisy_linear = NoisyLinear(2, 10).to(device)
+    noisy_linear.training = False 
+    with torch.no_grad():
+        output = noisy_linear.forward(torch.randn(1, 2).to(device))
+        noisy_linear.training = True 
+        output_training = noisy_linear.forward(torch.randn(1, 2).to(device))
+    assert output.shape == (1, 10)
+    assert output_training.shape == (1, 10)
 
 ######### Test instantiation #########
 
@@ -91,6 +103,19 @@ def test_incorrect_instantiation_for_multi_agents(input_shape, channel_size, ker
                                     multi=multi,
                                     critic=True,
                                     device=device)
+        
+def test_rainbow_instantiation(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 16, 16], 
+                                channel_size=[32, 32], 
+                                kernel_size=[3, 3], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                layer_norm=True,
+                                rainbow=True,
+                                device=device)
+    assert isinstance(evolvable_cnn, EvolvableCNN)
+
 
 ######### Test get_activation #########
 def test_returns_correct_activation_function_for_all_supported_names(device):
@@ -118,6 +143,21 @@ def test_returns_correct_activation_function_for_all_supported_names(device):
                                   device=device).get_activation(name)
         assert isinstance(activation, nn.Module)
 
+######### Test reset_noise ########
+def test_reset_noise(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 16, 16], 
+                                channel_size=[32, 32], 
+                                kernel_size=[3, 3], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                rainbow=True,
+                                layer_norm=True,
+                                device=device)
+    evolvable_cnn.reset_noise()
+    assert isinstance(evolvable_cnn.value_net[0], NoisyLinear)
+    assert isinstance(evolvable_cnn.advantage_net[0], NoisyLinear)
+
 ######### Test forward #########
 @pytest.mark.parametrize(
         "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, output_shape",
@@ -136,12 +176,13 @@ def test_forward(input_shape, channel_size, kernel_size, stride_size, hidden_siz
                        hidden_size=hidden_size, 
                        num_actions=num_actions,
                        device=device)
-    input_tensor = torch.randn(input_shape).unsqueeze(0) # To add in a batch size dimension
+    input_tensor = torch.randn(input_shape).unsqueeze(0).to(dtype=torch.float16) # To add in a batch size dimension
+    input_array = np.expand_dims(np.random.randn(*input_shape), 0)
     input_tensor = input_tensor.to(device)
-    print(input_tensor.shape)
     output = evolvable_cnn.forward(input_tensor)
-    print(output)
+    output_array = evolvable_cnn.forward(input_array)
     assert output.shape == output_shape
+    assert output_array.shape == output_shape
 
 @pytest.mark.parametrize(
         "input_shape, channel_size, kernel_size, stride_size, \
@@ -192,6 +233,68 @@ def test_forward_multi_critic(input_shape, channel_size, kernel_size, stride_siz
         output = evolvable_cnn.forward(input_tensor, secondary_tensor)
     assert output.shape == output_shape
 
+def test_forward_rainbow(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 16, 16], 
+                                channel_size=[32, 32], 
+                                kernel_size=[3, 3], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                rainbow=True,
+                                layer_norm=True,
+                                support=torch.linspace(0.0, 200.0, 51).to(device),
+                                device=device)
+    input_tensor = torch.randn(1, 1, 16, 16).to(device)
+    with torch.no_grad():
+        output = evolvable_cnn.forward(input_tensor)
+    assert output.shape == (1,10)
+
+######### Test create_mlp and create_cnn########
+@pytest.mark.parametrize(
+        "noisy",
+        [
+            (False),
+            (True)
+        ]
+)
+def test_create_mlp_create_cnn(noisy, device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 16, 16], 
+                                channel_size=[32, 32], 
+                                kernel_size=[3, 3], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                layer_norm=True,
+                                device=device)
+    value_net = evolvable_cnn.create_mlp(10, 4, [64, 64], output_activation=None, noisy=noisy, name="value")
+    feature_net = evolvable_cnn.create_cnn(1, [32, 32], [3, 3], [1, 1], "feature")
+    assert isinstance(value_net, nn.Module)
+    assert isinstance(feature_net, nn.Module)
+
+@pytest.mark.parametrize(
+        "noisy",
+        [
+            (False),
+            (True)
+        ]
+)
+def test_create_mlp_create_cnn_multi(noisy, device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 64, 64], 
+                                channel_size=[32, 32], 
+                                kernel_size=[(1, 3, 3), (1,3,3)], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                layer_norm=True,
+                                multi=True,
+                                n_agents=2,
+                                device=device)
+    value_net = evolvable_cnn.create_mlp(10, 4, [64, 64], output_activation=None, noisy=noisy, name="value")
+    feature_net = evolvable_cnn.create_cnn(1, [32, 32], [(1,3,3), (1,3,3)], [1, 1], "feature")
+    assert isinstance(value_net, nn.Module)
+    assert isinstance(feature_net, nn.Module)
+
+
 ######### Test add_mlp_layer #########
 @pytest.mark.parametrize(
         "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
@@ -223,6 +326,19 @@ def test_add_mlp_layer(input_shape, channel_size, kernel_size, stride_size, hidd
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert len(evolvable_cnn.hidden_size) == initial_hidden_size
+
+def test_add_mlp_layer_else_statement(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1,16,16], 
+                       channel_size=[32,32], 
+                       kernel_size=[3,3], 
+                       stride_size=[1,1], 
+                       hidden_size=[32,32], 
+                       num_actions=4,
+                       max_hidden_layers=2,
+                       device=device)
+    initial_hidden_size = len(evolvable_cnn.hidden_size)
+    evolvable_cnn.add_mlp_layer()
+    assert initial_hidden_size == len(evolvable_cnn.hidden_size)  
 
 ######### Test remove_mlp_layer #########
 @pytest.mark.parametrize(
@@ -258,13 +374,13 @@ def test_remove_mlp_layer(input_shape, channel_size, kernel_size, stride_size, h
 
 ######### Test add_mlp_node #########
 @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index",
         [
-            ([1, 16, 16], [32], [3], [1], [128], 10),
-            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1),
+            ([1, 16, 16], [32], [3], [1], [128], 10, None),
+            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1, 1),
         ]
 )
-def test_add_nodes(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+def test_add_nodes(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index, device):
     evolvable_cnn = EvolvableCNN(input_shape=input_shape, 
                        channel_size=channel_size, 
                        kernel_size=kernel_size, 
@@ -273,20 +389,23 @@ def test_add_nodes(input_shape, channel_size, kernel_size, stride_size, hidden_s
                        num_actions=num_actions,
                        device=device)
     original_hidden_size = copy.deepcopy(evolvable_cnn.hidden_size)
-    result = evolvable_cnn.add_mlp_node()
+    layer = layer_index
+    result = evolvable_cnn.add_mlp_node(hidden_layer=layer)
     hidden_layer = result["hidden_layer"]
     numb_new_nodes = result["numb_new_nodes"]
     assert evolvable_cnn.hidden_size[hidden_layer] == original_hidden_size[hidden_layer] + numb_new_nodes
 
+
+
 ######### Test remove_mlp_node #########
 @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index, numb_new_nodes",
         [
-            ([1, 16, 16], [32], [3], [1], [128], 10),
-            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1),
+            ([1, 16, 16], [32], [3], [1], [128], 10, 1, None),
+            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1, None, 4),
         ]
 )
-def test_remove_nodes(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+def test_remove_nodes(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index, numb_new_nodes, device):
     evolvable_cnn = EvolvableCNN(input_shape=input_shape, 
                        channel_size=channel_size, 
                        kernel_size=kernel_size, 
@@ -296,10 +415,11 @@ def test_remove_nodes(input_shape, channel_size, kernel_size, stride_size, hidde
                        min_mlp_nodes=4,
                        min_hidden_layers=1,
                        device=device)
+    layer = layer_index
     original_hidden_size = copy.deepcopy(evolvable_cnn.hidden_size)
-    numb_new_nodes = 4
-    result = evolvable_cnn.remove_mlp_node(numb_new_nodes=numb_new_nodes)
+    result = evolvable_cnn.remove_mlp_node(numb_new_nodes=numb_new_nodes, hidden_layer=layer)
     hidden_layer = result["hidden_layer"]
+    numb_new_nodes = result["numb_new_nodes"]
     assert evolvable_cnn.hidden_size[hidden_layer] == original_hidden_size[hidden_layer] - numb_new_nodes
 
 ######### Test add_cnn_layer #########
@@ -318,6 +438,43 @@ def test_add_cnn_layer(input_shape, channel_size, kernel_size, stride_size, hidd
                        hidden_size=hidden_size, 
                        num_actions=num_actions,
                        device=device)
+    initial_channel_num = len(evolvable_cnn.channel_size)
+    initial_net = evolvable_cnn.feature_net
+    initial_net_dict = dict(initial_net.named_parameters())
+    evolvable_cnn.add_cnn_layer()
+    new_net = evolvable_cnn.feature_net
+    if initial_channel_num < 6:
+        assert len(evolvable_cnn.channel_size) == initial_channel_num + 1
+        for key, param in new_net.named_parameters():
+            if key in initial_net_dict.keys():
+                torch.testing.assert_close(param, initial_net_dict[key])
+    else:
+        assert len(evolvable_cnn.channel_size) == initial_channel_num
+
+def test_add_cnn_layer_else_statement(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1,16,16], 
+                       channel_size=[32,32], 
+                       kernel_size=[3,3], 
+                       stride_size=[1,1], 
+                       hidden_size=[32,32], 
+                       num_actions=4,
+                       max_cnn_hidden_layers=2,
+                       device=device)
+    original_num_hidden_layers = copy.deepcopy(evolvable_cnn.channel_size)
+    evolvable_cnn.add_cnn_layer()
+    assert len(original_num_hidden_layers) == len(evolvable_cnn.channel_size)
+
+def test_add_cnn_layer_rainbow(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 128, 128], 
+                                channel_size=[32, 32], 
+                                kernel_size=[3, 3], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                rainbow=True,
+                                layer_norm=True,
+                                support=torch.linspace(0.0, 200.0, 51).to(device),
+                                device=device)
     initial_channel_num = len(evolvable_cnn.channel_size)
     initial_net = evolvable_cnn.feature_net
     initial_net_dict = dict(initial_net.named_parameters())
@@ -360,15 +517,39 @@ def test_remove_cnn_layer(input_shape, channel_size, kernel_size, stride_size, h
     else:
         assert len(evolvable_cnn.channel_size) == initial_channel_num
 
+def test_remove_cnn_layer_rainbow(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1, 16, 16], 
+                                channel_size=[32, 32], 
+                                kernel_size=[3, 3], 
+                                stride_size=[1, 1], 
+                                hidden_size=[64, 64], 
+                                num_actions=10,
+                                rainbow=True,
+                                layer_norm=True,
+                                support=torch.linspace(0.0, 200.0, 51).to(device),
+                                device=device)
+    initial_channel_num = len(evolvable_cnn.channel_size)
+    initial_net = evolvable_cnn.feature_net
+    initial_net_dict = dict(initial_net.named_parameters())
+    evolvable_cnn.remove_cnn_layer()
+    new_net = evolvable_cnn.feature_net
+    if initial_channel_num < 6:
+        assert len(evolvable_cnn.channel_size) == initial_channel_num - 1
+        for key, param in new_net.named_parameters():
+            if key in initial_net_dict.keys():
+                torch.testing.assert_close(param, initial_net_dict[key])
+    else:
+        assert len(evolvable_cnn.channel_size) == initial_channel_num
+
 ######### Test add_cnn_channel #########
 @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index",
         [
-            ([1, 16, 16], [32], [3], [1], [128], 10),
-            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1),
+            ([1, 16, 16], [32], [3], [1], [128], 10, 0),
+            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1, None),
         ]
 )
-def test_add_channels(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+def test_add_channels(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index, device):
     evolvable_cnn = EvolvableCNN(input_shape=input_shape, 
                        channel_size=channel_size, 
                        kernel_size=kernel_size, 
@@ -377,20 +558,21 @@ def test_add_channels(input_shape, channel_size, kernel_size, stride_size, hidde
                        num_actions=num_actions,
                        device=device)
     original_channel_size = copy.deepcopy(evolvable_cnn.channel_size)
-    result = evolvable_cnn.add_cnn_channel()
+    result = evolvable_cnn.add_cnn_channel(hidden_layer=layer_index)
     hidden_layer = result["hidden_layer"]
     numb_new_channels = result["numb_new_channels"]
     assert evolvable_cnn.channel_size[hidden_layer] == original_channel_size[hidden_layer] + numb_new_channels
 
 ######### Test remove_cnn_channel #########
 @pytest.mark.parametrize(
-        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+        "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, layer_index, numb_new_channels",
         [
-            ([1, 16, 16], [32], [3], [1], [128], 10),
-            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1),
+            ([1, 16, 16], [256], [3], [1], [128], 10, None, None),
+            ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1, 0, 2),
         ]
 )
-def test_remove_channels(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+def test_remove_channels(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, 
+                         layer_index, numb_new_channels, device):
     evolvable_cnn = EvolvableCNN(input_shape=input_shape, 
                        channel_size=channel_size, 
                        kernel_size=kernel_size, 
@@ -400,11 +582,100 @@ def test_remove_channels(input_shape, channel_size, kernel_size, stride_size, hi
                        min_channel_size=4,
                        device=device)
     original_channel_size = copy.deepcopy(evolvable_cnn.channel_size)
-    numb_new_channels = 2
-    result = evolvable_cnn.remove_cnn_channel(numb_new_channels=numb_new_channels)
+    result = evolvable_cnn.remove_cnn_channel(numb_new_channels=numb_new_channels, hidden_layer=layer_index)
     hidden_layer = result["hidden_layer"]
+    numb_new_channels = result["numb_new_channels"]
     assert evolvable_cnn.channel_size[hidden_layer] == original_channel_size[hidden_layer] - numb_new_channels
 
+######### Test change_cnn_kernel #########
+def test_change_cnn_kernel(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1,16,16], 
+                       channel_size=[32,32], 
+                       kernel_size=[3,3], 
+                       stride_size=[1,1], 
+                       hidden_size=[32,32], 
+                       num_actions=4,
+                       device=device)
+    # Change kernel size
+    evolvable_cnn.change_cnn_kernel()
+
+    while evolvable_cnn.kernel_size == [(3, 3), (3, 3)]:
+        evolvable_cnn.change_cnn_kernel()
+
+    # Check if kernel size has changed
+    assert evolvable_cnn.kernel_size != [
+        (3, 3),
+        (3, 3),
+    ], evolvable_cnn.kernel_size
+
+def test_change_cnn_kernel_else_statement(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1,16,16], 
+                       channel_size=[32], 
+                       kernel_size=[(3,3)], 
+                       stride_size=[1], 
+                       hidden_size=[32,32], 
+                       num_actions=4,
+                       device=device)
+
+    # Change kernel size
+    evolvable_cnn.change_cnn_kernel()
+
+    # Check if kernel size has changed
+    assert evolvable_cnn.kernel_size == [
+        (3, 3),
+        (3, 3),
+    ], evolvable_cnn.kernel_size
+
+@pytest.mark.parametrize(
+        "critic",
+        [
+            (True),
+            (False)
+        ]
+)
+def test_change_cnn_kernel_multi(critic, device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1,16,16], 
+                       channel_size=[32,32], 
+                       kernel_size=[(1,3,3), (1,3,3)], 
+                       stride_size=[1,1], 
+                       hidden_size=[32,32], 
+                       multi=True,
+                       n_agents=2,
+                       num_actions=4,
+                       critic=critic,
+                       device=device)
+
+    # Change kernel size
+    evolvable_cnn.change_cnn_kernel()
+
+    while evolvable_cnn.kernel_size == [(1, 3, 3), (1, 3, 3)]:
+        evolvable_cnn.change_cnn_kernel()
+
+    # Check if kernel size has changed
+    assert evolvable_cnn.kernel_size != [
+        (1, 3, 3),
+        (1, 3, 3),
+    ], evolvable_cnn.kernel_size
+
+def test_change_cnn_kernel_multi_else_statement(device):
+    evolvable_cnn = EvolvableCNN(input_shape=[1,16,16], 
+                       channel_size=[32], 
+                       kernel_size=[(1,3,3)], 
+                       stride_size=[1], 
+                       hidden_size=[32,32], 
+                       multi=True,
+                       n_agents=2,
+                       num_actions=4,
+                       device=device)
+
+    # Change kernel size
+    evolvable_cnn.change_cnn_kernel()
+
+    # Check if kernel size has changed
+    assert evolvable_cnn.kernel_size == [
+        (1, 3, 3),
+        (1, 3, 3),
+    ], evolvable_cnn.kernel_size
 
 ######### Test clone #########
 @pytest.mark.parametrize(
@@ -434,3 +705,5 @@ def test_clone_instance(input_shape, channel_size, kernel_size, stride_size, hid
             torch.testing.assert_close(param, original_feature_net_dict[key])
     for key, param in clone_value_net.named_parameters():
             torch.testing.assert_close(param, original_value_net_dict[key])
+
+
