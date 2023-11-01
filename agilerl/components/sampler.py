@@ -1,3 +1,13 @@
+from torch.utils.data import DataLoader
+
+from agilerl.components.replay_buffer import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
+from agilerl.components.replay_data import ReplayDataset
+
+
 class Sampler:
     """Sampler class to handle both standard and distributed training."""
 
@@ -18,12 +28,27 @@ class Sampler:
         self.dataloader = dataloader
 
         if self.distributed:
+            assert isinstance(
+                self.dataset, ReplayDataset
+            ), "Dataset must be agilerl ReplayDataset."
+            assert isinstance(
+                self.dataloader, DataLoader
+            ), "Dataset must be torch DataLoader."
             self.sample = self.sample_distributed
         elif self.per:
+            assert isinstance(
+                self.memory, PrioritizedReplayBuffer
+            ), "Memory must be agilerl PrioritizedReplayBuffer."
             self.sample = self.sample_per
         elif self.n_step:
+            assert isinstance(
+                self.memory, MultiStepReplayBuffer
+            ), "Memory must be agilerl MultiStepReplayBuffer."
             self.sample = self.sample_n_step
         else:
+            assert isinstance(
+                self.memory, ReplayBuffer
+            ), "Memory must be agilerl ReplayBuffer."
             self.sample = self.sample_standard
 
     def sample_standard(self, batch_size):
