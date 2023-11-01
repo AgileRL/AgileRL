@@ -20,6 +20,10 @@ class Sampler:
         dataset=None,
         dataloader=None,
     ):
+        assert (memory is not None) or (
+            (dataset is not None) and (dataloader is not None)
+        ), "Sampler needs to be initialized with either 'memory' or ('dataset' AND 'dataloader')."
+
         self.distributed = distributed
         self.per = per
         self.n_step = n_step
