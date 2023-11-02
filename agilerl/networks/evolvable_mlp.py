@@ -107,7 +107,7 @@ class EvolvableMLP(nn.Module):
     :param mlp_output_activation: Output activation layer, defaults to None
     :type mlp_output_activation: str, optional
     :param min_hidden_layers: Minimum number of hidden layers the network will shrink down to, defaults to 1
-    :type min_hidden_layers: int, optional 
+    :type min_hidden_layers: int, optional
     :param max_hidden_layers: Maximum number of hidden layers the network will expand to, defaults to 3
     :type max_hidden_layers: int, optional
     :param min_mlp_nodes: Minimum number of nodes a layer can have within the network, defaults to 64
@@ -152,6 +152,18 @@ class EvolvableMLP(nn.Module):
     ):
         super().__init__()
 
+        assert (
+            num_inputs > 0
+        ), "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            num_outputs > 0
+        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        for num in hidden_size:
+            assert (
+                num > 0
+            ), "'hidden_size' cannot contain zero, please enter a valid integer."
+        assert len(hidden_size) != 0, "MLP must contain at least one hidden layer."
+
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation
@@ -161,8 +173,8 @@ class EvolvableMLP(nn.Module):
         self.min_mlp_nodes = min_mlp_nodes
         self.max_mlp_nodes = max_mlp_nodes
         self.layer_norm = layer_norm
-        self.output_vanish = output_vanish
-        self.init_layers = init_layers
+        self.output_vanish = False if rainbow else output_vanish
+        self.init_layers = False if rainbow else init_layers
         self.hidden_size = hidden_size
         self.num_atoms = num_atoms
         self.support = support
@@ -344,7 +356,6 @@ class EvolvableMLP(nn.Module):
 
         return x
 
-
     @property
     def init_dict(self):
         """Returns model information in dictionary."""
@@ -382,7 +393,7 @@ class EvolvableMLP(nn.Module):
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
-            self.recreate_nets()
+            self.recreate_nets(shrink_params=True)
         else:
             self.add_mlp_node()
 
@@ -401,7 +412,9 @@ class EvolvableMLP(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
             self.recreate_nets()
 
@@ -422,25 +435,39 @@ class EvolvableMLP(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] -= numb_new_nodes
-            self.recreate_nets()
+            self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    def recreate_nets(self):
+    def recreate_nets(self, shrink_params=False):
         """Recreates neural networks."""
         new_feature_net, new_value_net, new_advantage_net = self.create_net()
-        new_feature_net = self.preserve_parameters(
-            old_net=self.feature_net, new_net=new_feature_net
-        )
-        if self.rainbow:
-            new_value_net = self.preserve_parameters(
-                old_net=self.value_net, new_net=new_value_net
+        if shrink_params:
+            new_feature_net = self.shrink_preserve_parameters(
+                old_net=self.feature_net, new_net=new_feature_net
             )
-            new_advantage_net = self.preserve_parameters(
-                old_net=self.advantage_net, new_net=new_advantage_net
+            if self.rainbow:
+                new_value_net = self.shrink_preserve_parameters(
+                    old_net=self.value_net, new_net=new_value_net
+                )
+                new_advantage_net = self.shrink_preserve_parameters(
+                    old_net=self.advantage_net, new_net=new_advantage_net
+                )
+        else:
+            new_feature_net = self.preserve_parameters(
+                old_net=self.feature_net, new_net=new_feature_net
             )
+            if self.rainbow:
+                new_value_net = self.preserve_parameters(
+                    old_net=self.value_net, new_net=new_value_net
+                )
+                new_advantage_net = self.preserve_parameters(
+                    old_net=self.advantage_net, new_net=new_advantage_net
+                )
         self.feature_net, self.value_net, self.advantage_net = (
             new_feature_net,
             new_value_net,
