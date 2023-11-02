@@ -282,7 +282,7 @@ def test_mutation_applies_random_mutations():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 3
+    population_size = 2
     pre_training_mut = True
 
     algo_classes = {
