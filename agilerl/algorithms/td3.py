@@ -16,7 +16,7 @@ class TD3:
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
@@ -261,6 +261,12 @@ class TD3:
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
+        if self.accelerator is not None:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
         if self.one_hot:
             states = (

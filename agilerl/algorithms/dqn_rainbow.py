@@ -322,6 +322,18 @@ class RainbowDQN:
                     n_next_states,
                     n_dones,
                 ) = experiences
+                if self.accelerator is not None:
+                    states = states.to(self.accelerator.device)
+                    actions = actions.to(self.accelerator.device)
+                    rewards = rewards.to(self.accelerator.device)
+                    next_states = next_states.to(self.accelerator.device)
+                    dones = dones.to(self.accelerator.device)
+                    weights = weights.to(self.accelerator.device)
+                    n_states = n_states.to(self.accelerator.device)
+                    n_actions = n_actions.to(self.accelerator.device)
+                    n_rewards = n_rewards.to(self.accelerator.device)
+                    n_next_states = n_next_states.to(self.accelerator.device)
+                    n_dones = n_dones.to(self.accelerator.device)
             else:
                 (
                     states,
@@ -332,6 +344,13 @@ class RainbowDQN:
                     weights,
                     idxs,
                 ) = experiences
+                if self.accelerator is not None:
+                    states = states.to(self.accelerator.device)
+                    actions = actions.to(self.accelerator.device)
+                    rewards = rewards.to(self.accelerator.device)
+                    next_states = next_states.to(self.accelerator.device)
+                    dones = dones.to(self.accelerator.device)
+                    weights = weights.to(self.accelerator.device)
             elementwise_loss = self._dqn_loss(
                 states, actions, rewards, next_states, dones, self.gamma
             )
@@ -351,6 +370,12 @@ class RainbowDQN:
                 next_states,
                 dones,
             ) = experiences
+            if self.accelerator is not None:
+                states = states.to(self.accelerator.device)
+                actions = actions.to(self.accelerator.device)
+                rewards = rewards.to(self.accelerator.device)
+                next_states = next_states.to(self.accelerator.device)
+                dones = dones.to(self.accelerator.device)
             idxs, new_priorities = None, None
             if n_step:
                 n_gamma = self.gamma**self.n_step

@@ -286,7 +286,7 @@ class PPO:
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, rewards, next_states, dones in that order.
+        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_states in that order.
         :type experience: list[torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
@@ -294,14 +294,22 @@ class PPO:
         :type policy_noise: float, optional
         """
         experiences = [torch.from_numpy(np.array(exp)) for exp in experiences]
-        states, actions, log_probs, rewards, dones, values, next_state = experiences
+        states, actions, log_probs, rewards, dones, values, next_states = experiences
+        if self.accelerator is not None:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            log_probs = log_probs.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
+            values = values.to(self.accelerator.device)
         dones = dones.long()
 
         # Bootstrapping
         with torch.no_grad():
             num_steps = rewards.size(0)
-            next_state = self.prepare_state(next_state)
-            next_value = self.critic(next_state).reshape(1, -1).cpu()
+            next_states = self.prepare_state(next_states)
+            next_value = self.critic(next_states).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards)
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
