@@ -194,6 +194,8 @@ class RainbowDQN:
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
             state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (

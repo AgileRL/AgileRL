@@ -276,6 +276,8 @@ class MADDPG:
         # Configure accelerator
         if self.accelerator is None:
             states = [state.to(self.device) for state in states]
+        else:
+            states = [state.to(self.accelerator.device) for state in states]
 
         if self.one_hot:
             states = [

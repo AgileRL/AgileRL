@@ -212,6 +212,8 @@ class PPO:
 
         if self.accelerator is None:
             state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (
