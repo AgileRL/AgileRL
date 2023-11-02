@@ -68,6 +68,19 @@ class MakeEvolvable(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        assert (
+            min_hidden_layers < max_hidden_layers
+        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
+        assert (
+            min_mlp_nodes < max_mlp_nodes
+        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        assert (
+            min_cnn_hidden_layers < max_cnn_hidden_layers
+        ), "'min_cnn_hidden_layers' must be less than 'max_cnn_hidden_layers."
+        assert (
+            min_channel_size < max_channel_size
+        ), "'min_channel_size' must be less than 'max_channel_size'."
+        assert isinstance(network, nn.Module), "'network' must be of type 'nn.Module'."
 
         self.init_layers = init_layers
         self.min_hidden_layers = min_hidden_layers

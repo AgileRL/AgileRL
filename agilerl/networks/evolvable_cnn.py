@@ -115,7 +115,7 @@ class EvolvableCNN(nn.Module):
     :param cnn_activation: CNN activation layer, defaults to 'relu'
     :type cnn_activation: str, optional
     :param min_hidden_layers: Minimum number of hidden layers the fully connected layer will shrink down to, defaults to 1
-    :type min_hidden_layers: int, optional 
+    :type min_hidden_layers: int, optional
     :param max_hidden_layers: Maximum number of hidden layers the fully connected layer will expand to, defaults to 3
     :type max_hidden_layers: int, optional
     :param min_mlp_nodes: Minimum number of nodes a layer can have within the fully connected layer, defaults to 64
@@ -182,15 +182,40 @@ class EvolvableCNN(nn.Module):
     ):
         super().__init__()
 
-        assert len(kernel_size) == len(channel_size), "Length of kernel size list must be the same length as channel size list."
-        assert len(stride_size) == len(channel_size), "Length of stride size list must be the same length as channel size list."
+        assert len(kernel_size) == len(
+            channel_size
+        ), "Length of kernel size list must be the same length as channel size list."
+        assert len(stride_size) == len(
+            channel_size
+        ), "Length of stride size list must be the same length as channel size list."
         assert len(input_shape) >= 3, "Input shape must have at least 3 dimensions."
-        assert len(hidden_size) > 0, "Fully connected layer must contain at least one hidden layer."
-        assert num_actions > 0, "'num_actions' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            len(hidden_size) > 0
+        ), "Fully connected layer must contain at least one hidden layer."
+        assert (
+            num_actions > 0
+        ), "'num_actions' cannot be less than or equal to zero, please enter a valid integer."
         if multi:
-            assert n_agents is not None, "'multi' set as True, specify the number of agents (n_agents) too."
+            assert (
+                n_agents is not None
+            ), "'multi' set as True, specify the number of agents (n_agents) too."
         if n_agents is not None:
-            assert multi, f"'n_agents' has been set to {n_agents} implying a multi-agent system, please also specify 'multi' as True."
+            assert (
+                multi
+            ), f"'n_agents' has been set to {n_agents} implying a multi-agent system, please also specify 'multi' as True."
+
+        assert (
+            min_hidden_layers < max_hidden_layers
+        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
+        assert (
+            min_mlp_nodes < max_mlp_nodes
+        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        assert (
+            min_cnn_hidden_layers < max_cnn_hidden_layers
+        ), "'min_cnn_hidden_layers' must be less than 'max_cnn_hidden_layers."
+        assert (
+            min_channel_size < max_channel_size
+        ), "'min_channel_size' must be less than 'max_channel_size'."
 
         self.input_shape = input_shape
         self.channel_size = channel_size
@@ -498,7 +523,6 @@ class EvolvableCNN(nn.Module):
 
         return x
 
-
     @property
     def init_dict(self):
         """Returns model information in dictionary."""
@@ -523,7 +547,7 @@ class EvolvableCNN(nn.Module):
             "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
             "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
             "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,   
+            "max_channel_size": self.max_channel_size,
             "multi": self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
@@ -540,7 +564,6 @@ class EvolvableCNN(nn.Module):
             self.recreate_nets()
         else:
             self.add_mlp_node()
-        
 
     def remove_mlp_layer(self):
         """Removes a hidden layer from fully connected layer."""
@@ -565,12 +588,14 @@ class EvolvableCNN(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
 
             self.recreate_nets()
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
-    
+
     def remove_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
         """Removes nodes from hidden layer of fully connected layer.
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -585,14 +610,15 @@ class EvolvableCNN(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] = (
                 self.hidden_size[hidden_layer] - numb_new_nodes
             )
             self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
-
 
     def add_cnn_layer(self):
         """Adds a hidden layer to convolutional neural network."""
@@ -601,7 +627,7 @@ class EvolvableCNN(nn.Module):
             if self.multi:
                 self.kernel_size += [(1, 3, 3)]
             else:
-                self.kernel_size += [(3,3)]
+                self.kernel_size += [(3, 3)]
             stride_size_list = [
                 [4],
                 [4, 2],
@@ -614,7 +640,6 @@ class EvolvableCNN(nn.Module):
             self.recreate_nets()
         else:
             self.add_cnn_channel()
-        
 
     def remove_cnn_layer(self):
         """Removes a hidden layer from convolutional neural network."""
@@ -633,7 +658,7 @@ class EvolvableCNN(nn.Module):
             self.recreate_nets(shrink_params=True)
         else:
             self.add_cnn_channel()
-        
+
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
 
@@ -683,16 +708,18 @@ class EvolvableCNN(nn.Module):
         if numb_new_channels is None:
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:  # HARD LIMIT
+        if (
+            self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size
+        ):  # HARD LIMIT
             self.channel_size[hidden_layer] += numb_new_channels
 
             self.recreate_nets()
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
-    
+
     def remove_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
         """Remove channel from hidden layer of convolutional neural network.
-        
+
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
         :type hidden_layer: int, optional
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
@@ -705,7 +732,9 @@ class EvolvableCNN(nn.Module):
         if numb_new_channels is None:
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size:  # HARD LIMIT
+        if (
+            self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size
+        ):  # HARD LIMIT
             self.channel_size[hidden_layer] -= numb_new_channels
 
             self.recreate_nets(shrink_params=True)
@@ -796,12 +825,12 @@ class EvolvableCNN(nn.Module):
                                 : min(old_size[0], new_size[0]),
                                 : min(old_size[1], new_size[1]),
                                 : min(old_size[2], new_size[2]),
-                                : min(old_size[3], new_size[3])
+                                : min(old_size[3], new_size[3]),
                             ] = old_net_dict[key].data[
                                 : min(old_size[0], new_size[0]),
                                 : min(old_size[1], new_size[1]),
                                 : min(old_size[2], new_size[2]),
-                                : min(old_size[3], new_size[3])
+                                : min(old_size[3], new_size[3]),
                             ]
                         elif len(param.data.size()) == 5:
                             param.data[
@@ -817,7 +846,7 @@ class EvolvableCNN(nn.Module):
                                 : min(old_size[3], new_size[3]),
                                 : min(old_size[4], new_size[4]),
                             ]
-                        
+
         return new_net
 
     def shrink_preserve_parameters(self, old_net, new_net):
