@@ -16,7 +16,7 @@ class DDPG:
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces

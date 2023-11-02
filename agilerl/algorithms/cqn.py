@@ -17,7 +17,7 @@ class CQN:
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
