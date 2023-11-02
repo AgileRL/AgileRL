@@ -12,11 +12,18 @@ from agilerl.components.sampler import Sampler
 
 # Initialize Sampler with default parameters
 def test_initialize_with_default_parameters():
-    sampler = Sampler()
+    action_dim = 1
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    device = "cpu"
+
+    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+
+    sampler = Sampler(memory=buffer)
     assert sampler.distributed is False
     assert sampler.per is False
     assert sampler.n_step is False
-    assert sampler.memory is None
+    assert sampler.memory == buffer
     assert sampler.dataset is None
     assert sampler.dataloader is None
 
