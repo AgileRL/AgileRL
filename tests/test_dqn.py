@@ -308,11 +308,21 @@ def test_learns_from_experiences():
 
     experiences = [states, actions, rewards, next_states, dones]
 
+    # Copy state dict before learning - should be different to after updating weights
+    actor = dqn.actor
+    actor_target = dqn.actor_target
+    actor_pre_learn_sd = str(dqn.actor.state_dict())
+    actor_target_pre_learn_sd = str(dqn.actor_target.state_dict())
+
     # Call the learn method
     loss = dqn.learn(experiences)
 
     assert isinstance(loss, float)
     assert loss >= 0.0
+    assert actor == dqn.actor
+    assert actor_target == dqn.actor_target
+    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
 # handles double Q-learning
@@ -343,11 +353,21 @@ def test_handles_double_q_learning():
 
     experiences = [states, actions, rewards, next_states, dones]
 
+    # Copy state dict before learning - should be different to after updating weights
+    actor = dqn.actor
+    actor_target = dqn.actor_target
+    actor_pre_learn_sd = str(dqn.actor.state_dict())
+    actor_target_pre_learn_sd = str(dqn.actor_target.state_dict())
+
     # Call the learn method
     loss = dqn.learn(experiences)
 
     assert isinstance(loss, float)
     assert loss >= 0.0
+    assert actor == dqn.actor
+    assert actor_target == dqn.actor_target
+    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
 # Updates target network parameters with soft update
