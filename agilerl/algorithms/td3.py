@@ -237,8 +237,13 @@ class TD3:
         # epsilon-greedy, Gaussian noise added to aid exploration
         if random.random() < epsilon:
             action = (
-                np.random.rand(state.size()[0], self.action_dim).astype("float32") - 0.5
-            ) * 2
+                (
+                    np.random.rand(state.size()[0], self.action_dim).astype("float32")
+                    - 0.5
+                )
+                * 2
+                * self.max_action
+            )
         else:
             self.actor.eval()
             with torch.no_grad():
