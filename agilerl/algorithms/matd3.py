@@ -321,6 +321,8 @@ class MATD3:
         # Configure accelerator
         if self.accelerator is None:
             states = [state.to(self.device) for state in states]
+        else:
+            states = [state.to(self.accelerator.device) for state in states]
 
         if self.one_hot:
             states = [
@@ -422,6 +424,14 @@ class MATD3:
             self.critic_2_optimizers,
         ):
             states, actions, rewards, next_states, dones = experiences
+            if self.accelerator is not None:
+                states = [state.to(self.accelerator.device) for state in states]
+                actions = [action.to(self.accelerator.device) for action in actions]
+                rewards = [reward.to(self.accelerator.device) for reward in rewards]
+                next_states = [
+                    next_state.to(self.accelerator.device) for next_state in next_states
+                ]
+                dones = [done.to(self.accelerator.device) for done in dones]
 
             if self.one_hot:
                 states = {

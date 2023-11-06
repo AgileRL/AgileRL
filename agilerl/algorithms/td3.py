@@ -16,7 +16,7 @@ class TD3:
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
@@ -141,6 +141,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation="Tanh",
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -153,6 +154,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -166,6 +168,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -218,7 +221,11 @@ class TD3:
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        state = torch.from_numpy(state).float().to(self.device)
+        state = torch.from_numpy(state).float()
+        if self.accelerator is None:
+            state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (
@@ -233,17 +240,25 @@ class TD3:
         # epsilon-greedy, Gaussian noise added to aid exploration
         if random.random() < epsilon:
             action = (
-                np.random.rand(state.size()[0], self.action_dim).astype("float32") - 0.5
-            ) * 2
+                (
+                    np.random.rand(state.size()[0], self.action_dim).astype("float32")
+                    - 0.5
+                )
+                * 2
+                * self.max_action
+            )
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
 
-            action = action_values.cpu().data.numpy() + np.random.normal(
-                0, self.max_action * self.expl_noise, size=self.action_dim
-            ).astype(np.float32).clip(-self.max_action, self.max_action)
+            action = (
+                action_values.cpu().data.numpy()
+                + np.random.normal(
+                    0, self.max_action * self.expl_noise, size=self.action_dim
+                ).astype(np.float32)
+            ).clip(-self.max_action, self.max_action)
         return action
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
@@ -257,6 +272,12 @@ class TD3:
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
+        if self.accelerator is not None:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
         if self.one_hot:
             states = (
@@ -279,7 +300,11 @@ class TD3:
             q_value_2 = self.critic_2(states, actions)
 
         next_actions = self.actor_target(next_states)
-        noise = actions.data.normal_(0, policy_noise).to(self.device)
+        noise = actions.data.normal_(0, policy_noise)
+        if self.accelerator is not None:
+            noise = noise.to(self.accelerator.device)
+        else:
+            noise = noise.to(self.device)
         noise = noise.clamp(-noise_clip, noise_clip)
         next_actions = next_actions + noise
 
@@ -327,6 +352,10 @@ class TD3:
             self.softUpdate(self.actor, self.actor_target)
             self.softUpdate(self.critic_1, self.critic_target_1)
             self.softUpdate(self.critic_2, self.critic_target_2)
+
+            return actor_loss.item(), critic_loss.item()
+        else:
+            return None, critic_loss.item()
 
     def softUpdate(self, net, target):
         """Soft updates target network."""

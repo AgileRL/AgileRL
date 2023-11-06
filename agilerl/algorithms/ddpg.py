@@ -16,7 +16,7 @@ class DDPG:
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
@@ -125,6 +125,7 @@ class DDPG:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation="Tanh",
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -137,6 +138,7 @@ class DDPG:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -181,6 +183,8 @@ class DDPG:
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
             state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (
@@ -227,6 +231,12 @@ class DDPG:
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
+        if self.accelerator is not None:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
         if self.one_hot:
             states = (
@@ -277,6 +287,8 @@ class DDPG:
             elif self.arch == "cnn":
                 actor_loss = -self.critic(states, self.actor.forward(states)).mean()
 
+                print(self.critic(states, self.actor.forward(states)))
+
             # actor loss backprop
             self.actor_optimizer.zero_grad()
             if self.accelerator is not None:
@@ -287,6 +299,10 @@ class DDPG:
 
             self.softUpdate(self.actor, self.actor_target)
             self.softUpdate(self.critic, self.critic_target)
+
+            return actor_loss.item(), critic_loss.item()
+        else:
+            return None, critic_loss.item()
 
     def softUpdate(self, net, target):
         """Soft updates target network."""

@@ -17,7 +17,7 @@ class CQN:
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
@@ -142,15 +142,17 @@ class CQN:
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
-        :type state: float or list[float]
+        :type state: float or numpy.ndarray[float]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
-        :type action_mask: list, optional
+        :type action_mask: numpy.ndarray, optional
         """
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
             state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (
@@ -204,6 +206,12 @@ class CQN:
         :type state: list[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
+        if self.accelerator is not None:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
         if self.one_hot:
             states = (
