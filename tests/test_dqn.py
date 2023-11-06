@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 
 import dill
@@ -311,8 +312,8 @@ def test_learns_from_experiences():
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
     actor_target = dqn.actor_target
-    actor_pre_learn_sd = str(dqn.actor.state_dict())
-    actor_target_pre_learn_sd = str(dqn.actor_target.state_dict())
+    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
     loss = dqn.learn(experiences)
@@ -356,8 +357,8 @@ def test_handles_double_q_learning():
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
     actor_target = dqn.actor_target
-    actor_pre_learn_sd = str(dqn.actor.state_dict())
-    actor_target_pre_learn_sd = str(dqn.actor_target.state_dict())
+    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
     loss = dqn.learn(experiences)
@@ -368,6 +369,56 @@ def test_handles_double_q_learning():
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
+
+
+# handles double Q-learning
+def test_handles_double_q_learning_cnn():
+    state_dim = (3, 32, 32)
+    action_dim = 2
+    one_hot = False
+    double = True
+    batch_size = 64
+    net_config = {
+        "arch": "cnn",
+        "h_size": [8],
+        "c_size": [3],
+        "k_size": [3],
+        "s_size": [1],
+        "normalize": False,
+    }
+
+    # Create an instance of the DQN class
+    dqn = DQN(
+        state_dim,
+        action_dim,
+        one_hot,
+        net_config=net_config,
+        double=double,
+        batch_size=batch_size,
+    )
+
+    # Create a batch of experiences
+    states = torch.randn(batch_size, *state_dim)
+    actions = torch.randint(0, action_dim, (batch_size, 1))
+    rewards = torch.randn((batch_size, 1))
+    next_states = torch.randn(batch_size, *state_dim)
+    dones = torch.randint(0, 2, (batch_size, 1))
+
+    experiences = [states, actions, rewards, next_states, dones]
+
+    # Copy state dict before learning - should be different to after updating weights
+    actor = dqn.actor
+    actor_target = dqn.actor_target
+    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+
+    # Call the learn method
+    loss = dqn.learn(experiences)
+
+    assert isinstance(loss, float)
+    assert loss >= 0.0
+    assert actor == dqn.actor
+    assert actor_target == dqn.actor_target
+    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
 
 
 # Updates target network parameters with soft update

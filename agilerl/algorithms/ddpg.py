@@ -125,6 +125,7 @@ class DDPG:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation="Tanh",
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -137,6 +138,7 @@ class DDPG:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -285,6 +287,8 @@ class DDPG:
             elif self.arch == "cnn":
                 actor_loss = -self.critic(states, self.actor.forward(states)).mean()
 
+                print(self.critic(states, self.actor.forward(states)))
+
             # actor loss backprop
             self.actor_optimizer.zero_grad()
             if self.accelerator is not None:
@@ -295,6 +299,10 @@ class DDPG:
 
             self.softUpdate(self.actor, self.actor_target)
             self.softUpdate(self.critic, self.critic_target)
+
+            return actor_loss.item(), critic_loss.item()
+        else:
+            return None, critic_loss.item()
 
     def softUpdate(self, net, target):
         """Soft updates target network."""

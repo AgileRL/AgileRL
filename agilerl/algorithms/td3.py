@@ -141,6 +141,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation="Tanh",
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -153,6 +154,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -166,6 +168,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -250,9 +253,12 @@ class TD3:
                 action_values = self.actor(state)
             self.actor.train()
 
-            action = action_values.cpu().data.numpy() + np.random.normal(
-                0, self.max_action * self.expl_noise, size=self.action_dim
-            ).astype(np.float32).clip(-self.max_action, self.max_action)
+            action = (
+                action_values.cpu().data.numpy()
+                + np.random.normal(
+                    0, self.max_action * self.expl_noise, size=self.action_dim
+                ).astype(np.float32)
+            ).clip(-self.max_action, self.max_action)
         return action
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
@@ -294,7 +300,11 @@ class TD3:
             q_value_2 = self.critic_2(states, actions)
 
         next_actions = self.actor_target(next_states)
-        noise = actions.data.normal_(0, policy_noise).to(self.device)
+        noise = actions.data.normal_(0, policy_noise)
+        if self.accelerator is not None:
+            noise = noise.to(self.accelerator.device)
+        else:
+            noise = noise.to(self.device)
         noise = noise.clamp(-noise_clip, noise_clip)
         next_actions = next_actions + noise
 
@@ -342,6 +352,10 @@ class TD3:
             self.softUpdate(self.actor, self.actor_target)
             self.softUpdate(self.critic_1, self.critic_target_1)
             self.softUpdate(self.critic_2, self.critic_target_2)
+
+            return actor_loss.item(), critic_loss.item()
+        else:
+            return None, critic_loss.item()
 
     def softUpdate(self, net, target):
         """Soft updates target network."""
