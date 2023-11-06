@@ -371,7 +371,7 @@ def test_handles_double_q_learning():
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
-# handles double Q-learning
+# handles double Q-learning with CNN
 def test_handles_double_q_learning_cnn():
     state_dim = (3, 32, 32)
     action_dim = 2
