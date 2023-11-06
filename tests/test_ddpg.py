@@ -230,7 +230,6 @@ def test_initialize_ddpg_with_cnn_accelerator():
     "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
         ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
-        # ([3, 64, 64], "simple_cnn", "simple_cnn_critic", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_initialize_ddpg_with_actor_network(
@@ -274,6 +273,54 @@ def test_initialize_ddpg_with_actor_network(
     assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
     assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
     assert ddpg.arch == actor_network.arch
+    assert ddpg.actor_optimizer == ddpg.actor_optimizer_type
+    assert ddpg.critic_optimizer == ddpg.critic_optimizer_type
+    assert isinstance(ddpg.criterion, nn.MSELoss)
+
+
+# Can initialize ddpg with an actor network but no critic - should trigger warning
+@pytest.mark.parametrize(
+    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    [
+        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+    ],
+)
+def test_initialize_ddpg_with_actor_network_no_critic(
+    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    ddpg = DDPG(
+        state_dim,
+        action_dim,
+        one_hot,
+        actor_network=actor_network,
+        critic_network=None,
+    )
+
+    assert ddpg.state_dim == state_dim
+    assert ddpg.action_dim == action_dim
+    assert ddpg.one_hot == one_hot
+    assert ddpg.net_config is not None
+    assert ddpg.batch_size == 64
+    assert ddpg.lr == 0.0001
+    assert ddpg.learn_step == 5
+    assert ddpg.gamma == 0.99
+    assert ddpg.tau == 0.001
+    assert ddpg.mut is None
+    assert ddpg.device == "cpu"
+    assert ddpg.accelerator is None
+    assert ddpg.index == 0
+    assert ddpg.scores == []
+    assert ddpg.fitness == []
+    assert ddpg.steps == [0]
+    assert ddpg.actor != actor_network
+    assert ddpg.critic_network is None
+    assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
+    assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
     assert ddpg.actor_optimizer == ddpg.actor_optimizer_type
     assert ddpg.critic_optimizer == ddpg.critic_optimizer_type
     assert isinstance(ddpg.criterion, nn.MSELoss)

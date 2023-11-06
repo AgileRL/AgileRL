@@ -312,6 +312,74 @@ def test_initialize_td3_with_actor_network(
 
 # Can initialize td3 with an actor network
 @pytest.mark.parametrize(
+    "state_dim, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
+    [
+        (
+            [4],
+            "simple_mlp",
+            "simple_mlp_critic",
+            "simple_mlp_critic",
+            torch.randn(1, 4),
+            torch.randn(1, 6),
+        ),
+    ],
+)
+
+# Can initialize td3 with an actor network but no critics - should trigger warning
+def test_initialize_td3_with_actor_network_no_critics(
+    state_dim,
+    actor_network,
+    critic_1_network,
+    critic_2_network,
+    input_tensor,
+    input_tensor_critic,
+    request,
+):
+    action_dim = 2
+    one_hot = False
+    max_action = 1
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    td3 = TD3(
+        state_dim,
+        action_dim,
+        one_hot,
+        max_action,
+        actor_network=actor_network,
+        critic_networks=None,
+    )
+
+    assert td3.state_dim == state_dim
+    assert td3.action_dim == action_dim
+    assert td3.one_hot == one_hot
+    assert td3.max_action == max_action
+    assert td3.net_config is not None
+    assert td3.batch_size == 64
+    assert td3.lr == 0.0001
+    assert td3.learn_step == 5
+    assert td3.gamma == 0.99
+    assert td3.tau == 0.005
+    assert td3.mut is None
+    assert td3.device == "cpu"
+    assert td3.accelerator is None
+    assert td3.index == 0
+    assert td3.scores == []
+    assert td3.fitness == []
+    assert td3.steps == [0]
+    assert td3.actor != actor_network
+    assert td3.critic_networks is None
+    assert isinstance(td3.actor_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer_type, optim.Adam)
+    assert td3.actor_optimizer == td3.actor_optimizer_type
+    assert td3.critic_1_optimizer == td3.critic_1_optimizer_type
+    assert td3.critic_2_optimizer == td3.critic_2_optimizer_type
+    assert isinstance(td3.criterion, nn.MSELoss)
+
+
+# Can initialize td3 with an actor network
+@pytest.mark.parametrize(
     "state_dim, actor_network, input_tensor",
     [
         ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
