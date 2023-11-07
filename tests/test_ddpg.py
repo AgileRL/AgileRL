@@ -869,6 +869,12 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "steps" in checkpoint
 
     # Load checkpoint
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
+    )
     ddpg.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
