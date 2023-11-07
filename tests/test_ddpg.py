@@ -405,7 +405,7 @@ def test_learns_from_experiences():
     # Copy state dict before learning - should be different to after updating weights
     actor = ddpg.actor
     actor_target = ddpg.actor_target
-    actor_pre_learn_sd = str(copy.deepcopy(ddpg.actor))
+    actor_pre_learn_sd = str(copy.deepcopy(ddpg.actor.state_dict()))
     critic = ddpg.critic
     critic_target = ddpg.critic_target
     critic_pre_learn_sd = str(copy.deepcopy(ddpg.critic.state_dict()))
