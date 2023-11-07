@@ -6,7 +6,9 @@ from accelerate import Accelerator
 
 import agilerl.training.train
 import agilerl.training.train_multi_agent
+import agilerl.training.train_offline
 import agilerl.training.train_on_policy
+from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
@@ -16,6 +18,7 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.training.train import train
 from agilerl.training.train_multi_agent import train_multi_agent
+from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
 
 
@@ -198,7 +201,7 @@ class DummyMemory:
 
         return one_step_transition
 
-    def save2memory(self, state, action, reward, next_state, done, is_vectorised):
+    def save2memory(self, state, action, reward, next_state, done, is_vectorised=False):
         if is_vectorised:
             self.save2memoryVectEnvs(state, action, reward, next_state, done)
         else:
@@ -489,7 +492,7 @@ def mocked_memory():
 
     mock_memory.save2memoryVectEnvs.side_effect = save2memoryVectEnvs
 
-    def save2memory(state, action, reward, next_state, done, is_vectorised):
+    def save2memory(state, action, reward, next_state, done, is_vectorised=False):
         if is_vectorised:
             mock_memory.save2memoryVectEnvs(state, action, reward, next_state, done)
         else:
@@ -763,6 +766,38 @@ def mocked_tournament():
 
     mock_tournament.select.side_effect = select
     return mock_tournament
+
+
+@pytest.fixture
+def offline_init_hp():
+    return {
+        "BATCH_SIZE": 128,
+        "LR": 1e-3,
+        "GAMMA": 0.99,
+        "DOUBLE": False,
+        "LEARN_STEP": 1,
+        "TAU": 1e-3,
+        "CHANNELS_LAST": False,
+        "POP_SIZE": 6,
+        "MEMORY_SIZE": 20000,
+        "DATASET": "../data/cartpole/cartpole_v1.1.0.h5",
+    }
+
+
+@pytest.fixture
+def dummy_h5py_data(action_size, state_size):
+    # Create a dummy h5py dataset
+    dataset = {key: None for key in ["actions", "observations", "rewards"]}
+    dataset["actions"] = np.array([np.random.randn(action_size) for _ in range(10)])
+    dataset["observations"] = np.array(
+        [np.random.randn(*state_size) for _ in range(10)]
+    )
+    dataset["rewards"] = np.array([np.random.randint(0, 5) for _ in range(10)])
+    dataset["terminals"] = np.array(
+        [np.random.choice([True, False]) for _ in range(10)]
+    )
+
+    return dataset
 
 
 @pytest.mark.parametrize(
@@ -1927,24 +1962,212 @@ def test_train_multi_memory_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size",
+    "state_size, action_size, vect, swap_channels, checkpoint",
     [
-        ((6,), 2),
+        ((6,), 2, True, False, None),
+        ((250, 160, 3), 2, False, True, None),
+        ((6,), 2, True, False, 1),
+        ((250, 160, 3), 2, False, True, 1),
     ],
 )
-def test_train_multi_loadCheckpoint(
-    multi_env, multi_memory, population_multi_agent, tournament, mutations
+def test_train_offline(
+    env,
+    population_off_policy,
+    memory,
+    swap_channels,
+    checkpoint,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data,
 ):
-    with patch(Accelerator.is_main_process) as mock_accelerator:
-        mock_accelerator.is_main_process = False
-        mock_accelerator.wait_for_everyone = False
-        pop, pop_fitnesses = train_multi_agent(
-            multi_env,
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+
+        pop, pop_fitness = train_offline(
+            env,
             "env_name",
+            dummy_h5py_data,
             "algo",
-            population_multi_agent,
-            multi_memory,
-            INIT_HP=None,
+            population_off_policy,
+            memory,
+            INIT_HP=offline_init_hp,
+            MUT_P=None,
+            swap_channels=swap_channels,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            accelerator=accelerator,
+            checkpoint=checkpoint,
+        )
+
+        assert len(pop) == len(population_off_policy)
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect",
+    [
+        ((6,), 2, True),
+    ],
+)
+def test_train_offline_wandb_calls(
+    env,
+    population_off_policy,
+    memory,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data,
+):
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+        MUT_P = {
+            "NO_MUT": 0.4,
+            "ARCH_MUT": 0.2,
+            "PARAMS_MUT": 0.2,
+            "ACT_MUT": 0.2,
+            "RL_HP_MUT": 0.2,
+        }
+        with patch(
+            "agilerl.training.train_offline.wandb.init"
+        ) as mock_wandb_init, patch(
+            "agilerl.training.train_offline.wandb.log"
+        ) as mock_wandb_log, patch(
+            "agilerl.training.train_offline.wandb.finish"
+        ) as mock_wandb_finish:
+            # Call the function that should trigger wandb.init
+            agilerl.training.train_offline.train_offline(
+                env,
+                "env_name",
+                dummy_h5py_data,
+                "algo",
+                population_off_policy,
+                memory,
+                INIT_HP=offline_init_hp,
+                MUT_P=MUT_P,
+                swap_channels=False,
+                n_episodes=10,
+                max_steps=5,
+                evo_epochs=1,
+                evo_loop=1,
+                tournament=tournament,
+                mutation=mutations,
+                wb=True,
+                accelerator=accelerator,
+            )
+
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called_with(
+                {
+                    "global_step": ANY,
+                    "eval/mean_fitness": ANY,
+                    "eval/best_fitness": ANY,
+                }
+            )
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect",
+    [
+        ((6,), 2, True),
+    ],
+)
+def test_train_offline_early_stop(
+    env,
+    population_off_policy,
+    memory,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data,
+):
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+        MUT_P = {
+            "NO_MUT": 0.4,
+            "ARCH_MUT": 0.2,
+            "PARAMS_MUT": 0.2,
+            "ACT_MUT": 0.2,
+            "RL_HP_MUT": 0.2,
+        }
+        with patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish:
+            # Call the function that should trigger wandb.init
+            agilerl.training.train_offline.train_offline(
+                env,
+                "env_name",
+                dummy_h5py_data,
+                "algo",
+                population_off_policy,
+                memory,
+                INIT_HP=offline_init_hp,
+                MUT_P=MUT_P,
+                swap_channels=False,
+                n_episodes=110,
+                target=-10000,
+                max_steps=5,
+                evo_epochs=1,
+                evo_loop=1,
+                tournament=tournament,
+                mutation=mutations,
+                wb=True,
+                accelerator=accelerator,
+            )
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, algo",
+    [
+        ((6,), 2, True, CQN),
+    ],
+)
+def test_offline_agent_calls(
+    env,
+    mocked_agent_off_policy,
+    memory,
+    algo,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data,
+):
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+        mock_population = [mocked_agent_off_policy for _ in range(6)]
+
+        pop, pop_fitnesses = train_offline(
+            env,
+            "env_name",
+            dummy_h5py_data,
+            "algo",
+            mock_population,
+            memory,
+            INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
             n_episodes=10,
@@ -1954,5 +2177,100 @@ def test_train_multi_loadCheckpoint(
             tournament=tournament,
             mutation=mutations,
             wb=False,
-            accelerator=mock_accelerator,
+            accelerator=accelerator,
         )
+
+        mocked_agent_off_policy.learn.assert_called()
+        mocked_agent_off_policy.test.assert_called()
+        if accelerator is not None:
+            mocked_agent_off_policy.saveCheckpoint.assert_called()
+            mocked_agent_off_policy.wrap_models.assert_called()
+            mocked_agent_off_policy.unwrap_models.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect",
+    [
+        ((6,), 2, True),
+    ],
+)
+def test_offline_memory_calls(
+    env,
+    population_off_policy,
+    mocked_memory,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data,
+):
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+
+        pop, pop_fitnesses = train_offline(
+            env,
+            "env_name",
+            dummy_h5py_data,
+            "algo",
+            population_off_policy,
+            mocked_memory,
+            INIT_HP=offline_init_hp,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            accelerator=accelerator,
+        )
+        mocked_memory.save2memory.assert_called()
+        mocked_memory.sample.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect",
+    [
+        ((6,), 2, True),
+    ],
+)
+def test_offline_mut_tourn_calls(
+    env,
+    population_off_policy,
+    memory,
+    mocked_tournament,
+    mocked_mutations,
+    offline_init_hp,
+    dummy_h5py_data,
+):
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+
+        pop, pop_fitnesses = train_offline(
+            env,
+            "env_name",
+            dummy_h5py_data,
+            "algo",
+            population_off_policy,
+            memory,
+            INIT_HP=offline_init_hp,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=mocked_tournament,
+            mutation=mocked_mutations,
+            wb=False,
+            accelerator=accelerator,
+        )
+        mocked_tournament.select.assert_called()
+        mocked_mutations.mutation.assert_called()

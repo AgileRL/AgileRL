@@ -11,7 +11,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.utils.minari_utils import MinariToAgileBuffer
 
 
-def train(
+def train_offline(
     env,
     env_name,
     dataset,
@@ -162,6 +162,7 @@ def train(
 
     else:
         print("Loading buffer...")
+        print(dataset["rewards"])
         dataset_length = dataset["rewards"].shape[0]
         # for i in range(dataset_length):
         #     state = dataset['observations'][i]
@@ -177,8 +178,8 @@ def train(
             state = dataset["observations"][i]
             next_state = dataset["observations"][i + 1]
             if swap_channels:
-                state = np.moveaxis(state, [3], [1])
-                next_state = np.moveaxis(next_state, [3], [1])
+                state = np.moveaxis(state, [-1], [-3])
+                next_state = np.moveaxis(next_state, [-1], [-3])
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])
