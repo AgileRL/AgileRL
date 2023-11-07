@@ -122,6 +122,8 @@ class PPO:
             self.action_var = torch.full((action_dim,), action_std_init**2)
             if self.accelerator is None:
                 self.action_var = self.action_var.to(self.device)
+            else:
+                self.action_var = self.action_var.to(self.accelerator.device)
 
         if self.actor_network is not None and self.critic_network is not None:
             self.actor = actor_network
@@ -162,7 +164,7 @@ class PPO:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation=self.net_config["output_activation"],
+                    mlp_output_activation=self.net_config["output_activation"],
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -232,8 +234,6 @@ class PPO:
 
     def getAction(self, state, action=None, grad=False):
         """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
         :type state: float or list[float]
@@ -269,6 +269,8 @@ class PPO:
             return_tensors = False
         elif self.accelerator is None:
             action = action.to(self.device)
+        else:
+            action = action.to(self.accelerator.device)
 
         action_logprob = dist.log_prob(action)
         dist_entropy = dist.entropy()
@@ -286,7 +288,7 @@ class PPO:
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_states in that order.
+        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
         :type experience: list[torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
@@ -294,22 +296,16 @@ class PPO:
         :type policy_noise: float, optional
         """
         experiences = [torch.from_numpy(np.array(exp)) for exp in experiences]
-        states, actions, log_probs, rewards, dones, values, next_states = experiences
+        states, actions, log_probs, rewards, dones, values, next_state = experiences
         if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
-            actions = actions.to(self.accelerator.device)
-            log_probs = log_probs.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            next_states = next_states.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
-            values = values.to(self.accelerator.device)
+            next_state = next_state.to(self.accelerator.device)
         dones = dones.long()
 
         # Bootstrapping
         with torch.no_grad():
             num_steps = rewards.size(0)
-            next_states = self.prepare_state(next_states)
-            next_value = self.critic(next_states).reshape(1, -1).cpu()
+            next_state = self.prepare_state(next_state)
+            next_value = self.critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards)
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
@@ -347,12 +343,20 @@ class PPO:
                 returns.to(self.device),
                 values.to(self.device),
             )
+        else:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            log_probs = log_probs.to(self.accelerator.device)
+            advantages = advantages.to(self.accelerator.device)
+            returns = returns.to(self.accelerator.device)
+            values = values.to(self.accelerator.device)
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
 
         clipfracs = []
 
+        mean_loss = 0
         for epoch in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
@@ -406,9 +410,14 @@ class PPO:
                     loss.backward()
                 self.optimizer.step()
 
+                mean_loss += loss.item()
+
             if self.target_kl is not None:
                 if approx_kl > self.target_kl:
                     break
+
+        mean_loss /= num_samples * self.update_epochs
+        return mean_loss
 
     def test(self, env, swap_channels=False, max_steps=500, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
