@@ -589,6 +589,7 @@ class PPO:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])

@@ -461,6 +461,7 @@ class DQN:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.net_config["arch"] == "mlp":
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
