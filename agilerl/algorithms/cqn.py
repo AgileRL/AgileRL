@@ -69,6 +69,33 @@ class CQN:
         accelerator=None,
         wrap=True,
     ):
+        assert isinstance(
+            state_dim, (list, tuple)
+        ), "State dimension must be a list or tuple."
+        assert isinstance(action_dim, int), "Action dimension must be an integer."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(tau, float), "Tau must be a float."
+        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(
+            double, bool
+        ), "Double Q-learning flag must be boolean value True or False."
+        assert (
+            isinstance(actor_network, nn.Module) or actor_network is None
+        ), "Actor network must be an nn.Module or None."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
+
         self.algo = "CQN"
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -96,7 +123,20 @@ class CQN:
             self.net_config = None
         else:
             # model
+            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
+            assert (
+                "arch" in self.net_config.keys()
+            ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                assert (
+                    "h_size" in self.net_config.keys()
+                ), "Net config must contain h_size: int."
+                assert isinstance(
+                    self.net_config["h_size"], list
+                ), "Net config h_size must be a list."
+                assert (
+                    len(self.net_config["h_size"]) > 0
+                ), "Net config h_size must contain at least one element."
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
@@ -105,6 +145,22 @@ class CQN:
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+                assert (
+                    "normalize" in self.net_config.keys()
+                ), "Net config must contain normalize: True or False."
+                assert isinstance(
+                    self.net_config["normalize"], bool
+                ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=action_dim,
