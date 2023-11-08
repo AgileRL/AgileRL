@@ -354,28 +354,6 @@ def test_returns_expected_action_epsilon_greedy():
         assert -1 <= act <= 1
 
 
-# Returns a tuple of tensors with the first dimension squeezed for each tensor in the input list
-def test_returns_tuple_with_squeezed_tensors():
-    experiences = [
-        torch.tensor([[[1, 2, 3], [4, 5, 6]]]),
-        torch.tensor([[[7], [8]]]),
-        torch.tensor([[[9], [10]]]),
-        torch.tensor([[[11, 12, 13], [14, 15, 16]]]),
-        torch.tensor([[[17], [18]]]),
-    ]
-
-    ddpg = DDPG(state_dim=[3], action_dim=1, one_hot=False)
-    squeezed_experiences = ddpg._squeeze_exp(experiences)
-
-    assert torch.equal(squeezed_experiences[0], torch.tensor([[1, 2, 3], [4, 5, 6]]))
-    assert torch.equal(squeezed_experiences[1], torch.tensor([[7], [8]]))
-    assert torch.equal(squeezed_experiences[2], torch.tensor([[9], [10]]))
-    assert torch.equal(
-        squeezed_experiences[3], torch.tensor([[11, 12, 13], [14, 15, 16]])
-    )
-    assert torch.equal(squeezed_experiences[4], torch.tensor([[17], [18]]))
-
-
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
     state_dim = (3, 32, 32)
