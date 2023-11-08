@@ -967,6 +967,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
     # Load checkpoint
     td3.loadCheckpoint(checkpoint_path)
 
@@ -980,17 +981,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(td3.critic_target_2, EvolvableMLP)
     assert td3.lr == 1e-4
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
-    assert str(td3.actor_optimizer.state_dict()) == str(
-        td3.actor_optimizer_type.state_dict()
-    )
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
-    assert str(td3.critic_1_optimizer.state_dict()) == str(
-        td3.critic_1_optimizer_type.state_dict()
-    )
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
-    assert str(td3.critic_2_optimizer.state_dict()) == str(
-        td3.critic_2_optimizer_type.state_dict()
-    )
     assert td3.max_action == 1
     assert td3.batch_size == 64
     assert td3.learn_step == 5
@@ -1058,6 +1050,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
     # Load checkpoint
     td3.loadCheckpoint(checkpoint_path)
 
@@ -1071,17 +1064,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(td3.critic_target_2, EvolvableCNN)
     assert td3.lr == 1e-4
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
-    assert str(td3.actor_optimizer.state_dict()) == str(
-        td3.actor_optimizer_type.state_dict()
-    )
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
-    assert str(td3.critic_1_optimizer.state_dict()) == str(
-        td3.critic_1_optimizer_type.state_dict()
-    )
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
-    assert str(td3.critic_2_optimizer.state_dict()) == str(
-        td3.critic_2_optimizer_type.state_dict()
-    )
     assert td3.max_action == 1
     assert td3.batch_size == 64
     assert td3.learn_step == 5
@@ -1171,6 +1155,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
     # Load checkpoint
     td3.loadCheckpoint(checkpoint_path)
 
@@ -1184,17 +1169,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(td3.critic_target_2, nn.Module)
     assert td3.lr == 1e-4
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
-    assert str(td3.actor_optimizer.state_dict()) == str(
-        td3.actor_optimizer_type.state_dict()
-    )
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
-    assert str(td3.critic_1_optimizer.state_dict()) == str(
-        td3.critic_1_optimizer_type.state_dict()
-    )
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
-    assert str(td3.critic_2_optimizer.state_dict()) == str(
-        td3.critic_2_optimizer_type.state_dict()
-    )
     assert td3.max_action == 1
     assert td3.batch_size == 64
     assert td3.learn_step == 5

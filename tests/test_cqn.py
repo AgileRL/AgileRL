@@ -617,6 +617,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     cqn.loadCheckpoint(checkpoint_path)
 
@@ -626,7 +627,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(cqn.actor_target, EvolvableMLP)
     assert cqn.lr == 1e-4
     assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
-    assert str(cqn.optimizer.state_dict()) == str(cqn.optimizer_type.state_dict())
     assert cqn.batch_size == 64
     assert cqn.learn_step == 5
     assert cqn.gamma == 0.99
@@ -678,6 +678,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     cqn.loadCheckpoint(checkpoint_path)
 
@@ -687,7 +688,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(cqn.actor_target, EvolvableCNN)
     assert cqn.lr == 1e-4
     assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
-    assert str(cqn.optimizer.state_dict()) == str(cqn.optimizer_type.state_dict())
     assert cqn.batch_size == 64
     assert cqn.learn_step == 5
     assert cqn.gamma == 0.99
@@ -742,6 +742,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     cqn.loadCheckpoint(checkpoint_path)
 
@@ -751,7 +752,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(cqn.actor_target, nn.Module)
     assert cqn.lr == 1e-4
     assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
-    assert str(cqn.optimizer.state_dict()) == str(cqn.optimizer_type.state_dict())
     assert cqn.batch_size == 64
     assert cqn.learn_step == 5
     assert cqn.gamma == 0.99

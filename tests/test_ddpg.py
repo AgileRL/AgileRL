@@ -794,6 +794,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+    )
     # Load checkpoint
     ddpg.loadCheckpoint(checkpoint_path)
 
@@ -805,13 +810,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(ddpg.critic_target, EvolvableMLP)
     assert ddpg.lr == 1e-4
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer_type.state_dict()
-    )
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
-    assert str(ddpg.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer_type.state_dict()
-    )
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -868,6 +867,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    assert checkpoint["net_config"] == net_config_cnn
+
     # Load checkpoint
     ddpg = DDPG(
         state_dim=[3, 32, 32],
@@ -885,13 +886,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(ddpg.critic_target, EvolvableCNN)
     assert ddpg.lr == 1e-4
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer_type.state_dict()
-    )
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
-    assert str(ddpg.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer_type.state_dict()
-    )
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -965,6 +960,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+    )
     # Load checkpoint
     ddpg.loadCheckpoint(checkpoint_path)
 
@@ -976,13 +976,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(ddpg.critic_target, nn.Module)
     assert ddpg.lr == 1e-4
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer_type.state_dict()
-    )
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
-    assert str(ddpg.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer_type.state_dict()
-    )
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99

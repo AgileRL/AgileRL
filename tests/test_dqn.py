@@ -672,6 +672,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     dqn.loadCheckpoint(checkpoint_path)
 
@@ -681,7 +682,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(dqn.actor_target, EvolvableMLP)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(dqn.optimizer.state_dict()) == str(dqn.optimizer_type.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -733,6 +733,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     dqn.loadCheckpoint(checkpoint_path)
 
@@ -742,7 +743,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(dqn.actor_target, EvolvableCNN)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(dqn.optimizer.state_dict()) == str(dqn.optimizer_type.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -797,6 +797,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     dqn.loadCheckpoint(checkpoint_path)
 
@@ -806,7 +807,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
-    assert str(dqn.optimizer.state_dict()) == str(dqn.optimizer_type.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99

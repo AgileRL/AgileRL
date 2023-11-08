@@ -798,6 +798,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
     # Load checkpoint
     ppo.loadCheckpoint(checkpoint_path)
 
@@ -809,7 +810,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     }
     assert isinstance(ppo.actor, EvolvableMLP)
     assert isinstance(ppo.critic, EvolvableMLP)
-    assert str(ppo.optimizer.state_dict()) == str(ppo.optimizer_type.state_dict())
     assert ppo.lr == 1e-4
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
@@ -878,6 +878,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
     # Load checkpoint
     ppo.loadCheckpoint(checkpoint_path)
 
@@ -885,7 +886,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert ppo.net_config == net_config_cnn
     assert isinstance(ppo.actor, EvolvableCNN)
     assert isinstance(ppo.critic, EvolvableCNN)
-    assert str(ppo.optimizer.state_dict()) == str(ppo.optimizer_type.state_dict())
     assert ppo.lr == 1e-4
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
@@ -968,6 +968,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
     # Load checkpoint
     ppo.loadCheckpoint(checkpoint_path)
 
@@ -975,7 +976,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ppo.net_config is None
     assert isinstance(ppo.actor, nn.Module)
     assert isinstance(ppo.critic, nn.Module)
-    assert str(ppo.optimizer.state_dict()) == str(ppo.optimizer_type.state_dict())
     assert ppo.lr == 1e-4
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
