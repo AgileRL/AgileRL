@@ -9,6 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class RainbowDQN:
@@ -48,8 +49,8 @@ class RainbowDQN:
     :type n_step: int, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param double: Use double Q-learning, defaults to False
-    :type double: bool, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -77,6 +78,7 @@ class RainbowDQN:
         v_max=200.0,
         n_step=3,
         mutation=None,
+        actor_network=None,
         device="cpu",
         accelerator=None,
         wrap=True,
@@ -98,6 +100,7 @@ class RainbowDQN:
         self.v_max = v_max
         self.n_step = n_step
         self.mut = mutation
+        self.actor_network = actor_network
         self.device = device
         self.accelerator = accelerator
         self.index = index
@@ -109,70 +112,50 @@ class RainbowDQN:
             self.device
         )
 
-        # model
-        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                mlp_output_activation="ReLU",
-                output_vanish=False,
-                init_layers=False,
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                mlp_output_activation="ReLU",
-                output_vanish=False,
-                init_layers=False,
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
+        if self.actor_network is not None:
+            self.actor = actor_network
+            self.net_config = None
+        else:
+            # model
+            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                self.actor = EvolvableMLP(
+                    num_inputs=state_dim[0],
+                    num_outputs=action_dim,
+                    hidden_size=self.net_config["h_size"],
+                    mlp_output_activation="ReLU",
+                    output_vanish=False,
+                    init_layers=False,
+                    num_atoms=self.num_atoms,
+                    support=self.support,
+                    rainbow=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                self.actor = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_output_activation="ReLU",
+                    num_atoms=self.num_atoms,
+                    support=self.support,
+                    rainbow=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
 
-        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-            self.actor = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_output_activation="ReLU",
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_output_activation="ReLU",
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
-
+        # Create the target network by copying the actor network
+        self.actor_target = copy.deepcopy(self.actor)
+        self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
@@ -460,6 +443,7 @@ class RainbowDQN:
             one_hot=self.one_hot,
             index=index,
             net_config=self.net_config,
+            actor_network=self.actor_network,
             batch_size=self.batch_size,
             lr=self.lr,
             learn_step=self.learn_step,
@@ -559,12 +543,17 @@ class RainbowDQN:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.net_config["arch"] == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
-        elif self.net_config["arch"] == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+        if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
+            if self.net_config["arch"] == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+            elif self.net_config["arch"] == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
