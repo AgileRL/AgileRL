@@ -82,7 +82,7 @@ class DQN:
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
-        assert isinstance(gamma, float), "Gamma must be a float."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
@@ -246,15 +246,6 @@ class DQN:
                 action = np.argmax(masked_action_values, axis=-1)
 
         return action
-
-    def _squeeze_exp(self, experiences):
-        """Remove first dim created by dataloader.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
-        """
-        st, ac, re, ne, do = experiences
-        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
@@ -461,13 +452,13 @@ class DQN:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.net_config["arch"] == "mlp":
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
             elif self.net_config["arch"] == "cnn":
                 self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
-            self.lr = checkpoint["lr"]
         else:
             self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
             self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
@@ -475,6 +466,7 @@ class DQN:
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.lr = checkpoint["lr"]
         self.batch_size = checkpoint["batch_size"]
         self.learn_step = checkpoint["learn_step"]
         self.gamma = checkpoint["gamma"]

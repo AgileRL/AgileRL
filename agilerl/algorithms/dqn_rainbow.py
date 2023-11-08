@@ -9,6 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class RainbowDQN:
@@ -48,8 +49,8 @@ class RainbowDQN:
     :type n_step: int, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param double: Use double Q-learning, defaults to False
-    :type double: bool, optional
+    :param actor_network: Custom actor network, defaults to None
+    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -77,10 +78,58 @@ class RainbowDQN:
         v_max=200.0,
         n_step=3,
         mutation=None,
+        actor_network=None,
         device="cpu",
         accelerator=None,
         wrap=True,
     ):
+        assert isinstance(
+            state_dim, (list, tuple)
+        ), "State dimension must be a list or tuple."
+        assert isinstance(action_dim, int), "Action dimension must be an integer."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(tau, float), "Tau must be a float."
+        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(
+            prior_eps, float
+        ), "Minimum priority for sampling must be a float."
+        assert prior_eps > 0, "Minimum priority for sampling must be greater than zero."
+        assert isinstance(num_atoms, int), "Number of atoms must be an integer."
+        assert num_atoms >= 1, "Number of atoms must be greater than or equal to one."
+        assert isinstance(
+            v_min, (float, int)
+        ), "Minimum value of support must be a float."
+        assert (
+            v_min >= 0
+        ), "Minimum value of support must be greater than or equal to zero."
+        assert isinstance(
+            v_max, (float, int)
+        ), "Maximum value of support must be a float."
+        assert (
+            v_max >= 0
+        ), "Maximum value of support must be greater than or equal to zero."
+        assert (
+            v_max >= v_min
+        ), "Maximum value of support must be greater than or equal to minimum value."
+        assert isinstance(n_step, int), "Step number must be an integer."
+        assert n_step >= 1, "Step number must be greater than or equal to one."
+        assert (
+            isinstance(actor_network, nn.Module) or actor_network is None
+        ), "Actor network must be an nn.Module or None."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
+
         self.algo = "Rainbow DQN"
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -98,6 +147,7 @@ class RainbowDQN:
         self.v_max = v_max
         self.n_step = n_step
         self.mut = mutation
+        self.actor_network = actor_network
         self.device = device
         self.accelerator = accelerator
         self.index = index
@@ -105,74 +155,85 @@ class RainbowDQN:
         self.fitness = []
         self.steps = [0]
 
-        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms).to(
-            self.device
-        )
+        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms)
+        if self.accelerator is None:
+            self.support = self.support.to(self.device)
+        else:
+            self.support = self.support.to(self.accelerator.device)
 
-        # model
-        if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-            self.actor = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                mlp_output_activation="ReLU",
-                output_vanish=False,
-                init_layers=False,
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                hidden_size=self.net_config["h_size"],
-                mlp_output_activation="ReLU",
-                output_vanish=False,
-                init_layers=False,
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
+        if self.actor_network is not None:
+            self.actor = actor_network
+            self.net_config = None
+        else:
+            # model
+            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
+            assert (
+                "arch" in self.net_config.keys()
+            ), "Net config must contain arch: 'mlp' or 'cnn'."
+            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                assert (
+                    "h_size" in self.net_config.keys()
+                ), "Net config must contain h_size: int."
+                assert isinstance(
+                    self.net_config["h_size"], list
+                ), "Net config h_size must be a list."
+                assert (
+                    len(self.net_config["h_size"]) > 0
+                ), "Net config h_size must contain at least one element."
+                self.actor = EvolvableMLP(
+                    num_inputs=state_dim[0],
+                    num_outputs=action_dim,
+                    hidden_size=self.net_config["h_size"],
+                    mlp_output_activation="ReLU",
+                    output_vanish=False,
+                    init_layers=False,
+                    num_atoms=self.num_atoms,
+                    support=self.support,
+                    rainbow=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
+            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+                assert (
+                    "normalize" in self.net_config.keys()
+                ), "Net config must contain normalize: True or False."
+                assert isinstance(
+                    self.net_config["normalize"], bool
+                ), "Net config normalize must be boolean value True or False."
+                self.actor = EvolvableCNN(
+                    input_shape=state_dim,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
+                    mlp_output_activation="ReLU",
+                    num_atoms=self.num_atoms,
+                    support=self.support,
+                    rainbow=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                )
 
-        elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-            self.actor = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_output_activation="ReLU",
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target = EvolvableCNN(
-                input_shape=state_dim,
-                num_actions=action_dim,
-                channel_size=self.net_config["c_size"],
-                kernel_size=self.net_config["k_size"],
-                stride_size=self.net_config["s_size"],
-                hidden_size=self.net_config["h_size"],
-                normalize=self.net_config["normalize"],
-                mlp_output_activation="ReLU",
-                num_atoms=self.num_atoms,
-                support=self.support,
-                rainbow=True,
-                device=self.device,
-                accelerator=self.accelerator,
-            )
-            self.actor_target.load_state_dict(self.actor.state_dict())
-
+        # Create the target network by copying the actor network
+        self.actor_target = copy.deepcopy(self.actor)
+        self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        self.arch = (
+            self.net_config["arch"] if self.net_config is not None else self.actor.arch
+        )
 
         if self.accelerator is not None:
             self.optimizer = self.optimizer_type
@@ -223,15 +284,6 @@ class RainbowDQN:
 
         return action
 
-    def _squeeze_exp(self, experiences):
-        """Remove first dim created by dataloader.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
-        """
-        st, ac, re, ne, do = experiences
-        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
-
     def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
         if self.one_hot:
             states = (
@@ -278,6 +330,9 @@ class RainbowDQN:
             if self.accelerator is None:
                 offset = offset.to(self.device)
                 proj_dist = proj_dist.to(self.device)
+            else:
+                offset = offset.to(self.accelerator.device)
+                proj_dist = proj_dist.to(self.accelerator.device)
 
             proj_dist.view(-1).index_add_(
                 0, (L + offset).view(-1), (next_dist * (u.float() - b)).view(-1)
@@ -434,7 +489,10 @@ class RainbowDQN:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                        state = np.moveaxis(state, [3], [1])
+                        # Handle unvectorised image environment
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
+                        state = np.moveaxis(state, [-1], [-3])
                     action = self.getAction(state)
                     state, reward, done, trunc, _ = env.step(action)
                     score += reward[0]
@@ -460,6 +518,7 @@ class RainbowDQN:
             one_hot=self.one_hot,
             index=index,
             net_config=self.net_config,
+            actor_network=self.actor_network,
             batch_size=self.batch_size,
             lr=self.lr,
             learn_step=self.learn_step,
@@ -559,12 +618,17 @@ class RainbowDQN:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
-        if self.net_config["arch"] == "mlp":
-            self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
-        elif self.net_config["arch"] == "cnn":
-            self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-            self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+        if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
+            if self.net_config["arch"] == "mlp":
+                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+            elif self.net_config["arch"] == "cnn":
+                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+        else:
+            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
+            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])

@@ -10,7 +10,7 @@ import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 
-from agilerl.algorithms.dqn import DQN
+from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -80,7 +80,7 @@ def test_initialize_dqn_with_minimum_parameters():
     action_dim = 2
     one_hot = False
 
-    dqn = DQN(state_dim, action_dim, one_hot)
+    dqn = RainbowDQN(state_dim, action_dim, one_hot)
 
     assert dqn.state_dim == state_dim
     assert dqn.action_dim == action_dim
@@ -98,14 +98,12 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
-    assert dqn.double is False
     assert dqn.actor_network is None
     assert isinstance(dqn.actor, EvolvableMLP)
     assert isinstance(dqn.actor_target, EvolvableMLP)
     assert isinstance(dqn.optimizer_type, optim.Adam)
     assert dqn.arch == "mlp"
     assert dqn.optimizer == dqn.optimizer_type
-    assert isinstance(dqn.criterion, nn.MSELoss)
 
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
@@ -128,12 +126,11 @@ def test_initialize_dqn_with_cnn_accelerator():
     gamma = 0.99
     tau = 1e-3
     mutation = None
-    double = True
     actor_network = None
     accelerator = Accelerator()
     wrap = True
 
-    dqn = DQN(
+    dqn = RainbowDQN(
         state_dim=state_dim,
         action_dim=action_dim,
         one_hot=one_hot,
@@ -145,7 +142,6 @@ def test_initialize_dqn_with_cnn_accelerator():
         gamma=gamma,
         tau=tau,
         mutation=mutation,
-        double=double,
         actor_network=actor_network,
         accelerator=accelerator,
         wrap=wrap,
@@ -166,14 +162,12 @@ def test_initialize_dqn_with_cnn_accelerator():
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
-    assert dqn.double is True
     assert dqn.actor_network is None
     assert isinstance(dqn.actor, EvolvableCNN)
     assert isinstance(dqn.actor_target, EvolvableCNN)
     assert isinstance(dqn.optimizer_type, optim.Adam)
     assert dqn.arch == "cnn"
     assert isinstance(dqn.optimizer, AcceleratedOptimizer)
-    assert isinstance(dqn.criterion, nn.MSELoss)
 
 
 # Can initialize DQN with an actor network
@@ -192,7 +186,7 @@ def test_initialize_dqn_with_actor_network(
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    dqn = DQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, actor_network=actor_network)
 
     assert dqn.state_dim == state_dim
     assert dqn.action_dim == action_dim
@@ -210,73 +204,93 @@ def test_initialize_dqn_with_actor_network(
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
-    assert dqn.double is False
     assert dqn.actor_network == actor_network
     assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer_type, optim.Adam)
     assert dqn.arch == actor_network.arch
     assert dqn.optimizer == dqn.optimizer_type
-    assert isinstance(dqn.criterion, nn.MSELoss)
 
 
-# Returns the expected action when given a state observation and epsilon=0 or 1.
-def test_returns_expected_action_epsilon_greedy():
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# Returns the expected action when given a state observation and action mask
+def test_returns_expected_action(accelerator):
     state_dim = [4]
     action_dim = 2
     one_hot = False
 
-    dqn = DQN(state_dim, action_dim, one_hot)
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, accelerator=accelerator)
     state = np.array([1, 2, 3, 4])
 
     action_mask = None
 
-    epsilon = 0
-    action = dqn.getAction(state, epsilon, action_mask)[0]
+    action = dqn.getAction(state, action_mask)[0]
 
     assert action.is_integer()
     assert action >= 0 and action < action_dim
 
-    epsilon = 1
-    action = dqn.getAction(state, epsilon, action_mask)[0]
+    action_mask = np.array([0, 1])
+
+    action = dqn.getAction(state, action_mask)[0]
 
     assert action.is_integer()
-    assert action >= 0 and action < action_dim
+    assert action == 1
 
 
-# Returns the expected action when given a state observation and action mask.
-def test_returns_expected_action_mask():
-    accelerator = Accelerator()
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# Returns the expected action when given a state observation and action mask
+def test_returns_expected_action_one_hot(accelerator):
     state_dim = [4]
     action_dim = 2
     one_hot = True
 
-    dqn = DQN(state_dim, action_dim, one_hot, accelerator=accelerator)
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, accelerator=accelerator)
     state = np.array([1])
+
+    action_mask = None
+
+    action = dqn.getAction(state, action_mask)[0]
+
+    assert action.is_integer()
+    assert action >= 0 and action < action_dim
 
     action_mask = np.array([0, 1])
 
-    epsilon = 0
-    action = dqn.getAction(state, epsilon, action_mask)[0]
-
-    assert action.is_integer()
-    assert action == 1
-
-    epsilon = 1
-    action = dqn.getAction(state, epsilon, action_mask)[0]
+    action = dqn.getAction(state, action_mask)[0]
 
     assert action.is_integer()
     assert action == 1
 
 
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
 # learns from experiences and updates network parameters
-def test_learns_from_experiences():
+def test_learns_from_experiences(accelerator):
     state_dim = [4]
     action_dim = 2
     one_hot = False
     batch_size = 64
 
     # Create an instance of the DQN class
-    dqn = DQN(state_dim, action_dim, one_hot, batch_size=batch_size)
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+    )
 
     # Create a batch of experiences
     states = torch.randn(batch_size, state_dim[0])
@@ -294,33 +308,33 @@ def test_learns_from_experiences():
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss = dqn.learn(experiences)
+    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
 
-    assert isinstance(loss, float)
-    assert loss >= 0.0
+    assert new_idxs is None
+    assert new_priorities is None
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
-# handles double Q-learning
-def test_handles_double_q_learning():
-    accelerator = Accelerator()
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# learns from experiences and updates network parameters
+def test_learns_from_experiences_one_hot(accelerator):
     state_dim = [4]
     action_dim = 2
     one_hot = True
-    double = True
     batch_size = 64
 
     # Create an instance of the DQN class
-    dqn = DQN(
-        state_dim,
-        action_dim,
-        one_hot,
-        double=double,
-        batch_size=batch_size,
-        accelerator=accelerator,
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
     )
 
     # Create a batch of experiences
@@ -339,47 +353,40 @@ def test_handles_double_q_learning():
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss = dqn.learn(experiences)
+    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
 
-    assert isinstance(loss, float)
-    assert loss >= 0.0
+    assert new_idxs is None
+    assert new_priorities is None
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
     assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
-# handles double Q-learning with CNN
-def test_handles_double_q_learning_cnn():
-    state_dim = (3, 32, 32)
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# learns from experiences and updates network parameters
+def test_learns_from_experiences_n_step(accelerator):
+    state_dim = [4]
     action_dim = 2
     one_hot = False
-    double = True
     batch_size = 64
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
 
     # Create an instance of the DQN class
-    dqn = DQN(
-        state_dim,
-        action_dim,
-        one_hot,
-        net_config=net_config,
-        double=double,
-        batch_size=batch_size,
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *state_dim)
+    states = torch.randn(batch_size, state_dim[0])
     actions = torch.randint(0, action_dim, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, *state_dim)
+    next_states = torch.randn(batch_size, state_dim[0])
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
@@ -388,15 +395,131 @@ def test_handles_double_q_learning_cnn():
     actor = dqn.actor
     actor_target = dqn.actor_target
     actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    loss = dqn.learn(experiences)
+    new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=False)
 
-    assert isinstance(loss, float)
-    assert loss >= 0.0
+    assert new_idxs is None
+    assert new_priorities is None
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target
     assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# learns from experiences and updates network parameters
+def test_learns_from_experiences_per(accelerator):
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 64
+
+    # Create an instance of the DQN class
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+    )
+
+    # Create a batch of experiences
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randint(0, action_dim, (batch_size, 1))
+    rewards = torch.randn((batch_size, 1))
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.randint(0, 2, (batch_size, 1))
+    weights = torch.rand(batch_size)
+    idxs = np.arange(batch_size)
+
+    experiences = [states, actions, rewards, next_states, dones, weights, idxs]
+
+    # Copy state dict before learning - should be different to after updating weights
+    actor = dqn.actor
+    actor_target = dqn.actor_target
+    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
+
+    # Call the learn method
+    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=True)
+
+    assert isinstance(new_idxs, np.ndarray)
+    assert isinstance(new_priorities, np.ndarray)
+    assert np.array_equal(new_idxs, idxs)
+    assert actor == dqn.actor
+    assert actor_target == dqn.actor_target
+    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# learns from experiences and updates network parameters
+def test_learns_from_experiences_per_n_step(accelerator):
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 64
+
+    # Create an instance of the DQN class
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+    )
+
+    # Create a batch of experiences
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randint(0, action_dim, (batch_size, 1))
+    rewards = torch.randn((batch_size, 1))
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.randint(0, 2, (batch_size, 1))
+    weights = torch.rand(batch_size)
+    idxs = np.arange(batch_size)
+    n_states = torch.randn(batch_size, state_dim[0])
+    n_actions = torch.randint(0, action_dim, (batch_size, 1))
+    n_rewards = torch.randn((batch_size, 1))
+    n_next_states = torch.randn(batch_size, state_dim[0])
+    n_dones = torch.randint(0, 2, (batch_size, 1))
+
+    experiences = [
+        states,
+        actions,
+        rewards,
+        next_states,
+        dones,
+        weights,
+        idxs,
+        n_states,
+        n_actions,
+        n_rewards,
+        n_next_states,
+        n_dones,
+    ]
+
+    # Copy state dict before learning - should be different to after updating weights
+    actor = dqn.actor
+    actor_target = dqn.actor_target
+    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
+
+    # Call the learn method
+    new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=True)
+
+    assert isinstance(new_idxs, np.ndarray)
+    assert isinstance(new_priorities, np.ndarray)
+    assert np.array_equal(new_idxs, idxs)
+    assert actor == dqn.actor
+    assert actor_target == dqn.actor_target
+    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
 
 
 # Updates target network parameters with soft update
@@ -411,13 +534,12 @@ def test_soft_update():
     gamma = 0.99
     tau = 1e-3
     mutation = None
-    double = False
     actor_network = None
     device = "cpu"
     accelerator = None
     wrap = True
 
-    dqn = DQN(
+    dqn = RainbowDQN(
         state_dim,
         action_dim,
         one_hot,
@@ -428,7 +550,6 @@ def test_soft_update():
         gamma=gamma,
         tau=tau,
         mutation=mutation,
-        double=double,
         actor_network=actor_network,
         device=device,
         accelerator=accelerator,
@@ -459,7 +580,7 @@ def test_algorithm_test_loop():
     env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
 
     # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
-    agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)
+    agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
@@ -471,7 +592,7 @@ def test_algorithm_test_loop_unvectorized():
 
     env = DummyEnv(state_size=state_dim, vect=False)
 
-    agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)
+    agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
@@ -492,7 +613,7 @@ def test_algorithm_test_loop_images():
         "normalize": False,
     }
 
-    agent = DQN(
+    agent = RainbowDQN(
         state_dim=state_dim,
         action_dim=action_dim,
         one_hot=False,
@@ -518,7 +639,7 @@ def test_algorithm_test_loop_images_unvectorized():
         "normalize": False,
     }
 
-    agent = DQN(
+    agent = RainbowDQN(
         state_dim=(3, 32, 32),
         action_dim=action_dim,
         one_hot=False,
@@ -534,7 +655,7 @@ def test_clone_returns_identical_agent():
     action_dim = 2
     one_hot = False
 
-    dqn = DQN(state_dim, action_dim, one_hot)
+    dqn = RainbowDQN(state_dim, action_dim, one_hot)
     clone_agent = dqn.clone()
 
     assert clone_agent.state_dim == dqn.state_dim
@@ -560,7 +681,7 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == dqn.scores
 
     accelerator = Accelerator()
-    dqn = DQN(state_dim, action_dim, one_hot, accelerator=accelerator)
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, accelerator=accelerator)
     clone_agent = dqn.clone()
 
     assert clone_agent.state_dim == dqn.state_dim
@@ -586,7 +707,9 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == dqn.scores
 
     accelerator = Accelerator()
-    dqn = DQN(state_dim, action_dim, one_hot, accelerator=accelerator, wrap=False)
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, accelerator=accelerator, wrap=False
+    )
     clone_agent = dqn.clone(wrap=False)
 
     assert clone_agent.state_dim == dqn.state_dim
@@ -614,7 +737,9 @@ def test_clone_returns_identical_agent():
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False, accelerator=Accelerator())
+    dqn = RainbowDQN(
+        state_dim=[4], action_dim=2, one_hot=False, accelerator=Accelerator()
+    )
     dqn.unwrap_models()
     assert isinstance(dqn.actor, nn.Module)
     assert isinstance(dqn.actor_target, nn.Module)
@@ -623,7 +748,7 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the DQN agent
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
+    dqn = RainbowDQN(state_dim=[4], action_dim=2, one_hot=False)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -650,7 +775,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     dqn.loadCheckpoint(checkpoint_path)
 
@@ -660,6 +784,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(dqn.actor_target, EvolvableMLP)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
+    assert str(dqn.optimizer.state_dict()) == str(dqn.optimizer_type.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -682,7 +807,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     }
 
     # Initialize the DQN agent
-    dqn = DQN(
+    dqn = RainbowDQN(
         state_dim=[3, 32, 32], action_dim=2, one_hot=False, net_config=net_config_cnn
     )
 
@@ -711,7 +836,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     dqn.loadCheckpoint(checkpoint_path)
 
@@ -721,6 +845,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(dqn.actor_target, EvolvableCNN)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
+    assert str(dqn.optimizer.state_dict()) == str(dqn.optimizer_type.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -746,7 +871,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
     # Initialize the DQN agent
-    dqn = DQN(
+    dqn = RainbowDQN(
         state_dim=[3, 64, 64], action_dim=2, one_hot=False, actor_network=actor_network
     )
 
@@ -775,7 +900,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
     dqn.loadCheckpoint(checkpoint_path)
 
@@ -785,6 +909,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
+    assert str(dqn.optimizer.state_dict()) == str(dqn.optimizer_type.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99

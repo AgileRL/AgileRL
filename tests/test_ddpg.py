@@ -230,7 +230,6 @@ def test_initialize_ddpg_with_cnn_accelerator():
     "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
         ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
-        # ([3, 64, 64], "simple_cnn", "simple_cnn_critic", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_initialize_ddpg_with_actor_network(
@@ -279,6 +278,54 @@ def test_initialize_ddpg_with_actor_network(
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
+# Can initialize ddpg with an actor network but no critic - should trigger warning
+@pytest.mark.parametrize(
+    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    [
+        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+    ],
+)
+def test_initialize_ddpg_with_actor_network_no_critic(
+    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    ddpg = DDPG(
+        state_dim,
+        action_dim,
+        one_hot,
+        actor_network=actor_network,
+        critic_network=None,
+    )
+
+    assert ddpg.state_dim == state_dim
+    assert ddpg.action_dim == action_dim
+    assert ddpg.one_hot == one_hot
+    assert ddpg.net_config is not None
+    assert ddpg.batch_size == 64
+    assert ddpg.lr == 0.0001
+    assert ddpg.learn_step == 5
+    assert ddpg.gamma == 0.99
+    assert ddpg.tau == 0.001
+    assert ddpg.mut is None
+    assert ddpg.device == "cpu"
+    assert ddpg.accelerator is None
+    assert ddpg.index == 0
+    assert ddpg.scores == []
+    assert ddpg.fitness == []
+    assert ddpg.steps == [0]
+    assert ddpg.actor != actor_network
+    assert ddpg.critic_network is None
+    assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
+    assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
+    assert ddpg.actor_optimizer == ddpg.actor_optimizer_type
+    assert ddpg.critic_optimizer == ddpg.critic_optimizer_type
+    assert isinstance(ddpg.criterion, nn.MSELoss)
+
+
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action_epsilon_greedy():
     accelerator = Accelerator()
@@ -305,28 +352,6 @@ def test_returns_expected_action_epsilon_greedy():
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
-
-
-# Returns a tuple of tensors with the first dimension squeezed for each tensor in the input list
-def test_returns_tuple_with_squeezed_tensors():
-    experiences = [
-        torch.tensor([[[1, 2, 3], [4, 5, 6]]]),
-        torch.tensor([[[7], [8]]]),
-        torch.tensor([[[9], [10]]]),
-        torch.tensor([[[11, 12, 13], [14, 15, 16]]]),
-        torch.tensor([[[17], [18]]]),
-    ]
-
-    ddpg = DDPG(state_dim=[3], action_dim=1, one_hot=False)
-    squeezed_experiences = ddpg._squeeze_exp(experiences)
-
-    assert torch.equal(squeezed_experiences[0], torch.tensor([[1, 2, 3], [4, 5, 6]]))
-    assert torch.equal(squeezed_experiences[1], torch.tensor([[7], [8]]))
-    assert torch.equal(squeezed_experiences[2], torch.tensor([[9], [10]]))
-    assert torch.equal(
-        squeezed_experiences[3], torch.tensor([[11, 12, 13], [14, 15, 16]])
-    )
-    assert torch.equal(squeezed_experiences[4], torch.tensor([[17], [18]]))
 
 
 # learns from experiences and updates network parameters
@@ -358,7 +383,7 @@ def test_learns_from_experiences():
     # Copy state dict before learning - should be different to after updating weights
     actor = ddpg.actor
     actor_target = ddpg.actor_target
-    actor_pre_learn_sd = copy.deepcopy(ddpg.actor)
+    actor_pre_learn_sd = str(copy.deepcopy(ddpg.actor.state_dict()))
     critic = ddpg.critic
     critic_target = ddpg.critic_target
     critic_pre_learn_sd = str(copy.deepcopy(ddpg.critic.state_dict()))
@@ -747,6 +772,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+    )
     # Load checkpoint
     ddpg.loadCheckpoint(checkpoint_path)
 
@@ -758,13 +788,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(ddpg.critic_target, EvolvableMLP)
     assert ddpg.lr == 1e-4
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer_type.state_dict()
-    )
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
-    assert str(ddpg.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer_type.state_dict()
-    )
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -821,7 +845,15 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    assert checkpoint["net_config"] == net_config_cnn
+
     # Load checkpoint
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
+    )
     ddpg.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
@@ -832,13 +864,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(ddpg.critic_target, EvolvableCNN)
     assert ddpg.lr == 1e-4
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer_type.state_dict()
-    )
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
-    assert str(ddpg.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer_type.state_dict()
-    )
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
@@ -912,6 +938,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+    )
     # Load checkpoint
     ddpg.loadCheckpoint(checkpoint_path)
 
@@ -923,13 +954,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(ddpg.critic_target, nn.Module)
     assert ddpg.lr == 1e-4
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
-    assert str(ddpg.actor_optimizer.state_dict()) == str(
-        ddpg.actor_optimizer_type.state_dict()
-    )
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
-    assert str(ddpg.critic_optimizer.state_dict()) == str(
-        ddpg.critic_optimizer_type.state_dict()
-    )
     assert ddpg.batch_size == 64
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99

@@ -1,5 +1,6 @@
 import copy
 import random
+import warnings
 
 import dill
 import numpy as np
@@ -37,7 +38,7 @@ class DDPG:
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
+    :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
@@ -71,6 +72,41 @@ class DDPG:
         accelerator=None,
         wrap=True,
     ):
+        assert isinstance(
+            state_dim, (list, tuple)
+        ), "State dimension must be a list or tuple."
+        assert isinstance(action_dim, int), "Action dimension must be an integer."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(tau, float), "Tau must be a float."
+        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(policy_freq, int), "Policy frequency must be an integer."
+        assert (
+            policy_freq >= 1
+        ), "Policy frequency must be greater than or equal to one."
+        assert (
+            isinstance(actor_network, nn.Module) or actor_network is None
+        ), "Actor network must be an nn.Module or None."
+        assert (
+            isinstance(critic_network, nn.Module) or critic_network is None
+        ), "Critic network must be an nn.Module or None."
+        if (actor_network is not None) != (critic_network is not None):  # XOR operation
+            warnings.warn(
+                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config."
+            )
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
+
         self.algo = "DDPG"
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -99,7 +135,20 @@ class DDPG:
             self.net_config = None
         else:
             # model
+            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
+            assert (
+                "arch" in self.net_config.keys()
+            ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                assert (
+                    "h_size" in self.net_config.keys()
+                ), "Net config must contain h_size: int."
+                assert isinstance(
+                    self.net_config["h_size"], list
+                ), "Net config h_size must be a list."
+                assert (
+                    len(self.net_config["h_size"]) > 0
+                ), "Net config h_size must contain at least one element."
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
@@ -116,6 +165,22 @@ class DDPG:
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+                assert (
+                    "normalize" in self.net_config.keys()
+                ), "Net config must contain normalize: True or False."
+                assert isinstance(
+                    self.net_config["normalize"], bool
+                ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=action_dim,
@@ -210,15 +275,6 @@ class DDPG:
             action = action_values.cpu().data.numpy()
 
         return action
-
-    def _squeeze_exp(self, experiences):
-        """Remove first dim created by dataloader.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
-        """
-        st, ac, re, ne, do = experiences
-        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
@@ -506,6 +562,7 @@ class DDPG:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
