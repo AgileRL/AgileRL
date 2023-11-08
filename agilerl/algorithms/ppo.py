@@ -131,12 +131,13 @@ class PPO:
         assert (
             max_grad_norm >= 0
         ), "Maximum norm for gradient clipping must be greater than or equal to zero."
-        assert isinstance(
-            target_kl, float
-        ), "Target KL divergence threshold must be a float."
         assert (
-            target_kl >= 0
-        ), "Target KL divergence threshold must be greater than or equal to zero."
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
+        if target_kl is not None:
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
         assert isinstance(
             update_epochs, int
         ), "Policy update epochs must be an integer."
