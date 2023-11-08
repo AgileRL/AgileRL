@@ -468,7 +468,6 @@ class DQN:
             elif self.net_config["arch"] == "cnn":
                 self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
-            self.lr = checkpoint["lr"]
         else:
             self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
             self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
@@ -476,6 +475,7 @@ class DQN:
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.lr = checkpoint["lr"]
         self.batch_size = checkpoint["batch_size"]
         self.learn_step = checkpoint["learn_step"]
         self.gamma = checkpoint["gamma"]
