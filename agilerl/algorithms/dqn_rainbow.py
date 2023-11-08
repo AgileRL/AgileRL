@@ -206,15 +206,6 @@ class RainbowDQN:
 
         return action
 
-    def _squeeze_exp(self, experiences):
-        """Remove first dim created by dataloader.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
-        """
-        st, ac, re, ne, do = experiences
-        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
-
     def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
         if self.one_hot:
             states = (
@@ -417,7 +408,10 @@ class RainbowDQN:
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                        state = np.moveaxis(state, [3], [1])
+                        # Handle unvectorised image environment
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
+                        state = np.moveaxis(state, [-1], [-3])
                     action = self.getAction(state)
                     state, reward, done, trunc, _ = env.step(action)
                     score += reward[0]
