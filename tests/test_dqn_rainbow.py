@@ -249,6 +249,37 @@ def test_returns_expected_action(accelerator):
         Accelerator(),
     ],
 )
+# Returns the expected action when given a state observation and action mask
+def test_returns_expected_action_one_hot(accelerator):
+    state_dim = [4]
+    action_dim = 2
+    one_hot = True
+
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, accelerator=accelerator)
+    state = np.array([1])
+
+    action_mask = None
+
+    action = dqn.getAction(state, action_mask)[0]
+
+    assert action.is_integer()
+    assert action >= 0 and action < action_dim
+
+    action_mask = np.array([0, 1])
+
+    action = dqn.getAction(state, action_mask)[0]
+
+    assert action.is_integer()
+    assert action == 1
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
 # learns from experiences and updates network parameters
 def test_learns_from_experiences(accelerator):
     state_dim = [4]
@@ -266,6 +297,51 @@ def test_learns_from_experiences(accelerator):
     actions = torch.randint(0, action_dim, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
     next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.randint(0, 2, (batch_size, 1))
+
+    experiences = [states, actions, rewards, next_states, dones]
+
+    # Copy state dict before learning - should be different to after updating weights
+    actor = dqn.actor
+    actor_target = dqn.actor_target
+    actor_pre_learn_sd = str(copy.deepcopy(dqn.actor.state_dict()))
+    actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
+
+    # Call the learn method
+    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
+
+    assert new_idxs is None
+    assert new_priorities is None
+    assert actor == dqn.actor
+    assert actor_target == dqn.actor_target
+    assert actor_pre_learn_sd != str(dqn.actor.state_dict())
+    assert actor_target_pre_learn_sd != str(dqn.actor_target.state_dict())
+
+
+@pytest.mark.parametrize(
+    "accelerator",
+    [
+        None,
+        Accelerator(),
+    ],
+)
+# learns from experiences and updates network parameters
+def test_learns_from_experiences_one_hot(accelerator):
+    state_dim = [4]
+    action_dim = 2
+    one_hot = True
+    batch_size = 64
+
+    # Create an instance of the DQN class
+    dqn = RainbowDQN(
+        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+    )
+
+    # Create a batch of experiences
+    states = torch.randint(0, state_dim[0], (batch_size, 1))
+    actions = torch.randint(0, action_dim, (batch_size, 1))
+    rewards = torch.randn((batch_size, 1))
+    next_states = torch.randint(0, state_dim[0], (batch_size, 1))
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
