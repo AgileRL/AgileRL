@@ -89,7 +89,9 @@ class TD3:
             max_action, (float, int)
         ), "Max action must be a float or integer."
         assert max_action > 0, "Max action must be greater than zero."
-        assert isinstance(expl_noise, float), "Exploration noise rate must be a float."
+        assert isinstance(
+            expl_noise, (float, int)
+        ), "Exploration noise rate must be a float."
         assert (
             expl_noise >= 0
         ), "Exploration noise must be greater than or equal to zero."
@@ -100,7 +102,7 @@ class TD3:
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
-        assert isinstance(gamma, float), "Gamma must be a float."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(policy_freq, int), "Policy frequency must be an integer."

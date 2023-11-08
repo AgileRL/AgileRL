@@ -104,29 +104,35 @@ class PPO:
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(gamma, float), "Gamma must be a float."
-        assert isinstance(gae_lambda, float), "Lambda must be a float."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
         assert isinstance(
-            action_std_init, float
+            action_std_init, (float, int)
         ), "Action standard deviation must be a float."
         assert (
             action_std_init >= 0
         ), "Action standard deviation must be greater than or equal to zero."
-        assert isinstance(clip_coef, float), "Clipping coefficient must be a float."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
         assert (
             clip_coef >= 0
         ), "Clipping coefficient must be greater than or equal to zero."
-        assert isinstance(ent_coef, float), "Entropy coefficient must be a float."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
         assert (
             ent_coef >= 0
         ), "Entropy coefficient must be greater than or equal to zero."
-        assert isinstance(vf_coef, float), "Value function coefficient must be a float."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
         assert (
             vf_coef >= 0
         ), "Value function coefficient must be greater than or equal to zero."
         assert isinstance(
-            max_grad_norm, float
+            max_grad_norm, (float, int)
         ), "Maximum norm for gradient clipping must be a float."
         assert (
             max_grad_norm >= 0

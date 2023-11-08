@@ -97,7 +97,7 @@ class RainbowDQN:
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
-        assert isinstance(gamma, float), "Gamma must be a float."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
@@ -106,11 +106,15 @@ class RainbowDQN:
         assert prior_eps > 0, "Minimum priority for sampling must be greater than zero."
         assert isinstance(num_atoms, int), "Number of atoms must be an integer."
         assert num_atoms >= 1, "Number of atoms must be greater than or equal to one."
-        assert isinstance(v_min, float), "Minimum value of support must be a float."
+        assert isinstance(
+            v_min, (float, int)
+        ), "Minimum value of support must be a float."
         assert (
             v_min >= 0
         ), "Minimum value of support must be greater than or equal to zero."
-        assert isinstance(v_max, float), "Maximum value of support must be a float."
+        assert isinstance(
+            v_max, (float, int)
+        ), "Maximum value of support must be a float."
         assert (
             v_max >= 0
         ), "Maximum value of support must be greater than or equal to zero."
