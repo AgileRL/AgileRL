@@ -108,9 +108,11 @@ class RainbowDQN:
         self.fitness = []
         self.steps = [0]
 
-        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms).to(
-            self.device
-        )
+        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms)
+        if self.accelerator is None:
+            self.support = self.support.to(self.device)
+        else:
+            self.support = self.support.to(self.accelerator.device)
 
         if self.actor_network is not None:
             self.actor = actor_network
@@ -252,6 +254,9 @@ class RainbowDQN:
             if self.accelerator is None:
                 offset = offset.to(self.device)
                 proj_dist = proj_dist.to(self.device)
+            else:
+                offset = offset.to(self.accelerator.device)
+                proj_dist = proj_dist.to(self.accelerator.device)
 
             proj_dist.view(-1).index_add_(
                 0, (L + offset).view(-1), (next_dist * (u.float() - b)).view(-1)
