@@ -1,7 +1,6 @@
 import copy
 import inspect
 import math
-import warnings
 from collections import OrderedDict
 
 import numpy as np
@@ -29,7 +28,7 @@ class EvolvableGPT(nn.Module):
     :type block_size: int, optional
     :param dropout: Dropout value, defaults to 0.0
     :type dropout: float, optional
-    :param activation: Activation function of transformer intermediate layer, defaults to 'gelu'
+    :param activation: Activation function of transformer intermediate layer, defaults to 'GELU'
     :type activation: str, optional
     :param layer_norm_eps: Epsilon value in layer normalization components, defaults to 1e-5
     :type layer_norm_eps: float, optional
@@ -39,8 +38,6 @@ class EvolvableGPT(nn.Module):
     :type max_layers: int, optional
     :param bias: Use bias in Linears and LayerNorms, defaults to True
     :type bias: bool, optional
-    :param stored_values: Stored network weights, defaults to None
-    :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -56,12 +53,11 @@ class EvolvableGPT(nn.Module):
         dim_feedfwd: int = 3072,
         block_size: int = 1024,
         dropout: float = 0.0,
-        activation: str = "gelu",
+        activation: str = "GELU",
         layer_norm_eps: float = 1e-5,
         min_layers: int = 8,
         max_layers: int = 16,
         bias: bool = True,
-        stored_values=None,
         device="cpu",
         accelerator=None,
     ):
@@ -83,24 +79,21 @@ class EvolvableGPT(nn.Module):
         self.accelerator = accelerator
 
         self.transformer = self.create_net()
+        self.transformer = self.transformer.to(self.device)
         self.transformer_keys = list(self.transformer.keys())
 
         self.lm_head = nn.Linear(self.n_embd, self.vocab_size, bias=False)
 
         self.transformer.wte.weight = self.lm_head.weight
 
-        if stored_values is not None:
-            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
-
-        else:
-            # init all weights
-            self.apply(self._init_weights)
-            # apply special scaled init to the residual projections, per GPT-2 paper
-            for pn, p in self.named_parameters():
-                if pn.endswith("c_proj.weight"):
-                    torch.nn.init.normal_(
-                        p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer)
-                    )
+        # init all weights
+        self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                torch.nn.init.normal_(
+                    p, mean=0.0, std=0.02 / math.sqrt(2 * self.n_layer)
+                )
 
         # report number of parameters
         # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
@@ -131,16 +124,17 @@ class EvolvableGPT(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            "tanh": nn.Tanh,
-            "linear": nn.Identity,
-            "relu": nn.ReLU,
-            "elu": nn.ELU,
-            "softsign": nn.Softsign,
-            "sigmoid": nn.Sigmoid,
-            "softplus": nn.Softplus,
-            "lrelu": nn.LeakyReLU,
-            "prelu": nn.PReLU,
-            "gelu": nn.GELU,
+            "Tanh": nn.Tanh,
+            "Identity": nn.Identity,
+            "ReLU": nn.ReLU,
+            "ELU": nn.ELU,
+            "Softsign": nn.Softsign,
+            "Sigmoid": nn.Sigmoid,
+            "Softplus": nn.Softplus,
+            "Softmax": nn.Softmax,
+            "LeakyReLU": nn.LeakyReLU,
+            "PReLU": nn.PReLU,
+            "GELU": new_gelu,
         }
 
         return activation_functions[activation_names]()
@@ -223,7 +217,7 @@ class EvolvableGPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         all_hidden_states = all_hidden_states + (x,)
         for block, layer_past in zip(self.transformer.h, past_key_values):
-            torch.cuda.set_device(x.device)
+            # torch.cuda.set_device(x.device)
             # Ensure layer_past is on same device as hidden_states (might not be correct)
             if layer_past is not None:
                 layer_past = tuple(past_state.to(x.device) for past_state in layer_past)
@@ -261,8 +255,10 @@ class EvolvableGPT(nn.Module):
             self.transformer.wpe.weight[:block_size]
         )
         for block in self.transformer.h:
-            if hasattr(block.attn, "bias"):
-                block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
+            if hasattr(block.attn, "attention_bias"):
+                block.attn.attention_bias = block.attn.attention_bias[
+                    :, :, :block_size, :block_size
+                ]
 
     @classmethod
     def from_pretrained(cls, model_type, override_args=None, custom_sd=None):
@@ -305,7 +301,7 @@ class EvolvableGPT(nn.Module):
         sd = model.state_dict()
         sd_keys = sd.keys()
         # discard this mask / buffer, not a param
-        sd_keys = [k for k in sd_keys if not k.endswith(".attn.bias")]
+        sd_keys = [k for k in sd_keys if not k.endswith(".attn.attention_bias")]
 
         # copy while ensuring all of the parameters are aligned and match in names
         # and shapes
@@ -450,7 +446,7 @@ class EvolvableGPT(nn.Module):
                 idx if idx.size(1) <= self.block_size else idx[:, -self.block_size :]
             )
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _, _, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -465,79 +461,6 @@ class EvolvableGPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
-
-    def get_model_dict(self):
-        """Returns dictionary with model information and weights."""
-        model_dict = self.init_dict
-        model_dict.update(
-            {"stored_values": self.extract_parameters(without_layer_norm=False)}
-        )
-        return model_dict
-
-    def count_parameters(self, without_layer_norm=False):
-        """Returns number of parameters in neural network.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                count += param.data.cpu().numpy().flatten().shape[0]
-        return count
-
-    def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened parameter vector.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
-                count += sz
-        return pvec.copy()
-
-    def extract_parameters(self, without_layer_norm=False):
-        """Returns current flattened neural network weights.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
-                count += sz
-        return copy.deepcopy(pvec)
-
-    def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current neural network weights.
-
-        :param pvec: Network weights
-        :type pvec: np.array()
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        count = 0
-
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count : count + sz]
-                reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
-                    torch.FloatTensor
-                )
-                count += sz
-        return pvec
 
     @property
     def init_dict(self):
@@ -565,7 +488,7 @@ class EvolvableGPT(nn.Module):
             self.n_layer += 1
             self.recreate_nets()
         # else:
-        #     self.add_nodes()
+        #     self.add_node()
 
     def remove_layer(self):
         """Removes a block layer from transformer."""
@@ -573,7 +496,7 @@ class EvolvableGPT(nn.Module):
             self.n_layer -= 1
             self.recreate_shrunk_nets()
         # else:
-        #     self.add_nodes()
+        #     self.add_node()
 
     def add_node(self, numb_new_nodes=None):
         """Adds nodes to hidden layers of transformer.
@@ -681,30 +604,6 @@ class EvolvableGPT(nn.Module):
         return new_net
 
 
-def _canonical_mask(
-    mask, mask_name, other_type, other_name, target_type, check_other=True
-):
-    """Returns canconical mask. Adapted from torch.nn.functional"""
-    if mask is not None:
-        _mask_dtype = mask.dtype
-        _mask_is_float = torch.is_floating_point(mask)
-        if _mask_dtype != torch.bool and not _mask_is_float:
-            raise AssertionError(
-                f"only bool and floating types of {mask_name} are supported"
-            )
-        if check_other and other_type is not None:
-            if _mask_dtype != other_type:
-                warnings.warn(
-                    f"Support for mismatched {mask_name} and {other_name} "
-                    "is deprecated. Use same type for both instead."
-                )
-        if not _mask_is_float:
-            mask = torch.zeros_like(mask, dtype=target_type).masked_fill_(
-                mask, float("-inf")
-            )
-    return mask
-
-
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
@@ -744,7 +643,7 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the
             # input sequence
             self.register_buffer(
-                "bias",
+                "attention_bias",
                 torch.tril(torch.ones(block_size, block_size)).view(
                     1, 1, block_size, block_size
                 ),
@@ -792,7 +691,7 @@ class CausalSelfAttention(nn.Module):
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+            att = att.masked_fill(self.attention_bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -814,7 +713,7 @@ class Block(nn.Module):
         dropout,
         block_size,
         hidden_size,
-        activation="gelu",
+        activation="GELU",
         layer_norm_eps=1e-5,
     ):
         super().__init__()
@@ -836,12 +735,14 @@ class Block(nn.Module):
 
 
 class MLP(EvolvableMLP):
-    def __init__(self, n_embd, dropout, hidden_size, activation="gelu"):
+    def __init__(self, n_embd, dropout, hidden_size, activation="GELU", **kwargs):
         super().__init__(
             num_inputs=n_embd,
             num_outputs=n_embd,
             hidden_size=[hidden_size],
-            activation=activation,
+            layer_norm=False,
+            mlp_output_activation=activation,
+            **kwargs,
         )
         self.dropout = nn.Dropout(dropout)
 
@@ -852,8 +753,10 @@ class MLP(EvolvableMLP):
         :type x: torch.Tensor() or np.array
         """
         if not isinstance(x, torch.Tensor):
-            x = torch.FloatTensor(np.array(x)).to(self.device)
-        for value in self.net:
+            x = torch.FloatTensor(np.array(x))
+            if self.accelerator is None:
+                x = x.to(self.device)
+        for value in self.feature_net:
             x = value(x)
         x = self.dropout(x)
         return x
@@ -865,16 +768,17 @@ class MLP(EvolvableMLP):
         :type activation_names: str
         """
         activation_functions = {
-            "tanh": nn.Tanh,
-            "linear": nn.Identity,
-            "relu": nn.ReLU,
-            "elu": nn.ELU,
-            "softsign": nn.Softsign,
-            "sigmoid": nn.Sigmoid,
-            "softplus": nn.Softplus,
-            "lrelu": nn.LeakyReLU,
-            "prelu": nn.PReLU,
-            "gelu": new_gelu,
+            "Tanh": nn.Tanh,
+            "Identity": nn.Identity,
+            "ReLU": nn.ReLU,
+            "ELU": nn.ELU,
+            "Softsign": nn.Softsign,
+            "Sigmoid": nn.Sigmoid,
+            "Softplus": nn.Softplus,
+            "Softmax": nn.Softmax,
+            "LeakyReLU": nn.LeakyReLU,
+            "PReLU": nn.PReLU,
+            "GELU": new_gelu,
         }
 
         return activation_functions[activation_names]()
@@ -932,15 +836,3 @@ class TokenEmbedding(nn.Module):
         """
         # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
         return self.embedding(tokens)
-
-
-def _none_or_dtype(input):
-    """Returns None or dtype of input. Adapted from torch.nn.functional.
-    :param input: Input to return dtype of
-    :type input: Any
-    """
-    if input is None:
-        return None
-    elif isinstance(input, torch.Tensor):
-        return input.dtype
-    raise RuntimeError("input to _none_or_dtype() must be None or torch.Tensor")
