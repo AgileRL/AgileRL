@@ -61,6 +61,45 @@ class EvolvableGPT(nn.Module):
         device="cpu",
         accelerator=None,
     ):
+        assert isinstance(n_layer, int), "Number of layers must be an integer."
+        assert n_layer >= 1, "Number of layers must be greater than or equal to one."
+        assert isinstance(vocab_size, int), "Vocabulary size must be an integer."
+        assert vocab_size >= 1, "Vocabulary size must be greater than or equal to one."
+        assert isinstance(n_embd, int), "Embedding dimension must be an integer."
+        assert n_embd >= 1, "Embedding dimension must be greater than or equal to one."
+        assert isinstance(n_head, int), "Number of attention heads must be an integer."
+        assert (
+            n_head >= 1
+        ), "Number of attention heads must be greater than or equal to one."
+        assert isinstance(
+            dim_feedfwd, int
+        ), "Feed forward dimension must be an integer."
+        assert (
+            dim_feedfwd >= 1
+        ), "Feed forward dimension must be greater than or equal to one."
+        assert isinstance(block_size, int), "Block size must be an integer."
+        assert block_size >= 1, "Block size must be greater than or equal to one."
+        assert isinstance(dropout, (float, int)), "Dropout must be a float."
+        assert 0 <= dropout <= 1, "Dropout must be between zero and one (inclusive)."
+        assert isinstance(layer_norm_eps, float), "Layer norm epsilon must be a float."
+        assert layer_norm_eps > 0, "Layer norm epsilon must be greater than zero."
+        assert isinstance(
+            min_layers, int
+        ), "Minimum number of layers must be an integer."
+        assert (
+            min_layers >= 1
+        ), "Minimum number of layers must be greater than or equal to one."
+        assert isinstance(
+            max_layers, int
+        ), "Maximum number of layers must be an integer."
+        assert (
+            max_layers >= 1
+        ), "Maximum number of layers must be greater than or equal to one."
+        assert (
+            max_layers >= min_layers
+        ), "Maximum number of layers must be greater than or equal to minimum number of layers."
+        assert isinstance(bias, bool), "Bias flag must be boolean value True or False."
+
         super().__init__()
 
         self.n_layer = n_layer
