@@ -106,7 +106,7 @@ class EvolvableMLP(nn.Module):
     :type mlp_activation: str, optional
     :param mlp_output_activation: Output activation layer, defaults to None
     :type mlp_output_activation: str, optional
-    :param layer_norm: Normalization between layers, defaults to False
+    :param layer_norm: Normalization between layers, defaults to True
     :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
