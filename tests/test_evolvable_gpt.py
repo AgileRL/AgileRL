@@ -199,7 +199,13 @@ def test_generate_new_tokens():
 def test_forward_pass():
     model = EvolvableGPT()
     input_tokens = torch.tensor([[1, 2, 3, 4, 5]])
-    logits, _, _, _ = model(input_tokens)
+    B = 1  # Batch size
+    C = 768  # Embedding dim
+
+    k = torch.randn((B, 12, 0, C // 12))
+    v = torch.randn((B, 12, 0, C // 12))
+    past_kv = [(k, v) for _ in range(12)]
+    logits, _, _, _ = model(input_tokens, past_key_values=past_kv)
     assert logits.shape == (1, 5, model.vocab_size)
 
 
@@ -280,9 +286,16 @@ def test_causal_self_attention_forward():
             1, 1, block_size, block_size
         ),
     )
-    x = torch.randint(0, 32, (4, 12, 768)).float()
+    B = 4  # Batch size
+    T = 128  # Sequence length
+    C = 768  # Embedding dim
+    x = torch.randint(0, 32, (B, T, C)).float()
 
-    y, present = attn(x)
+    k = torch.randn((B, 12, 0, C // 12))
+    v = torch.randn((B, 12, 0, C // 12))
+    layer_past = (k, v)
+
+    y, present = attn(x, layer_past=layer_past)
 
     assert isinstance(y, torch.Tensor)
     assert isinstance(present[0], torch.Tensor)
