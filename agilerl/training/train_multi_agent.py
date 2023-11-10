@@ -243,7 +243,7 @@ def train_multi_agent(
                 if any(truncation.values()) or any(done.values()):
                     break
 
-                memory.save2memory(state, action, reward, next_state, done)
+                memory.save2memory(state, cont_actions, reward, next_state, done)
 
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r
