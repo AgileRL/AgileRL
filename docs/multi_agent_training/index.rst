@@ -337,7 +337,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                         state, action, reward, np.moveaxis(next_state, [3], [1]), done)
                 else:
                     memory.save2memory(
-                        state, action, reward, next_state, done)
+                        state, cont_actions, reward, next_state, done)
 
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r
