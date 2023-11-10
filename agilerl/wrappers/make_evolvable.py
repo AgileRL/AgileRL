@@ -80,7 +80,17 @@ class MakeEvolvable(nn.Module):
         assert (
             min_channel_size < max_channel_size
         ), "'min_channel_size' must be less than 'max_channel_size'."
-        assert isinstance(network, nn.Module), "'network' must be of type 'nn.Module'."
+        if not kwargs:
+            assert isinstance(
+                network, nn.Module
+            ), f"'network' must be of type 'nn.Module'.{type(network)}"
+        if secondary_input_tensor is not None:
+            assert (
+                extra_critic_dims is not None
+            ), "Must add extra critic dimensions, equal to the sum of all agents action dims."
+            assert isinstance(
+                extra_critic_dims, int
+            ), "Extra critic dimensions must be an integer."
 
         self.init_layers = init_layers
         self.min_hidden_layers = min_hidden_layers

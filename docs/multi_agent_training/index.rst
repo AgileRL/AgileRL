@@ -358,3 +358,17 @@ Alternatively, use a custom training loop. Combining all of the above:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+
+Agent Masking
+-------------
+
+If you need to take actions from agents at different timesteps, you can use agent masking to only retrieve new actions for certain agents. This
+can be defined by your environment, and should be returned in 'info' as a dictionary. Info must contain two dictionaries - one named 'agent_mask',
+which contains a boolean value for whether an action should be returned for each agent, and another named 'env_defined_actions', which contains
+the actions for each agent that a new action is not generated for. This is handled automatically by the AgileRL multi-agent training function, but
+can be implemented in a custom loop as follows:
+
+.. code-block:: python
+
+    info = {'agent_mask': {'speaker_0': True, 'listener_0': False},
+            'env_defined_actions': {'speaker_0': None, 'listener_0': np.array([0,0,0,0,0])}}

@@ -953,6 +953,7 @@ class MATD3:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
                 self.actors = [
                     EvolvableMLP(**checkpoint["actors_init_dict"][idx])

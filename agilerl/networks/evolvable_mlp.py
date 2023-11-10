@@ -287,7 +287,6 @@ class EvolvableMLP(nn.Module):
             output_vanish=False,
             output_activation=self.mlp_output_activation,
         )
-
         if self.accelerator is None:
             feature_net = feature_net.to(self.device)
 
@@ -342,6 +341,8 @@ class EvolvableMLP(nn.Module):
 
         batch_size = x.size(0)
 
+        if x.dtype != torch.float32:
+            x = x.to(torch.float32)
         x = self.feature_net(x)
 
         if self.rainbow:

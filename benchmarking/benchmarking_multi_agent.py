@@ -120,6 +120,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         NET_CONFIG,
         INIT_HP,
         INIT_HP["POP_SIZE"],
+        population_size=INIT_HP["POP_SIZE"],
         device=device,
         accelerator=accelerator,
     )

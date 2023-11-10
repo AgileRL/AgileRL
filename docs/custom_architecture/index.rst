@@ -137,6 +137,7 @@ how to define actor and critic networks for a two agent system with state tensor
 
   class MultiAgentCNNActor(nn.Module):
     def __init__(self):
+    super().__init__()
       self.conv1 = nn.Conv3d(
          in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
       )
@@ -187,7 +188,7 @@ how to define actor and critic networks for a two agent system with state tensor
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         # Define fully connected layers
-        self.fc1 = nn.Linear(15202, 256)
+        self.fc1 = nn.Linear(15208, 256)
         self.fc2 = nn.Linear(256, 2)
 
         # Define activation function
@@ -210,9 +211,8 @@ how to define actor and critic networks for a two agent system with state tensor
         return x
 
 To then make these two CNNs evolvable we pass them, along with input tensors into the ``MakeEvolvable`` wrapper. Note, for the critic,
-we must pass ``extra_critic_dims`` argument to account for the action tensor that will also be evaluated in the forward pass. For environments
-with a discrete action space, this will be the number of agents in the system (in this example, 2) and the sumation of all agents action dimensions
-for continuous action spaces. Below highlights how you would make these two networks evolvable:
+we must pass ``extra_critic_dims`` argument to account for the action tensor that will also be evaluated in the forward pass. The extra critic
+dimensions is equivalent to the sumation of all agents action dimensions. Below highlights how you would make these two networks evolvable:
 
 .. code-block:: python
   actor = MultiAgentCNNActor()
@@ -222,8 +222,9 @@ for continuous action spaces. Below highlights how you would make these two netw
   critic = MultiAgentCNNCritic()
   evolvable_critic = MakeEvolvable(network=critic,
                                    input_tensor=torch.randn(1, 4, 2, 210, 160), # (B, C_in, D, H, W)),
-                                                                                #  D = 2 as critica are centralised and we evaluate both agents
-                                   secondary_input_tensor=torch.randn(1,2), # Evaluate 2 actions, one from each agent
+                                                                                #  D = 2 as critics are centralised and  so we evaluate both agents
+                                   secondary_input_tensor=torch.randn(1,8), # Assuming 2 agents each with action dimensions of 4
+                                   extra_critic_dims=8, # Equal to the sum of all agents action dimensions
                                    device=device)
 
 

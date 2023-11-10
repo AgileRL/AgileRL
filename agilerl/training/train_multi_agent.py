@@ -221,9 +221,13 @@ def train_multi_agent(
                     if "env_defined_actions" in info.keys()
                     else None
                 )
-                action = agent.getAction(
+                cont_actions, discrete_action = agent.getAction(
                     state, epsilon, agent_mask, env_defined_actions
                 )
+                if agent.discrete_actions:
+                    action = discrete_action
+                else:
+                    action = cont_actions
                 next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
@@ -239,7 +243,7 @@ def train_multi_agent(
                 if any(truncation.values()) or any(done.values()):
                     break
 
-                memory.save2memory(state, action, reward, next_state, done)
+                memory.save2memory(state, cont_actions, reward, next_state, done)
 
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r

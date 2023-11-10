@@ -189,15 +189,6 @@ class DQN:
 
         return action
 
-    def _squeeze_exp(self, experiences):
-        """Remove first dim created by dataloader.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
-        """
-        st, ac, re, ne, do = experiences
-        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
-
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 

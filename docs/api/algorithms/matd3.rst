@@ -46,7 +46,7 @@ can be implemented in a custom loop as follows:
 .. code-block:: python
 
     info = {'agent_mask': {'speaker_0': True, 'listener_0': False},
-            'env_defined_actions': {'speaker_0': None, 'listener_0': [0,0,0,0,0]}}
+            'env_defined_actions': {'speaker_0': None, 'listener_0': np.array([0,0,0,0,0])}}
 
 .. code-block:: python
 

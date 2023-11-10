@@ -181,7 +181,6 @@ class EvolvableCNN(nn.Module):
         accelerator=None,
     ):
         super().__init__()
-
         assert len(kernel_size) == len(
             channel_size
         ), "Length of kernel size list must be the same length as channel size list."
@@ -395,11 +394,21 @@ class EvolvableCNN(nn.Module):
 
         with torch.no_grad():
             if self.multi:
-                input_size = (
-                    feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
-                    .view(1, -1)
-                    .size(1)
-                )
+                if self.critic:
+                    critic_input = torch.stack(
+                        (
+                            torch.zeros(1, *self.input_shape),
+                            torch.zeros(1, *self.input_shape),
+                        ),
+                        dim=2,
+                    )
+                    input_size = feature_net(critic_input).view(1, -1).size(1)
+                else:
+                    input_size = (
+                        feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
+                        .view(1, -1)
+                        .size(1)
+                    )
             else:
                 input_size = (
                     feature_net(torch.zeros(1, *self.input_shape)).view(1, -1).size(1)
