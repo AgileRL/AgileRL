@@ -134,13 +134,14 @@ class DummyMultiEnv:
 
 
 class DummyMultiAgent(DummyAgentOffPolicy):
-    def __init__(self, batch_size, env):
-        super().__init__(batch_size, env)
+    def __init__(self, batch_size, env, *args):
+        super().__init__(batch_size, env, *args)
         self.agents = ["agent_0", "agent_1"]
         self.lr = 0.1
+        self.discrete_actions = False
 
     def getAction(self, *args):
-        return {agent: np.random.randn(self.action_size) for agent in self.agents}
+        return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
 
     def learn(self, experiences, n_step=False, per=False):
         super().learn(experiences, n_step=False, per=False)
@@ -445,12 +446,13 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
+    mock_agent.discrete_actions = False
 
     def getAction(*args):
         return {
             agent: np.random.randn(mock_agent.action_size)
             for agent in mock_agent.agents
-        }
+        }, None
 
     mock_agent.getAction.side_effect = getAction
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)

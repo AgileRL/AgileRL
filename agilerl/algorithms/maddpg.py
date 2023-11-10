@@ -154,7 +154,6 @@ class MADDPG:
         self.min_action = min_action
         self.discrete_actions = discrete_actions
         self.total_actions = sum(self.action_dims)
-
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
 
@@ -467,7 +466,6 @@ class MADDPG:
 
             if self.arch == "mlp":
                 action_values = list(actions.values())
-                print("ACTION VALUES", action_values)
                 input_combined = torch.cat(list(states.values()) + action_values, 1)
                 if self.accelerator is not None:
                     with critic.no_sync():

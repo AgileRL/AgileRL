@@ -213,7 +213,11 @@ def test_forward_method(
             actual_output = evolvable_network.forward(input_tensor)
     else:
         evolvable_network = MakeEvolvable(
-            network, input_tensor, secondary_input_tensor, device, extra_critic_dims=2
+            network,
+            input_tensor,
+            secondary_input_tensor,
+            extra_critic_dims=2,
+            device=device,
         )
         with torch.no_grad():
             input_tensor = input_tensor.to(dtype=torch.float16)
@@ -622,7 +626,6 @@ def test_add_cnn_layer_multi(two_arg_cnn, device):
         two_arg_cnn,
         torch.randn(1, 4, 2, 210, 160),
         torch.randn(1, 2),
-        (1, 2),
         device=device,
         extra_critic_dims=2,
     )
@@ -648,7 +651,7 @@ def test_add_cnn_layer_no_activation(device):
 
 def test_add_cnn_layer_else_statement(simple_cnn, device):
     evolvable_cnn = MakeEvolvable(
-        simple_cnn, torch.randn(1, 3, 64, 64), device=device, max_cnn_hidden_layers=1
+        simple_cnn, torch.randn(1, 3, 64, 64), device=device, max_cnn_hidden_layers=2
     )
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
@@ -861,7 +864,7 @@ def test_change_kernel_multi_two_arg(two_arg_cnn, device):
         two_arg_cnn,
         torch.randn(1, 4, 2, 210, 160),
         torch.randn(1, 2),
-        device,
+        device=device,
         extra_critic_dims=2,
     )
     while evolvable_cnn.kernel_size == [(1, 3, 3), (1, 3, 3)]:
