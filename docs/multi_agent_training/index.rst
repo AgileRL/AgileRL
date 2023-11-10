@@ -301,16 +301,35 @@ Alternatively, use a custom training loop. Combining all of the above:
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:   # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
+            state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
 
             while env.agents:
                 total_steps += 1
                 if swap_channels:
                     state = np.moveaxis(state, [3], [1])
+
+                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
+                env_defined_actions = (
+                    info["env_defined_actions"]
+                    if "env_defined_actions" in info.keys()
+                    else None
+                )
+
                 # Get next action from agent
-                action = agent.getAction(state, epsilon)
-                next_state, reward, done, _, _ = env.step(action)   # Act in environment
+                cont_actions, discrete_action = agent.getAction(
+                    state, epsilon, agent_mask, env_defined_actions
+                )
+                if agent.discrete_actions:
+                    action = discrete_action
+                else:
+                    action = cont_actions
+
+                next_state, reward, termination, truncation, info = env.step(
+                    action
+                )  # Act in environment
+
+                next_state, reward, done, _, info = env.step(action)   # Act in environment
 
                 # Save experience to replay buffer
                 if swap_channels:
