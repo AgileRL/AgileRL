@@ -262,11 +262,16 @@ def train(
                             reward,
                             np.moveaxis(next_state, [-1], [-3]),
                             done,
-                            is_vectorised,
+                            is_vectorised=is_vectorised,
                         )
                     else:
                         memory.save2memory(
-                            state, action, reward, next_state, done, is_vectorised
+                            state,
+                            action,
+                            reward,
+                            next_state,
+                            done,
+                            is_vectorised=is_vectorised,
                         )
 
                 if per:

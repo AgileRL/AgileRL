@@ -39,6 +39,8 @@ class Mutations:
     :type agents_id: list[str]
     :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
     :type arch: str, optional
+    :param mutate_elite: Mutate elite member of population, defaults to True
+    :type mutate_elite: bool, optional
     :param rand_seed: Random seed for repeatability, defaults to None
     :type rand_seed: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -66,10 +68,100 @@ class Mutations:
         max_batch_size=1024,
         agent_ids=None,
         arch="mlp",
+        mutate_elite=True,
         rand_seed=None,
         device="cpu",
         accelerator=None,
     ):
+        assert isinstance(
+            algo, (str, dict)
+        ), "Algo must be string e.g. 'DQN' or a dictionary with agent network names."
+        assert isinstance(
+            no_mutation, (float, int)
+        ), "Probability of no mutation must be a float or integer."
+        assert (
+            no_mutation >= 0
+        ), "Probability of no mutation must be greater than or equal to zero."
+        assert isinstance(
+            architecture, (float, int)
+        ), "Probability of architecture mutation must be a float or integer."
+        assert (
+            architecture >= 0
+        ), "Probability of architecture mutation must be greater than or equal to zero."
+        assert isinstance(
+            new_layer_prob, (float, int)
+        ), "Probability of new layer architecture mutation must be a float or integer."
+        assert (
+            1 >= new_layer_prob >= 0
+        ), "Probability of new layer architecture mutation must be between zero and one (inclusive)."
+        assert isinstance(
+            parameters, (float, int)
+        ), "Probability of parameters mutation must be a float or integer."
+        assert (
+            parameters >= 0
+        ), "Probability of parameters mutation must be greater than or equal to zero."
+        assert isinstance(
+            activation, (float, int)
+        ), "Probability of activation mutation must be a float or integer."
+        assert (
+            activation >= 0
+        ), "Probability of activation mutation must be greater than or equal to zero."
+        assert isinstance(
+            rl_hp, (float, int)
+        ), "Probability of reinforcement learning hyperparameter mutation must be a float or integer."
+        assert (
+            rl_hp >= 0
+        ), "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
+        if rl_hp > 0:
+            assert isinstance(
+                rl_hp_selection, list
+            ), "Reinforcement learning hyperparameter mutation options must be a list."
+            assert (
+                len(rl_hp_selection) >= 0
+            ), "Reinforcement learning hyperparameter mutation options list must contain at least one option."
+        assert (
+            mutation_sd >= 0
+        ), "Mutation strength must be greater than or equal to zero."
+        assert isinstance(
+            mutation_sd, (float, int)
+        ), "Mutation strength must be a float or integer."
+        assert isinstance(min_lr, float), "Minimum learning rate must be a float."
+        assert min_lr > 0, "Minimum learning rate must be greater than zero."
+        assert isinstance(max_lr, float), "Maximum learning rate must be a float."
+        assert max_lr > 0, "Maximum learning rate must be greater than zero."
+        assert isinstance(
+            min_learn_step, int
+        ), "Minimum learn step rate must be an integer."
+        assert (
+            min_learn_step >= 1
+        ), "Minimum learn step must be greater than or equal to one."
+        assert isinstance(
+            max_learn_step, int
+        ), "Maximum learn step rate must be an integer."
+        assert (
+            max_learn_step >= 1
+        ), "Maximum learn step must be greater than or equal to one."
+        assert isinstance(
+            min_batch_size, int
+        ), "Minimum batch size rate must be an integer."
+        assert (
+            min_batch_size >= 1
+        ), "Minimum batch size must be greater than or equal to one."
+        assert isinstance(
+            max_batch_size, int
+        ), "Maximum batch size rate must be an integer."
+        assert (
+            max_batch_size >= 1
+        ), "Maximum batch size must be greater than or equal to one."
+        assert isinstance(
+            mutate_elite, bool
+        ), "Mutate elite must be boolean value True or False."
+        assert (
+            isinstance(rand_seed, int) or rand_seed is None
+        ), "Random seed must be an integer or None."
+        if isinstance(rand_seed, int):
+            assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
+
         # Random seed for repeatability
         self.rng = np.random.RandomState(rand_seed)
 
@@ -85,6 +177,7 @@ class Mutations:
         self.rl_hp_mut = rl_hp  # Learning HP mutation
         self.rl_hp_selection = rl_hp_selection  # Learning HPs to choose from
         self.mutation_sd = mutation_sd  # Mutation strength
+        self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
         self.agent_ids = agent_ids
@@ -160,6 +253,11 @@ class Mutations:
         mutation_choice = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
+
+        # If not mutating elite member of population (first in list from tournament selection),
+        # set this as the first mutation choice
+        if not self.mutate_elite:
+            mutation_choice[0] = self.no_mutation
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):

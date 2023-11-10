@@ -11,8 +11,8 @@ class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -22,19 +22,47 @@ class ReplayBuffer:
     """
 
     def __init__(self, action_dim, memory_size, field_names, device=None):
-        self.n_actions = action_dim
+        assert action_dim > 0, "Action dimension must be greater than zero."
+        assert memory_size > 0, "Mmeory size must be greater than zero."
+        assert len(field_names) > 0, "Field names must contain at least one field name."
+
+        self.action_dim = action_dim
         self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
-        self.experience = namedtuple("Experience", field_names=field_names)
+        self.field_names = field_names
+        self.experience = namedtuple("Experience", field_names=self.field_names)
         self.counter = 0  # update cycle counter
         self.device = device
 
     def __len__(self):
         return len(self.memory)
 
-    def _add(self, state, action, reward, next_state, done):
-        e = self.experience(state, action, reward, next_state, done)
+    def _add(self, *args):
+        """Adds experience to memory."""
+        e = self.experience(*args)
         self.memory.append(e)
+
+    def _process_transition(self, experiences, np_array=False):
+        """Returns transition dictionary from experiences."""
+        transition = {}
+        for field in self.field_names:
+            ts = [getattr(e, field) for e in experiences if e is not None]
+            ts = np.vstack(ts)
+
+            # Handle numpy stacking
+            if field in ["done", "termination", "truncation"]:
+                ts = ts.astype(np.uint8)
+
+            if not np_array:
+                # Handle torch tensor creation
+                ts = torch.from_numpy(ts).float()
+
+                # Place on device
+                if self.device is not None:
+                    ts = ts.to(self.device)
+
+            transition[field] = ts
+        return transition
 
     def sample(self, batch_size):
         """Returns sample of experiences from memory.
@@ -43,100 +71,49 @@ class ReplayBuffer:
         :type batch_size: int
         """
         experiences = random.sample(self.memory, k=batch_size)
+        transition = self._process_transition(experiences)
+        return tuple(transition.values())
 
-        states = torch.from_numpy(
-            np.stack([e.state for e in experiences if e is not None], axis=0)
-        ).float()
-        actions = torch.from_numpy(
-            np.vstack([e.action for e in experiences if e is not None])
-        )
-        rewards = torch.from_numpy(
-            np.vstack([e.reward for e in experiences if e is not None])
-        ).float()
-        next_states = torch.from_numpy(
-            np.stack([e.next_state for e in experiences if e is not None], axis=0)
-        ).float()
-        dones = torch.from_numpy(
-            np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)
-        ).float()
-
-        if self.device is not None:
-            states, actions, rewards, next_states, dones = (
-                states.to(self.device),
-                actions.to(self.device),
-                rewards.to(self.device),
-                next_states.to(self.device),
-                dones.to(self.device),
-            )
-
-        return (states, actions, rewards, next_states, dones)
-
-    def save2memorySingleEnv(self, state, action, reward, next_state, done):
+    def save2memorySingleEnv(self, *args):
         """Saves experience to memory.
 
-        :param state: Environment observation
-        :type state: float or list[float]
-        :param action: Action in environment
-        :type action: float or list[float]
-        :param reward: Reward from environment
-        :type reward: float
-        :param next_state: Environment observation of next state
-        :type next_state: float or list[float]
-        :param done: True if environment episode finished, else False
-        :type done: bool
+        :param *args: Variable length argument list. Contains transition elements in consistent order,
+            e.g. state, action, reward, next_state, done
         """
-        self._add(state, action, reward, next_state, done)
+        self._add(*args)
         self.counter += 1
 
-    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
+    def save2memoryVectEnvs(self, *args):
         """Saves multiple experiences to memory.
 
-        :param states: Multiple environment observations in a batch
-        :type states: list[float] or list[list[float]]
-        :param actions: Multiple actions in environment a batch
-        :type actions: list[float] or list[list[float]]
-        :param rewards: Multiple rewards from environment in a batch
-        :type rewards: list[float]
-        :param next_states: Multiple environment observations of next states in a batch
-        :type next_states: list[float] or list[list[float]]
-        :param dones: True if environment episodes finished, else False, in a batch
-        :type dones: list[bool]
+        :param *args: Variable length argument list. Contains batched transition elements in consistent order,
+            e.g. states, actions, rewards, next_states, dones
         """
-        for state, action, reward, next_state, done in zip(
-            states, actions, rewards, next_states, dones
-        ):
-            self._add(state, action, reward, next_state, done)
+        for transition in zip(*args):
+            self._add(*transition)
             self.counter += 1
 
-    def save2memory(self, state, action, reward, next_state, done, is_vectorised=False):
+    def save2memory(self, *args, is_vectorised=False):
         """Applies appropriate save2memory function depending on whether
         the environment is vectorised or not.
 
-        :param states: Environment observations
-        :type states: float, list[float] or list[list[float]]
-        :param actions: Environment actions
-        :type actions: float, list[float] or list[list[float]]
-        :param rewards: Environment rewards
-        :type rewards: float or list[float]
-        :param next_states: Environment observations for the next state
-        :type next_states: float, list[float] or list[list[float]]
-        :param dones: True if environment episodes finished, else False
-        :type dones: float or list[bool]
+        :param *args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,
+            e.g. states, actions, rewards, next_states, dones
         :param is_vectorised: Boolean flag indicating if the environment has been vectorised
         :type is_vectorised: bool
         """
         if is_vectorised:
-            self.save2memoryVectEnvs(state, action, reward, next_state, done)
+            self.save2memoryVectEnvs(*args)
         else:
-            self.save2memorySingleEnv(state, action, reward, next_state, done)
+            self.save2memorySingleEnv(*args)
 
 
 class MultiStepReplayBuffer(ReplayBuffer):
     """The Multi-step Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -162,26 +139,27 @@ class MultiStepReplayBuffer(ReplayBuffer):
         device=None,
     ):
         super().__init__(action_dim, memory_size, field_names, device)
+        assert (
+            "reward" in field_names
+        ), "Reward must be saved in replay buffer under the field name 'reward'."
+        assert (
+            "next_state" in field_names
+        ), "Next state must be saved in replay buffer under the field name 'next_state'."
+        assert (
+            "done" in field_names or "termination" in field_names
+        ), "Done/termination must be saved in replay buffer under the field name 'done' or 'termination."
         self.num_envs = num_envs
         self.n_step_buffers = [deque(maxlen=n_step) for i in range(num_envs)]
         self.n_step = n_step
         self.gamma = gamma
 
-    def save2memory(self, state, action, reward, next_state, done):
+    def save2memorySingleEnv(self, *args):
         """Saves experience to memory.
 
-        :param state: Environment observation
-        :type state: float or list[float]
-        :param action: Action in environment
-        :type action: float or list[float]
-        :param reward: Reward from environment
-        :type reward: float
-        :param next_state: Environment observation of next state
-        :type next_state: float or list[float]
-        :param done: True if environment episode finished, else False
-        :type done: bool
+        :param *args: Variable length argument list. Contains transition elements in consistent order,
+            e.g. state, action, reward, next_state, done
         """
-        transition = self.experience(state, action, reward, next_state, done)
+        transition = self.experience(*args)
         self.n_step_buffers[0].append(transition)
 
         # single step transition is not ready
@@ -189,32 +167,20 @@ class MultiStepReplayBuffer(ReplayBuffer):
             return ()
 
         # make a n-step transition
-        state, action, reward, next_state, done = self._get_n_step_info(
-            self.n_step_buffers[0], self.gamma
-        )
-        self._add(state, action, reward, next_state, done)
+        args = self._get_n_step_info(self.n_step_buffers[0], self.gamma)
+        self._add(*args)
         self.counter += 1
 
         return transition
 
-    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
+    def save2memoryVectEnvs(self, *args):
         """Saves multiple experiences to memory.
 
-        :param states: Multiple environment observations in a batch
-        :type states: list[float] or list[list[float]]
-        :param actions: Multiple actions in environment a batch
-        :type actions: list[float] or list[list[float]]
-        :param rewards: Multiple rewards from environment in a batch
-        :type rewards: list[float]
-        :param next_states: Multiple environment observations of next states in a batch
-        :type next_states: list[float] or list[list[float]]
-        :param dones: True if environment episodes finished, else False, in a batch
-        :type dones: list[bool]
+        :param *args: Variable length argument list. Contains transition elements in consistent order,
+            e.g. state, action, reward, next_state, done
         """
-        for state, action, reward, next_state, done, buffer in zip(
-            states, actions, rewards, next_states, dones, self.n_step_buffers
-        ):
-            transition = self.experience(state, action, reward, next_state, done)
+        for buffer, *transition in zip(self.n_step_buffers, *args):
+            transition = self.experience(*transition)
             buffer.append(transition)
 
         # single step transition is not ready
@@ -223,13 +189,11 @@ class MultiStepReplayBuffer(ReplayBuffer):
         else:
             for buffer in self.n_step_buffers:
                 # make a n-step transition
-                state, action, reward, next_state, done = self._get_n_step_info(
-                    buffer, self.gamma
-                )
-                self._add(state, action, reward, next_state, done)
+                single_step_args = self._get_n_step_info(buffer, self.gamma)
+                self._add(*single_step_args)
                 self.counter += 1
 
-            return states, actions, rewards, next_states, dones
+            return args
 
     def sample_from_indices(self, idxs):
         """Returns sample of experiences from memory using provided indices.
@@ -238,62 +202,52 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :type idxs: list[int]
         """
         experiences = [self.memory[i] for i in idxs]
-
-        states = torch.from_numpy(
-            np.stack([e.state for e in experiences if e is not None], axis=0)
-        ).float()
-        actions = torch.from_numpy(
-            np.vstack([e.action for e in experiences if e is not None])
-        )
-        rewards = torch.from_numpy(
-            np.vstack([e.reward for e in experiences if e is not None])
-        ).float()
-        next_states = torch.from_numpy(
-            np.stack([e.next_state for e in experiences if e is not None], axis=0)
-        ).float()
-        dones = torch.from_numpy(
-            np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)
-        ).float()
-
-        if self.device is not None:
-            states, actions, rewards, next_states, dones = (
-                states.to(self.device),
-                actions.to(self.device),
-                rewards.to(self.device),
-                next_states.to(self.device),
-                dones.to(self.device),
-            )
-
-        return (states, actions, rewards, next_states, dones)
+        transition = self._process_transition(experiences)
+        return tuple(transition.values())
 
     def _get_n_step_info(self, n_step_buffer, gamma):
-        """Return n step reward, next_state, and done."""
+        """Returns n step reward, next_state, and done, as well as other saved transition elements, in order."""
         # info of the last transition
-        t = n_step_buffer[-1]
-        vect_state, vect_action = t.state, t.action
-        vect_reward, vect_next_state, vect_done = t.reward, t.next_state, t.done
+        t = [n_step_buffer[-1]]
+        transition = self._process_transition(t, np_array=True)
 
-        for transition in reversed(list(n_step_buffer)[:-1]):
+        vect_reward = transition["reward"]
+        vect_next_state = transition["next_state"]
+        if "done" in transition.keys():
+            vect_done = transition["done"]
+        else:
+            vect_done = transition["termination"]
+
+        for ts in reversed(list(n_step_buffer)[:-1]):
             vect_r, vect_n_s, vect_d = (
-                transition.reward,
-                transition.next_state,
-                transition.done,
+                ts.reward,
+                ts.next_state,
+                ts.done if "done" in transition.keys() else ts.termination,
             )
 
             vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
             vect_next_state, vect_done = (
-                (vect_n_s, vect_d) if vect_d else (vect_next_state, vect_done)
+                (np.expand_dims(vect_n_s, 0), np.array([[vect_d]]))
+                if vect_d
+                else (vect_next_state, vect_done)
             )
 
-        return vect_state, vect_action, vect_reward, vect_next_state, vect_done
+        transition["reward"] = vect_reward
+        transition["next_state"] = vect_next_state
+        if "done" in transition.keys():
+            transition["done"] = vect_done
+        else:
+            transition["termination"] = vect_done
+
+        return tuple(transition.values())
 
 
 class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     """The Prioritized Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param n_actions: Action dimension
-    :type n_actions: int
+    :param action_dim: Action dimension
+    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -335,8 +289,8 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         self.sum_tree = SumSegmentTree(tree_capacity)
         self.min_tree = MinSegmentTree(tree_capacity)
 
-    def _add(self, state, action, reward, next_state, done):
-        super()._add(state, action, reward, next_state, done)
+    def _add(self, *args):
+        super()._add(*args)
         self.sum_tree[self.tree_ptr] = self.max_priority**self.alpha
         self.min_tree[self.tree_ptr] = self.max_priority**self.alpha
         self.tree_ptr = (self.tree_ptr + 1) % self.memory_size
@@ -349,37 +303,19 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         """
         idxs = self._sample_proprtional(batch_size)
         experiences = [self.memory[i] for i in idxs]
+        transition = self._process_transition(experiences)
 
-        states = torch.from_numpy(
-            np.stack([e.state for e in experiences if e is not None], axis=0)
-        ).float()
-        actions = torch.from_numpy(
-            np.vstack([e.action for e in experiences if e is not None])
-        )
-        rewards = torch.from_numpy(
-            np.vstack([e.reward for e in experiences if e is not None])
-        ).float()
-        next_states = torch.from_numpy(
-            np.stack([e.next_state for e in experiences if e is not None], axis=0)
-        ).float()
-        dones = torch.from_numpy(
-            np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)
-        ).float()
         weights = torch.from_numpy(
             np.array([self._calculate_weight(i, beta) for i in idxs])
         ).float()
 
         if self.device is not None:
-            states, actions, rewards, next_states, dones, weights = (
-                states.to(self.device),
-                actions.to(self.device),
-                rewards.to(self.device),
-                next_states.to(self.device),
-                dones.to(self.device),
-                weights.to(self.device),
-            )
+            weights = weights.to(self.device)
 
-        return (states, actions, rewards, next_states, dones, weights, idxs)
+        transition["weights"] = weights
+        transition["idxs"] = idxs
+
+        return tuple(transition.values())
 
     def update_priorities(self, idxs, priorities):
         """Update priorities of sampled transitions."""

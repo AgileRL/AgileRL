@@ -13,7 +13,7 @@ permissions:
 jobs:
     build:
 
-        runs-on: ubuntu-latest
+        runs-on: buildjet-16vcpu-ubuntu-2204
 
         steps:
             - uses: actions/checkout@v4

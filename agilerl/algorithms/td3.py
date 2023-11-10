@@ -1,5 +1,6 @@
 import copy
 import random
+import warnings
 
 import dill
 import numpy as np
@@ -16,7 +17,7 @@ class TD3:
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
@@ -41,7 +42,7 @@ class TD3:
     :type tau: float, optional
     :param mutation: Most recent mutation to agent, defaults to None
     :type mutation: str, optional
-    :param policy_freq: Frequency of target network updates compared to policy network, defaults to 2
+    :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
@@ -77,6 +78,59 @@ class TD3:
         accelerator=None,
         wrap=True,
     ):
+        assert isinstance(
+            state_dim, (list, tuple)
+        ), "State dimension must be a list or tuple."
+        assert isinstance(action_dim, int), "Action dimension must be an integer."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(
+            max_action, (float, int)
+        ), "Max action must be a float or integer."
+        assert max_action > 0, "Max action must be greater than zero."
+        assert isinstance(
+            expl_noise, (float, int)
+        ), "Exploration noise rate must be a float."
+        assert (
+            expl_noise >= 0
+        ), "Exploration noise must be greater than or equal to zero."
+        assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(tau, float), "Tau must be a float."
+        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(policy_freq, int), "Policy frequency must be an integer."
+        assert (
+            policy_freq >= 1
+        ), "Policy frequency must be greater than or equal to one."
+        assert (
+            isinstance(actor_network, nn.Module) or actor_network is None
+        ), "Actor network must be an nn.Module or None."
+        assert (
+            isinstance(critic_networks, (list, tuple)) or critic_networks is None
+        ), "Critic network must be a list or tuple, or None."
+        if critic_networks is not None:
+            assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
+            for critic_network in critic_networks:
+                assert (
+                    isinstance(critic_network, nn.Module) or critic_network is None
+                ), "Critic network must be an nn.Module or None."
+        if (actor_network is not None) != (
+            critic_networks is not None
+        ):  # XOR operation
+            warnings.warn(
+                "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config."
+            )
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
+
         self.algo = "TD3"
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -107,8 +161,21 @@ class TD3:
             self.net_config = None
         else:
             # model
-            # TD3 employs two critic networks
+            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
+            assert (
+                "arch" in self.net_config.keys()
+            ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                assert (
+                    "h_size" in self.net_config.keys()
+                ), "Net config must contain h_size: int."
+                assert isinstance(
+                    self.net_config["h_size"], list
+                ), "Net config h_size must be a list."
+                assert (
+                    len(self.net_config["h_size"]) > 0
+                ), "Net config h_size must contain at least one element."
+                # TD3 employs two critic networks
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
@@ -132,6 +199,22 @@ class TD3:
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+                assert (
+                    "normalize" in self.net_config.keys()
+                ), "Net config must contain normalize: True or False."
+                assert isinstance(
+                    self.net_config["normalize"], bool
+                ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=action_dim,
@@ -141,6 +224,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation="Tanh",
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -153,6 +237,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -166,6 +251,7 @@ class TD3:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
+                    mlp_output_activation=None,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -218,7 +304,11 @@ class TD3:
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         """
-        state = torch.from_numpy(state).float().to(self.device)
+        state = torch.from_numpy(state).float()
+        if self.accelerator is None:
+            state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (
@@ -233,17 +323,25 @@ class TD3:
         # epsilon-greedy, Gaussian noise added to aid exploration
         if random.random() < epsilon:
             action = (
-                np.random.rand(state.size()[0], self.action_dim).astype("float32") - 0.5
-            ) * 2
+                (
+                    np.random.rand(state.size()[0], self.action_dim).astype("float32")
+                    - 0.5
+                )
+                * 2
+                * self.max_action
+            )
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
 
-            action = action_values.cpu().data.numpy() + np.random.normal(
-                0, self.max_action * self.expl_noise, size=self.action_dim
-            ).astype(np.float32).clip(-self.max_action, self.max_action)
+            action = (
+                action_values.cpu().data.numpy()
+                + np.random.normal(
+                    0, self.max_action * self.expl_noise, size=self.action_dim
+                ).astype(np.float32)
+            ).clip(-self.max_action, self.max_action)
         return action
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
@@ -257,6 +355,12 @@ class TD3:
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
+        if self.accelerator is not None:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
         if self.one_hot:
             states = (
@@ -279,7 +383,11 @@ class TD3:
             q_value_2 = self.critic_2(states, actions)
 
         next_actions = self.actor_target(next_states)
-        noise = actions.data.normal_(0, policy_noise).to(self.device)
+        noise = actions.data.normal_(0, policy_noise)
+        if self.accelerator is not None:
+            noise = noise.to(self.accelerator.device)
+        else:
+            noise = noise.to(self.device)
         noise = noise.clamp(-noise_clip, noise_clip)
         next_actions = next_actions + noise
 
@@ -327,6 +435,10 @@ class TD3:
             self.softUpdate(self.actor, self.actor_target)
             self.softUpdate(self.critic_1, self.critic_target_1)
             self.softUpdate(self.critic_2, self.critic_target_2)
+
+            return actor_loss.item(), critic_loss.item()
+        else:
+            return None, critic_loss.item()
 
     def softUpdate(self, net, target):
         """Soft updates target network."""
@@ -573,6 +685,7 @@ class TD3:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])

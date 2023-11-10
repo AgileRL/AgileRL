@@ -16,7 +16,7 @@ class PPO:
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
 
     :param state_dim: State observation dimension
-    :type state_dim: int
+    :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
@@ -89,6 +89,74 @@ class PPO:
         accelerator=None,
         wrap=True,
     ):
+        assert isinstance(
+            state_dim, (list, tuple)
+        ), "State dimension must be a list or tuple."
+        assert isinstance(action_dim, int), "Action dimension must be an integer."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(
+            discrete_actions, bool
+        ), "Discrete actions flag must be boolean value True or False."
+        assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
+        assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
+        assert isinstance(
+            action_std_init, (float, int)
+        ), "Action standard deviation must be a float."
+        assert (
+            action_std_init >= 0
+        ), "Action standard deviation must be greater than or equal to zero."
+        assert isinstance(
+            clip_coef, (float, int)
+        ), "Clipping coefficient must be a float."
+        assert (
+            clip_coef >= 0
+        ), "Clipping coefficient must be greater than or equal to zero."
+        assert isinstance(
+            ent_coef, (float, int)
+        ), "Entropy coefficient must be a float."
+        assert (
+            ent_coef >= 0
+        ), "Entropy coefficient must be greater than or equal to zero."
+        assert isinstance(
+            vf_coef, (float, int)
+        ), "Value function coefficient must be a float."
+        assert (
+            vf_coef >= 0
+        ), "Value function coefficient must be greater than or equal to zero."
+        assert isinstance(
+            max_grad_norm, (float, int)
+        ), "Maximum norm for gradient clipping must be a float."
+        assert (
+            max_grad_norm >= 0
+        ), "Maximum norm for gradient clipping must be greater than or equal to zero."
+        assert (
+            isinstance(target_kl, (float, int)) or target_kl is None
+        ), "Target KL divergence threshold must be a float."
+        if target_kl is not None:
+            assert (
+                target_kl >= 0
+            ), "Target KL divergence threshold must be greater than or equal to zero."
+        assert isinstance(
+            update_epochs, int
+        ), "Policy update epochs must be an integer."
+        assert (
+            update_epochs >= 1
+        ), "Policy update epochs must be greater than or equal to one."
+        assert (
+            isinstance(actor_network, nn.Module) or actor_network is None
+        ), "Actor network must be an nn.Module or None."
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
+
         self.algo = "PPO"
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -122,12 +190,18 @@ class PPO:
             self.action_var = torch.full((action_dim,), action_std_init**2)
             if self.accelerator is None:
                 self.action_var = self.action_var.to(self.device)
+            else:
+                self.action_var = self.action_var.to(self.accelerator.device)
 
         if self.actor_network is not None and self.critic_network is not None:
             self.actor = actor_network
             self.critic = critic_network
             self.net_config = None
         else:
+            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
+            assert (
+                "arch" in self.net_config.keys()
+            ), "Net config must contain arch: 'mlp' or 'cnn'."
             # Set up network output activations
             if "output_activation" in self.net_config.keys():
                 pass
@@ -138,6 +212,15 @@ class PPO:
                     self.net_config["output_activation"] = "Tanh"
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
+                assert (
+                    "h_size" in self.net_config.keys()
+                ), "Net config must contain h_size: int."
+                assert isinstance(
+                    self.net_config["h_size"], list
+                ), "Net config h_size must be a list."
+                assert (
+                    len(self.net_config["h_size"]) > 0
+                ), "Net config h_size must contain at least one element."
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
@@ -154,6 +237,22 @@ class PPO:
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
+                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+                assert (
+                    "normalize" in self.net_config.keys()
+                ), "Net config must contain normalize: True or False."
+                assert isinstance(
+                    self.net_config["normalize"], bool
+                ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=action_dim,
@@ -162,7 +261,7 @@ class PPO:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation=self.net_config["output_activation"],
+                    mlp_output_activation=self.net_config["output_activation"],
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -212,6 +311,8 @@ class PPO:
 
         if self.accelerator is None:
             state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
 
         if self.one_hot:
             state = (
@@ -230,8 +331,6 @@ class PPO:
 
     def getAction(self, state, action=None, grad=False):
         """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
         :type state: float or list[float]
@@ -267,6 +366,8 @@ class PPO:
             return_tensors = False
         elif self.accelerator is None:
             action = action.to(self.device)
+        else:
+            action = action.to(self.accelerator.device)
 
         action_logprob = dist.log_prob(action)
         dist_entropy = dist.entropy()
@@ -284,7 +385,7 @@ class PPO:
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: List of batched states, actions, rewards, next_states, dones in that order.
+        :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
         :type experience: list[torch.Tensor[float]]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
@@ -293,6 +394,8 @@ class PPO:
         """
         experiences = [torch.from_numpy(np.array(exp)) for exp in experiences]
         states, actions, log_probs, rewards, dones, values, next_state = experiences
+        if self.accelerator is not None:
+            next_state = next_state.to(self.accelerator.device)
         dones = dones.long()
 
         # Bootstrapping
@@ -337,12 +440,20 @@ class PPO:
                 returns.to(self.device),
                 values.to(self.device),
             )
+        else:
+            states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
+            log_probs = log_probs.to(self.accelerator.device)
+            advantages = advantages.to(self.accelerator.device)
+            returns = returns.to(self.accelerator.device)
+            values = values.to(self.accelerator.device)
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
 
         clipfracs = []
 
+        mean_loss = 0
         for epoch in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
@@ -396,9 +507,14 @@ class PPO:
                     loss.backward()
                 self.optimizer.step()
 
+                mean_loss += loss.item()
+
             if self.target_kl is not None:
                 if approx_kl > self.target_kl:
                     break
+
+        mean_loss /= num_samples * self.update_epochs
+        return mean_loss
 
     def test(self, env, swap_channels=False, max_steps=500, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
@@ -570,6 +686,7 @@ class PPO:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
                 self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
                 self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
