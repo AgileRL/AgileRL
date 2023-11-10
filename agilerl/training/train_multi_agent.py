@@ -18,7 +18,7 @@ def train_multi_agent(
     memory,
     INIT_HP,
     MUT_P,
-    net_config,
+    net_config=None,
     swap_channels=False,
     n_episodes=2000,
     max_steps=25,
@@ -49,13 +49,19 @@ def train_multi_agent(
     :type pop: list[object]
     :param memory: Experience Replay Buffer
     :type memory: object
+    :param INIT_HP: Dictionary containing initial hyperparameters.
+    :type INIT_HP: dict
+    :param MUT_P: Dictionary containing mutation parameters.
+    :type Mut_P: dict
+    :param net_config: Network configuration dictionary, defaults to None
+    :type net_config: dict
     :param swap_channels: Swap image channels dimension from last to first
     [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
     :param max_steps: Maximum number of steps in environment per episode, defaults to
-    500
+        500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -215,9 +221,13 @@ def train_multi_agent(
                     if "env_defined_actions" in info.keys()
                     else None
                 )
-                action = agent.getAction(
+                cont_actions, discrete_action = agent.getAction(
                     state, epsilon, agent_mask, env_defined_actions
                 )
+                if agent.discrete_actions:
+                    action = discrete_action
+                else:
+                    action = cont_actions
                 next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
