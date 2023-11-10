@@ -148,7 +148,7 @@ Example
             if channels_last:
                     state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                     next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
-            memory.save2memory(state, action, reward, next_state, done)
+            memory.save2memory(state, cont_actions, reward, next_state, done)
 
             for agent_id, r in reward.items():
                     agent_reward[agent_id] += r
