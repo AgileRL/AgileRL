@@ -114,7 +114,7 @@ class EvolvableMLP(nn.Module):
     :type min_mlp_nodes: int, optional
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
     :type max_mlp_nodes: int, optional
-    :param layer_norm: Normalization between layers, defaults to False
+    :param layer_norm: Normalization between layers, defaults to True
     :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
