@@ -106,14 +106,20 @@ class EvolvableMLP(nn.Module):
     :type mlp_activation: str, optional
     :param mlp_output_activation: Output activation layer, defaults to None
     :type mlp_output_activation: str, optional
+    :param min_hidden_layers: Minimum number of hidden layers the network will shrink down to, defaults to 1
+    :type min_hidden_layers: int, optional
+    :param max_hidden_layers: Maximum number of hidden layers the network will expand to, defaults to 3
+    :type max_hidden_layers: int, optional
+    :param min_mlp_nodes: Minimum number of nodes a layer can have within the network, defaults to 64
+    :type min_mlp_nodes: int, optional
+    :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
+    :type max_mlp_nodes: int, optional
     :param layer_norm: Normalization between layers, defaults to True
     :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
     :type output_vanish: bool, optional
     :param init_layers: Initialise network layers, defaults to True
     :type init_layers: bool, optional
-    :param stored_values: Stored network weights, defaults to None
-    :type stored_values: numpy.array(), optional
     :param support: Atoms support tensor, defaults to None
     :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
@@ -132,10 +138,13 @@ class EvolvableMLP(nn.Module):
         num_atoms=50,
         mlp_activation="ReLU",
         mlp_output_activation=None,
+        min_hidden_layers=1,
+        max_hidden_layers=3,
+        min_mlp_nodes=64,
+        max_mlp_nodes=500,
         layer_norm=True,
         output_vanish=True,
         init_layers=True,
-        stored_values=None,
         support=None,
         rainbow=False,
         device="cpu",
@@ -143,13 +152,35 @@ class EvolvableMLP(nn.Module):
     ):
         super().__init__()
 
+        assert (
+            num_inputs > 0
+        ), "'num_inputs' cannot be less than or equal to zero, please enter a valid integer."
+        assert (
+            num_outputs > 0
+        ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
+        for num in hidden_size:
+            assert (
+                num > 0
+            ), "'hidden_size' cannot contain zero, please enter a valid integer."
+        assert len(hidden_size) != 0, "MLP must contain at least one hidden layer."
+        assert (
+            min_hidden_layers < max_hidden_layers
+        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
+        assert (
+            min_mlp_nodes < max_mlp_nodes
+        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation
         self.mlp_output_activation = mlp_output_activation
+        self.min_hidden_layers = min_hidden_layers
+        self.max_hidden_layers = max_hidden_layers
+        self.min_mlp_nodes = min_mlp_nodes
+        self.max_mlp_nodes = max_mlp_nodes
         self.layer_norm = layer_norm
-        self.output_vanish = output_vanish
-        self.init_layers = init_layers
+        self.output_vanish = False if rainbow else output_vanish
+        self.init_layers = False if rainbow else init_layers
         self.hidden_size = hidden_size
         self.num_atoms = num_atoms
         self.support = support
@@ -158,9 +189,6 @@ class EvolvableMLP(nn.Module):
         self.accelerator = accelerator
 
         self.feature_net, self.value_net, self.advantage_net = self.create_net()
-
-        if stored_values is not None:
-            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -259,7 +287,6 @@ class EvolvableMLP(nn.Module):
             output_vanish=False,
             output_activation=self.mlp_output_activation,
         )
-
         if self.accelerator is None:
             feature_net = feature_net.to(self.device)
 
@@ -314,6 +341,8 @@ class EvolvableMLP(nn.Module):
 
         batch_size = x.size(0)
 
+        if x.dtype != torch.float32:
+            x = x.to(torch.float32)
         x = self.feature_net(x)
 
         if self.rainbow:
@@ -334,81 +363,6 @@ class EvolvableMLP(nn.Module):
 
         return x
 
-    def get_model_dict(self):
-        """Returns dictionary with model information and weights."""
-        model_dict = self.init_dict
-        model_dict.update(
-            {"stored_values": self.extract_parameters(without_layer_norm=False)}
-        )
-        return model_dict
-
-    def count_parameters(self, without_layer_norm=False):
-        """Returns number of parameters in neural network.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                count += param.data.cpu().numpy().flatten().shape[0]
-        return count
-
-    def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened
-        parameter vector.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
-                count += sz
-        return pvec.copy()
-
-    def extract_parameters(self, without_layer_norm=False):
-        """Returns current flattened neural network weights.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
-                count += sz
-        return copy.deepcopy(pvec)
-
-    def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current
-        neural network weights.
-
-        :param pvec: Network weights
-        :type pvec: np.array()
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        count = 0
-
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count : count + sz]
-                reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
-                    torch.FloatTensor
-                )
-                count += sz
-        return pvec
-
     @property
     def init_dict(self):
         """Returns model information in dictionary."""
@@ -419,6 +373,10 @@ class EvolvableMLP(nn.Module):
             "num_atoms": self.num_atoms,
             "mlp_activation": self.mlp_activation,
             "mlp_output_activation": self.mlp_output_activation,
+            "min_hidden_layers": self.min_hidden_layers,
+            "max_hidden_layers": self.max_hidden_layers,
+            "min_mlp_nodes": self.min_mlp_nodes,
+            "max_mlp_nodes": self.max_mlp_nodes,
             "layer_norm": self.layer_norm,
             "init_layers": self.init_layers,
             "output_vanish": self.output_vanish,
@@ -429,21 +387,10 @@ class EvolvableMLP(nn.Module):
         }
         return init_dict
 
-    @property
-    def short_dict(self):
-        """Returns shortened version of model information in dictionary."""
-        short_dict = {
-            "hidden_size": self.hidden_size,
-            "mlp_activation": self.mlp_activation,
-            "mlp_output_activation": self.mlp_output_activation,
-            "layer_norm": self.layer_norm,
-        }
-        return short_dict
-
     def add_mlp_layer(self):
         """Adds a hidden layer to neural network."""
         # add layer to hyper params
-        if len(self.hidden_size) < 3:  # HARD LIMIT
+        if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
             self.recreate_nets()
         else:
@@ -451,9 +398,9 @@ class EvolvableMLP(nn.Module):
 
     def remove_mlp_layer(self):
         """Removes a hidden layer from neural network."""
-        if len(self.hidden_size) > 1:  # HARD LIMIT
+        if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
-            self.recreate_nets()
+            self.recreate_nets(shrink_params=True)
         else:
             self.add_mlp_node()
 
@@ -472,7 +419,9 @@ class EvolvableMLP(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
             self.recreate_nets()
 
@@ -493,27 +442,39 @@ class EvolvableMLP(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
-            self.hidden_size[hidden_layer] = (
-                self.hidden_size[hidden_layer] - numb_new_nodes
-            )
-            self.recreate_nets()
+        if (
+            self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes
+        ):  # HARD LIMIT
+            self.hidden_size[hidden_layer] -= numb_new_nodes
+            self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    def recreate_nets(self):
+    def recreate_nets(self, shrink_params=False):
         """Recreates neural networks."""
         new_feature_net, new_value_net, new_advantage_net = self.create_net()
-        new_feature_net = self.preserve_parameters(
-            old_net=self.feature_net, new_net=new_feature_net
-        )
-        if self.rainbow:
-            new_value_net = self.preserve_parameters(
-                old_net=self.value_net, new_net=new_value_net
+        if shrink_params:
+            new_feature_net = self.shrink_preserve_parameters(
+                old_net=self.feature_net, new_net=new_feature_net
             )
-            new_advantage_net = self.preserve_parameters(
-                old_net=self.advantage_net, new_net=new_advantage_net
+            if self.rainbow:
+                new_value_net = self.shrink_preserve_parameters(
+                    old_net=self.value_net, new_net=new_value_net
+                )
+                new_advantage_net = self.shrink_preserve_parameters(
+                    old_net=self.advantage_net, new_net=new_advantage_net
+                )
+        else:
+            new_feature_net = self.preserve_parameters(
+                old_net=self.feature_net, new_net=new_feature_net
             )
+            if self.rainbow:
+                new_value_net = self.preserve_parameters(
+                    old_net=self.value_net, new_net=new_value_net
+                )
+                new_advantage_net = self.preserve_parameters(
+                    old_net=self.advantage_net, new_net=new_advantage_net
+                )
         self.feature_net, self.value_net, self.advantage_net = (
             new_feature_net,
             new_value_net,

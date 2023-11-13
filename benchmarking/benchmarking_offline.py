@@ -6,7 +6,7 @@ import yaml
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_offline import train
+from agilerl.training.train_offline import train_offline
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
@@ -106,7 +106,7 @@ def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
         device=device,
     )
 
-    trained_pop, pop_fitnesses = train(
+    trained_pop, pop_fitnesses = train_offline(
         env,
         INIT_HP["ENV_NAME"],
         dataset,

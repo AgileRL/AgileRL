@@ -17,9 +17,12 @@ class GumbelSoftmax(nn.Module):
         :param eps: Epsilon, defaults to 1e-20
         :type eps: float, optional
         """
-        epsilon = torch.rand_like(logits)
-        logits += -torch.log(-torch.log(epsilon + eps) + eps)
-        return F.softmax(logits / tau, dim=-1)
+        epsilon = torch.rand_like(logits)  # epsilon = U
+        gumbel_noise = -torch.log(-torch.log(epsilon + eps) + eps)
+        # print("GUMBEL NOISE", gumbel_noise)
+        y = logits + gumbel_noise
+        return F.softmax(y / tau, dim=-1)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # print("GBSM input", input)
         return self.gumbel_softmax(input)

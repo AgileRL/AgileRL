@@ -1,5 +1,6 @@
 import copy
 import random
+import warnings
 
 import dill
 import numpy as np
@@ -89,13 +90,56 @@ class MATD3:
         accelerator=None,
         wrap=True,
     ):
+        assert isinstance(state_dims, list), "State dimensions must be a list."
+        assert isinstance(action_dims, list), "Action dimensions must be a list."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(n_agents, int), "Number of agents must be an integer."
+        assert isinstance(
+            agent_ids, (tuple, list)
+        ), "Agent IDs must be stores in a tuple or list."
+        assert isinstance(
+            discrete_actions, bool
+        ), "Discrete actions flag must be a boolean value True or False."
+        assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(batch_size, int), "Batch size must be an integer."
+        assert batch_size >= 1, "Batch size must be greater than or equal to one."
+        assert isinstance(lr, float), "Learning rate must be a float."
+        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(gamma, float), "Gamma must be a float."
+        assert isinstance(tau, float), "Tau must be a float."
+        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(policy_freq, int), "Policy frequency must be an integer."
+        assert policy_freq > 0, "Policy frequency must be grateer than zero."
+        assert n_agents == len(
+            agent_ids
+        ), "Number of agents must be equal to the length of the agent IDs list."
+        if actor_networks is not None:
+            assert all(
+                isinstance(actor, nn.Module) for actor in actor_networks
+            ), "Actor networks must be an nn.Module or None."
+        if critic_networks is not None:
+            for critic_network in critic_networks:
+                assert all(
+                    isinstance(critic, nn.Module) for critic in critic_network
+                ), "Critic networks must be an nn.Module or None."
+        if (actor_networks is not None) != (critic_networks is not None):
+            warnings.warn(
+                "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
+            )
+        assert isinstance(
+            wrap, bool
+        ), "Wrap models flag must be boolean value True or False."
         self.algo = "MATD3"
         self.state_dims = state_dims
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
         self.action_dims = action_dims
         self.one_hot = one_hot
         self.n_agents = n_agents
-        self.multi = True if n_agents > 1 else False
+        self.multi = True
         self.agent_ids = agent_ids
         self.net_config = net_config
         self.batch_size = batch_size
@@ -115,11 +159,7 @@ class MATD3:
         self.expl_noise = expl_noise
         self.min_action = min_action
         self.discrete_actions = discrete_actions
-        self.total_actions = (
-            sum(self.action_dims)
-            if not self.discrete_actions
-            else len(self.action_dims)
-        )
+        self.total_actions = sum(self.action_dims)
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
 
@@ -202,7 +242,7 @@ class MATD3:
                         hidden_size=self.net_config["h_size"],
                         normalize=self.net_config["normalize"],
                         mlp_activation="Tanh",
-                        mlp_output_activation="Softmax",
+                        mlp_output_activation=None,
                         critic=True,
                         n_agents=self.n_agents,
                         multi=self.multi,
@@ -221,6 +261,7 @@ class MATD3:
                         hidden_size=self.net_config["h_size"],
                         normalize=self.net_config["normalize"],
                         mlp_activation="Tanh",
+                        mlp_output_activation=None,
                         critic=True,
                         n_agents=self.n_agents,
                         multi=self.multi,
@@ -297,15 +338,25 @@ class MATD3:
         :type epsilon: float, optional
         :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
         :type agent_mask: Dict[str, bool]
-        :param env_defined_actions: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
-        :type env_defined_actions: Dict[str, bool]
+        :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
+        :type env_defined_actions: Dict[str, np.array]
         """
         # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
         if agent_mask is None:
             agent_ids = self.agent_ids
             actors = self.actors
+            state_dims = self.state_dims
         else:
             agent_ids = [agent for agent in agent_mask.keys() if agent_mask[agent]]
+            state_dims = [
+                state_dim
+                for state_dim, mask_flag in zip(self.state_dims, agent_mask.keys())
+                if mask_flag
+            ]
+            action_dims_dict = {
+                agent: action_dim
+                for agent, action_dim in zip(self.agent_ids, self.action_dims)
+            }
             states = {
                 agent: states[agent] for agent in agent_mask.keys() if agent_mask[agent]
             }
@@ -321,15 +372,13 @@ class MATD3:
         # Configure accelerator
         if self.accelerator is None:
             states = [state.to(self.device) for state in states]
-        else:
-            states = [state.to(self.accelerator.device) for state in states]
 
         if self.one_hot:
             states = [
                 nn.functional.one_hot(state.long(), num_classes=state_dim[0])
                 .float()
                 .squeeze()
-                for state, state_dim in zip(states, self.state_dims)
+                for state, state_dim in zip(states, state_dims)
             ]
 
         if self.arch == "mlp":
@@ -340,11 +389,17 @@ class MATD3:
         elif self.arch == "cnn":
             states = [state.unsqueeze(2) for state in states]
 
-        actions = {}
+        action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
             if random.random() < epsilon:
                 if self.discrete_actions:
-                    action = np.random.randint(0, self.action_dims[idx])
+                    action = (
+                        np.random.dirichlet(
+                            np.ones(self.action_dims[idx]), state.size()[0]
+                        )
+                        .astype("float32")
+                        .squeeze()
+                    )
                 else:
                     action = (
                         np.random.rand(state.size()[0], self.action_dims[idx])
@@ -354,14 +409,14 @@ class MATD3:
             else:
                 actor.eval()
                 if self.accelerator is not None:
-                    with actor.no_sync():
+                    with actor.no_sync(), torch.no_grad():
                         action_values = actor(state)
                 else:
                     with torch.no_grad():
                         action_values = actor(state)
                 actor.train()
                 if self.discrete_actions:
-                    action = action_values.squeeze(0).argmax().item()
+                    action = action_values.cpu().data.numpy().squeeze()
                 else:
                     action = (
                         action_values.cpu().data.numpy().squeeze()
@@ -374,23 +429,40 @@ class MATD3:
                     action = np.clip(
                         action, self.min_action[idx][0], self.max_action[idx][0]
                     )
-            actions[agent_id] = action
+            action_dict[agent_id] = action
+
+        if self.discrete_actions:
+            discrete_action_dict = {}
+            for agent, action in action_dict.items():
+                if self.one_hot:
+                    discrete_action_dict[agent] = action.argmax(axis=1)
+                else:
+                    discrete_action_dict[agent] = action.argmax().item()
+        else:
+            discrete_action_dict = None
 
         if env_defined_actions is not None:
             for agent in env_defined_actions.keys():
                 if not agent_mask[agent]:
-                    actions.update({agent: env_defined_actions[agent]})
+                    if self.discrete_actions:
+                        discrete_action_dict.update({agent: env_defined_actions[agent]})
+                        action = env_defined_actions[agent]
+                        action = (
+                            nn.functional.one_hot(
+                                torch.tensor(action).long(),
+                                num_classes=action_dims_dict[agent],
+                            )
+                            .float()
+                            .squeeze()
+                        )
+                        action_dict.update({agent: action})
+                    else:
+                        action_dict.update({agent: env_defined_actions[agent]})
 
-        return actions
-
-    def _squeeze_exp(self, experiences):
-        """Remove first dim created by dataloader.
-
-        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
-        :type state: list[torch.Tensor[float]]
-        """
-        st, ac, re, ne, do = experiences
-        return st.squeeze(0), ac.squeeze(0), re.squeeze(0), ne.squeeze(0), do.squeeze(0)
+        return (
+            action_dict,
+            discrete_action_dict,
+        )
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
@@ -424,14 +496,6 @@ class MATD3:
             self.critic_2_optimizers,
         ):
             states, actions, rewards, next_states, dones = experiences
-            if self.accelerator is not None:
-                states = [state.to(self.accelerator.device) for state in states]
-                actions = [action.to(self.accelerator.device) for action in actions]
-                rewards = [reward.to(self.accelerator.device) for reward in rewards]
-                next_states = [
-                    next_state.to(self.accelerator.device) for next_state in next_states
-                ]
-                dones = [done.to(self.accelerator.device) for done in dones]
 
             if self.one_hot:
                 states = {
@@ -440,16 +504,23 @@ class MATD3:
                     )
                     .float()
                     .squeeze()
-                    for agent_id, state, state_dim in zip(
+                    for (agent_id, state), state_dim in zip(
                         states.items(), self.state_dims
+                    )
+                }
+                next_states = {
+                    agent_id: nn.functional.one_hot(
+                        next_state.long(), num_classes=state_dim[0]
+                    )
+                    .float()
+                    .squeeze()
+                    for (agent_id, next_state), state_dim in zip(
+                        next_states.items(), self.state_dims
                     )
                 }
 
             if self.arch == "mlp":
-                if self.discrete_actions:
-                    action_values = [a.unsqueeze(1) for a in actions.values()]
-                else:
-                    action_values = list(actions.values())
+                action_values = list(actions.values())
                 input_combined = torch.cat(list(states.values()) + action_values, 1)
                 if self.accelerator is not None:
                     with critic_1.no_sync():
@@ -466,7 +537,7 @@ class MATD3:
 
             elif self.arch == "cnn":
                 stacked_states = torch.stack(list(states.values()), dim=2)
-                stacked_actions = torch.stack(list(actions.values()), dim=1)
+                stacked_actions = torch.cat(list(actions.values()), dim=1)
                 if self.accelerator is not None:
                     with critic_1.no_sync():
                         q_value_1 = critic_1(stacked_states, stacked_actions)
@@ -480,14 +551,6 @@ class MATD3:
                         next_states[agent_id].unsqueeze(2)
                     ).detach_()
                     for idx, agent_id in enumerate(self.agent_ids)
-                ]
-
-            if self.discrete_actions:
-                next_actions = [
-                    torch.argmax(agent_actions, dim=1).unsqueeze(1)
-                    if self.arch == "mlp"
-                    else torch.argmax(agent_actions, dim=1)
-                    for agent_actions in next_actions
                 ]
 
             if self.arch == "mlp":
@@ -504,7 +567,7 @@ class MATD3:
                     q_value_next_state_2 = critic_target_2(next_input_combined)
             elif self.arch == "cnn":
                 stacked_next_states = torch.stack(list(next_states.values()), dim=2)
-                stacked_next_actions = torch.stack(next_actions, dim=1)
+                stacked_next_actions = torch.cat(next_actions, dim=1)
                 if self.accelerator is not None:
                     with critic_target_1.no_sync():
                         q_value_next_state_1 = critic_target_1(
@@ -521,6 +584,7 @@ class MATD3:
                     q_value_next_state_2 = critic_target_2(
                         stacked_next_states, stacked_next_actions
                     )
+            print(q_value_next_state_1, q_value_next_state_2)
             q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
             y_j = (
@@ -551,12 +615,6 @@ class MATD3:
                     else:
                         action = actor(states[agent_id])
                     detached_actions = copy.deepcopy(actions)
-                    if self.discrete_actions:
-                        action = action.argmax(1).unsqueeze(1)
-                        detached_actions = {
-                            agent_id: d.unsqueeze(1)
-                            for agent_id, d in detached_actions.items()
-                        }
                     detached_actions[agent_id] = action
                     input_combined = torch.cat(
                         list(states.values()) + list(detached_actions.values()), 1
@@ -573,11 +631,9 @@ class MATD3:
                             action = actor(states[agent_id].unsqueeze(2))
                     else:
                         action = actor(states[agent_id].unsqueeze(2))
-                    if self.discrete_actions:
-                        action = action.argmax(1)
                     detached_actions = copy.deepcopy(actions)
                     detached_actions[agent_id] = action
-                    stacked_detached_actions = torch.stack(
+                    stacked_detached_actions = torch.cat(
                         list(detached_actions.values()), dim=1
                     )
                     if self.accelerator is not None:
@@ -598,7 +654,7 @@ class MATD3:
                     actor_loss.backward()
                 actor_optimizer.step()
 
-        if len(self.scores) % self.policy_freq:
+        if len(self.scores) % self.policy_freq == 0:
             for (
                 actor,
                 actor_target,
@@ -617,6 +673,10 @@ class MATD3:
                 self.softUpdate(actor, actor_target)
                 self.softUpdate(critic_1, critic_target_1)
                 self.softUpdate(critic_2, critic_target_2)
+
+            return actor_loss.item(), critic_loss.item()
+        else:
+            return None, critic_loss.item()
 
     def softUpdate(self, net, target):
         """Soft updates target network."""
@@ -657,12 +717,16 @@ class MATD3:
                         if "env_defined_actions" in info.keys()
                         else None
                     )
-                    action = self.getAction(
+                    cont_actions, discrete_action = self.getAction(
                         state,
                         epsilon=0,
                         agent_mask=agent_mask,
                         env_defined_actions=env_defined_actions,
                     )
+                    if self.discrete_actions:
+                        action = discrete_action
+                    else:
+                        action = cont_actions
                     state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r
@@ -963,6 +1027,7 @@ class MATD3:
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
+            self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
                 self.actors = [
                     EvolvableMLP(**checkpoint["actors_init_dict"][idx])

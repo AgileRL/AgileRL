@@ -19,6 +19,22 @@ class MakeEvolvable(nn.Module):
         off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN \
         architecture, defaults to None
     :type secondary_input_tensor: torch.Tensor, optional
+    :param min_hidden_layers: Minimum number of hidden layers the fully connected layer will shrink down to, defaults to 1
+    :type min_hidden_layers: int, optional
+    :param max_hidden_layers: Maximum number of hidden layers the fully connected layer will expand to, defaults to 3
+    :type max_hidden_layers: int, optional
+    :param min_mlp_nodes: Minimum number of nodes a layer can have within the fully connected layer, defaults to 64
+    :type min_mlp_nodes: int, optional
+    :param max_mlp_nodes: Maximum number of nodes a layer can have within the fully connected layer, defaults to 1024
+    :type max_mlp_nodes: int, optional
+    :param min_cnn_hidden_layers: Minimum number of hidden layers the convolutional layer will shrink down to, defaults to 1
+    :type min_cnn_hidden_layers: int, optional
+    :param max_cnn_hidden_layers: Maximum number of hidden layers the convolutional layer will expand to, defaults to 6
+    :type max_cnn_hidden_layers: int, optional
+    :param min_channel_size: Minimum number of channels a convolutional layer can have, defaults to 32
+    :type min_channel_size: int, optional
+    :param max_channel_size: Maximum number of channels a convolutional layer can have, defaults to 256
+    :type max_channel_size: int, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to False
     :type output_vanish: bool, optional
     :param init_layers: Initialise network layers, defaults to False
@@ -36,6 +52,14 @@ class MakeEvolvable(nn.Module):
         network,
         input_tensor,
         secondary_input_tensor=None,
+        min_hidden_layers=1,
+        max_hidden_layers=3,
+        min_mlp_nodes=64,
+        max_mlp_nodes=1024,
+        min_cnn_hidden_layers=1,
+        max_cnn_hidden_layers=6,
+        min_channel_size=32,
+        max_channel_size=256,
         output_vanish=False,
         init_layers=False,
         device="cpu",
@@ -44,8 +68,41 @@ class MakeEvolvable(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        print("min layers", min_hidden_layers)
+        print("max", max_hidden_layers)
+        assert (
+            min_hidden_layers < max_hidden_layers
+        ), "'min_hidden_layers' must be less than 'max_hidden_layers."
+        assert (
+            min_mlp_nodes < max_mlp_nodes
+        ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
+        assert (
+            min_cnn_hidden_layers < max_cnn_hidden_layers
+        ), "'min_cnn_hidden_layers' must be less than 'max_cnn_hidden_layers."
+        assert (
+            min_channel_size < max_channel_size
+        ), "'min_channel_size' must be less than 'max_channel_size'."
+        if not kwargs:
+            assert isinstance(
+                network, nn.Module
+            ), f"'network' must be of type 'nn.Module'.{type(network)}"
+        if secondary_input_tensor is not None:
+            assert (
+                extra_critic_dims is not None
+            ), "Must add extra critic dimensions, equal to the sum of all agents action dims."
+            assert isinstance(
+                extra_critic_dims, int
+            ), "Extra critic dimensions must be an integer."
 
         self.init_layers = init_layers
+        self.min_hidden_layers = min_hidden_layers
+        self.max_hidden_layers = max_hidden_layers
+        self.min_mlp_nodes = min_mlp_nodes
+        self.max_mlp_nodes = max_mlp_nodes
+        self.min_cnn_hidden_layers = min_cnn_hidden_layers
+        self.max_cnn_hidden_layers = max_cnn_hidden_layers
+        self.min_channel_size = min_channel_size
+        self.max_channel_size = max_channel_size
         self.output_vanish = output_vanish
         self.device = device
         self.accelerator = accelerator
@@ -98,11 +155,11 @@ class MakeEvolvable(nn.Module):
 
         # Check if there is a cnn
         if self.cnn_layer_info:
+            if x.dtype != torch.float32:
+                x = x.type(torch.float32)
             x = self.feature_net(x)
             x = x.reshape(x.size(0), -1)
             # Ensure dtype is float32
-            if x.dtype != torch.float32:
-                x = x.type(torch.float32)
 
         # Concatenate actions if passed to network as a separate tensor
         if xc is not None:
@@ -447,7 +504,7 @@ class MakeEvolvable(nn.Module):
                 )
                 if self.init_layers:
                     net_dict[f"{name}_linear_layer_{str(l_no)}"] = self.layer_init(
-                        net_dict[f"{name}linear_layer_{str(l_no)}"]
+                        net_dict[f"{name}_linear_layer_{str(l_no)}"]
                     )
                 if ("norm_layers" in self.mlp_layer_info.keys()) and (
                     l_no in self.mlp_layer_info["norm_layers"].keys()
@@ -636,7 +693,7 @@ class MakeEvolvable(nn.Module):
 
     def add_mlp_layer(self):
         """Adds a hidden layer to value network."""
-        if len(self.hidden_size) < 3:  # HARD LIMIT
+        if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
             self.mlp_layer_info["activation_layers"][
                 len(self.hidden_size) - 1
@@ -645,14 +702,13 @@ class MakeEvolvable(nn.Module):
                 self.mlp_layer_info["activation_layers"][
                     len(self.hidden_size)
                 ] = self.mlp_output_activation
-
             self.recreate_nets()
         else:
             self.add_mlp_node()
 
     def remove_mlp_layer(self):
         """Removes a hidden layer from value network."""
-        if len(self.hidden_size) > 1:  # HARD LIMIT
+        if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
             if len(self.hidden_size) in self.mlp_layer_info["activation_layers"].keys():
                 if self.mlp_output_activation is None:
@@ -673,6 +729,12 @@ class MakeEvolvable(nn.Module):
                         len(self.hidden_size)
                     ] = self.mlp_output_activation
 
+            if (
+                "norm_layers" in self.mlp_layer_info.keys()
+                and len(self.hidden_size) in self.mlp_layer_info["norm_layers"]
+            ):
+                self.mlp_layer_info["norm_layers"].pop(len(self.hidden_size))
+
             self.recreate_nets(shrink_params=True)
         else:
             self.add_mlp_node()
@@ -692,7 +754,9 @@ class MakeEvolvable(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] + numb_new_nodes <= 500:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
 
             self.recreate_nets()
@@ -714,62 +778,85 @@ class MakeEvolvable(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if self.hidden_size[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
+        if (
+            self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes
+        ):  # HARD LIMIT
             self.hidden_size[hidden_layer] -= numb_new_nodes
             self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     def add_cnn_layer(self):
-        """Adds a hidden layer to Convolutional Neural Network."""
-        if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
-            if len(self.channel_size) < 6:  # HARD LIMIT
-                self.channel_size += [self.channel_size[-1]]
+        """Adds a hidden layer to convolutional neural network."""
+        if len(self.channel_size) < self.max_cnn_hidden_layers:  # HARD LIMIT
+            self.channel_size += [self.channel_size[-1]]
+            if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
                 self.kernel_size += [(1, 3, 3)]
-                self.padding += [self.padding[-1]]
-                stride_size_list = [
-                    [4],
-                    [4, 2],
-                    [4, 2, 1],
-                    [2, 2, 2, 1],
-                    [2, 1, 2, 1, 2],
-                    [2, 1, 2, 1, 2, 1],
-                ]
-                self.stride_size = stride_size_list[len(self.channel_size) - 1]
-
-                if "activation_layers" not in self.cnn_layer_info.keys():
-                    self.cnn_layer_info["activation_layers"] = dict()
-                self.cnn_layer_info["activation_layers"][
-                    len(self.channel_size) - 1
-                ] = "ReLU"
-
-                self.recreate_nets()
             else:
-                self.add_cnn_channel()
+                self.kernel_size += [(3, 3)]
+            self.padding += [self.padding[-1]]
+            stride_size_list = [
+                [4],
+                [4, 2],
+                [4, 2, 1],
+                [2, 2, 2, 1],
+                [2, 1, 2, 1, 2],
+                [2, 1, 2, 1, 2, 1],
+            ]
+            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            if "activation_layers" not in self.cnn_layer_info.keys():
+                self.cnn_layer_info["activation_layers"] = dict()
+            self.cnn_layer_info["activation_layers"][
+                len(self.channel_size) - 1
+            ] = "ReLU"
 
+            self.recreate_nets()
         else:
-            if len(self.channel_size) < 6:  # HARD LIMIT
-                self.channel_size += [self.channel_size[-1]]
-                self.kernel_size += [3]
-                self.padding += [self.padding[-1]]
-                stride_size_list = [
-                    [4],
-                    [4, 2],
-                    [4, 2, 1],
-                    [2, 2, 2, 1],
-                    [2, 1, 2, 1, 2],
-                    [2, 1, 2, 1, 2, 1],
-                ]
-                self.stride_size = stride_size_list[len(self.channel_size) - 1]
-                if "activation_layers" not in self.cnn_layer_info.keys():
-                    self.cnn_layer_info["activation_layers"] = dict()
+            self.add_cnn_channel()
+
+    def remove_cnn_layer(self):
+        """Removes a hidden layer from the convolutional neural network."""
+        if len(self.channel_size) > self.min_cnn_hidden_layers:
+            self.channel_size = self.channel_size[:-1]
+            self.kernel_size = self.kernel_size[:-1]
+            stride_size_list = [
+                [4],
+                [4, 2],
+                [4, 2, 1],
+                [2, 2, 2, 1],
+                [2, 1, 2, 1, 2],
+                [2, 1, 2, 1, 2, 1],
+            ]
+            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+
+            if "activation_layers" in self.cnn_layer_info.keys():
+                if len(self.channel_size) in self.cnn_layer_info["activation_layers"]:
+                    self.cnn_layer_info["activation_layers"].pop(len(self.channel_size))
+            else:
+                self.cnn_layer_info["activation_layers"] = dict()
+            if (
+                len(self.channel_size) - 1
+                not in self.cnn_layer_info["activation_layers"]
+            ):
                 self.cnn_layer_info["activation_layers"][
                     len(self.channel_size) - 1
                 ] = "ReLU"
 
-                self.recreate_nets()
-            else:
-                self.add_cnn_channel()
+            if (
+                "pooling_layers" in self.cnn_layer_info.keys()
+                and len(self.channel_size) in self.cnn_layer_info["pooling_layers"]
+            ):
+                self.cnn_layer_info["pooling_layers"].pop(len(self.channel_size))
+
+            if (
+                "norm_layers" in self.cnn_layer_info.keys()
+                and len(self.channel_size) in self.cnn_layer_info["norm_layers"]
+            ):
+                self.cnn_layer_info["norm_layers"].pop(len(self.channel_size))
+
+            self.recreate_nets()
+        else:
+            self.add_cnn_channel()
 
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
@@ -782,7 +869,7 @@ class MakeEvolvable(nn.Module):
                 kernel_size_value = np.random.choice([3, 4, 5, 7])
                 if self.secondary_input_tensor is not None:
                     self.kernel_size[hidden_layer] = tuple(
-                        min(kernel_size_value, self.n_agents - 1)
+                        min(kernel_size_value, self.extra_critic_dims - 1)
                         if idx == 0
                         else kernel_size_value
                         for idx in range(3)
@@ -791,6 +878,7 @@ class MakeEvolvable(nn.Module):
                     self.kernel_size[hidden_layer] = tuple(
                         1 if idx == 0 else kernel_size_value for idx in range(3)
                     )
+
                 self.recreate_nets()
             else:
                 self.add_cnn_layer()
@@ -821,10 +909,36 @@ class MakeEvolvable(nn.Module):
         if numb_new_channels is None:
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if self.channel_size[hidden_layer] + numb_new_channels <= 256:  # HARD LIMIT
+        if (
+            self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size
+        ):  # HARD LIMIT
             self.channel_size[hidden_layer] += numb_new_channels
 
             self.recreate_nets()
+
+        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
+
+    def remove_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
+        """Remove channel from hidden layer of convolutional neural network.
+
+        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
+        :type numb_new_channels: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
+        if numb_new_channels is None:
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+
+        if (
+            self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size
+        ):  # HARD LIMIT
+            self.channel_size[hidden_layer] -= numb_new_channels
+
+            self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
@@ -835,18 +949,23 @@ class MakeEvolvable(nn.Module):
         :type shrink_params: bool
         """
         new_feature_net, new_value_net = self.create_nets()
-        if self.feature_net is not None:
-            new_feature_net = self.preserve_parameters(
-                old_net=self.feature_net, new_net=new_feature_net
-            )
+
         if shrink_params:
             new_value_net = self.shrink_preserve_parameters(
                 old_net=self.value_net, new_net=new_value_net
             )
+            if self.feature_net is not None:
+                new_feature_net = self.shrink_preserve_parameters(
+                    old_net=self.feature_net, new_net=new_feature_net
+                )
         else:
             new_value_net = self.preserve_parameters(
                 old_net=self.value_net, new_net=new_value_net
             )
+            if self.feature_net is not None:
+                new_feature_net = self.preserve_parameters(
+                    old_net=self.feature_net, new_net=new_feature_net
+                )
 
         self.feature_net, self.value_net = (new_feature_net, new_value_net)
 
@@ -886,7 +1005,17 @@ class MakeEvolvable(nn.Module):
                                 : min(old_size[0], new_size[0]),
                                 : min(old_size[1], new_size[1]),
                             ]
-                        else:
+                        elif len(param.data.size()) == 3:
+                            param.data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                                : min(old_size[2], new_size[2]),
+                            ] = old_net_dict[key].data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                                : min(old_size[2], new_size[2]),
+                            ]
+                        elif len(param.data.size()) == 4:
                             param.data[
                                 : min(old_size[0], new_size[0]),
                                 : min(old_size[1], new_size[1]),
@@ -897,6 +1026,20 @@ class MakeEvolvable(nn.Module):
                                 : min(old_size[1], new_size[1]),
                                 : min(old_size[2], new_size[2]),
                                 : min(old_size[3], new_size[3]),
+                            ]
+                        elif len(param.data.size()) == 5:
+                            param.data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                                : min(old_size[2], new_size[2]),
+                                : min(old_size[3], new_size[3]),
+                                : min(old_size[4], new_size[4]),
+                            ] = old_net_dict[key].data[
+                                : min(old_size[0], new_size[0]),
+                                : min(old_size[1], new_size[1]),
+                                : min(old_size[2], new_size[2]),
+                                : min(old_size[3], new_size[3]),
+                                : min(old_size[4], new_size[4]),
                             ]
 
         return new_net

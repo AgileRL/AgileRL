@@ -98,8 +98,8 @@ If the single agent algorithm has more than one critic (e.g. TD3), then pass the
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
 
-Finally, if you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks
-for each agent in the multi-agent environment. The example below outlines how this would work for a two agent environment.
+If you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks for each agent in the
+multi-agent environment. The example below outlines how this would work for a two agent environment.
 
 .. code-block:: python
 
@@ -117,12 +117,116 @@ for each agent in the multi-agent environment. The example below outlines how th
                             state_dim=state_dim,  # State dimensions
                             action_dim=action_dim,  # Action dimensions
                             one_hot=one_hot,  # One-hot encoding
-                            net_config=None,  # Network configuration set as None
+                            net_config=None,  # Network configuration se t as None
                             actor_network=evolvable_actors, # Custom evolvable actor
                             critic_network=evolvable_critics, # Custom evolvable critic
                             INIT_HP=INIT_HP,  # Initial hyperparameters
                             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
                             device=device)
+
+Finally, if you are using a multi-agent algorithm but need to use CNNs to account for RGB image states, there are a few extra considerations
+that need to be taken into account when defining your critic network. In MADDPG and MATD3, each agent consists of an actor and critic and each
+critic evaluates the states and actions of all agents that act in the multi-agent system. Unlike with non-RGB environments that require MLPs, we cannot
+immediately stack the state and action tensors due to differing dimensions, we must first pass the state tensor through the convolutinal layers,
+before flattening the output, combining with the actions tensor, and then passing this combined state-action tensor into the fully-connected layer.
+This means that when defining the critic, the ``.forward()`` method must account for two input tensors (states and actions). Below are examples of
+how to define actor and critic networks for a two agent system with state tensors of shape (4, 210, 160):
+
+.. code-block:: python
+  from agilerl.networks.custom_activation import GumbelSoftmax
+
+  class MultiAgentCNNActor(nn.Module):
+    def __init__(self):
+    super().__init__()
+      self.conv1 = nn.Conv3d(
+         in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+      )
+      self.conv2 = nn.Conv3d(
+            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+      )
+      # Define the max-pooling layers
+      self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+      # Define fully connected layers
+      self.fc1 = nn.Linear(15200, 256)
+      self.fc2 = nn.Linear(256, 2)
+
+      # Define activation function
+      self.relu = nn.ReLU()
+
+      # Define output activation
+      self.output_activation = GumbelSoftmax()
+
+    def forward(self, state_tensor):
+        # Forward pass through convolutional layers
+        x = self.relu(self.conv1(state_tensor))
+        x = self.relu(self.conv2(x))
+
+        # Flatten the output for the fully connected layers
+        x = x.view(x.size(0), -1)
+
+        # Forward pass through fully connected layers
+        x = self.relu(self.fc1(x))
+        x = self.output_activation(self.fc2(x))
+
+        return x
+
+
+  class MultiAgentCNNCritic(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # Define the convolutional layers
+        self.conv1 = nn.Conv3d(
+            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+        )
+        self.conv2 = nn.Conv3d(
+            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+        )
+
+        # Define the max-pooling layers
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Define fully connected layers
+        self.fc1 = nn.Linear(15208, 256)
+        self.fc2 = nn.Linear(256, 2)
+
+        # Define activation function
+        self.relu = nn.ReLU()
+
+
+    def forward(self, state_tensor, action_tensor):
+        # Forward pass through convolutional layers
+        x = self.relu(self.conv1(state_tensor))
+        x = self.relu(self.conv2(x))
+
+        # Flatten the output for the fully connected layers
+        x = x.view(x.size(0), -1)
+        x = torch.cat([x, action_tensor], dim=1)
+
+        # Forward pass through fully connected layers
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+
+        return x
+
+To then make these two CNNs evolvable we pass them, along with input tensors into the ``MakeEvolvable`` wrapper. Note, for the critic,
+we must pass ``extra_critic_dims`` argument to account for the action tensor that will also be evaluated in the forward pass. The extra critic
+dimensions is equivalent to the sumation of all agents action dimensions. Below highlights how you would make these two networks evolvable:
+
+.. code-block:: python
+  actor = MultiAgentCNNActor()
+  evolvable_actor = MakeEvolvable(network=actor,
+                                  input_tensor=torch.randn(1, 4, 1, 210, 160), # (B, C_in, D, H, W) D = 1 as actors are decentralised
+                                  device=device)
+  critic = MultiAgentCNNCritic()
+  evolvable_critic = MakeEvolvable(network=critic,
+                                   input_tensor=torch.randn(1, 4, 2, 210, 160), # (B, C_in, D, H, W)),
+                                                                                #  D = 2 as critics are centralised and  so we evaluate both agents
+                                   secondary_input_tensor=torch.randn(1,8), # Assuming 2 agents each with action dimensions of 4
+                                   extra_critic_dims=8, # Equal to the sum of all agents action dimensions
+                                   device=device)
+
 
 The only other consideration that needs to be made is when instantiating the ``Mutations`` class. The ``arch`` argument should be set
 as ``evolvable_actor.arch`` for single agent algorithms or ``evolvable_actors[0].arch`` for multi-agent algorithms.
