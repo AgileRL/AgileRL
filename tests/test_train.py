@@ -1172,7 +1172,9 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train.wandb.init") as mock_wandb_init, patch(
+    with patch("agilerl.training.train.wandb.login") as _, patch(
+        "agilerl.training.train.wandb.init"
+    ) as mock_wandb_init, patch(
         "agilerl.training.train.wandb.log"
     ) as mock_wandb_log, patch(
         "agilerl.training.train.wandb.finish"
@@ -1198,6 +1200,7 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
             tournament=tournament,
             mutation=mutations,
             wb=True,
+            wandb_api_key="testing",
         )
 
         # Assert that wandb.init was called with expected arguments
@@ -1247,7 +1250,9 @@ def test_wandb_init_log_distributed(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train.wandb.init") as mock_wandb_init, patch(
+    with patch("agilerl.training.train.wandb.login") as _, patch(
+        "agilerl.training.train.wandb.init"
+    ) as mock_wandb_init, patch(
         "agilerl.training.train.wandb.log"
     ) as mock_wandb_log, patch(
         "agilerl.training.train.wandb.finish"
@@ -1275,6 +1280,7 @@ def test_wandb_init_log_distributed(
             wb=True,
             accelerator=accelerator,
             checkpoint=checkpoint,
+            wandb_api_key="testing",
         )
 
         # Assert that wandb.init was called with expected arguments
@@ -1315,7 +1321,11 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train.wandb.finish") as mock_wandb_finish:
+    with patch("agilerl.training.train.wandb.login") as _, patch(
+        "agilerl.training.train.wandb.init"
+    ) as _, patch("agilerl.training.train.wandb.log") as _, patch(
+        "agilerl.training.train.wandb.finish"
+    ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
         agilerl.training.train.train(
             env,
@@ -1338,6 +1348,7 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
             tournament=tournament,
             mutation=mutations,
             wb=True,
+            wandb_api_key="testing",
         )
         # Assert that wandb.finish was called
         mock_wandb_finish.assert_called()
@@ -1537,7 +1548,9 @@ def test_wandb_init_log_on_policy(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.init") as mock_wandb_init, patch(
+    with patch("agilerl.training.train.wandb.login") as _, patch(
+        "agilerl.training.train_on_policy.wandb.init"
+    ) as mock_wandb_init, patch(
         "agilerl.training.train_on_policy.wandb.log"
     ) as mock_wandb_log, patch(
         "agilerl.training.train.wandb.finish"
@@ -1560,6 +1573,7 @@ def test_wandb_init_log_on_policy(
             wb=True,
             accelerator=accelerator,
             checkpoint=checkpoint,
+            wandb_api_key="testing",
         )
 
         # Assert that wandb.init was called with expected arguments
@@ -1600,7 +1614,11 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.finish") as mock_wandb_finish:
+    with patch("agilerl.training.train.wandb.login") as _, patch(
+        "agilerl.training.train.wandb.init"
+    ) as _, patch("agilerl.training.train.wandb.log") as _, patch(
+        "agilerl.training.train_on_policy.wandb.finish"
+    ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
         agilerl.training.train_on_policy.train_on_policy(
             env,
@@ -1618,6 +1636,7 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
             tournament=tournament,
             mutation=mutations,
             wb=True,
+            wandb_api_key="testing",
         )
         # Assert that wandb.finish was called
         mock_wandb_finish.assert_called()
@@ -1733,7 +1752,7 @@ def test_train_multi_wandb_init_log(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch(
+    with patch("agilerl.training.train.wandb.login") as _, patch(
         "agilerl.training.train_multi_agent.wandb.init"
     ) as mock_wandb_init, patch(
         "agilerl.training.train_multi_agent.wandb.log"
@@ -1763,6 +1782,7 @@ def test_train_multi_wandb_init_log(
             mutation=mutations,
             wb=True,
             accelerator=accelerator,
+            wandb_api_key="testing",
         )
 
         # Assert that wandb.init was called with expected arguments
@@ -1803,7 +1823,11 @@ def test_multi_agent_early_stop(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.finish") as mock_wandb_finish:
+    with patch("agilerl.training.train.wandb.login") as _, patch(
+        "agilerl.training.train.wandb.init"
+    ) as _, patch("agilerl.training.train.wandb.log") as _, patch(
+        "agilerl.training.train_multi_agent.wandb.finish"
+    ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
         agilerl.training.train_multi_agent.train_multi_agent(
             multi_env,
@@ -1823,6 +1847,7 @@ def test_multi_agent_early_stop(
             tournament=tournament,
             mutation=mutations,
             wb=True,
+            wandb_api_key="testing",
         )
         # Assert that wandb.finish was called
         mock_wandb_finish.assert_called()
@@ -2040,7 +2065,7 @@ def test_train_offline_wandb_calls(
             "ACT_MUT": 0.2,
             "RL_HP_MUT": 0.2,
         }
-        with patch(
+        with patch("agilerl.training.train.wandb.login") as _, patch(
             "agilerl.training.train_offline.wandb.init"
         ) as mock_wandb_init, patch(
             "agilerl.training.train_offline.wandb.log"
@@ -2066,6 +2091,7 @@ def test_train_offline_wandb_calls(
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
+                wandb_api_key="testing",
             )
 
             # Assert that wandb.init was called with expected arguments
@@ -2113,7 +2139,11 @@ def test_train_offline_early_stop(
             "ACT_MUT": 0.2,
             "RL_HP_MUT": 0.2,
         }
-        with patch("agilerl.training.train_offline.wandb.finish") as mock_wandb_finish:
+        with patch("agilerl.training.train_offline.wandb.login") as _, patch(
+            "agilerl.training.train.wandb.init"
+        ) as _, patch("agilerl.training.train.wandb.log") as _, patch(
+            "agilerl.training.train_offline.wandb.finish"
+        ) as mock_wandb_finish:
             # Call the function that should trigger wandb.init
             agilerl.training.train_offline.train_offline(
                 env,
@@ -2134,6 +2164,7 @@ def test_train_offline_early_stop(
                 mutation=mutations,
                 wb=True,
                 accelerator=accelerator,
+                wandb_api_key="testing",
             )
             # Assert that wandb.finish was called
             mock_wandb_finish.assert_called()

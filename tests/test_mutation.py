@@ -1100,7 +1100,7 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent():
         "arch": "cnn",
         "h_size": [8],
         "c_size": [3],
-        "k_size": [(1, 3, 3), (1, 3, 3)],
+        "k_size": [(1, 3, 3)],
         "s_size": [1],
         "normalize": False,
     }
@@ -1219,7 +1219,7 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent():
         "arch": "cnn",
         "h_size": [8],
         "c_size": [3],
-        "k_size": [(1, 3, 3), (1, 3, 3)],
+        "k_size": [(1, 3, 3)],
         "s_size": [1],
         "normalize": False,
     }
@@ -1333,7 +1333,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent():
         "arch": "cnn",
         "h_size": [8],
         "c_size": [3],
-        "k_size": [(1, 3, 3), (1, 3, 3)],
+        "k_size": [(1, 3, 3)],
         "s_size": [1],
         "normalize": False,
     }
