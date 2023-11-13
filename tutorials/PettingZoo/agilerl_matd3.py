@@ -49,7 +49,7 @@ if __name__ == "__main__":
         one_hot = True
     except Exception:
         state_dim = [
-            env.observation_space(agent)["observation"].shape for agent in env.agents
+            env.observation_space(agent).shape for agent in env.agents
         ]
         one_hot = False
     try:
