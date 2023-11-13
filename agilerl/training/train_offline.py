@@ -1,4 +1,5 @@
 import os
+import warnings
 from datetime import datetime
 
 import numpy as np
@@ -35,6 +36,7 @@ def train_offline(
     accelerator=None,
     minari_dataset_id=None,
     remote=False,
+    wandb_api_key=None,
 ):
     """The general offline RL training function. Returns trained population of agents and their fitnesses.
 
@@ -76,8 +78,33 @@ def train_offline(
     :type verbose: bool, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param wandb_api_key: API key for Weights & Biases, defaults to None
+    :type wandb_api_key: str, optional
     """
+    assert isinstance(
+        algo, str
+    ), "'algo' must be the name of the algorithm as a string."
+    assert isinstance(n_episodes, int), "Number of episodes must be an integer."
+    assert isinstance(max_steps, int), "Number of steps must be an integer."
+    assert isinstance(evo_epochs, int), "Evolution frequency must be an integer."
+    if target is not None:
+        assert isinstance(
+            target, (float, int)
+        ), "Target score must be a float or an integer."
+    if checkpoint is not None:
+        assert isinstance(checkpoint, int), "Checkpoint must be an integer."
+    assert isinstance(
+        wb, bool
+    ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
+    assert isinstance(verbose, bool), "Verbose must be a boolean."
+
     if wb:
+        if not hasattr(wandb, "api"):
+            if wandb_api_key is not None:
+                wandb.login(key=wandb_api_key)
+            else:
+                warnings.warn("Must login to wandb with API key.")
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
