@@ -387,6 +387,8 @@ def test_sample_nstep_experiences_from_memory():
     next_state = np.array([5, 6, 7, 8])
     done = np.array([False])
 
+    print(state, state.shape)
+
     replay_buffer.save2memory(state, action, reward, next_state, done)
     replay_buffer.save2memory(state, action, reward, next_state, done)
     replay_buffer.save2memory(state, action, reward, next_state, done)
@@ -489,7 +491,7 @@ def test_calculates_n_step_reward():
     result = replay_buffer._get_n_step_info(n_step_buffer, gamma)
 
     expected_reward = 1 + gamma * (2 + gamma * (3 + gamma * (4 + gamma * 5)))
-    assert np.array_equal(result[2], np.array([[expected_reward]]))
+    assert np.array_equal(result[2], np.array([expected_reward]))
 
 
 ##### PrioritizedReplayBuffer class tests #####
