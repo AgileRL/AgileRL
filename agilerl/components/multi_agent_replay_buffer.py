@@ -47,7 +47,11 @@ class MultiAgentReplayBuffer:
         for field in self.field_names:
             field_dict = {}
             for agent_id in self.agent_ids:
-                ts = [getattr(e, field)[agent_id] for e in experiences if e is not None]
+                ts = [
+                    np.expand_dims(getattr(e, field)[agent_id], axis=0)
+                    for e in experiences
+                    if e is not None
+                ]
 
                 # Handle numpy stacking
                 ts = np.vstack(ts)
