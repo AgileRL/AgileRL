@@ -156,7 +156,7 @@ if __name__ == "__main__":
             agent_reward = {agent_id: 0 for agent_id in env.agents}
             if INIT_HP["CHANNELS_LAST"]:
                 state = {
-                    agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
+                    agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                     for agent_id, s in state.items()
                 }
             for _ in range(max_steps):
@@ -184,15 +184,11 @@ if __name__ == "__main__":
                 if INIT_HP["CHANNELS_LAST"]:
                     state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                     next_state = {
-                        agent_id: np.moveaxis(ns, [2], [0])
+                        agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_state.items()
                     }
 
-                # Stop episode if any agents have terminated
-                if any(truncation.values()) or any(termination.values()):
-                    break
-
-                # Save experiences to replay buffe
+                # Save experiences to replay buffer
                 memory.save2memory(state, cont_actions, reward, next_state, termination)
 
                 # Collect the reward
@@ -215,6 +211,10 @@ if __name__ == "__main__":
                         for agent_id, ns in next_state.items()
                     }
                 state = next_state
+
+                # Stop episode if any agents have terminated
+                if any(truncation.values()) or any(termination.values()):
+                    break
 
             # Save the total episode reward
             score = sum(agent_reward.values())

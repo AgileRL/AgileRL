@@ -196,33 +196,43 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 .. code-block:: python
 
-    from agilerl.utils.utils import initialPopulation
-    from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.hpo.mutation import Mutations
-    from pettingzoo.mpe import simple_speaker_listener_v4
+    import os
+
     import numpy as np
     import torch
+    from pettingzoo.mpe import simple_speaker_listener_v4
+    from tqdm import trange
 
-    NET_CONFIG = {
-        'arch': 'mlp',          # Network architecture
-        'h_size': [32, 32],     # Actor hidden size
-    }
+    from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.utils.utils import initialPopulation
 
-    INIT_HP = {
-        'ALGO': 'MADDPG',                  # Algorithm
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        'BATCH_SIZE': 1024,             # Batch size
-        'LR': 0.01,                     # Learning rate
-        'EPISODES': 10_000,             # Max no. episodes
-        'GAMMA': 0.95,                  # Discount factor
-        'MEMORY_SIZE': 1_000_000,       # Max memory buffer size
-        'LEARN_STEP': 5,                # Learning frequency
-        'TAU': 0.01,                    # For soft update of target parameters
-        'CHANNELS_LAST': False          # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Define the network configuration
+    NET_CONFIG = {
+        "arch": "mlp",  # Network architecture
+        "h_size": [32, 32],  # Actor hidden size
+    }
+
+    # Define the initial hyperparameters
+    INIT_HP = {
+        "POPULATION_SIZE": 4,
+        "ALGO": "MATD3",  # Algorithm
+        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        "CHANNELS_LAST": False,
+        "BATCH_SIZE": 32,  # Batch size
+        "LR": 0.01,  # Learning rate
+        "GAMMA": 0.95,  # Discount factor
+        "MEMORY_SIZE": 100000,  # Max memory buffer size
+        "LEARN_STEP": 5,  # Learning frequency
+        "TAU": 0.01,  # For soft update of target parameters
+        "POLICY_FREQ": 2,  # Policy frequnecy
+    }
+
+    # Define the simple speaker listener environment as a parallel environment
     env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
     env.reset()
 
@@ -235,80 +245,97 @@ Alternatively, use a custom training loop. Combining all of the above:
         one_hot = False
     try:
         action_dim = [env.action_space(agent).n for agent in env.agents]
-        INIT_HP['DISCRETE_ACTIONS'] = True
-        INIT_HP['MAX_ACTION'] = None
-        INIT_HP['MIN_ACTION'] = None
+        INIT_HP["DISCRETE_ACTIONS"] = True
+        INIT_HP["MAX_ACTION"] = None
+        INIT_HP["MIN_ACTION"] = None
     except Exception:
         action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP['DISCRETE_ACTIONS'] = False
-        INIT_HP['MAX_ACTION'] = [env.action_space(agent).high for agent in env.agents]
-        INIT_HP['MIN_ACTION'] = [env.action_space(agent).low for agent in env.agents]
+        INIT_HP["DISCRETE_ACTIONS"] = False
+        INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
+        INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
 
-    if INIT_HP['CHANNELS_LAST']:
-        state_dim = [(state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim]
+    # Not applicable to MPE environments, used when images are used for observations (Atari environments)
+    if INIT_HP["CHANNELS_LAST"]:
+        state_dim = [
+            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim
+        ]
 
-    INIT_HP['N_AGENTS'] = env.num_agents
-    INIT_HP['AGENT_IDS'] = [agent_id for agent_id in env.agents]
+    # Append number of agents and agent IDs to the initial hyperparameter dictionary
+    INIT_HP["N_AGENTS"] = env.num_agents
+    INIT_HP["AGENT_IDS"] = env.agents
 
-    agent_pop = initialPopulation(algo=INIT_HP['ALGO'],
-                                  state_dim=state_dim,
-                                  action_dim=action_dim,
-                                  one_hot=one_hot,
-                                  net_config=NET_CONFIG,
-                                  INIT_HP=INIT_HP,
-                                  population_size=6,
-                                  device=device)
+    # Create a population ready for evolutionary hyper-parameter optimisation
+    pop = initialPopulation(
+        INIT_HP["ALGO"],
+        state_dim,
+        action_dim,
+        one_hot,
+        NET_CONFIG,
+        INIT_HP,
+        population_size=INIT_HP["POPULATION_SIZE"],
+        device=device,
+    )
 
+    # Configure the multi-agent replay buffer
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = MultiAgentReplayBuffer(memory_size=1_000_000,        # Max replay buffer size
-                                    field_names=field_names,  # Field names to store in memory
-                                    agent_ids=INIT_HP['AGENT_IDS'],
-                                    device=torch.device("cuda"))
+    memory = MultiAgentReplayBuffer(
+        INIT_HP["MEMORY_SIZE"],
+        field_names=field_names,
+        agent_ids=INIT_HP["AGENT_IDS"],
+        device=device,
+    )
 
-    tournament = TournamentSelection(tournament_size=2, # Tournament selection size
-                                     elitism=True,      # Elitism in tournament selection
-                                     population_size=6, # Population size
-                                     evo_step=1)        # Evaluate using last N fitness scores
+    # Instantiate a tournament selection object (used for HPO)
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        evo_step=1,
+    )  # Evaluate using last N fitness scores
 
-    mutations = Mutations(algo=INIT_HP['ALGO'],                           # Algorithm
-                          no_mutation=0.4,                      # No mutation
-                          architecture=0.2,                     # Architecture mutation
-                          new_layer_prob=0.2,                   # New layer mutation
-                          parameters=0.2,                       # Network parameters mutation
-                          activation=0,                         # Activation layer mutation
-                          rl_hp=0.2,                            # Learning HP mutation
-                          rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
-                          mutation_sd=0.1,                      # Mutation strength
-                          agent_ids=INIT_HP['AGENT_IDS'],
-                          arch=NET_CONFIG['arch'],              # Network architecture
-                          rand_seed=1,                          # Random seed
-                          device=torch.device("cuda"))
+    # Instantiate a mutations object (used for HPO)
+    mutations = Mutations(
+        algo=INIT_HP["ALGO"],
+        no_mutation=0.2,  # Probability of no mutation
+        architecture=0.2,  # Probability of architecture mutation
+        new_layer_prob=0.2,  # Probability of new layer mutation
+        parameters=0.2,  # Probability of parameter mutation
+        activation=0,  # Probability of activation function mutation
+        rl_hp=0.2,  # Probability of RL hyperparameter mutation
+        rl_hp_selection=[
+            "lr",
+            "learn_step",
+            "batch_size",
+        ],  # RL hyperparams selected for mutation
+        mutation_sd=0.1,  # Mutation strength
+        agent_ids=INIT_HP["AGENT_IDS"],
+        arch=NET_CONFIG["arch"],
+        rand_seed=1,
+        device=device,
+    )
 
-    max_episodes = 10_000 # Max training episodes
-    max_steps = 25        # Max steps per episode
+    # Define training loop parameters
+    max_episodes = 500  # Total episodes (default: 6000)
+    max_steps = 25  # Maximum steps to take in each episode
+    epsilon = 1.0  # Starting epsilon value
+    eps_end = 0.1  # Final epsilon value
+    eps_decay = 0.995  # Epsilon decay
+    evo_epochs = 20  # Evolution frequency
+    evo_loop = 1  # Number of evaluation episodes
+    elite = pop[0]  # Assign a placeholder "elite" agent
 
-    # Exploration params
-    eps_start = 1.0     # Max exploration
-    eps_end = 0.1       # Min exploration
-    eps_decay = 0.995   # Decay per episode
-    epsilon = eps_start
-
-    evo_epochs = 5      # Evolution frequency
-    evo_loop = 1        # Number of evaluation episodes
-
-    # TRAINING LOOP
-    for idx_epi in range(max_episodes):
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        for agent in pop:   # Loop through population
+    # Training loop
+    for idx_epi in trange(max_episodes):
+        for agent in pop:  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
+            if INIT_HP["CHANNELS_LAST"]:
+                state = {
+                    agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                    for agent_id, s in state.items()
+                }
 
-            while env.agents:
-                total_steps += 1
-                if swap_channels:
-                    state = np.moveaxis(state, [3], [1])
-
+            for _ in range(max_steps):
                 agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
                 env_defined_actions = (
                     info["env_defined_actions"]
@@ -329,54 +356,78 @@ Alternatively, use a custom training loop. Combining all of the above:
                     action
                 )  # Act in environment
 
-                next_state, reward, done, _, info = env.step(action)   # Act in environment
+                # Image processing if necessary for the environment
+                if INIT_HP["CHANNELS_LAST"]:
+                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                    next_state = {
+                        agent_id: np.moveaxis(ns, [-1], [-3])
+                        for agent_id, ns in next_state.items()
+                    }
 
-                # Save experience to replay buffer
-                if swap_channels:
-                    memory.save2memory(
-                        state, action, reward, np.moveaxis(next_state, [3], [1]), done)
-                else:
-                    memory.save2memory(
-                        state, cont_actions, reward, next_state, done)
+                # Save experiences to replay buffer
+                memory.save2memory(state, cont_actions, reward, next_state, termination)
 
+                # Collect the reward
                 for agent_id, r in reward.items():
                     agent_reward[agent_id] += r
 
-                #Learn according to learning frequency
-                if (memory.counter % agent.learn_step == 0) and (len(
-                        memory) >= agent.batch_size):
-                    # Sample replay buffer
-                    experiences = sampler.sample(agent.batch_size)
-                    # Learn according to agent's RL algorithm
-                    agent.learn(experiences)
+                # Learn according to learning frequency
+                if (memory.counter % agent.learn_step == 0) and (
+                    len(memory) >= agent.batch_size
+                ):
+                    experiences = memory.sample(
+                        agent.batch_size
+                    )  # Sample replay buffer
+                    agent.learn(experiences)  # Learn according to agent's RL algorithm
 
+                # Update the state
+                if INIT_HP["CHANNELS_LAST"]:
+                    next_state = {
+                        agent_id: np.expand_dims(ns, 0)
+                        for agent_id, ns in next_state.items()
+                    }
                 state = next_state
 
+                # Stop episode if any agents have terminated
+                if any(truncation.values()) or any(termination.values()):
+                    break
+
+            # Save the total episode reward
             score = sum(agent_reward.values())
             agent.scores.append(score)
-
-            agent.steps[-1] += total_steps
 
         # Update epsilon for exploration
         epsilon = max(eps_end, epsilon * eps_decay)
 
         # Now evolve population if necessary
-        if (idx_epi+1) % evo_epochs == 0:
-
+        if (idx_epi + 1) % evo_epochs == 0:
             # Evaluate population
-            fitnesses = [agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop) for agent in pop]
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=INIT_HP["CHANNELS_LAST"],
+                    max_steps=max_steps,
+                    loop=evo_loop,
+                )
+                for agent in pop
+            ]
 
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
-
-            print(f'Episode {idx_epi+1}/{max_episodes}')
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+            print(f"Episode {idx_epi + 1}/{max_episodes}")
+            print(f'Fitnesses: {["%.2f" % fitness for fitness in fitnesses]}')
+            print(
+                f'100 fitness avgs: {["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]}'
+            )
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+
+    # Save the trained algorithm
+    path = "./models/MATD3"
+    filename = "MATD3_trained_agent.pt"
+    os.makedirs(path, exist_ok=True)
+    save_path = os.path.join(path, filename)
+    elite.saveCheckpoint(save_path)
 
 Agent Masking
 -------------

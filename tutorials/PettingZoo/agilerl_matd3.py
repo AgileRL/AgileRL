@@ -122,7 +122,7 @@ if __name__ == "__main__":
     )
 
     # Define training loop parameters
-    max_episodes = 5  # Total episodes (default: 6000)
+    max_episodes = 500  # Total episodes (default: 6000)
     max_steps = 25  # Maximum steps to take in each episode
     epsilon = 1.0  # Starting epsilon value
     eps_end = 0.1  # Final epsilon value
@@ -138,7 +138,7 @@ if __name__ == "__main__":
             agent_reward = {agent_id: 0 for agent_id in env.agents}
             if INIT_HP["CHANNELS_LAST"]:
                 state = {
-                    agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
+                    agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                     for agent_id, s in state.items()
                 }
 
@@ -167,13 +167,9 @@ if __name__ == "__main__":
                 if INIT_HP["CHANNELS_LAST"]:
                     state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
                     next_state = {
-                        agent_id: np.moveaxis(ns, [2], [0])
+                        agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_state.items()
                     }
-
-                # Stop episode if any agents have terminated
-                if any(truncation.values()) or any(termination.values()):
-                    break
 
                 # Save experiences to replay buffer
                 memory.save2memory(state, cont_actions, reward, next_state, termination)
@@ -198,6 +194,10 @@ if __name__ == "__main__":
                         for agent_id, ns in next_state.items()
                     }
                 state = next_state
+
+                # Stop episode if any agents have terminated
+                if any(truncation.values()) or any(termination.values()):
+                    break
 
             # Save the total episode reward
             score = sum(agent_reward.values())
