@@ -584,7 +584,6 @@ class MATD3:
                     q_value_next_state_2 = critic_target_2(
                         stacked_next_states, stacked_next_actions
                     )
-            print(q_value_next_state_1, q_value_next_state_2)
             q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
             y_j = (
