@@ -81,7 +81,9 @@ class TD3:
         assert isinstance(
             state_dim, (list, tuple)
         ), "State dimension must be a list or tuple."
-        assert isinstance(action_dim, int), "Action dimension must be an integer."
+        assert isinstance(
+            action_dim, (int, np.integer)
+        ), "Action dimension must be an integer."
         assert isinstance(
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."

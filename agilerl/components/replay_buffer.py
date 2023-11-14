@@ -46,7 +46,11 @@ class ReplayBuffer:
         """Returns transition dictionary from experiences."""
         transition = {}
         for field in self.field_names:
-            ts = [getattr(e, field) for e in experiences if e is not None]
+            ts = [
+                np.expand_dims(getattr(e, field), axis=0)
+                for e in experiences
+                if e is not None
+            ]
             ts = np.vstack(ts)
 
             # Handle numpy stacking
@@ -211,12 +215,12 @@ class MultiStepReplayBuffer(ReplayBuffer):
         t = [n_step_buffer[-1]]
         transition = self._process_transition(t, np_array=True)
 
-        vect_reward = transition["reward"]
-        vect_next_state = transition["next_state"]
+        vect_reward = transition["reward"][0]
+        vect_next_state = transition["next_state"][0]
         if "done" in transition.keys():
-            vect_done = transition["done"]
+            vect_done = transition["done"][0]
         else:
-            vect_done = transition["termination"]
+            vect_done = transition["termination"][0]
 
         for ts in reversed(list(n_step_buffer)[:-1]):
             vect_r, vect_n_s, vect_d = (
@@ -238,6 +242,8 @@ class MultiStepReplayBuffer(ReplayBuffer):
             transition["done"] = vect_done
         else:
             transition["termination"] = vect_done
+        transition["state"] = transition["state"][0]
+        transition["action"] = transition["action"][0]
 
         return tuple(transition.values())
 
