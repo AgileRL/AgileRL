@@ -1387,7 +1387,7 @@ def test_train_save_elite(env, population_off_policy, tournament, mutations, mem
         save_elite=True,
         elite_path=elite_path,
     )
-    assert os.path.isfile(elite_path) 
+    assert os.path.isfile(elite_path)
     os.remove(elite_path)
 
 
@@ -1749,7 +1749,7 @@ def test_train_on_policy_save_elite(
         elite_path=elite_path,
         accelerator=accelerator,
     )
-    assert os.path.isfile(f"{elite_path}.pt") 
+    assert os.path.isfile(f"{elite_path}.pt")
     os.remove(f"{elite_path}.pt")
 
 
@@ -1785,7 +1785,7 @@ def test_train_on_policy_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") 
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
@@ -2171,7 +2171,7 @@ def test_train_multi_save_elite(
         elite_path=elite_path,
         accelerator=accelerator,
     )
-    assert os.path.isfile(f"{elite_path}.pt") 
+    assert os.path.isfile(f"{elite_path}.pt")
     os.remove(f"{elite_path}.pt")
 
 
@@ -2212,7 +2212,7 @@ def test_train_multi_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") 
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
@@ -2572,7 +2572,7 @@ def test_train_offline_save_elite(
         save_elite=True,
         elite_path=elite_path,
     )
-    assert os.path.isfile(f"{elite_path}.pt") 
+    assert os.path.isfile(f"{elite_path}.pt")
     os.remove(f"{elite_path}.pt")
 
 
@@ -2617,5 +2617,5 @@ def test_train_offline_save_checkpoint(
         checkpoint_path=checkpoint_path,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") 
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
