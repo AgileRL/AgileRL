@@ -129,6 +129,9 @@ def train(
         wb, bool
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
+    if save_elite == False and elite_path is not None:
+        warnings.warn("'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True.")
 
     if wb:
         if not hasattr(wandb, "api"):
