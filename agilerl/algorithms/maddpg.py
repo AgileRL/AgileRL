@@ -26,10 +26,10 @@ class MADDPG:
     :type n_agents: int
     :param agent_ids: Agent ID for each agent
     :type agent_ids: list[str]
-    :param max_action: Upper bound of the action space
-    :type max_action: float
-    :param min_action: Lower bound of the action space
-    :type min_action: float
+    :param max_action: Upper bound of the action space for each agent
+    :type max_action: list[float]
+    :param min_action: Lower bound of the action space for each agent
+    :type min_action: list[float]
     :param discrete_actions: Boolean flag to indicate a discrete action space
     :type discrete_actions: bool, optional
     :param expl_noise: Standard deviation for Gaussian exploration noise, defaults to 0.1
@@ -99,6 +99,13 @@ class MADDPG:
         assert isinstance(
             discrete_actions, bool
         ), "Discrete actions flag must be a boolean value True or False."
+        assert isinstance(max_action, list), "Max action must be a list."
+        assert isinstance(min_action, list), "Min action must be a list."
+        for x, n in zip(max_action, min_action):
+            x, n = x[0], n[0]
+            assert x > n, "Max action must be greater than min action."
+            assert x > 0, "Max action must be greater than zero."
+            assert n <= 0, "Min action must be less than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -167,24 +174,26 @@ class MADDPG:
             else:
                 if self.discrete_actions:
                     self.net_config["output_activation"] = "GumbelSoftmax"
-                else:
-                    self.net_config["output_activation"] = "Softmax"
+
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-                self.actors = [
-                    EvolvableMLP(
-                        num_inputs=state_dim[0],
-                        num_outputs=action_dim,
-                        hidden_size=self.net_config["h_size"],
-                        mlp_output_activation=self.net_config["output_activation"],
-                        device=self.device,
-                        accelerator=self.accelerator,
+                self.actors = []
+                for action_dim, state_dim in zip(self.action_dims, self.state_dims):
+                    if not self.discrete_actions:
+                        if self.min_action < 0:
+                            self.net_config["output_activation"] = "Tanh"
+                        else:
+                            self.net_config["output_activation"] = "Sigmoid"
+                    self.actors.append(
+                        EvolvableMLP(
+                            num_inputs=state_dim[0],
+                            num_outputs=action_dim,
+                            hidden_size=self.net_config["h_size"],
+                            mlp_output_activation=self.net_config["output_activation"],
+                            device=self.device,
+                            accelerator=self.accelerator,
+                        )
                     )
-                    for (action_dim, state_dim) in zip(
-                        self.action_dims, self.state_dims
-                    )
-                ]
-
                 self.critics = [
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
@@ -198,25 +207,29 @@ class MADDPG:
                 ]
 
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                self.actors = [
-                    EvolvableCNN(
-                        input_shape=state_dim,
-                        num_actions=action_dim,
-                        channel_size=self.net_config["c_size"],
-                        kernel_size=self.net_config["k_size"],
-                        stride_size=self.net_config["s_size"],
-                        hidden_size=self.net_config["h_size"],
-                        normalize=self.net_config["normalize"],
-                        mlp_output_activation=self.net_config["output_activation"],
-                        multi=self.multi,
-                        n_agents=self.n_agents,
-                        device=self.device,
-                        accelerator=self.accelerator,
+                self.actors = []
+                for action_dim, state_dim in zip(self.action_dims, self.state_dims):
+                    if not self.discrete_actions:
+                        if self.min_action < 0:
+                            self.net_config["output_activation"] = "Tanh"
+                        else:
+                            self.net_config["output_activation"] = "Sigmoid"
+                    self.actors.append(
+                        EvolvableCNN(
+                            input_shape=state_dim,
+                            num_actions=action_dim,
+                            channel_size=self.net_config["c_size"],
+                            kernel_size=self.net_config["k_size"],
+                            stride_size=self.net_config["s_size"],
+                            hidden_size=self.net_config["h_size"],
+                            normalize=self.net_config["normalize"],
+                            mlp_output_activation=self.net_config["output_activation"],
+                            multi=self.multi,
+                            n_agents=self.n_agents,
+                            device=self.device,
+                            accelerator=self.accelerator,
+                        )
                     )
-                    for (action_dim, state_dim) in zip(
-                        self.action_dims, self.state_dims
-                    )
-                ]
                 self.critics = [
                     EvolvableCNN(
                         input_shape=state_dim,
@@ -278,6 +291,18 @@ class MADDPG:
             self.critic_optimizers = self.critic_optimizers_type
 
         self.criterion = nn.MSELoss()
+
+    def scale_to_action_space(self, action, idx):
+        """Scales actions to action space defined by self.min_action and self.max_action.
+
+        :param action: Action to be scaled
+        :type action: numpy.ndarray
+        """
+        return np.where(
+            action > 0,
+            action * self.max_action[idx][0],
+            action * -self.min_action[idx][0],
+        )
 
     def getAction(self, states, epsilon=0, agent_mask=None, env_defined_actions=None):
         """Returns the next action to take in the environment.
@@ -354,10 +379,11 @@ class MADDPG:
                     )
                 else:
                     action = (
-                        np.random.rand(state.size()[0], self.action_dims[idx])
+                        (self.max_action - self.min_action)
+                        * np.random.rand(state.size()[0], self.action_dims[idx])
                         .astype("float32")
                         .squeeze()
-                    )
+                    ) + self.min_action
             else:
                 actor.eval()
                 if self.accelerator is not None:
@@ -370,17 +396,15 @@ class MADDPG:
                 if self.discrete_actions:
                     action = action_values.cpu().data.numpy().squeeze()
                 else:
+                    action = self.scale_to_action_space(
+                        action_values.cpu().data.numpy(), idx
+                    )
                     action = (
-                        action_values.cpu().data.numpy().squeeze()
+                        action
                         + np.random.normal(
-                            0,
-                            self.max_action[idx][0] * self.expl_noise,
-                            size=self.action_dims[idx],
+                            0, self.expl_noise, size=self.action_dims[idx]
                         ).astype(np.float32)
-                    )
-                    action = np.clip(
-                        action, self.min_action[idx][0], self.max_action[idx][0]
-                    )
+                    ).clip(self.min_action[idx][0], self.max_action[idx][0])
             action_dict[agent_id] = action
 
         if self.discrete_actions:
@@ -424,7 +448,7 @@ class MADDPG:
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
 
-        for (
+        for idx, (
             agent_id,
             actor,
             actor_target,
@@ -432,14 +456,16 @@ class MADDPG:
             critic_target,
             actor_optimizer,
             critic_optimizer,
-        ) in zip(
-            self.agent_ids,
-            self.actors,
-            self.actor_targets,
-            self.critics,
-            self.critic_targets,
-            self.actor_optimizers,
-            self.critic_optimizers,
+        ) in enumerate(
+            zip(
+                self.agent_ids,
+                self.actors,
+                self.actor_targets,
+                self.critics,
+                self.critic_targets,
+                self.actor_optimizers,
+                self.critic_optimizers,
+            )
         ):
             states, actions, rewards, next_states, dones = experiences
 
@@ -473,10 +499,20 @@ class MADDPG:
                         q_value = critic(input_combined)
                 else:
                     q_value = critic(input_combined)
-                next_actions = [
-                    self.actor_targets[idx](next_states[agent_id]).detach_()
-                    for idx, agent_id in enumerate(self.agent_ids)
-                ]
+                    next_actions = []
+                for i, agent_id_label in enumerate(self.agent_ids):
+                    unscaled_actions = self.actor_targets[i](
+                        next_states[agent_id_label]
+                    ).detach_()
+                    if not self.discrete_actions:
+                        scaled_actions = torch.where(
+                            unscaled_actions > 0,
+                            unscaled_actions * self.max_action[i][0],
+                            unscaled_actions * -self.min_action[i][0],
+                        )
+                        next_actions.append(scaled_actions)
+                    else:
+                        next_actions.append(unscaled_actions)
 
             elif self.arch == "cnn":
                 stacked_states = torch.stack(list(states.values()), dim=2)
@@ -486,12 +522,20 @@ class MADDPG:
                         q_value = critic(stacked_states, stacked_actions)
                 else:
                     q_value = critic(stacked_states, stacked_actions)
-                next_actions = [
-                    self.actor_targets[idx](
-                        next_states[agent_id].unsqueeze(2)
+                next_actions = []
+                for i, agent_id_label in enumerate(self.agent_ids):
+                    unscaled_actions = self.actor_targets[i](
+                        next_states[agent_id_label].unsqueeze(2)
                     ).detach_()
-                    for idx, agent_id in enumerate(self.agent_ids)
-                ]
+                    if not self.discrete_actions:
+                        scaled_actions = torch.where(
+                            unscaled_actions > 0,
+                            unscaled_actions * self.max_action[i][0],
+                            unscaled_actions * -self.min_action[i][0],
+                        )
+                        next_actions.append(scaled_actions)
+                    else:
+                        next_actions.append(unscaled_actions)
 
             if self.arch == "mlp":
                 next_input_combined = torch.cat(
@@ -537,6 +581,12 @@ class MADDPG:
                         action = actor(states[agent_id])
                 else:
                     action = actor(states[agent_id])
+                if not self.discrete_actions:
+                    action = torch.where(
+                        action > 0,
+                        action * self.max_action[idx][0],
+                        action * -self.min_action[idx][0],
+                    )
                 detached_actions = copy.deepcopy(actions)
                 detached_actions[agent_id] = action
                 input_combined = torch.cat(
@@ -554,6 +604,12 @@ class MADDPG:
                         action = actor(states[agent_id].unsqueeze(2))
                 else:
                     action = actor(states[agent_id].unsqueeze(2))
+                if not self.discrete_actions:
+                    action = torch.where(
+                        action > 0,
+                        action * self.max_action[idx][0],
+                        action * -self.min_action[idx][0],
+                    )
                 detached_actions = copy.deepcopy(actions)
                 detached_actions[agent_id] = action
                 stacked_detached_actions = torch.cat(
