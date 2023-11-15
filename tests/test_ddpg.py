@@ -964,3 +964,31 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ddpg.scores == []
     assert ddpg.fitness == []
     assert ddpg.steps == [0]
+
+
+# Returns the input action scaled to the action space defined by self.min_action and self.max_action.
+def test_action_scaling():
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=1, min_action=-1)
+    scaled_action = ddpg.scale_to_action_space(action)
+    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
+
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-2)
+    scaled_action = ddpg.scale_to_action_space(action)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
+
+    action = np.array([0.1, 0.2, 0.3, 0])
+    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=1, min_action=0)
+    scaled_action = ddpg.scale_to_action_space(action)
+    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
+
+    action = np.array([0.1, 0.2, 0.3, 0])
+    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=0)
+    scaled_action = ddpg.scale_to_action_space(action)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
+
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-1)
+    scaled_action = ddpg.scale_to_action_space(action)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
