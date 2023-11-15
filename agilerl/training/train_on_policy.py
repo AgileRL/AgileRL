@@ -14,8 +14,8 @@ def train_on_policy(
     env_name,
     algo,
     pop,
-    INIT_HP,
-    MUT_P,
+    INIT_HP=None,
+    MUT_P=None,
     swap_channels=False,
     n_episodes=2000,
     max_steps=500,
@@ -26,6 +26,8 @@ def train_on_policy(
     mutation=None,
     checkpoint=None,
     checkpoint_path=None,
+    save_elite=False,
+    elite_path=None,
     wb=False,
     verbose=True,
     accelerator=None,
@@ -42,6 +44,10 @@ def train_on_policy(
     :type algo: str
     :param pop: Population of agents
     :type pop: list[object]
+    :param INIT_HP: Dictionary containing initial hyperparameters, defaults to None
+    :type INIT_HP: dict, optional
+    :param MUT_P: Dictionary containing mutation parameters, defaults to None
+    :type MUT_P: dict, optional
     :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
@@ -62,6 +68,10 @@ def train_on_policy(
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
+    :param save_elite: Boolean flag indicating whether to save elite member at the end of training, defaults to False
+    :type save_elite: bool, optional
+    :param elite_path: Location to save elite agent, defaults to None
+    :type elite_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
     :param verbose: Display training stats, defaults to True
@@ -87,6 +97,16 @@ def train_on_policy(
         wb, bool
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
+    if save_elite is False and elite_path is not None:
+        warnings.warn(
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
+        )
+    if checkpoint is None and checkpoint_path is not None:
+        warnings.warn(
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
+        )
 
     if wb:
         if not hasattr(wandb, "api"):
@@ -107,15 +127,15 @@ def train_on_policy(
                     config={
                         "algo": f"Evo HPO {algo}",
                         "env": env_name,
-                        "batch_size": INIT_HP["BATCH_SIZE"],
-                        "lr": INIT_HP["LR"],
-                        "gamma": INIT_HP["GAMMA"],
-                        "pop_size": INIT_HP["POP_SIZE"],
-                        "no_mut": MUT_P["NO_MUT"],
-                        "arch_mut": MUT_P["ARCH_MUT"],
-                        "params_mut": MUT_P["PARAMS_MUT"],
-                        "act_mut": MUT_P["ACT_MUT"],
-                        "rl_hp_mut": MUT_P["RL_HP_MUT"],
+                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                        "lr": INIT_HP["LR"] if INIT_HP else None,
+                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
                     },
                 )
             accelerator.wait_for_everyone()
@@ -130,15 +150,15 @@ def train_on_policy(
                 config={
                     "algo": f"Evo HPO {algo}",
                     "env": env_name,
-                    "batch_size": INIT_HP["BATCH_SIZE"],
-                    "lr": INIT_HP["LR"],
-                    "gamma": INIT_HP["GAMMA"],
-                    "pop_size": INIT_HP["POP_SIZE"],
-                    "no_mut": MUT_P["NO_MUT"],
-                    "arch_mut": MUT_P["ARCH_MUT"],
-                    "params_mut": MUT_P["PARAMS_MUT"],
-                    "act_mut": MUT_P["ACT_MUT"],
-                    "rl_hp_mut": MUT_P["RL_HP_MUT"],
+                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                    "lr": INIT_HP["LR"] if INIT_HP else None,
+                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
                 },
             )
 
@@ -327,6 +347,16 @@ def train_on_policy(
                     elite, pop = tournament.select(pop)
                     pop = mutation.mutation(pop)
 
+                if save_elite and (idx_epi + 1 == n_episodes):
+                    elite_save_path = (
+                        elite_path.split(".pt")[0]
+                        if elite_path is not None
+                        else "{}-elite_{}-{}".format(
+                            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+                        )
+                    )
+                    elite.saveCheckpoint(f"{elite_save_path}.pt")
+
             if verbose:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
@@ -351,6 +381,7 @@ def train_on_policy(
 
         # Save model checkpoint
         if checkpoint is not None:
+            print("Checkpoint")
             if (idx_epi + 1) % checkpoint == 0:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
