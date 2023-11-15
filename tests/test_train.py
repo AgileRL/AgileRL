@@ -3,6 +3,10 @@ from unittest.mock import ANY, MagicMock, patch
 import numpy as np
 import pytest
 from accelerate import Accelerator
+from pathlib import Path
+import os
+import dill
+import torch
 
 import agilerl.training.train
 import agilerl.training.train_multi_agent
@@ -74,8 +78,11 @@ class DummyAgentOffPolicy:
         self.fitness.append(rand_int)
         return rand_int
 
-    def saveCheckpoint(self, *args):
-        return
+    def saveCheckpoint(self, path):
+        empty_dic = {}
+        torch.save(empty_dic, path,
+            pickle_module=dill)
+        return True
 
     def loadCheckpoint(self, *args):
         return
@@ -97,8 +104,8 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
 
-    def saveCheckpoint(self, *args):
-        return
+    def saveCheckpoint(self, path):
+        return super().saveCheckpoint(path)
 
     def loadCheckpoint(self, *args):
         return
@@ -149,8 +156,8 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
 
-    def saveCheckpoint(self, *args):
-        return
+    def saveCheckpoint(self, path):
+        return super().saveCheckpoint(path)
 
     def loadCheckpoint(self, *args):
         return
@@ -883,13 +890,13 @@ def test_train_agent_calls_made(
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
+            save_elite=True
         )
 
         mocked_agent_off_policy.getAction.assert_called()
         mocked_agent_off_policy.learn.assert_called()
         mocked_agent_off_policy.test.assert_called()
         if accelerator is not None:
-            mocked_agent_off_policy.saveCheckpoint.assert_called()
             mocked_agent_off_policy.wrap_models.assert_called()
             mocked_agent_off_policy.unwrap_models.assert_called()
 
@@ -1223,11 +1230,12 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, checkpoint, accelerator",
-    [((6,), 2, True, 5, True), ((6,), 2, True, 5, False), ((6,), 2, True, None, True)],
+    "state_size, action_size, vect, accelerator",
+    [((6,), 2, True, True), 
+     ((6,), 2, True, False),]
 )
 def test_wandb_init_log_distributed(
-    env, population_off_policy, tournament, mutations, memory, checkpoint, accelerator
+    env, population_off_policy, tournament, mutations, memory, accelerator
 ):
     if accelerator:
         accelerator = Accelerator()
@@ -1279,7 +1287,6 @@ def test_wandb_init_log_distributed(
             mutation=mutations,
             wb=True,
             accelerator=accelerator,
-            checkpoint=checkpoint,
             wandb_api_key="testing",
         )
 
@@ -1353,6 +1360,79 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         # Assert that wandb.finish was called
         mock_wandb_finish.assert_called()
 
+@pytest.mark.parametrize(
+    "state_size, action_size, vect", [((6,), 2, True)]
+)
+def test_train_save_elite(env, population_off_policy, tournament, mutations, memory):
+    elite_path =  "checkpoint.pt"
+    pop, pop_fitnesses = train(
+        env,
+        "env_name",
+        "algo",
+        population_off_policy,
+        memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        n_step=False,
+        per=False,
+        noisy=True,
+        n_step_memory=None,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        save_elite=True,
+        elite_path=elite_path
+    )
+    assert os.path.isfile(elite_path) == True
+    os.remove(elite_path)
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, accelerator_flag", 
+    [((6,), 2, True, True), ((6,), 2, True, False)]
+)
+def test_train_save_checkpoint(env, population_off_policy, tournament, mutations, memory, accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    checkpoint_path =  "checkpoint"
+    pop, pop_fitnesses = train(
+        env,
+        "env_name",
+        "algo",
+        population_off_policy,
+        memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        n_step=False,
+        per=False,
+        noisy=True,
+        n_step_memory=None,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        checkpoint=10,
+        checkpoint_path=checkpoint_path,
+        accelerator=accelerator
+    )
+    for i in range(6): # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
+    
+
+
+
+
 
 @pytest.mark.parametrize("state_size, action_size, vect, algo", [((6,), 2, True, PPO)])
 def test_train_on_policy_agent_calls_made(
@@ -1386,7 +1466,6 @@ def test_train_on_policy_agent_calls_made(
         mocked_agent_on_policy.learn.assert_called()
         mocked_agent_on_policy.test.assert_called()
         if accelerator is not None:
-            mocked_agent_on_policy.saveCheckpoint.assert_called()
             mocked_agent_on_policy.wrap_models.assert_called()
             mocked_agent_on_policy.unwrap_models.assert_called()
 
@@ -1522,11 +1601,12 @@ def test_train_on_policy_distributed(env, population_on_policy, tournament, muta
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator, checkpoint",
-    [((6,), 2, True, False, 5), ((6,), 2, True, False, None), ((6,), 2, True, True, 5)],
+    "state_size, action_size, vect, accelerator",
+    [((6,), 2, True, False ), 
+     ((6,), 2, True, True)],
 )
 def test_wandb_init_log_on_policy(
-    env, population_on_policy, tournament, mutations, accelerator, checkpoint
+    env, population_on_policy, tournament, mutations, accelerator
 ):
     if accelerator:
         accelerator = Accelerator()
@@ -1572,7 +1652,6 @@ def test_wandb_init_log_on_policy(
             mutation=mutations,
             wb=True,
             accelerator=accelerator,
-            checkpoint=checkpoint,
             wandb_api_key="testing",
         )
 
@@ -1642,6 +1721,72 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         mock_wandb_finish.assert_called()
 
 
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, accelerator_flag", 
+    [((6,), 2, True, True), ((6,), 2, True, False)]
+)
+def test_train_on_policy_save_elite(env, population_on_policy, tournament, mutations, accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    elite_path =  "elite"
+    pop, pop_fitnesses = train_on_policy(
+        env,
+        "env_name",
+        "algo",
+        population_on_policy,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        save_elite=True,
+        elite_path=elite_path,
+        accelerator=accelerator
+    )
+    assert os.path.isfile(f"{elite_path}.pt") == True
+    os.remove(f"{elite_path}.pt")
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, accelerator_flag", 
+    [((6,), 2, True, True), ((6,), 2, True, False)]
+)
+def test_train_on_policy_save_checkpoint(env, population_on_policy, tournament, mutations, accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    checkpoint_path =  "checkpoint"
+    pop, pop_fitnesses = train_on_policy(
+        env,
+        "env_name",
+        "algo",
+        population_on_policy,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        checkpoint=10,
+        checkpoint_path=checkpoint_path,
+        accelerator=accelerator
+    )
+    for i in range(6): # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
+
+
 @pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
 def test_train_multi_agent(
     multi_env, population_multi_agent, multi_memory, tournament, mutations
@@ -1689,7 +1834,6 @@ def test_train_multi_agent_distributed(
         tournament=tournament,
         mutation=mutations,
         accelerator=accelerator,
-        checkpoint=1,
     )
 
     assert len(pop) == len(population_multi_agent)
@@ -1854,11 +1998,12 @@ def test_multi_agent_early_stop(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, checkpoint, algo",
-    [((6,), 2, None, MADDPG), ((6,), 2, None, MATD3), ((6,), 2, 1, MATD3)],
+    "state_size, action_size, algo",
+    [((6,), 2, MADDPG), 
+     ((6,), 2, MATD3), ]
 )
 def test_train_multi_agent_calls(
-    multi_env, mocked_multi_agent, multi_memory, tournament, mutations, algo, checkpoint
+    multi_env, mocked_multi_agent, multi_memory, tournament, mutations, algo
 ):
     for accelerator_flag in [False, True]:
         if accelerator_flag:
@@ -1886,14 +2031,12 @@ def test_train_multi_agent_calls(
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
-            checkpoint=checkpoint,
         )
 
         mocked_multi_agent.getAction.assert_called()
         mocked_multi_agent.learn.assert_called()
         mocked_multi_agent.test.assert_called()
         if accelerator is not None:
-            mocked_multi_agent.saveCheckpoint.assert_called()
             mocked_multi_agent.wrap_models.assert_called()
             mocked_multi_agent.unwrap_models.assert_called()
 
@@ -1989,12 +2132,78 @@ def test_train_multi_memory_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, swap_channels, checkpoint",
+    "state_size, action_size, accelerator_flag", 
+    [((6,), 2, True), ((6,), 2, False)]
+)
+def test_train_multi_save_elite(multi_env, population_multi_agent, tournament, mutations, multi_memory, accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    elite_path =  "elite"
+    pop, pop_fitnesses = train_multi_agent(
+        multi_env,
+        "env_name",
+        "algo",
+        population_multi_agent,
+        multi_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        save_elite=True,
+        elite_path=elite_path,
+        accelerator=accelerator
+    )
+    assert os.path.isfile(f"{elite_path}.pt") == True
+    os.remove(f"{elite_path}.pt")
+
+@pytest.mark.parametrize(
+    "state_size, action_size, accelerator_flag", 
+    [((6,), 2, True), ((6,), 2, False)]
+)
+def test_train_multi_save_checkpoint(multi_env, population_multi_agent, tournament, mutations, multi_memory, accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    checkpoint_path =  "checkpoint"
+    pop, pop_fitnesses = train_multi_agent(
+        multi_env,
+        "env_name",
+        "algo",
+        population_multi_agent,
+        multi_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        checkpoint=10,
+        checkpoint_path=checkpoint_path,
+        accelerator=accelerator
+    )
+    for i in range(6): # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, swap_channels",
     [
-        ((6,), 2, True, False, None),
-        ((250, 160, 3), 2, False, True, None),
-        ((6,), 2, True, False, 1),
-        ((250, 160, 3), 2, False, True, 1),
+        ((6,), 2, True, False),
+        ((250, 160, 3), 2, False, True),
     ],
 )
 def test_train_offline(
@@ -2002,7 +2211,6 @@ def test_train_offline(
     population_off_policy,
     memory,
     swap_channels,
-    checkpoint,
     tournament,
     mutations,
     offline_init_hp,
@@ -2032,7 +2240,6 @@ def test_train_offline(
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
-            checkpoint=checkpoint,
         )
 
         assert len(pop) == len(population_off_policy)
@@ -2216,7 +2423,6 @@ def test_offline_agent_calls(
         mocked_agent_off_policy.learn.assert_called()
         mocked_agent_off_policy.test.assert_called()
         if accelerator is not None:
-            mocked_agent_off_policy.saveCheckpoint.assert_called()
             mocked_agent_off_policy.wrap_models.assert_called()
             mocked_agent_off_policy.unwrap_models.assert_called()
 
@@ -2307,3 +2513,87 @@ def test_offline_mut_tourn_calls(
         )
         mocked_tournament.select.assert_called()
         mocked_mutations.mutation.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, accelerator_flag", 
+    [((6,), 2, True, True), ((6,), 2, True, False)]
+)
+def test_train_offline_save_elite(env,
+    population_off_policy,
+    memory,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data, 
+    accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    elite_path =  "elite"
+    pop, pop_fitnesses = train_offline(
+            env,
+            "env_name",
+            dummy_h5py_data,
+            "algo",
+            population_off_policy,
+            memory,
+            INIT_HP=offline_init_hp,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            accelerator=accelerator,
+            save_elite=True,
+            elite_path=elite_path
+        )
+    assert os.path.isfile(f"{elite_path}.pt") == True
+    os.remove(f"{elite_path}.pt")
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, accelerator_flag", 
+    [((6,), 2, True, True), ((6,), 2, True, False)]
+)
+def test_train_offline_save_checkpoint(env,
+    population_off_policy,
+    memory,
+    tournament,
+    mutations,
+    offline_init_hp,
+    dummy_h5py_data, 
+    accelerator_flag):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    checkpoint_path =  "checkpoint"
+    pop, pop_fitnesses = train_offline(
+            env,
+            "env_name",
+            dummy_h5py_data,
+            "algo",
+            population_off_policy,
+            memory,
+            INIT_HP=offline_init_hp,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            accelerator=accelerator,
+            checkpoint=10,
+            checkpoint_path=checkpoint_path
+        )
+    for i in range(6): # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
