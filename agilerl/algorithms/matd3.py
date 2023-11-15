@@ -102,13 +102,21 @@ class MATD3:
         assert isinstance(
             discrete_actions, bool
         ), "Discrete actions flag must be a boolean value True or False."
-        assert isinstance(max_action, list), "Max action must be a list."
-        assert isinstance(min_action, list), "Min action must be a list."
-        for x, n in zip(max_action, min_action):
-            x, n = x[0], n[0]
-            assert x > n, "Max action must be greater than min action."
-            assert x > 0, "Max action must be greater than zero."
-            assert n <= 0, "Min action must be less than or equal to zero."
+        assert (
+            isinstance(max_action, list) or max_action is None
+        ), "Max action must be a list."
+        assert (
+            isinstance(min_action, list) or min_action is None
+        ), "Min action must be a list."
+        assert (max_action is not None) == (
+            min_action is not None
+        ), "Max and min actions must both be supplied, or both be None."
+        if max_action is not None and min_action is not None:
+            for x, n in zip(max_action, min_action):
+                x, n = x[0], n[0]
+                assert x > n, "Max action must be greater than min action."
+                assert x > 0, "Max action must be greater than zero."
+                assert n <= 0, "Min action must be less than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
