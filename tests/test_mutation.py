@@ -47,6 +47,10 @@ SHARED_INIT_HP = {
     "CHANNELS_LAST": False,
 }
 
+SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
+SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
+SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
+
 
 # The constructor initializes all the attributes of the Mutations class correctly.
 def test_constructor_initializes_attributes():
@@ -881,7 +885,7 @@ def test_mutation_applies_random_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -938,7 +942,7 @@ def test_mutation_applies_no_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -989,7 +993,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -1054,7 +1058,7 @@ def test_mutation_applies_activation_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -1119,7 +1123,7 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -1178,7 +1182,7 @@ def test_mutation_applies_parameter_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -1238,7 +1242,7 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -1292,7 +1296,7 @@ def test_mutation_applies_architecture_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
@@ -1352,7 +1356,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent():
                 action_dim=action_dim,
                 one_hot=one_hot,
                 net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
+                INIT_HP=SHARED_INIT_HP_MA,
                 population_size=population_size,
                 device=device if not distributed else None,
                 accelerator=accelerator if distributed else None,
