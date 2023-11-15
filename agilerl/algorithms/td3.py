@@ -24,7 +24,7 @@ class TD3:
     :type one_hot: bool
     :param max_action: Upper bound of the action space, defaults to 1
     :type max_action: float, optional
-    :param min_action: Upper bound of the action space, defaults to -1
+    :param min_action: Lower bound of the action space, defaults to -1
     :type min_action: float, optional
     :param expl_noise: Standard deviation for Gaussian exploration noise
     :param expl_noise: float, optional

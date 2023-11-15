@@ -24,7 +24,7 @@ class DDPG:
     :type one_hot: bool
     :param max_action: Upper bound of the action space, defaults to 1
     :type max_action: float, optional
-    :param min_action: Upper bound of the action space, defaults to -1
+    :param min_action: Lower bound of the action space, defaults to -1
     :type min_action: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
