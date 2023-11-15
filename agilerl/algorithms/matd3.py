@@ -422,7 +422,7 @@ class MATD3:
                         action_values.cpu().data.numpy().squeeze()
                         + np.random.normal(
                             0,
-                            self.max_action[idx][0] * self.expl_noise,
+                            self.expl_noise,
                             size=self.action_dims[idx],
                         ).astype(np.float32)
                     )

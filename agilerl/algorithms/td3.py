@@ -340,9 +340,9 @@ class TD3:
 
             action = (
                 action_values.cpu().data.numpy()
-                + np.random.normal(
-                    0, self.max_action * self.expl_noise, size=self.action_dim
-                ).astype(np.float32)
+                + np.random.normal(0, self.expl_noise, size=self.action_dim).astype(
+                    np.float32
+                )
             ).clip(-self.max_action, self.max_action)
         return action
 
