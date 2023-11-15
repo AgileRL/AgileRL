@@ -119,9 +119,16 @@ def train_multi_agent(
         wb, bool
     ), "'wb' must be a boolean flag, indicating whether to record run with W&B"
     assert isinstance(verbose, bool), "Verbose must be a boolean."
-    if save_elite == False and elite_path is not None:
-        warnings.warn("'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True.")
+    if save_elite is False and elite_path is not None:
+        warnings.warn(
+            "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
+        )
+    if checkpoint is None and checkpoint_path is not None:
+        warnings.warn(
+            "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
+        )
 
     if wb:
         if not hasattr(wandb, "api"):
