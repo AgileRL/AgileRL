@@ -178,9 +178,11 @@ class MADDPG:
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 self.actors = []
-                for action_dim, state_dim in zip(self.action_dims, self.state_dims):
+                for idx, (action_dim, state_dim) in enumerate(
+                    zip(self.action_dims, self.state_dims)
+                ):
                     if not self.discrete_actions:
-                        if self.min_action < 0:
+                        if self.min_action[idx][0] < 0:
                             self.net_config["output_activation"] = "Tanh"
                         else:
                             self.net_config["output_activation"] = "Sigmoid"
@@ -208,9 +210,11 @@ class MADDPG:
 
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
                 self.actors = []
-                for action_dim, state_dim in zip(self.action_dims, self.state_dims):
+                for idx, (action_dim, state_dim) in enumerate(
+                    zip(self.action_dims, self.state_dims)
+                ):
                     if not self.discrete_actions:
-                        if self.min_action < 0:
+                        if self.min_action[idx][0] < 0:
                             self.net_config["output_activation"] = "Tanh"
                         else:
                             self.net_config["output_activation"] = "Sigmoid"
@@ -379,11 +383,11 @@ class MADDPG:
                     )
                 else:
                     action = (
-                        (self.max_action - self.min_action)
+                        (self.max_action[idx][0] - self.min_action[idx][0])
                         * np.random.rand(state.size()[0], self.action_dims[idx])
                         .astype("float32")
                         .squeeze()
-                    ) + self.min_action
+                    ) + self.min_action[idx][0]
             else:
                 actor.eval()
                 if self.accelerator is not None:
@@ -397,7 +401,7 @@ class MADDPG:
                     action = action_values.cpu().data.numpy().squeeze()
                 else:
                     action = self.scale_to_action_space(
-                        action_values.cpu().data.numpy(), idx
+                        action_values.cpu().data.numpy().squeeze(), idx
                     )
                     action = (
                         action
@@ -499,7 +503,7 @@ class MADDPG:
                         q_value = critic(input_combined)
                 else:
                     q_value = critic(input_combined)
-                    next_actions = []
+                next_actions = []
                 for i, agent_id_label in enumerate(self.agent_ids):
                     unscaled_actions = self.actor_targets[i](
                         next_states[agent_id_label]

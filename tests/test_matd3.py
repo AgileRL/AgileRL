@@ -268,8 +268,8 @@ def test_initialize_matd3_with_net_config(
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
-    max_action = [1, 1]
-    min_action = [-1, -1]
+    max_action = [(1,), (1,)]
+    min_action = [(-1,), (-1,)]
     discrete_actions = False
     expl_noise = 0.1
     batch_size = 64
@@ -398,8 +398,8 @@ def test_initialize_matd3_with_mlp_networks(
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
         n_agents=len(state_dims),
-        max_action=[1, 1],
-        min_action=[-1, -1],
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
         discrete_actions=True,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
@@ -418,8 +418,8 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.n_agents == 2
     assert matd3.policy_freq == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
-    assert matd3.max_action == [1, 1]
-    assert matd3.min_action == [-1, -1]
+    assert matd3.max_action == [(1,), (1,)]
+    assert matd3.min_action == [(-1,), (-1,)]
     assert matd3.discrete_actions is True
     assert matd3.multi
     assert matd3.total_state_dims == sum(state[0] for state in state_dims)
@@ -508,8 +508,8 @@ def test_initialize_matd3_with_cnn_networks(
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
         n_agents=len(state_dims),
-        max_action=[1, 1],
-        min_action=[-1, -1],
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
         discrete_actions=True,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
@@ -528,8 +528,8 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.one_hot is False
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
-    assert matd3.max_action == [1, 1]
-    assert matd3.min_action == [-1, -1]
+    assert matd3.max_action == [(1,), (1,)]
+    assert matd3.min_action == [(-1,), (-1,)]
     assert matd3.discrete_actions is True
     assert matd3.multi
     assert matd3.total_state_dims == sum(state[0] for state in state_dims)
@@ -588,8 +588,8 @@ def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device):
             one_hot=False,
             agent_ids=["agent_0", "agent_1"],
             n_agents=len(state_dims),
-            max_action=[1, 1],
-            min_action=[-1, -1],
+            max_action=[(1,), (1,)],
+            min_action=[(-1,), (-1,)],
             discrete_actions=True,
             actor_networks=evo_actors,
             device=device,
@@ -624,6 +624,7 @@ def test_matd3_getAction_epsilon_greedy_mlp(
         state_dims,
         action_dims,
         one_hot=one_hot,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
         n_agents=2,
         agent_ids=agent_ids,
         max_action=[[1], [1]],
@@ -1358,8 +1359,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
-    max_action = [1, 1]
-    min_action = [-1, -1]
+    max_action = [(1,), (1,)]
+    min_action = [(-1,), (-1,)]
     expl_noise = 0.1
     discrete_actions = False
     index = 0
@@ -1521,8 +1522,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
-        max_action=[(1)],
-        min_action=[(-1)],
+        max_action=[(1,)],
+        min_action=[(-1,)],
         discrete_actions=True,
     )
     loaded_matd3.loadCheckpoint(checkpoint_path)
@@ -1642,8 +1643,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
-        max_action=[(1)],
-        min_action=[(-1)],
+        max_action=[(1,)],
+        min_action=[(-1,)],
         discrete_actions=True,
     )
     loaded_matd3.loadCheckpoint(checkpoint_path)
@@ -1781,8 +1782,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
-        max_action=[(1)],
-        min_action=[(-1)],
+        max_action=[(1,)],
+        min_action=[(-1,)],
         discrete_actions=True,
     )
     loaded_matd3.loadCheckpoint(checkpoint_path)
@@ -1871,3 +1872,40 @@ def test_matd3_unwrap_models():
         assert isinstance(critic_target_1, nn.Module)
         assert isinstance(critic_2, nn.Module)
         assert isinstance(critic_target_2, nn.Module)
+
+
+# Returns the input action scaled to the action space defined by self.min_action and self.max_action.
+def test_action_scaling():
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    max_actions = [(1,), (2,), (1,), (2,), (2,)]
+    min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
+
+    matd3 = MATD3(
+        state_dims=[[4], [4], [4], [4], [4]],
+        action_dims=[1, 1, 1, 1, 1],
+        n_agents=5,
+        agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
+        discrete_actions=False,
+        one_hot=False,
+        max_action=max_actions,
+        min_action=min_actions,
+    )
+
+    scaled_action = matd3.scale_to_action_space(action, idx=0)
+    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
+
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    scaled_action = matd3.scale_to_action_space(action, idx=1)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
+
+    action = np.array([0.1, 0.2, 0.3, 0])
+    scaled_action = matd3.scale_to_action_space(action, idx=2)
+    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
+
+    action = np.array([0.1, 0.2, 0.3, 0])
+    scaled_action = matd3.scale_to_action_space(action, idx=3)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
+
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    scaled_action = matd3.scale_to_action_space(action, idx=4)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))

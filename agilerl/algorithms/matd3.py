@@ -185,9 +185,11 @@ class MATD3:
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 self.actors = []
-                for action_dim, state_dim in zip(self.action_dims, self.state_dims):
+                for idx, (action_dim, state_dim) in enumerate(
+                    zip(self.action_dims, self.state_dims)
+                ):
                     if not self.discrete_actions:
-                        if self.min_action < 0:
+                        if self.min_action[idx][0] < 0:
                             self.net_config["output_activation"] = "Tanh"
                         else:
                             self.net_config["output_activation"] = "Sigmoid"
@@ -223,9 +225,11 @@ class MATD3:
                 ]
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
                 self.actors = []
-                for action_dim, state_dim in zip(self.action_dims, self.state_dims):
+                for idx, (action_dim, state_dim) in enumerate(
+                    zip(self.action_dims, self.state_dims)
+                ):
                     if not self.discrete_actions:
-                        if self.min_action < 0:
+                        if self.min_action[idx][0] < 0:
                             self.net_config["output_activation"] = "Tanh"
                         else:
                             self.net_config["output_activation"] = "Sigmoid"
@@ -427,11 +431,11 @@ class MATD3:
                     )
                 else:
                     action = (
-                        (self.max_action - self.min_action)
+                        (self.max_action[idx][0] - self.min_action[idx][0])
                         * np.random.rand(state.size()[0], self.action_dims[idx])
                         .astype("float32")
                         .squeeze()
-                    ) + self.min_action
+                    ) + self.min_action[idx][0]
             else:
                 actor.eval()
                 if self.accelerator is not None:
@@ -445,7 +449,7 @@ class MATD3:
                     action = action_values.cpu().data.numpy().squeeze()
                 else:
                     action = self.scale_to_action_space(
-                        action_values.cpu().data.numpy(), idx
+                        action_values.cpu().data.numpy().squeeze(), idx
                     )
                     action = (
                         action
