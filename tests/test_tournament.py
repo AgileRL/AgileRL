@@ -1,3 +1,5 @@
+import copy
+
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -40,6 +42,10 @@ SHARED_INIT_HP = {
     "AGENT_IDS": ["agent1", "agent2"],
     "CHANNELS_LAST": False,
 }
+
+SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
+SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
+SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
 
 
 # Initializes the 'TournamentSelection' object with the given parameters.
@@ -185,7 +191,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
             action_dim=action_dim,
             one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP,
+            INIT_HP=SHARED_INIT_HP_MA,
             population_size=population_size,
             device=device,
         )
@@ -231,7 +237,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
             action_dim=action_dim,
             one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP,
+            INIT_HP=SHARED_INIT_HP_MA,
             population_size=population_size,
             device=device,
         )

@@ -1,3 +1,4 @@
+import copy
 from unittest.mock import patch
 
 import gymnasium as gym
@@ -50,6 +51,11 @@ SHARED_INIT_HP = {
     "AGENT_IDS": ["agent1", "agent2"],
     "CHANNELS_LAST": False,
 }
+
+
+SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
+SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
+SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
 
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
@@ -124,7 +130,7 @@ def test_create_initial_population_multi_agent():
             action_dim=action_dim,
             one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP,
+            INIT_HP=SHARED_INIT_HP_MA,
             population_size=population_size,
             device=device,
             accelerator=accelerator,

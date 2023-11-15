@@ -22,6 +22,10 @@ class DDPG:
     :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
+    :param max_action: Upper bound of the action space, defaults to 1
+    :type max_action: float, optional
+    :param min_action: Lower bound of the action space, defaults to -1
+    :type min_action: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -57,6 +61,8 @@ class DDPG:
         state_dim,
         action_dim,
         one_hot,
+        max_action=1,
+        min_action=-1,
         index=0,
         net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
@@ -81,6 +87,15 @@ class DDPG:
         assert isinstance(
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
+        assert isinstance(
+            max_action, (float, int, np.floating, np.integer)
+        ), "Max action must be a float or integer."
+        assert isinstance(
+            min_action, (float, int, np.floating, np.integer)
+        ), "Min action must be a float or integer."
+        assert max_action > min_action, "Max action must be greater than min action."
+        assert max_action > 0, "Max action must be greater than zero."
+        assert min_action <= 0, "Min action must be less than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -113,6 +128,8 @@ class DDPG:
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.one_hot = one_hot
+        self.max_action = max_action
+        self.min_action = min_action
         self.net_config = net_config
         self.batch_size = batch_size
         self.lr = lr
@@ -141,6 +158,10 @@ class DDPG:
             assert (
                 "arch" in self.net_config.keys()
             ), "Net config must contain arch: 'mlp' or 'cnn'."
+            if self.min_action < 0:
+                output_activation = "Tanh"
+            else:
+                output_activation = "Sigmoid"
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
                     "h_size" in self.net_config.keys()
@@ -155,7 +176,7 @@ class DDPG:
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
                     hidden_size=self.net_config["h_size"],
-                    mlp_output_activation="Tanh",
+                    mlp_output_activation=output_activation,
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -192,7 +213,7 @@ class DDPG:
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
                     mlp_activation="Tanh",
-                    mlp_output_activation="Tanh",
+                    mlp_output_activation=output_activation,
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -237,6 +258,14 @@ class DDPG:
 
         self.criterion = nn.MSELoss()
 
+    def scale_to_action_space(self, action):
+        """Scales actions to action space defined by self.min_action and self.max_action.
+
+        :param action: Action to be scaled
+        :type action: numpy.ndarray
+        """
+        return np.where(action > 0, action * self.max_action, action * -self.min_action)
+
     def getAction(self, state, epsilon=0):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -266,15 +295,16 @@ class DDPG:
         # epsilon-greedy
         if random.random() < epsilon:
             action = (
-                np.random.rand(state.size()[0], self.action_dim).astype("float32") - 0.5
-            ) * 2
+                (self.max_action - self.min_action)
+                * np.random.rand(state.size()[0], self.action_dim).astype("float32")
+            ) + self.min_action
         else:
             self.actor.eval()
             with torch.no_grad():
                 action_values = self.actor(state)
             self.actor.train()
 
-            action = action_values.cpu().data.numpy()
+            action = self.scale_to_action_space(action_values.cpu().data.numpy())
 
         return action
 
@@ -315,6 +345,12 @@ class DDPG:
             q_value = self.critic(states, actions)
 
         next_actions = self.actor_target(next_states)
+        # Scale actions
+        next_actions = torch.where(
+            next_actions > 0,
+            next_actions * self.max_action,
+            next_actions * -self.min_action,
+        )
         noise = actions.data.normal_(0, policy_noise)
         noise = noise.clamp(-noise_clip, noise_clip)
         next_actions = next_actions + noise
@@ -339,13 +375,17 @@ class DDPG:
 
         # update actor and targets every policy_freq episodes
         if len(self.scores) % self.policy_freq == 0:
+            policy_actions = self.actor.forward(states)
+            policy_actions = torch.where(
+                policy_actions > 0,
+                policy_actions * self.max_action,
+                policy_actions * -self.min_action,
+            )
             if self.arch == "mlp":
-                input_combined = torch.cat([states, self.actor.forward(states)], 1)
+                input_combined = torch.cat([states, policy_actions], 1)
                 actor_loss = -self.critic(input_combined).mean()
             elif self.arch == "cnn":
-                actor_loss = -self.critic(states, self.actor.forward(states)).mean()
-
-                print(self.critic(states, self.actor.forward(states)))
+                actor_loss = -self.critic(states, policy_actions).mean()
 
             # actor loss backprop
             self.actor_optimizer.zero_grad()

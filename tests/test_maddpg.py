@@ -268,8 +268,8 @@ def test_initialize_maddpg_with_net_config(
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
-    max_action = [1, 1]
-    min_action = [-1, -1]
+    max_action = [(1,), (1,)]
+    min_action = [(-1,), (-1,)]
     discrete_actions = False
     expl_noise = 0.1
     batch_size = 64
@@ -375,8 +375,8 @@ def test_initialize_maddpg_with_mlp_networks(
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
         n_agents=len(state_dims),
-        max_action=[1, 1],
-        min_action=[-1, -1],
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
         discrete_actions=True,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
@@ -392,8 +392,8 @@ def test_initialize_maddpg_with_mlp_networks(
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
-    assert maddpg.max_action == [1, 1]
-    assert maddpg.min_action == [-1, -1]
+    assert maddpg.max_action == [(1,), (1,)]
+    assert maddpg.min_action == [(-1,), (-1,)]
     assert maddpg.discrete_actions is True
     assert maddpg.multi
     assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
@@ -462,8 +462,8 @@ def test_initialize_maddpg_with_cnn_networks(
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
         n_agents=len(state_dims),
-        max_action=[1, 1],
-        min_action=[-1, -1],
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
         discrete_actions=True,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
@@ -479,8 +479,8 @@ def test_initialize_maddpg_with_cnn_networks(
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
-    assert maddpg.max_action == [1, 1]
-    assert maddpg.min_action == [-1, -1]
+    assert maddpg.max_action == [(1,), (1,)]
+    assert maddpg.min_action == [(-1,), (-1,)]
     assert maddpg.discrete_actions is True
     assert maddpg.multi
     assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
@@ -530,8 +530,8 @@ def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device):
             one_hot=False,
             agent_ids=["agent_0", "agent_1"],
             n_agents=len(state_dims),
-            max_action=[1, 1],
-            min_action=[-1, -1],
+            max_action=[(1,), (1,)],
+            min_action=[(-1,), (-1,)],
             discrete_actions=True,
             actor_networks=evo_actors,
             device=device,
@@ -566,6 +566,7 @@ def test_maddpg_getAction_epsilon_greedy_mlp(
         state_dims,
         action_dims,
         one_hot=one_hot,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
         n_agents=2,
         agent_ids=agent_ids,
         max_action=[[1], [1]],
@@ -598,6 +599,7 @@ def test_maddpg_getAction_epsilon_greedy_mlp(
                 assert action.all() <= action_dims[idx] - 1
             else:
                 assert action <= action_dims[idx] - 1
+    maddpg = None
 
 
 @pytest.mark.parametrize(
@@ -667,6 +669,8 @@ def test_getAction_epsilon_greedy_distributed(
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
     state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+    from agilerl.algorithms.maddpg import MADDPG
+
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -710,7 +714,7 @@ def test_getAction_epsilon_greedy_distributed(
 @pytest.mark.parametrize(
     "epsilon, state_dims, action_dims, discrete_actions",
     [
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),  #
+        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
         (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
@@ -1248,8 +1252,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
-    max_action = [1, 1]
-    min_action = [-1, -1]
+    max_action = [(1,), (1,)]
+    min_action = [(-1,), (-1,)]
     expl_noise = 0.1
     discrete_actions = False
     index = 0
@@ -1390,8 +1394,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
-        max_action=[(1)],
-        min_action=[(-1)],
+        max_action=[(1,)],
+        min_action=[(-1,)],
         discrete_actions=True,
     )
     loaded_maddpg.loadCheckpoint(checkpoint_path)
@@ -1489,8 +1493,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
-        max_action=[(1)],
-        min_action=[(-1)],
+        max_action=[(1,)],
+        min_action=[(-1,)],
         discrete_actions=True,
     )
     loaded_maddpg.loadCheckpoint(checkpoint_path)
@@ -1602,8 +1606,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
-        max_action=[(1)],
-        min_action=[(-1)],
+        max_action=[(1,)],
+        min_action=[(-1,)],
         discrete_actions=True,
     )
     loaded_maddpg.loadCheckpoint(checkpoint_path)
@@ -1663,3 +1667,40 @@ def test_maddpg_unwrap_models():
         assert isinstance(actor_target, nn.Module)
         assert isinstance(critic, nn.Module)
         assert isinstance(critic_target, nn.Module)
+
+
+# Returns the input action scaled to the action space defined by self.min_action and self.max_action.
+def test_action_scaling():
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    max_actions = [(1,), (2,), (1,), (2,), (2,)]
+    min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
+
+    maddpg = MADDPG(
+        state_dims=[[4], [4], [4], [4], [4]],
+        action_dims=[1, 1, 1, 1, 1],
+        n_agents=5,
+        agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
+        discrete_actions=False,
+        one_hot=False,
+        max_action=max_actions,
+        min_action=min_actions,
+    )
+
+    scaled_action = maddpg.scale_to_action_space(action, idx=0)
+    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
+
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    scaled_action = maddpg.scale_to_action_space(action, idx=1)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
+
+    action = np.array([0.1, 0.2, 0.3, 0])
+    scaled_action = maddpg.scale_to_action_space(action, idx=2)
+    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
+
+    action = np.array([0.1, 0.2, 0.3, 0])
+    scaled_action = maddpg.scale_to_action_space(action, idx=3)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
+
+    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    scaled_action = maddpg.scale_to_action_space(action, idx=4)
+    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))

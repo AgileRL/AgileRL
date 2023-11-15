@@ -119,7 +119,7 @@ Example
         state, info  = env.reset() # Reset environment at start of episode
         agent_reward = {agent_id: 0 for agent_id in env.agents}
         if channels_last:
-                state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
+            state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
 
         for _ in range(max_steps):
             agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
@@ -142,12 +142,10 @@ Example
                 action
             )  # Act in environment
 
-            next_state, reward, done, _, info = env.step(action) # Act in environment
-
             # Save experiences to replay buffer
             if channels_last:
-                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
-                    next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
+                state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
             memory.save2memory(state, cont_actions, reward, next_state, done)
 
             for agent_id, r in reward.items():
@@ -163,6 +161,10 @@ Example
             if channels_last:
                 next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
             state = next_state
+
+            # Stop episode if any agents have terminated
+            if any(truncation.values()) or any(termination.values()):
+                break
 
         # Save the total episode reward
         score = sum(agent_reward.values())

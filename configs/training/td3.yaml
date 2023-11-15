@@ -5,6 +5,8 @@ INIT_HP:
     ALGO: TD3                                         # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
+    MAX_ACTION: 1              # Maximum action
+    MIN_ACTION: -1             # Minimum action
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
     EPISODES: 1000             # Max no. episodes
