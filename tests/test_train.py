@@ -1,12 +1,11 @@
+import os
 from unittest.mock import ANY, MagicMock, patch
 
+import dill
 import numpy as np
 import pytest
-from accelerate import Accelerator
-from pathlib import Path
-import os
-import dill
 import torch
+from accelerate import Accelerator
 
 import agilerl.training.train
 import agilerl.training.train_multi_agent
@@ -80,8 +79,7 @@ class DummyAgentOffPolicy:
 
     def saveCheckpoint(self, path):
         empty_dic = {}
-        torch.save(empty_dic, path,
-            pickle_module=dill)
+        torch.save(empty_dic, path, pickle_module=dill)
         return True
 
     def loadCheckpoint(self, *args):
@@ -890,7 +888,7 @@ def test_train_agent_calls_made(
             mutation=mutations,
             wb=False,
             accelerator=accelerator,
-            save_elite=True
+            save_elite=True,
         )
 
         mocked_agent_off_policy.getAction.assert_called()
@@ -1231,8 +1229,10 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
 
 @pytest.mark.parametrize(
     "state_size, action_size, vect, accelerator",
-    [((6,), 2, True, True), 
-     ((6,), 2, True, False),]
+    [
+        ((6,), 2, True, True),
+        ((6,), 2, True, False),
+    ],
 )
 def test_wandb_init_log_distributed(
     env, population_off_policy, tournament, mutations, memory, accelerator
@@ -1360,11 +1360,10 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         # Assert that wandb.finish was called
         mock_wandb_finish.assert_called()
 
-@pytest.mark.parametrize(
-    "state_size, action_size, vect", [((6,), 2, True)]
-)
+
+@pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
 def test_train_save_elite(env, population_off_policy, tournament, mutations, memory):
-    elite_path =  "checkpoint.pt"
+    elite_path = "checkpoint.pt"
     pop, pop_fitnesses = train(
         env,
         "env_name",
@@ -1386,21 +1385,24 @@ def test_train_save_elite(env, population_off_policy, tournament, mutations, mem
         mutation=mutations,
         wb=False,
         save_elite=True,
-        elite_path=elite_path
+        elite_path=elite_path,
     )
-    assert os.path.isfile(elite_path) == True
+    assert os.path.isfile(elite_path) 
     os.remove(elite_path)
 
+
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator_flag", 
-    [((6,), 2, True, True), ((6,), 2, True, False)]
+    "state_size, action_size, vect, accelerator_flag",
+    [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_save_checkpoint(env, population_off_policy, tournament, mutations, memory, accelerator_flag):
+def test_train_save_checkpoint(
+    env, population_off_policy, tournament, mutations, memory, accelerator_flag
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path =  "checkpoint"
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train(
         env,
         "env_name",
@@ -1423,15 +1425,11 @@ def test_train_save_checkpoint(env, population_off_policy, tournament, mutations
         wb=False,
         checkpoint=10,
         checkpoint_path=checkpoint_path,
-        accelerator=accelerator
+        accelerator=accelerator,
     )
-    for i in range(6): # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+    for i in range(6):  # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
-    
-
-
-
 
 
 @pytest.mark.parametrize("state_size, action_size, vect, algo", [((6,), 2, True, PPO)])
@@ -1602,8 +1600,7 @@ def test_train_on_policy_distributed(env, population_on_policy, tournament, muta
 
 @pytest.mark.parametrize(
     "state_size, action_size, vect, accelerator",
-    [((6,), 2, True, False ), 
-     ((6,), 2, True, True)],
+    [((6,), 2, True, False), ((6,), 2, True, True)],
 )
 def test_wandb_init_log_on_policy(
     env, population_on_policy, tournament, mutations, accelerator
@@ -1722,15 +1719,17 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator_flag", 
-    [((6,), 2, True, True), ((6,), 2, True, False)]
+    "state_size, action_size, vect, accelerator_flag",
+    [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_on_policy_save_elite(env, population_on_policy, tournament, mutations, accelerator_flag):
+def test_train_on_policy_save_elite(
+    env, population_on_policy, tournament, mutations, accelerator_flag
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    elite_path =  "elite"
+    elite_path = "elite"
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",
@@ -1748,21 +1747,24 @@ def test_train_on_policy_save_elite(env, population_on_policy, tournament, mutat
         wb=False,
         save_elite=True,
         elite_path=elite_path,
-        accelerator=accelerator
+        accelerator=accelerator,
     )
-    assert os.path.isfile(f"{elite_path}.pt") == True
+    assert os.path.isfile(f"{elite_path}.pt") 
     os.remove(f"{elite_path}.pt")
 
+
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator_flag", 
-    [((6,), 2, True, True), ((6,), 2, True, False)]
+    "state_size, action_size, vect, accelerator_flag",
+    [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_on_policy_save_checkpoint(env, population_on_policy, tournament, mutations, accelerator_flag):
+def test_train_on_policy_save_checkpoint(
+    env, population_on_policy, tournament, mutations, accelerator_flag
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path =  "checkpoint"
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",
@@ -1780,10 +1782,10 @@ def test_train_on_policy_save_checkpoint(env, population_on_policy, tournament, 
         wb=False,
         checkpoint=10,
         checkpoint_path=checkpoint_path,
-        accelerator=accelerator
+        accelerator=accelerator,
     )
-    for i in range(6): # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+    for i in range(6):  # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") 
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
@@ -1999,8 +2001,10 @@ def test_multi_agent_early_stop(
 
 @pytest.mark.parametrize(
     "state_size, action_size, algo",
-    [((6,), 2, MADDPG), 
-     ((6,), 2, MATD3), ]
+    [
+        ((6,), 2, MADDPG),
+        ((6,), 2, MATD3),
+    ],
 )
 def test_train_multi_agent_calls(
     multi_env, mocked_multi_agent, multi_memory, tournament, mutations, algo
@@ -2132,15 +2136,21 @@ def test_train_multi_memory_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, accelerator_flag", 
-    [((6,), 2, True), ((6,), 2, False)]
+    "state_size, action_size, accelerator_flag", [((6,), 2, True), ((6,), 2, False)]
 )
-def test_train_multi_save_elite(multi_env, population_multi_agent, tournament, mutations, multi_memory, accelerator_flag):
+def test_train_multi_save_elite(
+    multi_env,
+    population_multi_agent,
+    tournament,
+    mutations,
+    multi_memory,
+    accelerator_flag,
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    elite_path =  "elite"
+    elite_path = "elite"
     pop, pop_fitnesses = train_multi_agent(
         multi_env,
         "env_name",
@@ -2159,21 +2169,28 @@ def test_train_multi_save_elite(multi_env, population_multi_agent, tournament, m
         wb=False,
         save_elite=True,
         elite_path=elite_path,
-        accelerator=accelerator
+        accelerator=accelerator,
     )
-    assert os.path.isfile(f"{elite_path}.pt") == True
+    assert os.path.isfile(f"{elite_path}.pt") 
     os.remove(f"{elite_path}.pt")
 
+
 @pytest.mark.parametrize(
-    "state_size, action_size, accelerator_flag", 
-    [((6,), 2, True), ((6,), 2, False)]
+    "state_size, action_size, accelerator_flag", [((6,), 2, True), ((6,), 2, False)]
 )
-def test_train_multi_save_checkpoint(multi_env, population_multi_agent, tournament, mutations, multi_memory, accelerator_flag):
+def test_train_multi_save_checkpoint(
+    multi_env,
+    population_multi_agent,
+    tournament,
+    mutations,
+    multi_memory,
+    accelerator_flag,
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path =  "checkpoint"
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_multi_agent(
         multi_env,
         "env_name",
@@ -2192,10 +2209,10 @@ def test_train_multi_save_checkpoint(multi_env, population_multi_agent, tourname
         wb=False,
         checkpoint=10,
         checkpoint_path=checkpoint_path,
-        accelerator=accelerator
+        accelerator=accelerator,
     )
-    for i in range(6): # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+    for i in range(6):  # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") 
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
@@ -2516,84 +2533,89 @@ def test_offline_mut_tourn_calls(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator_flag", 
-    [((6,), 2, True, True), ((6,), 2, True, False)]
+    "state_size, action_size, vect, accelerator_flag",
+    [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_offline_save_elite(env,
+def test_train_offline_save_elite(
+    env,
     population_off_policy,
     memory,
     tournament,
     mutations,
     offline_init_hp,
-    dummy_h5py_data, 
-    accelerator_flag):
+    dummy_h5py_data,
+    accelerator_flag,
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    elite_path =  "elite"
+    elite_path = "elite"
     pop, pop_fitnesses = train_offline(
-            env,
-            "env_name",
-            dummy_h5py_data,
-            "algo",
-            population_off_policy,
-            memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
-            swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=5,
-            evo_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=False,
-            accelerator=accelerator,
-            save_elite=True,
-            elite_path=elite_path
-        )
-    assert os.path.isfile(f"{elite_path}.pt") == True
+        env,
+        "env_name",
+        dummy_h5py_data,
+        "algo",
+        population_off_policy,
+        memory,
+        INIT_HP=offline_init_hp,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        accelerator=accelerator,
+        save_elite=True,
+        elite_path=elite_path,
+    )
+    assert os.path.isfile(f"{elite_path}.pt") 
     os.remove(f"{elite_path}.pt")
 
+
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator_flag", 
-    [((6,), 2, True, True), ((6,), 2, True, False)]
+    "state_size, action_size, vect, accelerator_flag",
+    [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_offline_save_checkpoint(env,
+def test_train_offline_save_checkpoint(
+    env,
     population_off_policy,
     memory,
     tournament,
     mutations,
     offline_init_hp,
-    dummy_h5py_data, 
-    accelerator_flag):
+    dummy_h5py_data,
+    accelerator_flag,
+):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path =  "checkpoint"
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_offline(
-            env,
-            "env_name",
-            dummy_h5py_data,
-            "algo",
-            population_off_policy,
-            memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=None,
-            swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=5,
-            evo_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=False,
-            accelerator=accelerator,
-            checkpoint=10,
-            checkpoint_path=checkpoint_path
-        )
-    for i in range(6): # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") == True
+        env,
+        "env_name",
+        dummy_h5py_data,
+        "algo",
+        population_off_policy,
+        memory,
+        INIT_HP=offline_init_hp,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        accelerator=accelerator,
+        checkpoint=10,
+        checkpoint_path=checkpoint_path,
+    )
+    for i in range(6):  # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt") 
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")

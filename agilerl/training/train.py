@@ -97,7 +97,7 @@ def train(
     :type checkpoint_path: str, optional
     :param save_elite: Boolean flag indicating whether to save elite member at the end of training, defaults to False
     :type save_elite: bool, optional
-    :param elite_path: Loaction to save elite agent, defaults to None
+    :param elite_path: Location to save elite agent, defaults to None
     :type elite_path: str, optional
     :param wb: Weights & Biases tracking, defaults to False
     :type wb: bool, optional
@@ -452,7 +452,6 @@ def train(
                         )
                     )
                     elite.saveCheckpoint(f"{elite_save_path}.pt")
-
 
             if verbose:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
