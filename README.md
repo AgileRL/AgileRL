@@ -64,10 +64,10 @@ Install as a package with pip:
 ```bash
 pip install agilerl
 ```
-Or install in development mode: (Recommended due to nascent nature of this library)
+Or install in development mode:
 ```bash
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-pip install -r requirements.txt
+pip install -e .
 ```
 If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>.
 

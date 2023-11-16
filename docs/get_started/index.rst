@@ -14,12 +14,12 @@ Install as a package with pip:
 
    pip install agilerl
 
-Or install in development mode: (Recommended due to nascent nature of this library)
+Or install in development mode:
 
 .. code-block:: bash
 
    git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-   pip install -r requirements.txt
+   pip install -e .
 
 
 Quickstart: Training an off-policy RL agent

@@ -10,15 +10,19 @@ Welcome to AgileRL's documentation!
 
 .. |License| image:: https://img.shields.io/badge/License-Apache_2.0-blue.svg
    :target: https://opensource.org/licenses/Apache-2.0
+   :align: center
 
 .. |Docs status| image:: https://readthedocs.org/projects/agilerl/badge/?version=latest
    :target: https://agilerl.readthedocs.io/en/latest/?badge=latest
+   :align: center
 
 .. |PyPI download total| image:: https://static.pepy.tech/badge/agilerl
    :target: https://pypi.python.org/pypi/agilerl/
+   :align: center
 
 .. |Discord| image:: https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat
    :target: https://discord.gg/eB8HyTA2ux
+   :align: center
 
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
@@ -26,15 +30,20 @@ This library is initially focused on reducing the time taken for training models
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
 We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
 
-.. note::
+.. image:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
+   :width: 100%
+   :max-width: 900px
+   :align: center
 
-   This project is under active development.
+   AgileRL offers 10x faster hyperparameter optimization than SOTA.
+
+   Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.
 
 Contents
 --------
 
 .. toctree::
-   :maxdepth: 3
+   :maxdepth: 1
 
    get_started/index
    online_training/index
@@ -44,3 +53,64 @@ Contents
    custom_architecture/index
    tutorials/index
    api/index
+
+
+Benchmarks
+----------
+
+Reinforcement learning algorithms and libraries are usually benchmarked once the optimal hyperparameters for training are known, but it often takes hundreds or thousands of experiments to discover these. This is unrealistic and does not reflect the true, total time taken for training. What if we could remove the need to conduct all these prior experiments?
+
+In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
+
+.. image:: https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png
+   :min-width: 100%
+   :width: 600px
+   :align: center
+
+   AgileRL offers an order of magnitude speed up in hyperparameter optimization vs popular reinforcement learning training frameworks combined with Optuna. Remove the need for multiple training runs and save yourself hours.
+
+AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
+
+.. image:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
+   :min-width: 100%
+   :width: 700px
+   :align: center
+
+
+Installation
+------------
+
+Install as a package with pip:
+
+.. code-block:: bash
+
+   pip install agilerl
+
+Or install in development mode:
+
+.. code-block:: bash
+
+   git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+   pip install -e .
+
+Demo:
+
+.. code-block:: bash
+
+   cd demos
+   python demo_online.py
+
+or to demo distributed training:
+
+.. code-block:: bash
+
+   cd demos
+   accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_online_distributed.py
+
+
+Tutorials
+---------
+
+We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent tasks, such as training DQN to
+play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs `here<tutorials>`.
+Our demo files also provide examples on how to train agents using AgileRL, and there are various algorithm-level examples throughout the documentation.
