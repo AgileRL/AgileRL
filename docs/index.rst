@@ -112,6 +112,6 @@ Our demo files also provide examples on how to train agents using AgileRL, and t
 :hidden:
 :caption: Development
 
-Github <https://github.com/AgileRL/AgileRL>
+GitHub <https://github.com/AgileRL/AgileRL>
 Discord <https://discord.com/invite/eB8HyTA2ux>
 Contribute to AgileRL <https://github.com/AgileRL/AgileRL/blob/main/CONTRIBUTING.md>
