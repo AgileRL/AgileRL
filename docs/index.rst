@@ -10,19 +10,15 @@ Welcome to AgileRL's documentation!
 
 .. |License| image:: https://img.shields.io/badge/License-Apache_2.0-blue.svg
    :target: https://opensource.org/licenses/Apache-2.0
-   :align: center
 
 .. |Docs status| image:: https://readthedocs.org/projects/agilerl/badge/?version=latest
    :target: https://agilerl.readthedocs.io/en/latest/?badge=latest
-   :align: center
 
 .. |PyPI download total| image:: https://static.pepy.tech/badge/agilerl
    :target: https://pypi.python.org/pypi/agilerl/
-   :align: center
 
 .. |Discord| image:: https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat
    :target: https://discord.gg/eB8HyTA2ux
-   :align: center
 
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
@@ -30,9 +26,8 @@ This library is initially focused on reducing the time taken for training models
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
 We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
 
-.. image:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
-   :width: 100%
-   :max-width: 900px
+.. figure:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
+   :width: 900px
    :align: center
 
    AgileRL offers 10x faster hyperparameter optimization than SOTA.
@@ -62,8 +57,7 @@ Reinforcement learning algorithms and libraries are usually benchmarked once the
 
 In the charts below, a single AgileRL run, which automatically tunes hyperparameters, is benchmarked against Optuna's multiple training runs traditionally required for hyperparameter optimization, demonstrating the real time savings possible. Global steps is the sum of every step taken by any agent in the environment, including across an entire population.
 
-.. image:: https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png
-   :min-width: 100%
+.. figure:: https://user-images.githubusercontent.com/47857277/227481592-27a9688f-7c0a-4655-ab32-90d659a71c69.png
    :width: 600px
    :align: center
 
@@ -71,8 +65,7 @@ In the charts below, a single AgileRL run, which automatically tunes hyperparame
 
 AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-style (parallel API). The charts below highlight the performance of our MADDPG and MATD3 algorithms with evolutionary hyper-parameter optimisation (HPO), benchmarked against epymarl's MADDPG algorithm with grid-search HPO for the simple speaker listener and simple spread environments.
 
-.. image:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
-   :min-width: 100%
+.. figure:: https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png
    :width: 700px
    :align: center
 
