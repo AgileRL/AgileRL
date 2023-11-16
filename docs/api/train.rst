@@ -5,6 +5,8 @@ If you are using a Gym-style environment, it is easiest to use our training func
 
 If you are training on static, offline data, you can use our offline RL training function.
 
+The multi agent training function handles Pettingzoo-style environments and multi-agent algorithms.
+
 .. autofunction:: agilerl.training.train.train
 
 .. autofunction:: agilerl.training.train_offline.train_offline

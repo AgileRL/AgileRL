@@ -282,23 +282,25 @@ Next, create the tournament, mutations and experience replay buffer objects that
                           rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
                           device=torch.device("cuda"))
 
-The easiest training loop implementation is to use our ``training.train_offline.train()`` function. It requires the ``agent`` have functions ``getAction()`` and ``learn().``
+The easiest training loop implementation is to use our ``training.train_offline.train_offline()`` function. It requires the ``agent`` have functions ``getAction()`` and ``learn().``
 
 .. code-block:: python
 
-    from agilerl.training.train_offline import train
+    from agilerl.training.train_offline import train_offline
 
-    trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
-                                       env_name=INIT_HP['ENV_NAME'],            # Environment name
-                                       dataset=dataset,                         # Offline dataset
-                                       algo=INIT_HP['ALGO'],                    # Algorithm
-                                       pop=agent_pop,                           # Population of agents
-                                       memory=memory,                           # Replay buffer
-                                       swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                       n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
-                                       evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
-                                       evo_loop=1,                              # Number of evaluation episodes per agent
-                                       target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
-                                       tournament=tournament,                   # Tournament selection object
-                                       mutation=mutations,                      # Mutations object
-                                       wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
+    trained_pop, pop_fitnesses = train_offline(
+                                                env=env,                                 # Gym-style environment
+                                                env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                                dataset=dataset,                         # Offline dataset
+                                                algo=INIT_HP['ALGO'],                    # Algorithm
+                                                pop=agent_pop,                           # Population of agents
+                                                memory=memory,                           # Replay buffer
+                                                swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                                n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                                evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                                evo_loop=1,                              # Number of evaluation episodes per agent
+                                                target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                                tournament=tournament,                   # Tournament selection object
+                                                mutation=mutations,                      # Mutations object
+                                                wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
+                                              )

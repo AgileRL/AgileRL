@@ -342,9 +342,10 @@ The easiest way to train a population of agents using PPO is to use our online t
 
 .. code-block:: python
 
-    from agilerl.training.train_on_policy import train
+    from agilerl.training.train_on_policy import train_on_policy
 
-    trained_pop, pop_fitnesses = train(env=env,                              # Gym-style environment
+    trained_pop, pop_fitnesses = train_on_policy(
+                                    env=env,                              # Gym-style environment
                                     env_name=INIT_HP['ENV_NAME'],            # Environment name
                                     algo=INIT_HP['ALGO'],                    # Algorithm
                                     pop=agent_pop,                           # Population of agents
@@ -355,7 +356,8 @@ The easiest way to train a population of agents using PPO is to use our online t
                                     target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
                                     tournament=tournament,                   # Tournament selection object
                                     mutation=mutations,                      # Mutations object
-                                    wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
+                                    wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
+                                    )
 
 Alternatively, use a custom on-policy training loop:
 
