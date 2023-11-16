@@ -2028,7 +2028,7 @@ def test_train_multi_agent_calls(
             net_config=None,
             swap_channels=False,
             n_episodes=10,
-            max_steps=5,
+            max_steps=50,
             evo_epochs=5,
             evo_loop=1,
             tournament=tournament,
