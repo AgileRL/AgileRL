@@ -87,7 +87,8 @@ def train_multi_agent(
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
-    :param save_elite: Boolean flag indicating whether to save elite member at the end of training, defaults to False
+    :param save_elite: Boolean flag indicating whether to save elite member at the end
+        of training, defaults to False
     :type save_elite: bool, optional
     :param elite_path: Location to save elite agent, defaults to None
     :type elite_path: str, optional
