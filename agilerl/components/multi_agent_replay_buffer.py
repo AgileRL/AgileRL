@@ -81,11 +81,54 @@ class MultiAgentReplayBuffer:
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 
-    def save2memory(self, *args):
+    def save2memorySingleEnv(self, *args):
         """Saves experience to memory.
 
-        :param *args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,
-            e.g. states, actions, rewards, next_states, dones
+        :param *args: Variable length argument list. Contains transition elements in consistent order,
+            e.g. state, action, reward, next_state, done
         """
         self._add(*args)
         self.counter += 1
+
+    def _reorganize_dicts(self, *args):
+        """Reorgansizes dictionaries from vectorised to unvectorized experiences.
+
+        Example input:
+        {"agent1": np.array([[1, 2], [3, 4]]), "agent2": np.array([[1, 2], [3, 4]])}
+
+        Example output:
+        [{'agent1': array([[1, 2]]), 'agent2': array([[1, 2]])},
+         {'agent1': array([[3, 4]]), 'agent2': array([[3, 4]])}]
+        """
+        results = [[] for _ in range(len(args))]
+        num_entries = len(next(iter(args[0].values())))
+        for i in range(num_entries):
+            for j, arg in enumerate(args):
+                new_dict = {key: np.array(value[i]) for key, value in arg.items()}
+                results[j].append(new_dict)
+        return tuple(results)
+
+    def save2memoryVectEnvs(self, *args):
+        """Saves multiple experiences to memory.
+
+        :param *args: Variable length argument list. Contains batched transition elements in consistent order,
+            e.g. states, actions, rewards, next_states, dones
+        """
+        args = self._reorganize_dicts(*args)
+        for transition in zip(*args):
+            self._add(*transition)
+            self.counter += 1
+
+    def save2memory(self, *args, is_vectorised=False):
+        """Applies appropriate save2memory function depending on whether
+        the environment is vectorised or not.
+
+        :param *args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,
+            e.g. states, actions, rewards, next_states, dones
+        :param is_vectorised: Boolean flag indicating if the environment has been vectorised
+        :type is_vectorised: bool
+        """
+        if is_vectorised:
+            self.save2memoryVectEnvs(*args)
+        else:
+            self.save2memorySingleEnv(*args)

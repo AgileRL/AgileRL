@@ -118,6 +118,108 @@ def test_add_experiences_to_memory():
     assert buffer.memory[0].reward == reward
 
 
+# Can add single experiences to memory with save2memorySingleEnv method
+def test_add_single_experiences_to_memory():
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    agent_ids = ["agent1", "agent2"]
+    device = "cpu"
+
+    buffer = MultiAgentReplayBuffer(memory_size, field_names, agent_ids, device)
+
+    state = {"agent1": np.array([1, 2, 3]), "agent2": np.array([1, 2, 3])}
+    action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
+    reward = {"agent1": np.array([6]), "agent2": np.array([7])}
+
+    buffer.save2memorySingleEnv(state, action, reward)
+
+    assert len(buffer.memory) == 1
+    assert buffer.memory[0].state == state
+    assert buffer.memory[0].action == action
+    assert buffer.memory[0].reward == reward
+
+
+# Can add multiple experiences to memory with save2memoryVectEnvs method
+def test_add_multiple_experiences_to_memory():
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    agent_ids = ["agent1", "agent2"]
+    device = "cpu"
+
+    buffer = MultiAgentReplayBuffer(memory_size, field_names, agent_ids, device)
+
+    states = {
+        "agent1": np.array([[1, 2], [3, 4]]),
+        "agent2": np.array([[1, 2], [3, 4]]),
+    }
+    actions = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
+    rewards = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
+
+    buffer.save2memoryVectEnvs(states, actions, rewards)
+
+    state1 = {"agent1": np.array([1, 2]), "agent2": np.array([1, 2])}
+    action1 = {"agent1": np.array([0]), "agent2": np.array([0])}
+    reward1 = {"agent1": np.array([0]), "agent2": np.array([0])}
+
+    state2 = {"agent1": np.array([3, 4]), "agent2": np.array([3, 4])}
+    action2 = {"agent1": np.array([1]), "agent2": np.array([1])}
+    reward2 = {"agent1": np.array([1]), "agent2": np.array([1])}
+
+    assert len(buffer.memory) == 2
+    assert str(buffer.memory[0].state) == str(state1)
+    assert str(buffer.memory[0].action) == str(action1)
+    assert str(buffer.memory[0].reward) == str(reward1)
+    assert str(buffer.memory[1].state) == str(state2)
+    assert str(buffer.memory[1].action) == str(action2)
+    assert str(buffer.memory[1].reward) == str(reward2)
+
+
+# Can handle vectorized and un-vectorized experiences from environment
+def test_add_any_experiences_to_memory():
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    agent_ids = ["agent1", "agent2"]
+    device = "cpu"
+
+    buffer = MultiAgentReplayBuffer(memory_size, field_names, agent_ids, device)
+
+    states = {
+        "agent1": np.array([[1, 2], [3, 4]]),
+        "agent2": np.array([[1, 2], [3, 4]]),
+    }
+    actions = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
+    rewards = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
+
+    buffer.save2memory(states, actions, rewards, is_vectorised=True)
+
+    state1 = {"agent1": np.array([1, 2]), "agent2": np.array([1, 2])}
+    action1 = {"agent1": np.array([0]), "agent2": np.array([0])}
+    reward1 = {"agent1": np.array([0]), "agent2": np.array([0])}
+
+    state2 = {"agent1": np.array([3, 4]), "agent2": np.array([3, 4])}
+    action2 = {"agent1": np.array([1]), "agent2": np.array([1])}
+    reward2 = {"agent1": np.array([1]), "agent2": np.array([1])}
+
+    assert len(buffer.memory) == 2
+    assert str(buffer.memory[0].state) == str(state1)
+    assert str(buffer.memory[0].action) == str(action1)
+    assert str(buffer.memory[0].reward) == str(reward1)
+    assert str(buffer.memory[1].state) == str(state2)
+    assert str(buffer.memory[1].action) == str(action2)
+    assert str(buffer.memory[1].reward) == str(reward2)
+
+    new_state = {"agent1": np.array([1, 2]), "agent2": np.array([1, 2])}
+    new_action = {"agent1": np.array([0]), "agent2": np.array([0])}
+    new_reward = {"agent1": np.array([0]), "agent2": np.array([0])}
+
+    buffer.save2memory(new_state, new_action, new_reward, is_vectorised=False)
+
+    assert len(buffer.memory) == 3
+    assert str(buffer.memory[2].state) == str(new_state)
+    assert str(buffer.memory[2].action) == str(new_action)
+    assert str(buffer.memory[2].reward) == str(new_reward)
+
+
 # Can sample experiences from memory using sample method
 def test_sample_experiences_from_memory():
     memory_size = 100
