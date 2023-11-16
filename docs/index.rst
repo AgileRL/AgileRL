@@ -25,6 +25,8 @@ This library is initially focused on reducing the time taken for training models
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.
 We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline and multi-agent reinforcement learning algorithms with distributed training.
 
+Join the AgileRL `Discord server <https://discord.com/invite/eB8HyTA2ux>`_ to ask questions, get help, and learn more about reinforcement learning.
+
 .. figure:: https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif
    :width: 900px
    :align: center
@@ -106,3 +108,10 @@ Tutorials
 We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent tasks, such as training DQN to
 play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs `here<tutorials>`.
 Our demo files also provide examples on how to train agents using AgileRL, and there are various algorithm-level examples throughout the documentation.
+
+:hidden:
+:caption: Development
+
+Github <https://github.com/AgileRL/AgileRL>
+Discord <https://discord.com/invite/eB8HyTA2ux>
+Contribute to AgileRL <https://github.com/AgileRL/AgileRL/blob/main/CONTRIBUTING.md>
