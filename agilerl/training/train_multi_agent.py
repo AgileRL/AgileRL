@@ -60,7 +60,7 @@ def train_multi_agent(
     :param net_config: Network configuration dictionary, defaults to None
     :type net_config: dict
     :param swap_channels: Swap image channels dimension from last to first
-    [H, W, C] -> [C, H, W], defaults to False
+        [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
