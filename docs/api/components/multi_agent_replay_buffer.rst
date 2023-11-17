@@ -1,5 +1,5 @@
 Multi-Agent Experience Replay Buffer
-========================
+====================================
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve

@@ -161,7 +161,7 @@ The easiest training loop implementation is to use our ``training.train()`` func
                                        wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
 
 Quickstart: Training an offline RL agent
-----------------------------------------
+-----------------------------------------
 
 Like with online RL, above, there are some meta-hyperparameters and settings that must be set before starting training. These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
 

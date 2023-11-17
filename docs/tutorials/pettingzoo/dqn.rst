@@ -804,7 +804,7 @@ A sample lesson config for self-play training could be defined as follows:
 It could also be possible to train an agent through self-play only, without using any previous lessons in the curriculum. This would require significant training time, but could ultimately result in better performance than other methods, and could avoid some of the mistakes discussed in `The Bitter Lesson <http://incompleteideas.net/IncIdeas/BitterLesson.html>`_.
 
 Training loop
-^^^^^^^^^^^^^
+^^^^^^^^^^^^^^
 
 The Connect Four training loop must take into account that the agent only takes an action every other interaction with the environment (the opponent takes alternating turns). This must be considered when saving transitions to the replay buffer. Equally, we must wait for the outcome of the next player's turn before determining what the reward should be for a transition. This is not a true Markov Decision Process for this reason, but we can still train a reinforcement learning agent reasonably successfully in these non-stationary conditions.
 

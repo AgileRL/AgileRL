@@ -1,6 +1,7 @@
 .. _matd3:
+
 Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
-=========================================
+===================================================================
 
 MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
 in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This
@@ -9,7 +10,7 @@ enables superior performance when compared to MADDPG.
 * MATD3 paper: https://arxiv.org/abs/1910.01465
 
 Can I use it?
-------------
+-------------
 
 .. list-table::
    :widths: 20 20 20
@@ -26,7 +27,7 @@ Can I use it?
      - ✔️
 
 Gumbel-Softmax
-------------
+--------------
 
 The Gumbel-Softmax activation function is a differentiable approximation that enables gradient-based optimization through
 continuous relaxation of discrete action spaces in multi-agent reinforcement learning, allowing agents to learn and improve

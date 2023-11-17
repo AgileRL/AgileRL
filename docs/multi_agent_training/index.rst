@@ -1,15 +1,17 @@
 .. _multiagenttraining:
+
 Multi-Agent Training
-=====
+====================
 
 In multi-agent reinforcement learning, multiple agents are trained to act in the same environment in both
 co-operative and competitive scenarios. With AgileRL, agents can be trained to act in multi-agent environments
 using our implementation of the MADDPG or MATD3 algorithms alongside our Evolutionary Hyperparameter
 Optimisation algorithm.
 
-.. _initpop:
+.. _initpop_ma:
+
 Population Creation
-------------
+-------------------
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
@@ -79,7 +81,7 @@ are more likely to remain present in the population. The sequence of evolution (
 .. _memory:
 
 Experience Replay
-------------
+-----------------
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -102,7 +104,7 @@ multi-agent environments. During training it can be added to using the ``MultiAg
 .. _tournament:
 
 Tournament Selection
-------------
+--------------------
 
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
 is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
@@ -162,7 +164,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. _trainloop:
 
 Training Loop
-------------
+-------------
 
 Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment (e.g. pettingzoo
 for multi-agent environments) it is easiest to use our training function, which returns a population of trained agents and logged training metrics.

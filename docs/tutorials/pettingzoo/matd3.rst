@@ -1,4 +1,5 @@
 .. _MATD3 tutorial:
+
 AgileRL Tutorial: Implementing MATD3
 ====================================
 

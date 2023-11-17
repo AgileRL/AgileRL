@@ -1,6 +1,7 @@
 .. _td3:
+
 Twin Delayed Deep Deterministic Policy Gradient (TD3)
-=========================================
+=====================================================
 
 TD3 is an extension of DDPG that addresses overestimation bias by introducing an extra
 critic network, delayed actor network updates, and action noise regularization.
@@ -8,7 +9,7 @@ critic network, delayed actor network updates, and action noise regularization.
 * TD3 paper: https://arxiv.org/abs/1802.09477
 
 Can I use it?
-------------
+-------------
 
 .. list-table::
    :widths: 20 20 20

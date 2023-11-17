@@ -40,16 +40,44 @@ Contents
 
 .. toctree::
    :maxdepth: 1
+   :caption: Introduction
 
    get_started/index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Training
+
    online_training/index
    offline_training/index
    multi_agent_training/index
    distributed_training/index
    custom_architecture/index
-   tutorials/index
-   api/index
 
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorials
+
+   tutorials/pettingzoo/index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: API
+
+   api/algorithms/index
+   api/components/index
+   api/hpo/index
+   api/networks/index
+   api/wrappers/index
+   api/train
+   api/utils
+
+.. toctree::
+   :caption: Development
+
+   GitHub <https://github.com/AgileRL/AgileRL>
+   Discord <https://discord.com/invite/eB8HyTA2ux>
+   Contribute to AgileRL <https://github.com/AgileRL/AgileRL/blob/main/CONTRIBUTING.md>
 
 Benchmarks
 ----------
@@ -106,12 +134,5 @@ Tutorials
 ---------
 
 We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent tasks, such as training DQN to
-play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs `here<tutorials>`.
+play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs :ref:`here <PettingZoo_tutorials>`.
 Our demo files also provide examples on how to train agents using AgileRL, and there are various algorithm-level examples throughout the documentation.
-
-:hidden:
-:caption: Development
-
-GitHub <https://github.com/AgileRL/AgileRL>
-Discord <https://discord.com/invite/eB8HyTA2ux>
-Contribute to AgileRL <https://github.com/AgileRL/AgileRL/blob/main/CONTRIBUTING.md>

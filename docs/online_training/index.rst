@@ -128,7 +128,7 @@ of agents.
 .. _mutate_online:
 
 Mutation
-------------
+--------
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
 prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the

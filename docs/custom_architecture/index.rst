@@ -133,6 +133,7 @@ This means that when defining the critic, the ``.forward()`` method must account
 how to define actor and critic networks for a two agent system with state tensors of shape (4, 210, 160):
 
 .. code-block:: python
+
   from agilerl.networks.custom_activation import GumbelSoftmax
 
   class MultiAgentCNNActor(nn.Module):
@@ -215,6 +216,7 @@ we must pass ``extra_critic_dims`` argument to account for the action tensor tha
 dimensions is equivalent to the sumation of all agents action dimensions. Below highlights how you would make these two networks evolvable:
 
 .. code-block:: python
+
   actor = MultiAgentCNNActor()
   evolvable_actor = MakeEvolvable(network=actor,
                                   input_tensor=torch.randn(1, 4, 1, 210, 160), # (B, C_in, D, H, W) D = 1 as actors are decentralised

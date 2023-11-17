@@ -1,5 +1,5 @@
 Utils
-=====
+======
 
 .. autofunction:: agilerl.utils.utils.makeVectEnvs
 
