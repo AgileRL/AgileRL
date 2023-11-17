@@ -59,7 +59,7 @@ html_theme_options = {
     },
 }
 
-# # Configure sphinx-notfound-page
+# Configure sphinx-notfound-page
 notfound_context = {
     "title": "Page Not Found",
     "body": """
