@@ -15,7 +15,7 @@ These improvements include:
 Rainbow DQN paper: https://arxiv.org/abs/1710.02298
 
 Can I use it?
-------------
+-------------
 
 .. list-table::
    :widths: 20 20 20

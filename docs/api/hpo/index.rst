@@ -1,4 +1,5 @@
 .. _hpo:
+
 Hyperparameter Optimization
 ===========================
 
@@ -7,7 +8,7 @@ for reinforcement learning. Evolutionary HPO has been shown to drastically reduc
 without requiring numerous training runs.
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    mutation
    tournament

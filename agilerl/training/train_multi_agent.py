@@ -60,7 +60,7 @@ def train_multi_agent(
     :param net_config: Network configuration dictionary, defaults to None
     :type net_config: dict
     :param swap_channels: Swap image channels dimension from last to first
-    [H, W, C] -> [C, H, W], defaults to False
+        [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
@@ -87,7 +87,8 @@ def train_multi_agent(
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
-    :param save_elite: Boolean flag indicating whether to save elite member at the end of training, defaults to False
+    :param save_elite: Boolean flag indicating whether to save elite member at the end
+        of training, defaults to False
     :type save_elite: bool, optional
     :param elite_path: Location to save elite agent, defaults to None
     :type elite_path: str, optional

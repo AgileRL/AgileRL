@@ -1,10 +1,10 @@
 Get started
-=====
+===========
 
 .. _install:
 
 Install AgileRL
-------------
+---------------
 
 To use AgileRL, first download the source code and install requirements.
 
@@ -14,16 +14,16 @@ Install as a package with pip:
 
    pip install agilerl
 
-Or install in development mode: (Recommended due to nascent nature of this library)
+Or install in development mode:
 
 .. code-block:: bash
 
    git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-   pip install -r requirements.txt
+   pip install -e .
 
 
 Quickstart: Training an off-policy RL agent
-----------------
+-------------------------------------------
 
 Before starting training, there are some meta-hyperparameters and settings that must be set.
 These are defined in ``INIT_HP``, for general parameters, ``MUTATION_PARAMS``, which define the evolutionary
@@ -161,7 +161,7 @@ The easiest training loop implementation is to use our ``training.train()`` func
                                        wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
 
 Quickstart: Training an offline RL agent
-----------------
+-----------------------------------------
 
 Like with online RL, above, there are some meta-hyperparameters and settings that must be set before starting training. These are defined in ``INIT_HP``, for general parameters, and ``MUTATION_PARAMS``, which define the evolutionary probabilities, and ``NET_CONFIG``, which defines the network architecture. For example:
 
@@ -282,23 +282,25 @@ Next, create the tournament, mutations and experience replay buffer objects that
                           rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
                           device=torch.device("cuda"))
 
-The easiest training loop implementation is to use our ``training.train_offline.train()`` function. It requires the ``agent`` have functions ``getAction()`` and ``learn().``
+The easiest training loop implementation is to use our ``training.train_offline.train_offline()`` function. It requires the ``agent`` have functions ``getAction()`` and ``learn().``
 
 .. code-block:: python
 
-    from agilerl.training.train_offline import train
+    from agilerl.training.train_offline import train_offline
 
-    trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
-                                       env_name=INIT_HP['ENV_NAME'],            # Environment name
-                                       dataset=dataset,                         # Offline dataset
-                                       algo=INIT_HP['ALGO'],                    # Algorithm
-                                       pop=agent_pop,                           # Population of agents
-                                       memory=memory,                           # Replay buffer
-                                       swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                       n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
-                                       evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
-                                       evo_loop=1,                              # Number of evaluation episodes per agent
-                                       target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
-                                       tournament=tournament,                   # Tournament selection object
-                                       mutation=mutations,                      # Mutations object
-                                       wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
+    trained_pop, pop_fitnesses = train_offline(
+                                                env=env,                                 # Gym-style environment
+                                                env_name=INIT_HP['ENV_NAME'],            # Environment name
+                                                dataset=dataset,                         # Offline dataset
+                                                algo=INIT_HP['ALGO'],                    # Algorithm
+                                                pop=agent_pop,                           # Population of agents
+                                                memory=memory,                           # Replay buffer
+                                                swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+                                                n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
+                                                evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
+                                                evo_loop=1,                              # Number of evaluation episodes per agent
+                                                target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
+                                                tournament=tournament,                   # Tournament selection object
+                                                mutation=mutations,                      # Mutations object
+                                                wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
+                                              )

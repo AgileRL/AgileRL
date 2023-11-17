@@ -1,4 +1,5 @@
 .. _dqn:
+
 Deep Q-Learning (DQN)
 =====================
 
@@ -7,7 +8,7 @@ DQN is an extension of Q-learning that makes use of a replay buffer and target n
 * DQN paper: https://arxiv.org/abs/1312.5602
 
 Can I use it?
-------------
+--------------
 
 .. list-table::
    :widths: 20 20 20

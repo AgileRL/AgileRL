@@ -12,7 +12,7 @@ copyright = "2023, AgileRL"
 author = "Nick Ustaran-Anderegg"
 
 release = "0.1"
-version = "0.1.12"
+version = "0.1.18"
 
 # -- General configuration
 
@@ -49,8 +49,12 @@ html_theme_options = {
     "source_branch": "main",
     "source_directory": "docs/",
     "light_css_variables": {
-        "color-brand-primary": "#41a5a5",
-        "color-brand-content": "#41a5a5",
+        "color-brand-primary": "#245c5c",
+        "color-brand-content": "#245c5c",
+    },
+    "dark_css_variables": {
+        "color-brand-primary": "#48b8b8",
+        "color-brand-content": "#48b8b8",
     },
 }
 

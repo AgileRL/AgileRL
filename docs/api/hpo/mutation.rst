@@ -38,7 +38,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 
 
 Parameters
-------------
+----------
 
 .. autoclass:: agilerl.hpo.mutation.Mutations
   :members:

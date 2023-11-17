@@ -1,5 +1,5 @@
 Online Training
-=====
+===============
 
 In online reinforcement learning, an agent is able to gather data by directly interacting with its environment. It can then use this experience to learn from and
 update its policy. To enable our agent to interact in this way, the agent needs to act either in the real world, or in a simulation.
@@ -7,10 +7,10 @@ update its policy. To enable our agent to interact in this way, the agent needs 
 AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our
 Evolutionary Hyperparameter Optimization algorithm.
 
-.. _evoHPO:
+.. _evoHPO_online:
 
 Evolutionary Hyperparameter Optimization
-------------
+----------------------------------------
 
 Traditionally, hyperparameter optimization (HPO) for reinforcement learning (RL) is particularly difficult when compared to other types of machine learning.
 This is for several reasons, including the relative sample inefficiency of RL and its sensitivity to hyperparameters.
@@ -24,9 +24,10 @@ best agents are selected to survive until the next generation, and their offspri
 Eventually, the optimal hyperparameters for learning in a given environment can be reached in significantly less steps than are required using other HPO methods.
 
 
-.. _initpop:
+.. _initpop_online:
+
 Population Creation
-------------
+-------------------
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
@@ -77,10 +78,10 @@ are more likely to remain present in the population. The sequence of evolution (
                                   device=torch.device("cuda"))
 
 
-.. _memory:
+.. _memory_online:
 
 Experience Replay
-------------
+-----------------
 
 In order to efficiently train a population of RL agents, off-policy algorithms must be used to share memory within populations. This reduces the exploration needed
 by an individual agent because it allows faster learning from the behaviour of other agents. For example, if you were able to watch a bunch of people attempt to solve
@@ -102,10 +103,10 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
                           device=torch.device("cuda"))
 
 
-.. _tournament:
+.. _tournament_online:
 
 Tournament Selection
-------------
+--------------------
 
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
 is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
@@ -124,10 +125,10 @@ of agents.
                                      evo_step=1)        # Evaluate using last N fitness scores
 
 
-.. _mutate:
+.. _mutate_online:
 
 Mutation
-------------
+--------
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
 prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
@@ -163,10 +164,10 @@ Tournament selection and mutation should be applied sequentially to fully evolve
                           device=torch.device("cuda"))
 
 
-.. _trainloop:
+.. _trainloop_online:
 
 Off-policy Training Loop
-------------
+------------------------
 
 Now it is time to insert the evolutionary HPO components into our training loop. If you are using a Gym-style environment, it is
 easiest to use our training function, which returns a population of trained agents and logged training metrics.
@@ -329,7 +330,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 .. _onpolicytrainloop:
 
 On-policy Training Loop
-------------
+-----------------------
 
 While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences
 collected using a different or previous policy, we have still chosen to include an efficient, evolvable PPO implementation in AgileRL. This
@@ -342,9 +343,10 @@ The easiest way to train a population of agents using PPO is to use our online t
 
 .. code-block:: python
 
-    from agilerl.training.train_on_policy import train
+    from agilerl.training.train_on_policy import train_on_policy
 
-    trained_pop, pop_fitnesses = train(env=env,                              # Gym-style environment
+    trained_pop, pop_fitnesses = train_on_policy(
+                                    env=env,                              # Gym-style environment
                                     env_name=INIT_HP['ENV_NAME'],            # Environment name
                                     algo=INIT_HP['ALGO'],                    # Algorithm
                                     pop=agent_pop,                           # Population of agents
@@ -355,7 +357,8 @@ The easiest way to train a population of agents using PPO is to use our online t
                                     target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
                                     tournament=tournament,                   # Tournament selection object
                                     mutation=mutations,                      # Mutations object
-                                    wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
+                                    wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
+                                    )
 
 Alternatively, use a custom on-policy training loop:
 

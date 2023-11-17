@@ -1,5 +1,5 @@
 Distributed Training
-=====
+====================
 
 AgileRL can also be used for distributed training if you have multiple devices you want to take advantage of. We use the HuggingFace `Accelerate
 <https://github.com/huggingface/accelerate>`_ library to implement this in an open manner, without hiding behind too many layers of abstraction.

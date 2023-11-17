@@ -19,7 +19,7 @@ of agents.
 
 
 Parameters
-------------
+----------
 
 .. autoclass:: agilerl.hpo.tournament.TournamentSelection
   :members:

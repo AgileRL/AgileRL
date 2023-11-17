@@ -1,4 +1,5 @@
 .. _ddpg:
+
 Deep Deterministic Policy Gradient (DDPG)
 =========================================
 
@@ -8,7 +9,7 @@ network that outputs continuous actions.
 * DDPG paper: https://arxiv.org/abs/1509.02971
 
 Can I use it?
-------------
+-------------
 
 .. list-table::
    :widths: 20 20 20

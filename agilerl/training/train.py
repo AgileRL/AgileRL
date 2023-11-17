@@ -61,7 +61,8 @@ def train(
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first
+        [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
@@ -85,7 +86,8 @@ def train(
     :type per: bool, optional
     :param noisy: Using noisy network exploration, defaults to False
     :type noisy: bool, optional
-    :param memory: Multi-step Experience Replay Buffer to be used alongside Prioritized ERB, defaults to None
+    :param memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
+        ERB, defaults to None
     :type memory: object, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
@@ -95,7 +97,8 @@ def train(
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
-    :param save_elite: Boolean flag indicating whether to save elite member at the end of training, defaults to False
+    :param save_elite: Boolean flag indicating whether to save elite member at the end
+        of training, defaults to False
     :type save_elite: bool, optional
     :param elite_path: Location to save elite agent, defaults to None
     :type elite_path: str, optional

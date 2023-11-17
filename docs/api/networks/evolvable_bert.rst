@@ -1,8 +1,8 @@
 Evolvable BERT
-======================================
+==============
 
 Parameters
-------------
+----------
 
 .. autoclass:: agilerl.networks.evolvable_bert.EvolvableBERT
   :members:

@@ -1,8 +1,8 @@
 Evolvable GPT
-======================================
+=============
 
 Parameters
-------------
+----------
 
 .. autoclass:: agilerl.networks.evolvable_gpt.EvolvableGPT
   :members:

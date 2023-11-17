@@ -64,10 +64,10 @@ Install as a package with pip:
 ```bash
 pip install agilerl
 ```
-Or install in development mode: (Recommended due to nascent nature of this library)
+Or install in development mode:
 ```bash
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-pip install -r requirements.txt
+pip install -e .
 ```
 If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>.
 
@@ -368,9 +368,9 @@ The setup for PPO is very similar to the off-policy example above, except it doe
 The easiest way to train a population of agents using PPO is to use our online training function:
 
 ```python
-from agilerl.training.train_on_policy import train
+from agilerl.training.train_on_policy import train_on_policy
 
-trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+trained_pop, pop_fitnesses = train_on_policy(env=env,                       # Gym-style environment
                                    env_name=INIT_HP['ENV_NAME'],            # Environment name
                                    algo=INIT_HP['ALGO'],                    # Algorithm
                                    pop=agent_pop,                           # Population of agents
@@ -662,11 +662,11 @@ mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Al
                       rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
                       device=device)
 ```
-The easiest training loop implementation is to use our <code>training.train_offline.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
+The easiest training loop implementation is to use our <code>training.train_offline.train_offline()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
 ```python
-from agilerl.training.train_offline import train
+from agilerl.training.train_offline import train_offline
 
-trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+trained_pop, pop_fitnesses = train_offline(env=env,                                 # Gym-style environment
                                    env_name=INIT_HP['ENV_NAME'],            # Environment name
                                    dataset=dataset,                         # Offline dataset
                                    algo=INIT_HP['ALGO'],                    # Algorithm

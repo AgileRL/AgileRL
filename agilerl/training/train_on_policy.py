@@ -48,11 +48,13 @@ def train_on_policy(
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
+    :param swap_channels: Swap image channels dimension from last to first
+        [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
     :param n_episodes: Maximum number of training episodes, defaults to 2000
     :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 500
+    :param max_steps: Maximum number of steps in environment per episode, defaults to
+        500
     :type max_steps: int, optional
     :param evo_epochs: Evolution frequency (episodes), defaults to 5
     :type evo_epochs: int, optional
@@ -68,7 +70,8 @@ def train_on_policy(
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
-    :param save_elite: Boolean flag indicating whether to save elite member at the end of training, defaults to False
+    :param save_elite: Boolean flag indicating whether to save elite member at the end
+        of training, defaults to False
     :type save_elite: bool, optional
     :param elite_path: Location to save elite agent, defaults to None
     :type elite_path: str, optional

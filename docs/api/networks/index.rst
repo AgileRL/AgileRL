@@ -1,5 +1,5 @@
 Networks
-========
+=========
 
 Evolvable network architectures implemented: (More coming soon!)
     * MLP
@@ -9,7 +9,7 @@ Evolvable network architectures implemented: (More coming soon!)
 We are constantly adding more neural network architectures, with a view to add recurrent and hierarchical networks soon.
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    evolvable_mlp
    evolvable_cnn

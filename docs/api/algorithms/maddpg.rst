@@ -1,6 +1,7 @@
 .. _maddpg:
+
 Multi-Agent Deep Deterministic Policy Gradient (MADDPG)
-=========================================
+=======================================================
 
 MADDPG (Multi-Agent Deep Deterministic Policy Gradients) extends the DDPG (Deep Deterministic Policy Gradients)
 algorithm to enable cooperative or competitive training of multiple agents in complex environments, enhancing the
@@ -9,7 +10,7 @@ stability and convergence of the learning process through decentralized actor an
 * MADDPG paper: https://arxiv.org/pdf/1706.02275.pdf
 
 Can I use it?
-------------
+-------------
 
 .. list-table::
    :widths: 20 20 20
@@ -26,7 +27,7 @@ Can I use it?
      - ✔️
 
 Gumbel-Softmax
-------------
+--------------
 
 The Gumbel-Softmax activation function is a differentiable approximation that enables gradient-based optimization through
 continuous relaxation of discrete action spaces in multi-agent reinforcement learning, allowing agents to learn and improve
