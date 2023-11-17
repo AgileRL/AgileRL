@@ -1,6 +1,3 @@
-Welcome to AgileRL's documentation!
-===================================
-
 .. figure:: https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png
    :height: 120
    :align: center
@@ -18,6 +15,9 @@ Welcome to AgileRL's documentation!
 
 .. |Discord| image:: https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat
    :target: https://discord.gg/eB8HyTA2ux
+
+Streamlining reinforcement learning.
+====================================
 
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
