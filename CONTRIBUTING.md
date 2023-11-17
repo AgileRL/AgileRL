@@ -36,29 +36,18 @@ For something that is bigger than a one or two line fix:
 
 1. Create your own fork of the code.
 2. Do the changes in your fork.
-3. Run the linter.
-````
-cd AgileRL
-ruff --format=github --target-version=py37 --ignore E501 ./
-````
-4. Run the tests. - **(TESTS UNDER CONSTRUCTION)**
-````
-pytest
-````
+4. Run the tests by running `pytest tests`
 5. Make the test pass.
 6. Commit your changes. Please use an appropriate commit prefix. If your pull request fixes an issue specify it in the commit message.
 7. Push to your fork and submit a pull request. Please provide us with some explanation of why you made the changes you made. For new features make sure to explain a standard use case to us.
 
-Small contributions such as fixing spelling errors, where the content is small enough to not be considered intellectual property, can be submitted by a contributor as a patch. <br>
-As a rule of thumb, changes are obvious fixes if they do not introduce any new functionality or creative thinking. As long as the change does not affect functionality, some likely examples include the following:
+#### Pre-commit hooks
+Checks will be run automatically by the CI on code pushed to the AgileRL repository. These checks can also be run locally with the following steps:
 
-- Spelling / grammar fixes
-- Typo correction, white space and formatting changes
-- Comment clean up
-- Bug fixes that change default return values or error codes stored in constants
-- Adding logging messages or debugging output
-- Changes to ‘metadata’ files like Gemfile, .gitignore, build scripts, etc.
-- Moving source files from one directory or package to another
+1) [Install `pre-commit`](https://pre-commit.com/#install).
+2) Install the Git hooks by running `pre-commit install`.
+
+Once these steps are done, the hooks will be run automatically at every new commit.
 
 ## How to report a bug
 If you find a security vulnerability, do NOT open an issue. Email dev@agilerl.com instead.
