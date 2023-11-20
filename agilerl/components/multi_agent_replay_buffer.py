@@ -56,7 +56,13 @@ class MultiAgentReplayBuffer:
                 # Handle numpy stacking
                 ts = np.vstack(ts)
 
-                if field in ["done", "termination", "truncation"]:
+                if field in [
+                    "done",
+                    "termination",
+                    "terminated",
+                    "truncation",
+                    "truncated",
+                ]:
                     ts = ts.astype(np.uint8)
 
                 if not np_array:

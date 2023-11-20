@@ -54,7 +54,13 @@ class ReplayBuffer:
             ts = np.vstack(ts)
 
             # Handle numpy stacking
-            if field in ["done", "termination", "truncation"]:
+            if field in [
+                "done",
+                "termination",
+                "terminated",
+                "truncation",
+                "truncated",
+            ]:
                 ts = ts.astype(np.uint8)
 
             if not np_array:
@@ -150,8 +156,10 @@ class MultiStepReplayBuffer(ReplayBuffer):
             "next_state" in field_names
         ), "Next state must be saved in replay buffer under the field name 'next_state'."
         assert (
-            "done" in field_names or "termination" in field_names
-        ), "Done/termination must be saved in replay buffer under the field name 'done' or 'termination."
+            "done" in field_names
+            or "termination" in field_names
+            or "terminated" in field_names
+        ), "Done/termination must be saved in replay buffer under the field name 'done', 'termination', or 'terminated'."
         self.num_envs = num_envs
         self.n_step_buffers = [deque(maxlen=n_step) for i in range(num_envs)]
         self.n_step = n_step
@@ -219,19 +227,24 @@ class MultiStepReplayBuffer(ReplayBuffer):
         vect_next_state = transition["next_state"][0]
         if "done" in transition.keys():
             vect_done = transition["done"][0]
-        else:
+        elif "termination" in transition.keys():
             vect_done = transition["termination"][0]
+        else:
+            vect_done = transition["terminated"][0]
 
         for ts in reversed(list(n_step_buffer)[:-1]):
-            vect_r, vect_n_s, vect_d = (
-                ts.reward,
-                ts.next_state,
-                ts.done if "done" in transition.keys() else ts.termination,
-            )
+            vect_r, vect_n_s = (ts.reward, ts.next_state)
+
+            if "done" in transition.keys():
+                vect_d = ts.done
+            elif "termination" in transition.keys():
+                vect_d = ts.termination
+            else:
+                vect_d = ts.terminated
 
             vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
             vect_next_state, vect_done = (
-                (np.expand_dims(vect_n_s, 0), np.array([[vect_d]]))
+                (vect_n_s, np.array([vect_d]))
                 if vect_d
                 else (vect_next_state, vect_done)
             )
@@ -240,8 +253,10 @@ class MultiStepReplayBuffer(ReplayBuffer):
         transition["next_state"] = vect_next_state
         if "done" in transition.keys():
             transition["done"] = vect_done
-        else:
+        elif "termination" in transition.keys():
             transition["termination"] = vect_done
+        else:
+            transition["terminated"] = vect_done
         transition["state"] = transition["state"][0]
         transition["action"] = transition["action"][0]
 
