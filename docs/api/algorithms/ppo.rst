@@ -31,7 +31,7 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils import makeVectEnvs
+  from agilerl.utils.utils import makeVectEnvs
   from agilerl.algorithms.ppo import PPO
 
   # Create environment

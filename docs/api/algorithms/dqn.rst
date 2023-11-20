@@ -30,7 +30,7 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils import makeVectEnvs
+  from agilerl.utils.utils import makeVectEnvs
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.algorithms.dqn import DQN
 
