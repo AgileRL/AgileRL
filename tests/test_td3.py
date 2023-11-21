@@ -1209,3 +1209,211 @@ def test_action_scaling():
     td3 = TD3(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-1)
     scaled_action = td3.scale_to_action_space(action)
     assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the td3 agent
+    td3 = TD3(state_dim=[4], action_dim=2, one_hot=False)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    td3.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_td3 = TD3.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_td3.state_dim == td3.state_dim
+    assert new_td3.action_dim == td3.action_dim
+    assert new_td3.one_hot == td3.one_hot
+    assert new_td3.min_action == td3.min_action
+    assert new_td3.max_action == td3.max_action
+    assert new_td3.net_config == td3.net_config
+    assert isinstance(td3.actor, EvolvableMLP)
+    assert isinstance(td3.actor_target, EvolvableMLP)
+    assert isinstance(td3.critic_1, EvolvableMLP)
+    assert isinstance(td3.critic_target_1, EvolvableMLP)
+    assert isinstance(td3.critic_2, EvolvableMLP)
+    assert isinstance(td3.critic_target_2, EvolvableMLP)
+    assert new_td3.lr == td3.lr
+    assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
+    assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
+        td3.actor_target.state_dict()
+    )
+    assert str(new_td3.critic_1.to("cpu").state_dict()) == str(
+        td3.critic_1.state_dict()
+    )
+    assert str(new_td3.critic_target_1.to("cpu").state_dict()) == str(
+        td3.critic_target_1.state_dict()
+    )
+    assert str(new_td3.critic_2.to("cpu").state_dict()) == str(
+        td3.critic_2.state_dict()
+    )
+    assert str(new_td3.critic_target_2.to("cpu").state_dict()) == str(
+        td3.critic_target_2.state_dict()
+    )
+    assert new_td3.batch_size == td3.batch_size
+    assert new_td3.learn_step == td3.learn_step
+    assert new_td3.gamma == td3.gamma
+    assert new_td3.tau == td3.tau
+    assert new_td3.policy_freq == td3.policy_freq
+    assert new_td3.mut == td3.mut
+    assert new_td3.index == td3.index
+    assert new_td3.scores == td3.scores
+    assert new_td3.fitness == td3.fitness
+    assert new_td3.steps == td3.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the td3 agent
+    td3 = TD3(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [3],
+            "s_size": [1],
+            "normalize": False,
+        },
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    td3.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_td3 = TD3.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_td3.state_dim == td3.state_dim
+    assert new_td3.action_dim == td3.action_dim
+    assert new_td3.one_hot == td3.one_hot
+    assert new_td3.min_action == td3.min_action
+    assert new_td3.max_action == td3.max_action
+    assert new_td3.net_config == td3.net_config
+    assert isinstance(td3.actor, EvolvableCNN)
+    assert isinstance(td3.actor_target, EvolvableCNN)
+    assert isinstance(td3.critic_1, EvolvableCNN)
+    assert isinstance(td3.critic_target_1, EvolvableCNN)
+    assert isinstance(td3.critic_2, EvolvableCNN)
+    assert isinstance(td3.critic_target_2, EvolvableCNN)
+    assert new_td3.lr == td3.lr
+    assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
+    assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
+        td3.actor_target.state_dict()
+    )
+    assert str(new_td3.critic_1.to("cpu").state_dict()) == str(
+        td3.critic_1.state_dict()
+    )
+    assert str(new_td3.critic_target_1.to("cpu").state_dict()) == str(
+        td3.critic_target_1.state_dict()
+    )
+    assert str(new_td3.critic_2.to("cpu").state_dict()) == str(
+        td3.critic_2.state_dict()
+    )
+    assert str(new_td3.critic_target_2.to("cpu").state_dict()) == str(
+        td3.critic_target_2.state_dict()
+    )
+    assert new_td3.batch_size == td3.batch_size
+    assert new_td3.learn_step == td3.learn_step
+    assert new_td3.gamma == td3.gamma
+    assert new_td3.tau == td3.tau
+    assert new_td3.policy_freq == td3.policy_freq
+    assert new_td3.mut == td3.mut
+    assert new_td3.index == td3.index
+    assert new_td3.scores == td3.scores
+    assert new_td3.fitness == td3.fitness
+    assert new_td3.steps == td3.steps
+
+
+@pytest.mark.parametrize(
+    "state_dim, actor_network, input_tensor",
+    [
+        ([4], "simple_mlp", torch.randn(1, 4)),
+        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    state_dim, actor_network, input_tensor, request, tmpdir
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    # Initialize the td3 agent
+    td3 = TD3(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        actor_network=actor_network,
+        critic_networks=[copy.deepcopy(actor_network), copy.deepcopy(actor_network)],
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    td3.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_td3 = TD3.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_td3.state_dim == td3.state_dim
+    assert new_td3.action_dim == td3.action_dim
+    assert new_td3.one_hot == td3.one_hot
+    assert new_td3.min_action == td3.min_action
+    assert new_td3.max_action == td3.max_action
+    assert new_td3.net_config == td3.net_config
+    assert isinstance(td3.actor, nn.Module)
+    assert isinstance(td3.actor_target, nn.Module)
+    assert isinstance(td3.critic_1, nn.Module)
+    assert isinstance(td3.critic_target_1, nn.Module)
+    assert isinstance(td3.critic_2, nn.Module)
+    assert isinstance(td3.critic_target_2, nn.Module)
+    assert new_td3.lr == td3.lr
+    assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
+    assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
+        td3.actor_target.state_dict()
+    )
+    assert str(new_td3.critic_1.to("cpu").state_dict()) == str(
+        td3.critic_1.state_dict()
+    )
+    assert str(new_td3.critic_target_1.to("cpu").state_dict()) == str(
+        td3.critic_target_1.state_dict()
+    )
+    assert str(new_td3.critic_2.to("cpu").state_dict()) == str(
+        td3.critic_2.state_dict()
+    )
+    assert str(new_td3.critic_target_2.to("cpu").state_dict()) == str(
+        td3.critic_target_2.state_dict()
+    )
+    assert new_td3.batch_size == td3.batch_size
+    assert new_td3.learn_step == td3.learn_step
+    assert new_td3.gamma == td3.gamma
+    assert new_td3.tau == td3.tau
+    assert new_td3.policy_freq == td3.policy_freq
+    assert new_td3.mut == td3.mut
+    assert new_td3.index == td3.index
+    assert new_td3.scores == td3.scores
+    assert new_td3.fitness == td3.fitness
+    assert new_td3.steps == td3.steps

@@ -676,6 +676,11 @@ class TD3:
         """
         torch.save(
             {
+                "state_dim": self.state_dim,
+                "action_dim": self.action_dim,
+                "one_hot": self.one_hot,
+                "min_action": self.min_action,
+                "max_action": self.max_action,
                 "actor_init_dict": self.actor.init_dict,
                 "actor_state_dict": self.actor.state_dict(),
                 "actor_target_init_dict": self.actor_target.init_dict,
@@ -698,8 +703,8 @@ class TD3:
                 "gamma": self.gamma,
                 "tau": self.tau,
                 "mutation": self.mut,
-                "max_action": self.max_action,
                 "expl_noise": self.expl_noise,
+                "policy_freq": self.policy_freq,
                 "index": self.index,
                 "scores": self.scores,
                 "fitness": self.fitness,
@@ -775,8 +780,127 @@ class TD3:
         self.tau = checkpoint["tau"]
         self.mut = checkpoint["mutation"]
         self.max_action = checkpoint["max_action"]
+        self.min_action = checkpoint["min_action"]
         self.expl_noise = checkpoint["expl_noise"]
+        self.policy_freq = checkpoint["policy_freq"]
         self.index = checkpoint["index"]
         self.scores = checkpoint["scores"]
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
+
+    @classmethod
+    def load(cls, path, device="cpu", accelerator=None):
+        """Creates agent with properties and network weights loaded from path.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+        :type device: str, optional
+        :param accelerator: Accelerator for distributed computing, defaults to None
+        :type accelerator: accelerate.Accelerator(), optional
+        """
+        checkpoint = torch.load(path, pickle_module=dill)
+
+        if checkpoint["net_config"] is not None:
+            agent = cls(
+                state_dim=checkpoint["state_dim"],
+                action_dim=checkpoint["action_dim"],
+                one_hot=checkpoint["one_hot"],
+                min_action=checkpoint["min_action"],
+                max_action=checkpoint["max_action"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                mutation=checkpoint["mutation"],
+                policy_freq=checkpoint["policy_freq"],
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.arch = checkpoint["net_config"]["arch"]
+            if agent.arch == "mlp":
+                agent.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                agent.actor_target = EvolvableMLP(
+                    **checkpoint["actor_target_init_dict"]
+                )
+                agent.critic_1 = EvolvableMLP(**checkpoint["critic_1_init_dict"])
+                agent.critic_target_1 = EvolvableMLP(
+                    **checkpoint["critic_target_1_init_dict"]
+                )
+                agent.critic_2 = EvolvableMLP(**checkpoint["critic_2_init_dict"])
+                agent.critic_target_2 = EvolvableMLP(
+                    **checkpoint["critic_target_2_init_dict"]
+                )
+            elif agent.arch == "cnn":
+                agent.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                agent.actor_target = EvolvableCNN(
+                    **checkpoint["actor_target_init_dict"]
+                )
+                agent.critic_1 = EvolvableCNN(**checkpoint["critic_1_init_dict"])
+                agent.critic_target_1 = EvolvableCNN(
+                    **checkpoint["critic_target_1_init_dict"]
+                )
+                agent.critic_2 = EvolvableCNN(**checkpoint["critic_2_init_dict"])
+                agent.critic_target_2 = EvolvableCNN(
+                    **checkpoint["critic_target_2_init_dict"]
+                )
+        else:
+            agent = cls(
+                state_dim=checkpoint["state_dim"],
+                action_dim=checkpoint["action_dim"],
+                one_hot=checkpoint["one_hot"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                mutation=checkpoint["mutation"],
+                policy_freq=checkpoint["policy_freq"],
+                actor_network=MakeEvolvable(**checkpoint["actor_init_dict"]),
+                critic_networks=[
+                    MakeEvolvable(**checkpoint["critic_1_init_dict"]),
+                    MakeEvolvable(**checkpoint["critic_2_init_dict"]),
+                ],
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+            agent.critic_target_1 = MakeEvolvable(
+                **checkpoint["critic_target_1_init_dict"]
+            )
+            agent.critic_target_2 = MakeEvolvable(
+                **checkpoint["critic_target_2_init_dict"]
+            )
+
+        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        agent.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
+        agent.actor_optimizer.load_state_dict(checkpoint["actor_optimizer_state_dict"])
+
+        agent.critic_1_optimizer = optim.Adam(agent.critic_1.parameters(), lr=agent.lr)
+        agent.critic_1.load_state_dict(checkpoint["critic_1_state_dict"])
+        agent.critic_target_1.load_state_dict(checkpoint["critic_target_1_state_dict"])
+        agent.critic_1_optimizer.load_state_dict(
+            checkpoint["critic_1_optimizer_state_dict"]
+        )
+
+        agent.critic_2_optimizer = optim.Adam(agent.critic_2.parameters(), lr=agent.lr)
+        agent.critic_2.load_state_dict(checkpoint["critic_2_state_dict"])
+        agent.critic_target_2.load_state_dict(checkpoint["critic_target_2_state_dict"])
+        agent.critic_2_optimizer.load_state_dict(
+            checkpoint["critic_2_optimizer_state_dict"]
+        )
+
+        if accelerator is not None:
+            agent.wrap_models()
+
+        agent.scores = checkpoint["scores"]
+        agent.fitness = checkpoint["fitness"]
+        agent.steps = checkpoint["steps"]
+
+        return agent
