@@ -706,6 +706,8 @@ class DDPG:
                 state_dim=checkpoint["state_dim"],
                 action_dim=checkpoint["action_dim"],
                 one_hot=checkpoint["one_hot"],
+                min_action=checkpoint["min_action"],
+                max_action=checkpoint["max_action"],
                 index=checkpoint["index"],
                 net_config=checkpoint["net_config"],
                 batch_size=checkpoint["batch_size"],
