@@ -74,7 +74,7 @@ def simple_cnn():
 
 
 # initialize CQN with valid parameters
-def test_initialize_dqn_with_minimum_parameters():
+def test_initialize_cqn_with_minimum_parameters():
     state_dim = [4]
     action_dim = 2
     one_hot = False
@@ -108,7 +108,7 @@ def test_initialize_dqn_with_minimum_parameters():
 
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
-def test_initialize_dqn_with_cnn_accelerator():
+def test_initialize_cqn_with_cnn_accelerator():
     state_dim = [3, 32, 32]
     action_dim = 2
     one_hot = False
@@ -175,7 +175,7 @@ def test_initialize_dqn_with_cnn_accelerator():
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 
-# Can initialize DQN with an actor network
+# Can initialize cqn with an actor network
 @pytest.mark.parametrize(
     "state_dim, actor_network, input_tensor",
     [
@@ -183,7 +183,7 @@ def test_initialize_dqn_with_cnn_accelerator():
         ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-def test_initialize_dqn_with_actor_network(
+def test_initialize_cqn_with_actor_network(
     state_dim, actor_network, input_tensor, request
 ):
     action_dim = 2
@@ -274,7 +274,7 @@ def test_learns_from_experiences():
     one_hot = False
     batch_size = 64
 
-    # Create an instance of the DQN class
+    # Create an instance of the cqn class
     cqn = CQN(state_dim, action_dim, one_hot, batch_size=batch_size)
 
     # Create a batch of experiences
@@ -310,7 +310,7 @@ def test_handles_double_q_learning():
     double = True
     batch_size = 64
 
-    # Create an instance of the DQN class
+    # Create an instance of the cqn class
     cqn = CQN(
         state_dim,
         action_dim,
@@ -567,7 +567,7 @@ def test_unwrap_models():
 
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
-    # Initialize the DQN agent
+    # Initialize the cqn agent
     cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
 
     # Save the checkpoint to a file
@@ -626,7 +626,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "normalize": False,
     }
 
-    # Initialize the DQN agent
+    # Initialize the cqn agent
     cqn = CQN(
         state_dim=[3, 32, 32], action_dim=2, one_hot=False, net_config=net_config_cnn
     )
@@ -690,7 +690,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    # Initialize the DQN agent
+    # Initialize the cqn agent
     cqn = CQN(
         state_dim=[3, 64, 64], action_dim=2, one_hot=False, actor_network=actor_network
     )
@@ -739,3 +739,153 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert cqn.scores == []
     assert cqn.fitness == []
     assert cqn.steps == [0]
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the cqn agent
+    cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    cqn.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_cqn = CQN.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_cqn.state_dim == cqn.state_dim
+    assert new_cqn.action_dim == cqn.action_dim
+    assert new_cqn.one_hot == cqn.one_hot
+    assert new_cqn.net_config == cqn.net_config
+    assert isinstance(cqn.actor, EvolvableMLP)
+    assert isinstance(cqn.actor_target, EvolvableMLP)
+    assert new_cqn.lr == cqn.lr
+    assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
+    assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
+        cqn.actor_target.state_dict()
+    )
+    assert new_cqn.batch_size == cqn.batch_size
+    assert new_cqn.learn_step == cqn.learn_step
+    assert new_cqn.gamma == cqn.gamma
+    assert new_cqn.tau == cqn.tau
+    assert new_cqn.mut == cqn.mut
+    assert new_cqn.index == cqn.index
+    assert new_cqn.scores == cqn.scores
+    assert new_cqn.fitness == cqn.fitness
+    assert new_cqn.steps == cqn.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the cqn agent
+    cqn = CQN(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [3],
+            "s_size": [1],
+            "normalize": False,
+        },
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    cqn.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_cqn = CQN.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_cqn.state_dim == cqn.state_dim
+    assert new_cqn.action_dim == cqn.action_dim
+    assert new_cqn.one_hot == cqn.one_hot
+    assert new_cqn.net_config == cqn.net_config
+    assert isinstance(cqn.actor, EvolvableCNN)
+    assert isinstance(cqn.actor_target, EvolvableCNN)
+    assert new_cqn.lr == cqn.lr
+    assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
+    assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
+        cqn.actor_target.state_dict()
+    )
+    assert new_cqn.batch_size == cqn.batch_size
+    assert new_cqn.learn_step == cqn.learn_step
+    assert new_cqn.gamma == cqn.gamma
+    assert new_cqn.tau == cqn.tau
+    assert new_cqn.mut == cqn.mut
+    assert new_cqn.index == cqn.index
+    assert new_cqn.scores == cqn.scores
+    assert new_cqn.fitness == cqn.fitness
+    assert new_cqn.steps == cqn.steps
+
+
+@pytest.mark.parametrize(
+    "state_dim, actor_network, input_tensor",
+    [
+        ([4], "simple_mlp", torch.randn(1, 4)),
+        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    state_dim, actor_network, input_tensor, request, tmpdir
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    # Initialize the cqn agent
+    cqn = CQN(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        actor_network=actor_network,
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    cqn.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_cqn = CQN.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_cqn.state_dim == cqn.state_dim
+    assert new_cqn.action_dim == cqn.action_dim
+    assert new_cqn.one_hot == cqn.one_hot
+    assert new_cqn.net_config == cqn.net_config
+    assert isinstance(cqn.actor, nn.Module)
+    assert isinstance(cqn.actor_target, nn.Module)
+    assert new_cqn.lr == cqn.lr
+    assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
+    assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
+        cqn.actor_target.state_dict()
+    )
+    assert new_cqn.batch_size == cqn.batch_size
+    assert new_cqn.learn_step == cqn.learn_step
+    assert new_cqn.gamma == cqn.gamma
+    assert new_cqn.tau == cqn.tau
+    assert new_cqn.mut == cqn.mut
+    assert new_cqn.index == cqn.index
+    assert new_cqn.scores == cqn.scores
+    assert new_cqn.fitness == cqn.fitness
+    assert new_cqn.steps == cqn.steps
