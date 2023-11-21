@@ -74,8 +74,8 @@ class RainbowDQN:
         beta=0.4,
         prior_eps=1e-6,
         num_atoms=51,
-        v_min=0.0,
-        v_max=200.0,
+        v_min=-10,
+        v_max=10,
         n_step=3,
         mutation=None,
         actor_network=None,
@@ -111,15 +111,9 @@ class RainbowDQN:
         assert isinstance(
             v_min, (float, int)
         ), "Minimum value of support must be a float."
-        assert (
-            v_min >= 0
-        ), "Minimum value of support must be greater than or equal to zero."
         assert isinstance(
             v_max, (float, int)
         ), "Maximum value of support must be a float."
-        assert (
-            v_max >= 0
-        ), "Maximum value of support must be greater than or equal to zero."
         assert (
             v_max >= v_min
         ), "Maximum value of support must be greater than or equal to minimum value."
@@ -585,6 +579,9 @@ class RainbowDQN:
         """
         torch.save(
             {
+                "state_dim": self.state_dim,
+                "action_dim": self.action_dim,
+                "one_hot": self.one_hot,
                 "actor_init_dict": self.actor.init_dict,
                 "actor_state_dict": self.actor.state_dict(),
                 "actor_target_init_dict": self.actor_target.init_dict,
@@ -651,3 +648,88 @@ class RainbowDQN:
         self.scores = checkpoint["scores"]
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
+
+    @classmethod
+    def load(cls, path, device="cpu", accelerator=None):
+        """Creates agent with properties and network weights loaded from path.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+        :type device: str, optional
+        :param accelerator: Accelerator for distributed computing, defaults to None
+        :type accelerator: accelerate.Accelerator(), optional
+        """
+        checkpoint = torch.load(path, pickle_module=dill)
+
+        if checkpoint["net_config"] is not None:
+            agent = cls(
+                state_dim=checkpoint["state_dim"],
+                action_dim=checkpoint["action_dim"],
+                one_hot=checkpoint["one_hot"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                beta=checkpoint["beta"],
+                prior_eps=checkpoint["prior_eps"],
+                num_atoms=checkpoint["num_atoms"],
+                v_min=checkpoint["v_min"],
+                v_max=checkpoint["v_max"],
+                n_step=checkpoint["n_step"],
+                mutation=checkpoint["mutation"],
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.arch = checkpoint["net_config"]["arch"]
+            if agent.arch == "mlp":
+                agent.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                agent.actor_target = EvolvableMLP(
+                    **checkpoint["actor_target_init_dict"]
+                )
+            elif agent.arch == "cnn":
+                agent.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                agent.actor_target = EvolvableCNN(
+                    **checkpoint["actor_target_init_dict"]
+                )
+        else:
+            agent = cls(
+                state_dim=checkpoint["state_dim"],
+                action_dim=checkpoint["action_dim"],
+                one_hot=checkpoint["one_hot"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                beta=checkpoint["beta"],
+                prior_eps=checkpoint["prior_eps"],
+                num_atoms=checkpoint["num_atoms"],
+                v_min=checkpoint["v_min"],
+                v_max=checkpoint["v_max"],
+                n_step=checkpoint["n_step"],
+                mutation=checkpoint["mutation"],
+                actor_network=MakeEvolvable(**checkpoint["actor_init_dict"]),
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+
+        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        agent.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
+        agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        if accelerator is not None:
+            agent.wrap_models()
+
+        agent.scores = checkpoint["scores"]
+        agent.fitness = checkpoint["fitness"]
+        agent.steps = checkpoint["steps"]
+
+        return agent
