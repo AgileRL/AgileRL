@@ -721,6 +721,7 @@ class DDPG:
                 accelerator=accelerator,
             )
             agent.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+            agent.critic_target = MakeEvolvable(**checkpoint["critic_target_init_dict"])
 
         agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
         agent.actor.load_state_dict(checkpoint["actor_state_dict"])
