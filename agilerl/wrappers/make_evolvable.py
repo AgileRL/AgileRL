@@ -68,8 +68,6 @@ class MakeEvolvable(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        print("min layers", min_hidden_layers)
-        print("max", max_hidden_layers)
         assert (
             min_hidden_layers < max_hidden_layers
         ), "'min_hidden_layers' must be less than 'max_hidden_layers."
