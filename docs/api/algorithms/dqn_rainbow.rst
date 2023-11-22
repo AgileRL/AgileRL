@@ -108,6 +108,29 @@ Or for a CNN:
 
   agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create agent
 
+Saving and loading agents
+-------------------------
+
+To save an agent, use the ``saveCheckpoint`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.dqn_rainbow import RainbowDQN
+
+  agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create Rainbow DQN agent
+
+  checkpoint_path = "path/to/checkpoint"
+  agent.saveCheckpoint(checkpoint_path)
+
+To load a saved agent, use the ``load`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.dqn_rainbow import RainbowDQN
+
+  checkpoint_path = "path/to/checkpoint"
+  agent = RainbowDQN.load(checkpoint_path)
+
 Parameters
 ------------
 

@@ -101,6 +101,29 @@ Or for a CNN:
 
   agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
 
+Saving and loading agents
+-------------------------
+
+To save an agent, use the ``saveCheckpoint`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.dqn import DQN
+
+  agent = DQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DQN agent
+
+  checkpoint_path = "path/to/checkpoint"
+  agent.saveCheckpoint(checkpoint_path)
+
+To load a saved agent, use the ``load`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.dqn import DQN
+
+  checkpoint_path = "path/to/checkpoint"
+  agent = DQN.load(checkpoint_path)
+
 Parameters
 ------------
 
