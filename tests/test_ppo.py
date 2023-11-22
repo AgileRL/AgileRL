@@ -991,3 +991,147 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ppo.scores == []
     assert ppo.fitness == []
     assert ppo.steps == [0]
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the ppo agent
+    ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    ppo.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_ppo = PPO.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_ppo.state_dim == ppo.state_dim
+    assert new_ppo.action_dim == ppo.action_dim
+    assert new_ppo.one_hot == ppo.one_hot
+    assert new_ppo.discrete_actions == ppo.discrete_actions
+    assert new_ppo.net_config == ppo.net_config
+    assert isinstance(new_ppo.actor, EvolvableMLP)
+    assert isinstance(new_ppo.critic, EvolvableMLP)
+    assert new_ppo.lr == ppo.lr
+    assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
+    assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert new_ppo.batch_size == ppo.batch_size
+    assert new_ppo.gamma == ppo.gamma
+    assert new_ppo.mut == ppo.mut
+    assert new_ppo.index == ppo.index
+    assert new_ppo.scores == ppo.scores
+    assert new_ppo.fitness == ppo.fitness
+    assert new_ppo.steps == ppo.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the ppo agent
+    ppo = PPO(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [3],
+            "s_size": [1],
+            "normalize": False,
+        },
+        discrete_actions=False,
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    ppo.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_ppo = PPO.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_ppo.state_dim == ppo.state_dim
+    assert new_ppo.action_dim == ppo.action_dim
+    assert new_ppo.one_hot == ppo.one_hot
+    assert new_ppo.discrete_actions == ppo.discrete_actions
+    assert new_ppo.net_config == ppo.net_config
+    assert isinstance(new_ppo.actor, EvolvableCNN)
+    assert isinstance(new_ppo.critic, EvolvableCNN)
+    assert new_ppo.lr == ppo.lr
+    assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
+    assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert new_ppo.batch_size == ppo.batch_size
+    assert new_ppo.gamma == ppo.gamma
+    assert new_ppo.mut == ppo.mut
+    assert new_ppo.index == ppo.index
+    assert new_ppo.scores == ppo.scores
+    assert new_ppo.fitness == ppo.fitness
+    assert new_ppo.steps == ppo.steps
+
+
+@pytest.mark.parametrize(
+    "state_dim, actor_network, input_tensor",
+    [
+        ([4], "simple_mlp", torch.randn(1, 4)),
+        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    state_dim, actor_network, input_tensor, request, tmpdir
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    # Initialize the ppo agent
+    ppo = PPO(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        discrete_actions=True,
+        actor_network=actor_network,
+        critic_network=copy.deepcopy(actor_network),
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    ppo.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_ppo = PPO.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_ppo.state_dim == ppo.state_dim
+    assert new_ppo.action_dim == ppo.action_dim
+    assert new_ppo.one_hot == ppo.one_hot
+    assert new_ppo.discrete_actions == ppo.discrete_actions
+    assert new_ppo.net_config == ppo.net_config
+    assert isinstance(new_ppo.actor, nn.Module)
+    assert isinstance(new_ppo.critic, nn.Module)
+    assert new_ppo.lr == ppo.lr
+    assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
+    assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
+    assert new_ppo.batch_size == ppo.batch_size
+    assert new_ppo.gamma == ppo.gamma
+    assert new_ppo.mut == ppo.mut
+    assert new_ppo.index == ppo.index
+    assert new_ppo.scores == ppo.scores
+    assert new_ppo.fitness == ppo.fitness
+    assert new_ppo.steps == ppo.steps

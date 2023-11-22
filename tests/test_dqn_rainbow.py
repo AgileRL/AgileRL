@@ -919,3 +919,153 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert dqn.scores == []
     assert dqn.fitness == []
     assert dqn.steps == [0]
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the DQN agent
+    dqn = RainbowDQN(state_dim=[4], action_dim=2, one_hot=False)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    dqn.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_dqn = RainbowDQN.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_dqn.state_dim == dqn.state_dim
+    assert new_dqn.action_dim == dqn.action_dim
+    assert new_dqn.one_hot == dqn.one_hot
+    assert new_dqn.net_config == dqn.net_config
+    assert isinstance(new_dqn.actor, EvolvableMLP)
+    assert isinstance(new_dqn.actor_target, EvolvableMLP)
+    assert new_dqn.lr == dqn.lr
+    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
+    assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
+        dqn.actor_target.state_dict()
+    )
+    assert new_dqn.batch_size == dqn.batch_size
+    assert new_dqn.learn_step == dqn.learn_step
+    assert new_dqn.gamma == dqn.gamma
+    assert new_dqn.tau == dqn.tau
+    assert new_dqn.mut == dqn.mut
+    assert new_dqn.index == dqn.index
+    assert new_dqn.scores == dqn.scores
+    assert new_dqn.fitness == dqn.fitness
+    assert new_dqn.steps == dqn.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the DQN agent
+    dqn = RainbowDQN(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [3],
+            "s_size": [1],
+            "normalize": False,
+        },
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    dqn.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_dqn = RainbowDQN.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_dqn.state_dim == dqn.state_dim
+    assert new_dqn.action_dim == dqn.action_dim
+    assert new_dqn.one_hot == dqn.one_hot
+    assert new_dqn.net_config == dqn.net_config
+    assert isinstance(new_dqn.actor, EvolvableCNN)
+    assert isinstance(new_dqn.actor_target, EvolvableCNN)
+    assert new_dqn.lr == dqn.lr
+    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
+    assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
+        dqn.actor_target.state_dict()
+    )
+    assert new_dqn.batch_size == dqn.batch_size
+    assert new_dqn.learn_step == dqn.learn_step
+    assert new_dqn.gamma == dqn.gamma
+    assert new_dqn.tau == dqn.tau
+    assert new_dqn.mut == dqn.mut
+    assert new_dqn.index == dqn.index
+    assert new_dqn.scores == dqn.scores
+    assert new_dqn.fitness == dqn.fitness
+    assert new_dqn.steps == dqn.steps
+
+
+@pytest.mark.parametrize(
+    "state_dim, actor_network, input_tensor",
+    [
+        ([4], "simple_mlp", torch.randn(1, 4)),
+        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    state_dim, actor_network, input_tensor, request, tmpdir
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    # Initialize the DQN agent
+    dqn = RainbowDQN(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        actor_network=actor_network,
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    dqn.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_dqn = RainbowDQN.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_dqn.state_dim == dqn.state_dim
+    assert new_dqn.action_dim == dqn.action_dim
+    assert new_dqn.one_hot == dqn.one_hot
+    assert new_dqn.net_config == dqn.net_config
+    assert isinstance(new_dqn.actor, nn.Module)
+    assert isinstance(new_dqn.actor_target, nn.Module)
+    assert new_dqn.lr == dqn.lr
+    assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
+    assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
+        dqn.actor_target.state_dict()
+    )
+    assert new_dqn.batch_size == dqn.batch_size
+    assert new_dqn.learn_step == dqn.learn_step
+    assert new_dqn.gamma == dqn.gamma
+    assert new_dqn.tau == dqn.tau
+    assert new_dqn.mut == dqn.mut
+    assert new_dqn.index == dqn.index
+    assert new_dqn.scores == dqn.scores
+    assert new_dqn.fitness == dqn.fitness
+    assert new_dqn.steps == dqn.steps

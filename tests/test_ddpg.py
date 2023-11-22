@@ -992,3 +992,181 @@ def test_action_scaling():
     ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-1)
     scaled_action = ddpg.scale_to_action_space(action)
     assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the ddpg agent
+    ddpg = DDPG(state_dim=[4], action_dim=2, one_hot=False)
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    ddpg.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_ddpg.state_dim == ddpg.state_dim
+    assert new_ddpg.action_dim == ddpg.action_dim
+    assert new_ddpg.one_hot == ddpg.one_hot
+    assert new_ddpg.min_action == ddpg.min_action
+    assert new_ddpg.max_action == ddpg.max_action
+    assert new_ddpg.net_config == ddpg.net_config
+    assert isinstance(new_ddpg.actor, EvolvableMLP)
+    assert isinstance(new_ddpg.actor_target, EvolvableMLP)
+    assert isinstance(new_ddpg.critic, EvolvableMLP)
+    assert isinstance(new_ddpg.critic_target, EvolvableMLP)
+    assert new_ddpg.lr == ddpg.lr
+    assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
+    assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(new_ddpg.critic.to("cpu").state_dict()) == str(ddpg.critic.state_dict())
+    assert str(new_ddpg.critic_target.to("cpu").state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert new_ddpg.batch_size == ddpg.batch_size
+    assert new_ddpg.learn_step == ddpg.learn_step
+    assert new_ddpg.gamma == ddpg.gamma
+    assert new_ddpg.tau == ddpg.tau
+    assert new_ddpg.policy_freq == ddpg.policy_freq
+    assert new_ddpg.mut == ddpg.mut
+    assert new_ddpg.index == ddpg.index
+    assert new_ddpg.scores == ddpg.scores
+    assert new_ddpg.fitness == ddpg.fitness
+    assert new_ddpg.steps == ddpg.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the ddpg agent
+    ddpg = DDPG(
+        state_dim=[3, 32, 32],
+        action_dim=2,
+        one_hot=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [3],
+            "s_size": [1],
+            "normalize": False,
+        },
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    ddpg.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_ddpg.state_dim == ddpg.state_dim
+    assert new_ddpg.action_dim == ddpg.action_dim
+    assert new_ddpg.one_hot == ddpg.one_hot
+    assert new_ddpg.min_action == ddpg.min_action
+    assert new_ddpg.max_action == ddpg.max_action
+    assert new_ddpg.net_config == ddpg.net_config
+    assert isinstance(new_ddpg.actor, EvolvableCNN)
+    assert isinstance(new_ddpg.actor_target, EvolvableCNN)
+    assert isinstance(new_ddpg.critic, EvolvableCNN)
+    assert isinstance(new_ddpg.critic_target, EvolvableCNN)
+    assert new_ddpg.lr == ddpg.lr
+    assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
+    assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(new_ddpg.critic.to("cpu").state_dict()) == str(ddpg.critic.state_dict())
+    assert str(new_ddpg.critic_target.to("cpu").state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert new_ddpg.batch_size == ddpg.batch_size
+    assert new_ddpg.learn_step == ddpg.learn_step
+    assert new_ddpg.gamma == ddpg.gamma
+    assert new_ddpg.tau == ddpg.tau
+    assert new_ddpg.policy_freq == ddpg.policy_freq
+    assert new_ddpg.mut == ddpg.mut
+    assert new_ddpg.index == ddpg.index
+    assert new_ddpg.scores == ddpg.scores
+    assert new_ddpg.fitness == ddpg.fitness
+    assert new_ddpg.steps == ddpg.steps
+
+
+@pytest.mark.parametrize(
+    "state_dim, actor_network, input_tensor",
+    [
+        ([4], "simple_mlp", torch.randn(1, 4)),
+        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    state_dim, actor_network, input_tensor, request, tmpdir
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    # Initialize the ddpg agent
+    ddpg = DDPG(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        actor_network=actor_network,
+        critic_network=copy.deepcopy(actor_network),
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    ddpg.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_ddpg = DDPG.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_ddpg.state_dim == ddpg.state_dim
+    assert new_ddpg.action_dim == ddpg.action_dim
+    assert new_ddpg.one_hot == ddpg.one_hot
+    assert new_ddpg.min_action == ddpg.min_action
+    assert new_ddpg.max_action == ddpg.max_action
+    assert new_ddpg.net_config == ddpg.net_config
+    assert isinstance(new_ddpg.actor, nn.Module)
+    assert isinstance(new_ddpg.actor_target, nn.Module)
+    assert isinstance(new_ddpg.critic, nn.Module)
+    assert isinstance(new_ddpg.critic_target, nn.Module)
+    assert new_ddpg.lr == ddpg.lr
+    assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
+    assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(new_ddpg.critic.to("cpu").state_dict()) == str(ddpg.critic.state_dict())
+    assert str(new_ddpg.critic_target.to("cpu").state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert new_ddpg.batch_size == ddpg.batch_size
+    assert new_ddpg.learn_step == ddpg.learn_step
+    assert new_ddpg.gamma == ddpg.gamma
+    assert new_ddpg.tau == ddpg.tau
+    assert new_ddpg.policy_freq == ddpg.policy_freq
+    assert new_ddpg.mut == ddpg.mut
+    assert new_ddpg.index == ddpg.index
+    assert new_ddpg.scores == ddpg.scores
+    assert new_ddpg.fitness == ddpg.fitness
+    assert new_ddpg.steps == ddpg.steps

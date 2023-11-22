@@ -741,7 +741,7 @@ def test_maddpg_getAction_epsilon_greedy_distributed_cnn(
         n_agents=2,
         agent_ids=agent_ids,
         max_action=[[1], [1]],
-        min_action=[[-1], [-1]],
+        min_action=[[-1], [0]],
         net_config=net_config,
         discrete_actions=discrete_actions,
         accelerator=accelerator,
@@ -1336,7 +1336,7 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
 
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     net_config = {"arch": "mlp", "h_size": [32, 32]}
-    # Initialize the ddpg agent
+    # Initialize the maddpg agent
     maddpg = MADDPG(
         state_dims=[
             [
@@ -1443,7 +1443,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "normalize": False,
     }
 
-    # Initialize the ddpg agent
+    # Initialize the maddpg agent
     maddpg = MADDPG(
         state_dims=[[3, 32, 32]],
         action_dims=[2],
@@ -1536,11 +1536,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     "state_dims, action_dims",
     [
         (
-            [
-                [
-                    6,
-                ]
-            ],
+            [[6]],
             [2],
         )
     ],
@@ -1704,3 +1700,290 @@ def test_action_scaling():
     action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = maddpg.scale_to_action_space(action, idx=4)
     assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the maddpg agent
+    maddpg = MADDPG(
+        state_dims=[[4], [4]],
+        action_dims=[2, 2],
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=True,
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    maddpg.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_maddpg = MADDPG.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_maddpg.state_dims == maddpg.state_dims
+    assert new_maddpg.action_dims == maddpg.action_dims
+    assert new_maddpg.one_hot == maddpg.one_hot
+    assert new_maddpg.n_agents == maddpg.n_agents
+    assert new_maddpg.agent_ids == maddpg.agent_ids
+    assert new_maddpg.min_action == maddpg.min_action
+    assert new_maddpg.max_action == maddpg.max_action
+    assert new_maddpg.net_config == maddpg.net_config
+    assert new_maddpg.lr == maddpg.lr
+    for (
+        new_actor,
+        new_actor_target,
+        new_critic,
+        new_critic_target,
+        actor,
+        actor_target,
+        critic,
+        critic_target,
+    ) in zip(
+        new_maddpg.actors,
+        new_maddpg.actor_targets,
+        new_maddpg.critics,
+        new_maddpg.critic_targets,
+        maddpg.actors,
+        maddpg.actor_targets,
+        maddpg.critics,
+        maddpg.critic_targets,
+    ):
+        assert isinstance(new_actor, EvolvableMLP)
+        assert isinstance(new_actor_target, EvolvableMLP)
+        assert isinstance(new_critic, EvolvableMLP)
+        assert isinstance(new_critic_target, EvolvableMLP)
+        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert str(new_actor_target.to("cpu").state_dict()) == str(
+            actor_target.state_dict()
+        )
+        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
+        assert str(new_critic_target.to("cpu").state_dict()) == str(
+            critic_target.state_dict()
+        )
+    assert new_maddpg.batch_size == maddpg.batch_size
+    assert new_maddpg.learn_step == maddpg.learn_step
+    assert new_maddpg.gamma == maddpg.gamma
+    assert new_maddpg.tau == maddpg.tau
+    assert new_maddpg.mut == maddpg.mut
+    assert new_maddpg.index == maddpg.index
+    assert new_maddpg.scores == maddpg.scores
+    assert new_maddpg.fitness == maddpg.fitness
+    assert new_maddpg.steps == maddpg.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the maddpg agent
+    maddpg = MADDPG(
+        state_dims=[[3, 32, 32], [3, 32, 32]],
+        action_dims=[2, 2],
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_a", "agent_b"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [(1, 3, 3)],
+            "s_size": [1],
+            "normalize": False,
+        },
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    maddpg.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_maddpg = MADDPG.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_maddpg.state_dims == maddpg.state_dims
+    assert new_maddpg.action_dims == maddpg.action_dims
+    assert new_maddpg.one_hot == maddpg.one_hot
+    assert new_maddpg.n_agents == maddpg.n_agents
+    assert new_maddpg.agent_ids == maddpg.agent_ids
+    assert new_maddpg.min_action == maddpg.min_action
+    assert new_maddpg.max_action == maddpg.max_action
+    assert new_maddpg.net_config == maddpg.net_config
+    assert new_maddpg.lr == maddpg.lr
+    for (
+        new_actor,
+        new_actor_target,
+        new_critic,
+        new_critic_target,
+        actor,
+        actor_target,
+        critic,
+        critic_target,
+    ) in zip(
+        new_maddpg.actors,
+        new_maddpg.actor_targets,
+        new_maddpg.critics,
+        new_maddpg.critic_targets,
+        maddpg.actors,
+        maddpg.actor_targets,
+        maddpg.critics,
+        maddpg.critic_targets,
+    ):
+        assert isinstance(new_actor, EvolvableCNN)
+        assert isinstance(new_actor_target, EvolvableCNN)
+        assert isinstance(new_critic, EvolvableCNN)
+        assert isinstance(new_critic_target, EvolvableCNN)
+        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert str(new_actor_target.to("cpu").state_dict()) == str(
+            actor_target.state_dict()
+        )
+        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
+        assert str(new_critic_target.to("cpu").state_dict()) == str(
+            critic_target.state_dict()
+        )
+    assert new_maddpg.batch_size == maddpg.batch_size
+    assert new_maddpg.learn_step == maddpg.learn_step
+    assert new_maddpg.gamma == maddpg.gamma
+    assert new_maddpg.tau == maddpg.tau
+    assert new_maddpg.mut == maddpg.mut
+    assert new_maddpg.index == maddpg.index
+    assert new_maddpg.scores == maddpg.scores
+    assert new_maddpg.fitness == maddpg.fitness
+    assert new_maddpg.steps == maddpg.steps
+
+
+@pytest.mark.parametrize(
+    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor, extra_critic_dims",
+    [
+        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
+        (
+            [[4, 210, 160], [4, 210, 160]],
+            [2, 2],
+            "cnn",
+            torch.randn(1, 4, 2, 210, 160),
+            torch.randn(1, 4, 2, 210, 160),
+            torch.randn(1, 2),
+            2,
+        ),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    mlp_actor,
+    mlp_critic,
+    cnn_actor,
+    cnn_critic,
+    state_dims,
+    action_dims,
+    arch,
+    input_tensor,
+    critic_input_tensor,
+    secondary_input_tensor,
+    extra_critic_dims,
+    tmpdir,
+):
+    one_hot = False
+    if arch == "mlp":
+        actor_network = mlp_actor
+        critic_network = mlp_critic
+    elif arch == "cnn":
+        actor_network = cnn_actor
+        critic_network = cnn_critic
+
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+    critic_network = MakeEvolvable(
+        critic_network,
+        critic_input_tensor,
+        secondary_input_tensor=secondary_input_tensor,
+        extra_critic_dims=extra_critic_dims,
+    )
+
+    # Initialize the maddpg agent
+    maddpg = MADDPG(
+        state_dims=state_dims,
+        action_dims=action_dims,
+        one_hot=one_hot,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=True,
+        actor_networks=[actor_network, copy.deepcopy(actor_network)],
+        critic_networks=[critic_network, copy.deepcopy(critic_network)],
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    maddpg.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_maddpg = MADDPG.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_maddpg.state_dims == maddpg.state_dims
+    assert new_maddpg.action_dims == maddpg.action_dims
+    assert new_maddpg.one_hot == maddpg.one_hot
+    assert new_maddpg.n_agents == maddpg.n_agents
+    assert new_maddpg.agent_ids == maddpg.agent_ids
+    assert new_maddpg.min_action == maddpg.min_action
+    assert new_maddpg.max_action == maddpg.max_action
+    assert new_maddpg.net_config == maddpg.net_config
+    assert new_maddpg.lr == maddpg.lr
+    for (
+        new_actor,
+        new_actor_target,
+        new_critic,
+        new_critic_target,
+        actor,
+        actor_target,
+        critic,
+        critic_target,
+    ) in zip(
+        new_maddpg.actors,
+        new_maddpg.actor_targets,
+        new_maddpg.critics,
+        new_maddpg.critic_targets,
+        maddpg.actors,
+        maddpg.actor_targets,
+        maddpg.critics,
+        maddpg.critic_targets,
+    ):
+        assert isinstance(new_actor, nn.Module)
+        assert isinstance(new_actor_target, nn.Module)
+        assert isinstance(new_critic, nn.Module)
+        assert isinstance(new_critic_target, nn.Module)
+        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert str(new_actor_target.to("cpu").state_dict()) == str(
+            actor_target.state_dict()
+        )
+        assert str(new_critic.to("cpu").state_dict()) == str(critic.state_dict())
+        assert str(new_critic_target.to("cpu").state_dict()) == str(
+            critic_target.state_dict()
+        )
+    assert new_maddpg.batch_size == maddpg.batch_size
+    assert new_maddpg.learn_step == maddpg.learn_step
+    assert new_maddpg.gamma == maddpg.gamma
+    assert new_maddpg.tau == maddpg.tau
+    assert new_maddpg.mut == maddpg.mut
+    assert new_maddpg.index == maddpg.index
+    assert new_maddpg.scores == maddpg.scores
+    assert new_maddpg.fitness == maddpg.fitness
+    assert new_maddpg.steps == maddpg.steps
