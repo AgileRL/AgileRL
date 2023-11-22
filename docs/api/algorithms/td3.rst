@@ -101,7 +101,30 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=max_action, net_config=NET_CONFIG)   # Create TD3 agent
+  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, net_config=NET_CONFIG)   # Create TD3 agent
+
+Saving and loading agents
+-------------------------
+
+To save an agent, use the ``saveCheckpoint`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.ddpg import DDPG
+
+  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DDPG agent
+
+  checkpoint_path = "path/to/checkpoint"
+  agent.saveCheckpoint(checkpoint_path)
+
+To load a saved agent, use the ``load`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.ddpg import DDPG
+
+  checkpoint_path = "path/to/checkpoint"
+  agent = DDPG.load(checkpoint_path)
 
 Parameters
 ------------
