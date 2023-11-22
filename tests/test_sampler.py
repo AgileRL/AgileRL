@@ -1,3 +1,4 @@
+import pytest
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
@@ -167,3 +168,24 @@ def test_sample_n_step_with_valid_batch_size():
     assert len(samples[0]) == len(idxs)
     assert len(samples[1]) == len(idxs)
     assert len(samples[2]) == len(idxs)
+
+
+@pytest.mark.parametrize(
+    "distributed, per, n_step, memory, dataset, dataloader",
+    [
+        (False, False, False, 0, None, None),
+        (True, False, False, None, 0, 0),
+        (False, True, False, 0, None, None),
+        (False, False, True, 0, None, None),
+    ],
+)
+def test_warnings_in_constructor(distributed, per, n_step, memory, dataset, dataloader):
+    with pytest.warns():
+        _ = Sampler(
+            distributed,
+            per,
+            n_step,
+            memory,
+            dataset,
+            dataloader,
+        )

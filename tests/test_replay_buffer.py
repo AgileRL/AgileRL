@@ -470,7 +470,7 @@ def test_returns_tuple_of_n_step_reward_next_state_and_done():
 def test_calculates_n_step_reward():
     n_step_buffer = deque(maxlen=5)
     gamma = 0.9
-    field_names = ["state", "action", "reward", "next_state", "done"]
+    field_names = ["state", "action", "reward", "next_state", "terminated"]
 
     # Create a namedtuple to represent a transition
     Transition = namedtuple("Transition", field_names)

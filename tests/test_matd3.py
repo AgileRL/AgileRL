@@ -689,7 +689,7 @@ def test_matd3_getAction_epsilon_greedy_cnn(
         agent_ids=agent_ids,
         net_config=net_config,
         max_action=[[1], [1]],
-        min_action=[[-1], [-1]],
+        min_action=[[-1], [0]],
         discrete_actions=discrete_actions,
         device=device,
     )
