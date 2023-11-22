@@ -820,8 +820,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_dqn.action_dim == dqn.action_dim
     assert new_dqn.one_hot == dqn.one_hot
     assert new_dqn.net_config == dqn.net_config
-    assert isinstance(dqn.actor, EvolvableMLP)
-    assert isinstance(dqn.actor_target, EvolvableMLP)
+    assert isinstance(new_dqn.actor, EvolvableMLP)
+    assert isinstance(new_dqn.actor_target, EvolvableMLP)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
@@ -874,8 +874,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_dqn.action_dim == dqn.action_dim
     assert new_dqn.one_hot == dqn.one_hot
     assert new_dqn.net_config == dqn.net_config
-    assert isinstance(dqn.actor, EvolvableCNN)
-    assert isinstance(dqn.actor_target, EvolvableCNN)
+    assert isinstance(new_dqn.actor, EvolvableCNN)
+    assert isinstance(new_dqn.actor_target, EvolvableCNN)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(
@@ -928,8 +928,8 @@ def test_load_from_pretrained_networks(
     assert new_dqn.action_dim == dqn.action_dim
     assert new_dqn.one_hot == dqn.one_hot
     assert new_dqn.net_config == dqn.net_config
-    assert isinstance(dqn.actor, nn.Module)
-    assert isinstance(dqn.actor_target, nn.Module)
+    assert isinstance(new_dqn.actor, nn.Module)
+    assert isinstance(new_dqn.actor_target, nn.Module)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert str(new_dqn.actor_target.to("cpu").state_dict()) == str(

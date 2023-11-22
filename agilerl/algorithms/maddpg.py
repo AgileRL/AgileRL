@@ -1137,22 +1137,22 @@ class MADDPG:
                 mutation=checkpoint["mutation"],
                 actor_networks=[
                     MakeEvolvable(**checkpoint["actors_init_dict"][idx])
-                    for idx, _ in enumerate(agent.agent_ids)
+                    for idx, _ in enumerate(checkpoint["agent_ids"])
                 ],
-                critic_network=[
+                critic_networks=[
                     MakeEvolvable(**checkpoint["critics_init_dict"][idx])
-                    for idx, _ in enumerate(agent.agent_ids)
+                    for idx, _ in enumerate(checkpoint["agent_ids"])
                 ],
                 device=device,
                 accelerator=accelerator,
             )
             agent.actor_targets = [
                 MakeEvolvable(**checkpoint["actor_targets_init_dict"][idx])
-                for idx, _ in enumerate(agent.agent_ids)
+                for idx, _ in enumerate(checkpoint["agent_ids"])
             ]
             agent.critic_targets = [
                 MakeEvolvable(**checkpoint["critic_targets_init_dict"][idx])
-                for idx, _ in enumerate(agent.agent_ids)
+                for idx, _ in enumerate(checkpoint["agent_ids"])
             ]
 
         agent.actor_optimizers = [

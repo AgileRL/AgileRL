@@ -1018,8 +1018,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_ppo.one_hot == ppo.one_hot
     assert new_ppo.discrete_actions == ppo.discrete_actions
     assert new_ppo.net_config == ppo.net_config
-    assert isinstance(ppo.actor, EvolvableMLP)
-    assert isinstance(ppo.critic, EvolvableMLP)
+    assert isinstance(new_ppo.actor, EvolvableMLP)
+    assert isinstance(new_ppo.critic, EvolvableMLP)
     assert new_ppo.lr == ppo.lr
     assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
@@ -1070,8 +1070,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_ppo.one_hot == ppo.one_hot
     assert new_ppo.discrete_actions == ppo.discrete_actions
     assert new_ppo.net_config == ppo.net_config
-    assert isinstance(ppo.actor, EvolvableCNN)
-    assert isinstance(ppo.critic, EvolvableCNN)
+    assert isinstance(new_ppo.actor, EvolvableCNN)
+    assert isinstance(new_ppo.critic, EvolvableCNN)
     assert new_ppo.lr == ppo.lr
     assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
@@ -1123,8 +1123,8 @@ def test_load_from_pretrained_networks(
     assert new_ppo.one_hot == ppo.one_hot
     assert new_ppo.discrete_actions == ppo.discrete_actions
     assert new_ppo.net_config == ppo.net_config
-    assert isinstance(ppo.actor, nn.Module)
-    assert isinstance(ppo.critic, nn.Module)
+    assert isinstance(new_ppo.actor, nn.Module)
+    assert isinstance(new_ppo.critic, nn.Module)
     assert new_ppo.lr == ppo.lr
     assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
