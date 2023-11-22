@@ -1909,3 +1909,335 @@ def test_action_scaling():
     action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = matd3.scale_to_action_space(action, idx=4)
     assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained(device, accelerator, tmpdir):
+    # Initialize the matd3 agent
+    matd3 = MATD3(
+        state_dims=[[4], [4]],
+        action_dims=[2, 2],
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=True,
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    matd3.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_matd3.state_dims == matd3.state_dims
+    assert new_matd3.action_dims == matd3.action_dims
+    assert new_matd3.one_hot == matd3.one_hot
+    assert new_matd3.n_agents == matd3.n_agents
+    assert new_matd3.agent_ids == matd3.agent_ids
+    assert new_matd3.min_action == matd3.min_action
+    assert new_matd3.max_action == matd3.max_action
+    assert new_matd3.net_config == matd3.net_config
+    assert new_matd3.lr == matd3.lr
+    for (
+        new_actor,
+        new_actor_target,
+        new_critic_1,
+        new_critic_target_1,
+        new_critic_2,
+        new_critic_target_2,
+        actor,
+        actor_target,
+        critic_1,
+        critic_target_1,
+        critic_2,
+        critic_target_2,
+    ) in zip(
+        new_matd3.actors,
+        new_matd3.actor_targets,
+        new_matd3.critics_1,
+        new_matd3.critic_targets_1,
+        new_matd3.critics_2,
+        new_matd3.critic_targets_2,
+        matd3.actors,
+        matd3.actor_targets,
+        matd3.critics_1,
+        matd3.critic_targets_1,
+        matd3.critics_2,
+        matd3.critic_targets_2,
+    ):
+        assert isinstance(new_actor, EvolvableMLP)
+        assert isinstance(new_actor_target, EvolvableMLP)
+        assert isinstance(new_critic_1, EvolvableMLP)
+        assert isinstance(new_critic_target_1, EvolvableMLP)
+        assert isinstance(new_critic_2, EvolvableMLP)
+        assert isinstance(new_critic_target_2, EvolvableMLP)
+        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert str(new_actor_target.to("cpu").state_dict()) == str(
+            actor_target.state_dict()
+        )
+        assert str(new_critic_1.to("cpu").state_dict()) == str(critic_1.state_dict())
+        assert str(new_critic_target_1.to("cpu").state_dict()) == str(
+            critic_target_1.state_dict()
+        )
+        assert str(new_critic_2.to("cpu").state_dict()) == str(critic_2.state_dict())
+        assert str(new_critic_target_2.to("cpu").state_dict()) == str(
+            critic_target_2.state_dict()
+        )
+    assert new_matd3.batch_size == matd3.batch_size
+    assert new_matd3.learn_step == matd3.learn_step
+    assert new_matd3.gamma == matd3.gamma
+    assert new_matd3.tau == matd3.tau
+    assert new_matd3.mut == matd3.mut
+    assert new_matd3.index == matd3.index
+    assert new_matd3.scores == matd3.scores
+    assert new_matd3.fitness == matd3.fitness
+    assert new_matd3.steps == matd3.steps
+
+
+@pytest.mark.parametrize(
+    "device, accelerator",
+    [
+        ("cpu", None),
+        ("cpu", Accelerator()),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
+    # Initialize the matd3 agent
+    matd3 = MATD3(
+        state_dims=[[3, 32, 32], [3, 32, 32]],
+        action_dims=[2, 2],
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_a", "agent_b"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=False,
+        net_config={
+            "arch": "cnn",
+            "h_size": [8],
+            "c_size": [3],
+            "k_size": [(1, 3, 3)],
+            "s_size": [1],
+            "normalize": False,
+        },
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    matd3.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
+
+    # Check if properties and weights are loaded correctly
+    assert new_matd3.state_dims == matd3.state_dims
+    assert new_matd3.action_dims == matd3.action_dims
+    assert new_matd3.one_hot == matd3.one_hot
+    assert new_matd3.n_agents == matd3.n_agents
+    assert new_matd3.agent_ids == matd3.agent_ids
+    assert new_matd3.min_action == matd3.min_action
+    assert new_matd3.max_action == matd3.max_action
+    assert new_matd3.net_config == matd3.net_config
+    assert new_matd3.lr == matd3.lr
+    for (
+        new_actor,
+        new_actor_target,
+        new_critic_1,
+        new_critic_target_1,
+        new_critic_2,
+        new_critic_target_2,
+        actor,
+        actor_target,
+        critic_1,
+        critic_target_1,
+        critic_2,
+        critic_target_2,
+    ) in zip(
+        new_matd3.actors,
+        new_matd3.actor_targets,
+        new_matd3.critics_1,
+        new_matd3.critic_targets_1,
+        new_matd3.critics_2,
+        new_matd3.critic_targets_2,
+        matd3.actors,
+        matd3.actor_targets,
+        matd3.critics_1,
+        matd3.critic_targets_1,
+        matd3.critics_2,
+        matd3.critic_targets_2,
+    ):
+        assert isinstance(new_actor, EvolvableCNN)
+        assert isinstance(new_actor_target, EvolvableCNN)
+        assert isinstance(new_critic_1, EvolvableCNN)
+        assert isinstance(new_critic_target_1, EvolvableCNN)
+        assert isinstance(new_critic_2, EvolvableCNN)
+        assert isinstance(new_critic_target_2, EvolvableCNN)
+        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert str(new_actor_target.to("cpu").state_dict()) == str(
+            actor_target.state_dict()
+        )
+        assert str(new_critic_1.to("cpu").state_dict()) == str(critic_1.state_dict())
+        assert str(new_critic_target_1.to("cpu").state_dict()) == str(
+            critic_target_1.state_dict()
+        )
+        assert str(new_critic_2.to("cpu").state_dict()) == str(critic_2.state_dict())
+        assert str(new_critic_target_2.to("cpu").state_dict()) == str(
+            critic_target_2.state_dict()
+        )
+    assert new_matd3.batch_size == matd3.batch_size
+    assert new_matd3.learn_step == matd3.learn_step
+    assert new_matd3.gamma == matd3.gamma
+    assert new_matd3.tau == matd3.tau
+    assert new_matd3.mut == matd3.mut
+    assert new_matd3.index == matd3.index
+    assert new_matd3.scores == matd3.scores
+    assert new_matd3.fitness == matd3.fitness
+    assert new_matd3.steps == matd3.steps
+
+
+@pytest.mark.parametrize(
+    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor, extra_critic_dims",
+    [
+        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
+        (
+            [[4, 210, 160], [4, 210, 160]],
+            [2, 2],
+            "cnn",
+            torch.randn(1, 4, 2, 210, 160),
+            torch.randn(1, 4, 2, 210, 160),
+            torch.randn(1, 2),
+            2,
+        ),
+    ],
+)
+# The saved checkpoint file contains the correct data and format.
+def test_load_from_pretrained_networks(
+    mlp_actor,
+    mlp_critic,
+    cnn_actor,
+    cnn_critic,
+    state_dims,
+    action_dims,
+    arch,
+    input_tensor,
+    critic_input_tensor,
+    secondary_input_tensor,
+    extra_critic_dims,
+    tmpdir,
+):
+    one_hot = False
+    if arch == "mlp":
+        actor_network = mlp_actor
+        critic_network = mlp_critic
+    elif arch == "cnn":
+        actor_network = cnn_actor
+        critic_network = cnn_critic
+
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+    critic_network = MakeEvolvable(
+        critic_network,
+        critic_input_tensor,
+        secondary_input_tensor=secondary_input_tensor,
+        extra_critic_dims=extra_critic_dims,
+    )
+
+    # Initialize the matd3 agent
+    matd3 = MATD3(
+        state_dims=state_dims,
+        action_dims=action_dims,
+        one_hot=one_hot,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=True,
+        actor_networks=[actor_network, copy.deepcopy(actor_network)],
+        critic_networks=[
+            [critic_network, copy.deepcopy(critic_network)],
+            [copy.deepcopy(critic_network), copy.deepcopy(critic_network)],
+        ],
+    )
+
+    # Save the checkpoint to a file
+    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    matd3.saveCheckpoint(checkpoint_path)
+
+    # Create new agent object
+    new_matd3 = MATD3.load(checkpoint_path)
+
+    # Check if properties and weights are loaded correctly
+    assert new_matd3.state_dims == matd3.state_dims
+    assert new_matd3.action_dims == matd3.action_dims
+    assert new_matd3.one_hot == matd3.one_hot
+    assert new_matd3.n_agents == matd3.n_agents
+    assert new_matd3.agent_ids == matd3.agent_ids
+    assert new_matd3.min_action == matd3.min_action
+    assert new_matd3.max_action == matd3.max_action
+    assert new_matd3.net_config == matd3.net_config
+    assert new_matd3.lr == matd3.lr
+    for (
+        new_actor,
+        new_actor_target,
+        new_critic_1,
+        new_critic_target_1,
+        new_critic_2,
+        new_critic_target_2,
+        actor,
+        actor_target,
+        critic_1,
+        critic_target_1,
+        critic_2,
+        critic_target_2,
+    ) in zip(
+        new_matd3.actors,
+        new_matd3.actor_targets,
+        new_matd3.critics_1,
+        new_matd3.critic_targets_1,
+        new_matd3.critics_2,
+        new_matd3.critic_targets_2,
+        matd3.actors,
+        matd3.actor_targets,
+        matd3.critics_1,
+        matd3.critic_targets_1,
+        matd3.critics_2,
+        matd3.critic_targets_2,
+    ):
+        assert isinstance(new_actor, nn.Module)
+        assert isinstance(new_actor_target, nn.Module)
+        assert isinstance(new_critic_1, nn.Module)
+        assert isinstance(new_critic_target_1, nn.Module)
+        assert isinstance(new_critic_2, nn.Module)
+        assert isinstance(new_critic_target_2, nn.Module)
+        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
+        assert str(new_actor_target.to("cpu").state_dict()) == str(
+            actor_target.state_dict()
+        )
+        assert str(new_critic_1.to("cpu").state_dict()) == str(critic_1.state_dict())
+        assert str(new_critic_target_1.to("cpu").state_dict()) == str(
+            critic_target_1.state_dict()
+        )
+        assert str(new_critic_2.to("cpu").state_dict()) == str(critic_2.state_dict())
+        assert str(new_critic_target_2.to("cpu").state_dict()) == str(
+            critic_target_2.state_dict()
+        )
+    assert new_matd3.batch_size == matd3.batch_size
+    assert new_matd3.learn_step == matd3.learn_step
+    assert new_matd3.gamma == matd3.gamma
+    assert new_matd3.tau == matd3.tau
+    assert new_matd3.mut == matd3.mut
+    assert new_matd3.index == matd3.index
+    assert new_matd3.scores == matd3.scores
+    assert new_matd3.fitness == matd3.fitness
+    assert new_matd3.steps == matd3.steps
