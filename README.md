@@ -41,6 +41,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
   * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
   * [Distributed training](#distributed-training)
   * [Multi-agent training](#multi-agent-training)
+  * [Citing AgileRL](#citing-agilerl)
 
 ## Benchmarks
 
@@ -1175,3 +1176,15 @@ The easiest training loop implementation is to use our ```training.train_multi_a
 
 ```
 View <a href="https://docs.agilerl.com">documentation</a>.
+
+## Citing AgileRL
+
+If you use AgileRL in your work, please cite the repository:
+```bibtex
+@software{Ustaran-Anderegg_AgileRL,
+author = {Ustaran-Anderegg, Nicholas and Pratt, Michael},
+license = {Apache-2.0},
+title = {{AgileRL}},
+url = {https://github.com/AgileRL/AgileRL}
+}
+```
