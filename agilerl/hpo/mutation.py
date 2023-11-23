@@ -378,16 +378,37 @@ class Mutations:
                     offspring_critic_opts,
                 )
         else:
-            # Reinitialise optimizer
-            actor_opt = getattr(individual, self.algo["actor"]["optimizer"])
-            net_params = getattr(individual, self.algo["actor"]["eval"]).parameters()
-            setattr(
-                individual,
-                self.algo["actor"]["optimizer"].replace("_type", ""),
-                type(actor_opt)(net_params, lr=individual.lr),
-            )
+            if individual.algo in ["PPO"]:
+                # Reinitialise optimizer
+                opt = getattr(individual, self.algo["actor"]["optimizer"])
+                actor_net_params = getattr(
+                    individual, self.algo["actor"]["eval"]
+                ).parameters()
+                critic_net_params = getattr(
+                    individual, self.algo["critics"][0]["eval"]
+                ).parameters()
+                opt_args = [
+                    {"params": actor_net_params, "lr": individual.lr},
+                    {"params": critic_net_params, "lr": individual.lr},
+                ]
+                setattr(
+                    individual,
+                    self.algo["actor"]["optimizer"].replace("_type", ""),
+                    type(opt)(opt_args),
+                )
 
-            if individual.algo not in ["PPO"]:
+            else:
+                # Reinitialise optimizer
+                actor_opt = getattr(individual, self.algo["actor"]["optimizer"])
+                net_params = getattr(
+                    individual, self.algo["actor"]["eval"]
+                ).parameters()
+                setattr(
+                    individual,
+                    self.algo["actor"]["optimizer"].replace("_type", ""),
+                    type(actor_opt)(net_params, lr=individual.lr),
+                )
+
                 # If algorithm has critics, reinitialise their optimizers too
                 for critic in self.algo["critics"]:
                     critic_opt = getattr(individual, critic["optimizer"])
