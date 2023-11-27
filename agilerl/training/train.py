@@ -266,6 +266,7 @@ def train(
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
 
+    action_dim = env.single_action_space.n ####
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
@@ -274,6 +275,9 @@ def train(
             state = env.reset()[0]  # Reset environment at start of episode
             rewards, terminations, truncs = [], [], []
             score = 0
+
+            train_actions_hist = [0] * action_dim
+
             for idx_step in range(max_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [-1], [-3])
@@ -282,6 +286,10 @@ def train(
                     action = agent.getAction(state)
                 else:
                     action = agent.getAction(state, epsilon)
+                
+                for a in action:
+                    train_actions_hist[a] += 1
+
                 if not is_vectorised:
                     action = action[0]
                 next_state, reward, done, trunc, _ = env.step(
@@ -390,6 +398,19 @@ def train(
 
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
+            train_actions_hist = [freq/sum(train_actions_hist) for freq in train_actions_hist]
+            train_actions_dict = {
+                  f"train/action_{index}": action
+                  for index, action in enumerate(train_actions_hist)
+               }
+            wandb_dict = {
+                            "global_step": total_steps,
+                            "train/mean_score": np.mean(mean_scores),
+                            "eval/mean_fitness": np.mean(fitnesses),
+                            "eval/best_fitness": np.max(fitnesses),
+                        }
+            wandb_dict.update(train_actions_dict)
+
             if wb:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -406,12 +427,7 @@ def train(
                     accelerator.wait_for_everyone()
                 else:
                     wandb.log(
-                        {
-                            "global_step": total_steps,
-                            "train/mean_score": np.mean(mean_scores),
-                            "eval/mean_fitness": np.mean(fitnesses),
-                            "eval/best_fitness": np.max(fitnesses),
-                        }
+                        wandb_dict
                     )
 
             # Update step counter

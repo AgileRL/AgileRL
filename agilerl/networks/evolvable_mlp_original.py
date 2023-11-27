@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agilerl.networks.custom_components import GumbelSoftmax
+from agilerl.networks.custom_activation import GumbelSoftmax
 
 
 class NoisyLinear(nn.Module):
@@ -18,11 +18,11 @@ class NoisyLinear(nn.Module):
     :type in_features: int
     :param out_features: Output features size
     :type out_features: int
-    :param std_init: Standard deviation, defaults to 0.5
+    :param std_init: Standard deviation, defaults to 0.4
     :type std_init: float, optional
     """
 
-    def __init__(self, in_features, out_features, std_init=0.5):
+    def __init__(self, in_features, out_features, std_init=0.4):
         super().__init__()
 
         self.in_features = in_features
@@ -62,15 +62,15 @@ class NoisyLinear(nn.Module):
 
     def reset_parameters(self):
         """Resets neural network parameters."""
-        mu_range = 1 / math.sqrt(self.in_features)
+        mu_range = 1 / math.sqrt(self.weight_mu.size(1))
 
         self.weight_mu.data.uniform_(-mu_range, mu_range)
         self.weight_sigma.data.fill_(
-            self.std_init / math.sqrt(self.in_features)
+            self.std_init / math.sqrt(self.weight_sigma.size(1))
         )
 
         self.bias_mu.data.uniform_(-mu_range, mu_range)
-        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
+        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.bias_sigma.size(0)))
 
     def reset_noise(self):
         """Resets neural network noise."""
@@ -348,11 +348,14 @@ class EvolvableMLP(nn.Module):
         if self.rainbow:
             value = self.value_net(x)
             advantage = self.advantage_net(x)
-            value = value.view(-1, 1, self.num_atoms)
-            advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
+
+            value = value.view(batch_size, 1, self.num_atoms)
+            advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
 
             x = value + advantage - advantage.mean(1, keepdim=True)
-            x = F.softmax(x, dim=-1)
+            x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                -1, self.num_outputs, self.num_atoms
+            )
             x = x.clamp(min=1e-3)
 
             if q:

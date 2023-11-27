@@ -1,5 +1,3 @@
-#### Not the original DQN, distributional has been removed
-
 import copy
 
 import dill
@@ -249,9 +247,7 @@ class RainbowDQN:
             self.actor_target = self.actor_target.to(self.device)
             self.optimizer = self.optimizer_type
 
-        self.criterion = nn.MSELoss()
-
-    def getAction(self, state, epsilon=0, action_mask=None):
+    def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -275,36 +271,6 @@ class RainbowDQN:
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
-        #################################
-        # if random.random() < epsilon:
-        #     if action_mask is None:
-        #         action = np.random.randint(0, self.action_dim, size=state.size()[0])
-        #     else:
-        #         inv_mask = 1 - action_mask
-
-        #         available_actions = np.ma.array(
-        #             np.arange(0, self.action_dim), mask=inv_mask
-        #         ).compressed()
-        #         action = np.random.choice(available_actions, size=state.size()[0])
-
-        # else:
-        #     self.actor.eval()
-        #     with torch.no_grad():
-        #         action_values = self.actor(state)
-        #     self.actor.train()
-
-        #     if action_mask is None:
-        #         action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
-        #     else:
-        #         inv_mask = 1 - action_mask
-        #         masked_action_values = np.ma.array(
-        #             action_values.cpu().data.numpy(), mask=inv_mask
-        #         )
-        #         action = np.argmax(masked_action_values, axis=-1)
-
-        # return action
-
-        #########################################
         self.actor.eval()
         with torch.no_grad():
             action_values = self.actor(state)
@@ -320,31 +286,6 @@ class RainbowDQN:
             action = np.argmax(masked_action_values, axis=-1)
 
         return action
-
-    def _normal_dqn_loss(self, states, actions, rewards, next_states, dones, gamma, double=True):
-        if self.one_hot:
-            states = (
-                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-            next_states = (
-                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-        if double:
-            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
-            q_target = self.actor(next_states).gather(dim=1, index=q_idx).detach()
-        else:
-            q_target = self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
-
-        # target, if terminal then y_j = rewards
-        y_j = rewards + gamma * q_target * (1 - dones)
-        q_eval = self.actor(states).gather(1, actions.long())
-
-        loss = self.criterion(q_eval, y_j)
-        return loss
 
     def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
         if self.one_hot:
@@ -363,18 +304,14 @@ class RainbowDQN:
 
         with torch.no_grad():
             # Double Q-learning
-            # next_dist = self.actor_target(next_states, q=False) 
-            # next_action = next_dist.sum(2).max(1)[1]
-            # next_action = (
-            #     next_action.unsqueeze(1)
-            #     .unsqueeze(1)
-            #     .expand(next_dist.size(0), 1, next_dist.size(2))
-            # )
-            # next_dist = next_dist.gather(1, next_action).squeeze(1)
-
-            next_actions = self.actor(next_states).argmax(1)
-            next_dist = self.actor_target(next_states, q=False)
-            next_dist = next_dist[range(self.batch_size), next_actions]
+            next_dist = self.actor_target(next_states, q=False) * self.support
+            next_action = next_dist.sum(2).max(1)[1]
+            next_action = (
+                next_action.unsqueeze(1)
+                .unsqueeze(1)
+                .expand(next_dist.size(0), 1, next_dist.size(2))
+            )
+            next_dist = next_dist.gather(1, next_action).squeeze(1)
 
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
@@ -407,9 +344,6 @@ class RainbowDQN:
                 0, (u + offset).view(-1), (next_dist * (b - L.float())).view(-1)
             )
 
-        # dist = self.actor(states, q=False)
-        # log_p = torch.log(dist[range(self.batch_size), actions.long()])
-        
         dist = self.actor(states, q=False)
         actions = actions.unsqueeze(1).expand(actions.size(0), 1, self.num_atoms)
         dist = dist.gather(1, actions.long()).squeeze(1)
@@ -466,7 +400,7 @@ class RainbowDQN:
                     rewards = rewards.to(self.accelerator.device)
                     next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
-                    weights = weights.reshape(-1,1).to(self.accelerator.device)
+                    weights = weights.to(self.accelerator.device)
             elementwise_loss = self._dqn_loss(states, actions, rewards, next_states, dones, self.gamma)
             if n_step:
                 n_gamma = self.gamma**self.n_step
@@ -499,7 +433,6 @@ class RainbowDQN:
                 states, actions, rewards, next_states, dones, n_gamma
             )
             loss = torch.mean(elementwise_loss)
-            #loss = self._normal_dqn_loss(states, actions, rewards, next_states, dones, n_gamma)
             
         self.optimizer.zero_grad()
         if self.accelerator is not None:
