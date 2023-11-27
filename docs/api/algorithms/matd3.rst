@@ -3,9 +3,9 @@
 Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 ===================================================================
 
-MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
+MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MATD3 algorithm to reduce overestimation bias
 in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This
-enables superior performance when compared to MADDPG.
+enables superior performance when compared to MATD3.
 
 * MATD3 paper: https://arxiv.org/abs/1910.01465
 
@@ -205,6 +205,37 @@ Or for a CNN:
                 min_action=min_action,
                 discrete_actions=discrete_actions,
                 net_config=NET_CONFIG)   # Create MATD3 agent
+
+Saving and loading agents
+-------------------------
+
+To save an agent, use the ``saveCheckpoint`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.matd3 import MATD3
+
+  agent = MATD3(state_dims=state_dim,
+                 action_dims=action_dim,
+                 one_hot=one_hot,
+                 n_agents=n_agents,
+                 agent_ids=agent_ids,
+                 max_action=max_action,
+                 min_action=min_action,
+                 discrete_actions=discrete_actions)   # Create MATD3 agent
+
+  checkpoint_path = "path/to/checkpoint"
+  agent.saveCheckpoint(checkpoint_path)
+
+To load a saved agent, use the ``load`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.matd3 import MATD3
+
+  checkpoint_path = "path/to/checkpoint"
+  agent = MATD3.load(checkpoint_path)
+
 
 Parameters
 ------------

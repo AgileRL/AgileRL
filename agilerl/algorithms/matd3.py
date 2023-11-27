@@ -1020,6 +1020,14 @@ class MATD3:
 
         torch.save(
             {
+                "state_dims": self.state_dims,
+                "action_dims": self.action_dims,
+                "one_hot": self.one_hot,
+                "n_agents": self.n_agents,
+                "agent_ids": self.agent_ids,
+                "min_action": self.min_action,
+                "max_action": self.max_action,
+                "discrete_actions": self.discrete_actions,
                 "actors_init_dict": [actor.init_dict for actor in self.actors],
                 "actors_state_dict": [actor.state_dict() for actor in self.actors],
                 "actor_targets_init_dict": [
@@ -1068,6 +1076,7 @@ class MATD3:
                     critic_2_optimizer.state_dict()
                     for critic_2_optimizer in self.critic_2_optimizers
                 ],
+                "expl_noise": self.expl_noise,
                 "net_config": self.net_config,
                 "batch_size": self.batch_size,
                 "lr": self.lr,
@@ -1251,6 +1260,7 @@ class MATD3:
         self.actor_optimizers = actor_optimizer_list
         self.critic_1_optimizers = critic_1_optimizer_list
         self.critic_2_optimizers = critic_2_optimizer_list
+        self.expl_noise = checkpoint["expl_noise"]
         self.batch_size = checkpoint["batch_size"]
         self.learn_step = checkpoint["learn_step"]
         self.policy_freq = checkpoint["policy_freq"]
@@ -1261,3 +1271,234 @@ class MATD3:
         self.scores = checkpoint["scores"]
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
+
+    @classmethod
+    def load(cls, path, device="cpu", accelerator=None):
+        """Creates agent with properties and network weights loaded from path.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+        :type device: str, optional
+        :param accelerator: Accelerator for distributed computing, defaults to None
+        :type accelerator: accelerate.Accelerator(), optional
+        """
+        checkpoint = torch.load(path, pickle_module=dill)
+
+        if checkpoint["net_config"] is not None:
+            agent = cls(
+                state_dims=checkpoint["state_dims"],
+                action_dims=checkpoint["action_dims"],
+                one_hot=checkpoint["one_hot"],
+                n_agents=checkpoint["n_agents"],
+                agent_ids=checkpoint["agent_ids"],
+                discrete_actions=checkpoint["discrete_actions"],
+                min_action=checkpoint["min_action"],
+                max_action=checkpoint["max_action"],
+                expl_noise=checkpoint["expl_noise"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                policy_freq=checkpoint["policy_freq"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                mutation=checkpoint["mutation"],
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.arch = checkpoint["net_config"]["arch"]
+            if agent.arch == "mlp":
+                agent.actors = [
+                    EvolvableMLP(**checkpoint["actors_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.actor_targets = [
+                    EvolvableMLP(**checkpoint["actor_targets_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critics_1 = [
+                    EvolvableMLP(**checkpoint["critics_1_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critic_targets_1 = [
+                    EvolvableMLP(**checkpoint["critic_targets_1_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critics_2 = [
+                    EvolvableMLP(**checkpoint["critics_2_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critic_targets_2 = [
+                    EvolvableMLP(**checkpoint["critic_targets_2_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+            elif agent.arch == "cnn":
+                agent.actors = [
+                    EvolvableCNN(**checkpoint["actors_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.actor_targets = [
+                    EvolvableCNN(**checkpoint["actor_targets_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critics_1 = [
+                    EvolvableCNN(**checkpoint["critics_1_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critic_targets_1 = [
+                    EvolvableCNN(**checkpoint["critic_targets_1_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critics_2 = [
+                    EvolvableCNN(**checkpoint["critics_2_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+                agent.critic_targets_2 = [
+                    EvolvableCNN(**checkpoint["critic_targets_2_init_dict"][idx])
+                    for idx, _ in enumerate(agent.agent_ids)
+                ]
+        else:
+            agent = cls(
+                state_dims=checkpoint["state_dims"],
+                action_dims=checkpoint["action_dims"],
+                one_hot=checkpoint["one_hot"],
+                n_agents=checkpoint["n_agents"],
+                agent_ids=checkpoint["agent_ids"],
+                discrete_actions=checkpoint["discrete_actions"],
+                min_action=checkpoint["min_action"],
+                max_action=checkpoint["max_action"],
+                expl_noise=checkpoint["expl_noise"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                policy_freq=checkpoint["policy_freq"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                mutation=checkpoint["mutation"],
+                actor_networks=[
+                    MakeEvolvable(**checkpoint["actors_init_dict"][idx])
+                    for idx, _ in enumerate(checkpoint["agent_ids"])
+                ],
+                critic_networks=[
+                    [
+                        MakeEvolvable(**checkpoint["critics_1_init_dict"][idx])
+                        for idx, _ in enumerate(checkpoint["agent_ids"])
+                    ],
+                    [
+                        MakeEvolvable(**checkpoint["critics_2_init_dict"][idx])
+                        for idx, _ in enumerate(checkpoint["agent_ids"])
+                    ],
+                ],
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.actor_targets = [
+                MakeEvolvable(**checkpoint["actor_targets_init_dict"][idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
+            agent.critic_targets = [
+                [
+                    MakeEvolvable(**checkpoint["critic_targets_1_init_dict"][idx])
+                    for idx, _ in enumerate(checkpoint["agent_ids"])
+                ],
+                [
+                    MakeEvolvable(**checkpoint["critic_targets_2_init_dict"][idx])
+                    for idx, _ in enumerate(checkpoint["agent_ids"])
+                ],
+            ]
+
+        agent.actor_optimizers = [
+            optim.Adam(actor.parameters(), lr=agent.lr) for actor in agent.actors
+        ]
+        agent.critic_1_optimizers = [
+            optim.Adam(critic_1.parameters(), lr=agent.lr)
+            for critic_1 in agent.critics_1
+        ]
+        agent.critic_2_optimizers = [
+            optim.Adam(critic_2.parameters(), lr=agent.lr)
+            for critic_2 in agent.critics_2
+        ]
+        actor_list = []
+        critic_1_list = []
+        critic_2_list = []
+        actor_target_list = []
+        critic_target_1_list = []
+        critic_target_2_list = []
+        actor_optimizer_list = []
+        critic_1_optimizer_list = []
+        critic_2_optimizer_list = []
+
+        for idx, (
+            actor,
+            actor_target,
+            critic_1,
+            critic_target_1,
+            critic_2,
+            critic_target_2,
+            actor_optimizer,
+            critic_1_optimizer,
+            critic_2_optimizer,
+        ) in enumerate(
+            zip(
+                agent.actors,
+                agent.actor_targets,
+                agent.critics_1,
+                agent.critic_targets_1,
+                agent.critics_2,
+                agent.critic_targets_2,
+                agent.actor_optimizers,
+                agent.critic_1_optimizers,
+                agent.critic_2_optimizers,
+            )
+        ):
+            actor.load_state_dict(checkpoint["actors_state_dict"][idx])
+            actor_list.append(actor)
+            actor_target.load_state_dict(checkpoint["actor_targets_state_dict"][idx])
+            actor_target_list.append(actor_target)
+            critic_1.load_state_dict(checkpoint["critics_1_state_dict"][idx])
+            critic_1_list.append(critic_1)
+            critic_2.load_state_dict(checkpoint["critics_2_state_dict"][idx])
+            critic_2_list.append(critic_2)
+            critic_target_1.load_state_dict(
+                checkpoint["critic_targets_1_state_dict"][idx]
+            )
+            critic_target_1_list.append(critic_target_1)
+            critic_target_2.load_state_dict(
+                checkpoint["critic_targets_2_state_dict"][idx]
+            )
+            critic_target_2_list.append(critic_target_2)
+            actor_optimizer.load_state_dict(
+                checkpoint["actor_optimizers_state_dict"][idx]
+            )
+            actor_optimizer_list.append(actor_optimizer)
+            critic_1_optimizer.load_state_dict(
+                checkpoint["critic_1_optimizers_state_dict"][idx]
+            )
+            critic_1_optimizer_list.append(critic_1_optimizer)
+            critic_2_optimizer.load_state_dict(
+                checkpoint["critic_2_optimizers_state_dict"][idx]
+            )
+            critic_2_optimizer_list.append(critic_2_optimizer)
+
+        agent.actors = actor_list
+        agent.actor_targets = actor_target_list
+        agent.critics_1 = critic_1_list
+        agent.critic_targets_1 = critic_target_1_list
+        agent.critics_2 = critic_2_list
+        agent.critic_targets_2 = critic_target_2_list
+        agent.actor_optimizers = actor_optimizer_list
+        agent.critic_1_optimizers = critic_1_optimizer_list
+        agent.critic_2_optimizers = critic_2_optimizer_list
+
+        if accelerator is not None:
+            agent.wrap_models()
+
+        agent.scores = checkpoint["scores"]
+        agent.fitness = checkpoint["fitness"]
+        agent.steps = checkpoint["steps"]
+
+        return agent

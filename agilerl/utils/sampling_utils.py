@@ -47,7 +47,7 @@ def update_decoder_kvs(kvs, updated_kvs, lens_chosen, idx):
     return kvs
 
 
-def get_relevent_kvs(kvs, lens_chosen, idx):
+def get_relevant_kvs(kvs, lens_chosen, idx):
     kvs = map_all_kvs(lambda x: select_batch_idxs(x, lens_chosen), kvs)
     kvs = map_all_kvs(lambda x: x[:, :, :idx, :], kvs)
     return kvs

@@ -1387,3 +1387,55 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent():
                 # Due to randomness and constraints on size, sometimes architectures are not different
                 # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
                 assert old.index == individual.index
+
+
+def test_reinit_opt():
+    state_dim = [3]
+    action_dim = 2
+    one_hot = False
+    net_config = {"arch": "mlp", "h_size": [8]}
+    population_size = 1
+
+    algo_classes = {
+        "DQN": DQN,
+        "Rainbow DQN": RainbowDQN,
+        "DDPG": DDPG,
+        "TD3": TD3,
+        "PPO": PPO,
+        "CQN": CQN,
+    }
+
+    for algo in algo_classes.keys():
+        population = initialPopulation(
+            algo=algo,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            one_hot=one_hot,
+            net_config=net_config,
+            INIT_HP=SHARED_INIT_HP,
+            population_size=population_size,
+        )
+
+        mutations = Mutations(
+            algo,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            ["batch_size", "lr", "learn_step"],
+            0.5,
+        )
+
+        new_population = copy.deepcopy(population)
+        mutations.reinit_opt(new_population[0])
+
+        new_opt = getattr(
+            new_population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+        )
+        old_opt = getattr(
+            population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+        )
+
+        assert str(new_opt.state_dict()) == str(old_opt.state_dict())

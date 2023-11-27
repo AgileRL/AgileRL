@@ -424,6 +424,9 @@ class DQN:
         """
         torch.save(
             {
+                "state_dim": self.state_dim,
+                "action_dim": self.action_dim,
+                "one_hot": self.one_hot,
                 "actor_init_dict": self.actor.init_dict,
                 "actor_state_dict": self.actor.state_dict(),
                 "actor_target_init_dict": self.actor_target.init_dict,
@@ -436,6 +439,7 @@ class DQN:
                 "gamma": self.gamma,
                 "tau": self.tau,
                 "mutation": self.mut,
+                "double": self.double,
                 "index": self.index,
                 "scores": self.scores,
                 "fitness": self.fitness,
@@ -464,11 +468,11 @@ class DQN:
         else:
             self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
             self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+        self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.lr = checkpoint["lr"]
         self.batch_size = checkpoint["batch_size"]
         self.learn_step = checkpoint["learn_step"]
         self.gamma = checkpoint["gamma"]
@@ -478,3 +482,78 @@ class DQN:
         self.scores = checkpoint["scores"]
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
+
+    @classmethod
+    def load(cls, path, device="cpu", accelerator=None):
+        """Creates agent with properties and network weights loaded from path.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+        :type device: str, optional
+        :param accelerator: Accelerator for distributed computing, defaults to None
+        :type accelerator: accelerate.Accelerator(), optional
+        """
+        checkpoint = torch.load(path, pickle_module=dill)
+
+        if checkpoint["net_config"] is not None:
+            agent = cls(
+                state_dim=checkpoint["state_dim"],
+                action_dim=checkpoint["action_dim"],
+                one_hot=checkpoint["one_hot"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                mutation=checkpoint["mutation"],
+                double=checkpoint["double"],
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.arch = checkpoint["net_config"]["arch"]
+            if agent.arch == "mlp":
+                agent.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
+                agent.actor_target = EvolvableMLP(
+                    **checkpoint["actor_target_init_dict"]
+                )
+            elif agent.arch == "cnn":
+                agent.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
+                agent.actor_target = EvolvableCNN(
+                    **checkpoint["actor_target_init_dict"]
+                )
+        else:
+            agent = cls(
+                state_dim=checkpoint["state_dim"],
+                action_dim=checkpoint["action_dim"],
+                one_hot=checkpoint["one_hot"],
+                index=checkpoint["index"],
+                net_config=checkpoint["net_config"],
+                batch_size=checkpoint["batch_size"],
+                lr=checkpoint["lr"],
+                learn_step=checkpoint["learn_step"],
+                gamma=checkpoint["gamma"],
+                tau=checkpoint["tau"],
+                mutation=checkpoint["mutation"],
+                double=checkpoint["double"],
+                actor_network=MakeEvolvable(**checkpoint["actor_init_dict"]),
+                device=device,
+                accelerator=accelerator,
+            )
+            agent.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+
+        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
+        agent.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
+        agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        if accelerator is not None:
+            agent.wrap_models()
+
+        agent.scores = checkpoint["scores"]
+        agent.fitness = checkpoint["fitness"]
+        agent.steps = checkpoint["steps"]
+
+        return agent

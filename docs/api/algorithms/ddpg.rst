@@ -100,7 +100,30 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DQN agent
+  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DDPG agent
+
+Saving and loading agents
+-------------------------
+
+To save an agent, use the ``saveCheckpoint`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.ddpg import DDPG
+
+  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DDPG agent
+
+  checkpoint_path = "path/to/checkpoint"
+  agent.saveCheckpoint(checkpoint_path)
+
+To load a saved agent, use the ``load`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.ddpg import DDPG
+
+  checkpoint_path = "path/to/checkpoint"
+  agent = DDPG.load(checkpoint_path)
 
 Parameters
 ------------

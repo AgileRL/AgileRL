@@ -197,14 +197,44 @@ Or for a CNN:
 .. code-block:: python
 
   agent = MADDPG(state_dims=state_dim,
-                action_dims=action_dim,
-                one_hot=one_hot,
-                n_agents=n_agents,
-                agent_ids=agent_ids,
-                max_action=max_action,
-                min_action=min_action,
-                discrete_actions=discrete_actions,
-                net_config=NET_CONFIG)   # Create MADDPG agent
+                 action_dims=action_dim,
+                 one_hot=one_hot,
+                 n_agents=n_agents,
+                 agent_ids=agent_ids,
+                 max_action=max_action,
+                 min_action=min_action,
+                 discrete_actions=discrete_actions,
+                 net_config=NET_CONFIG)   # Create MADDPG agent
+
+Saving and loading agents
+-------------------------
+
+To save an agent, use the ``saveCheckpoint`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.maddpg import MADDPG
+
+  agent = MADDPG(state_dims=state_dim,
+                 action_dims=action_dim,
+                 one_hot=one_hot,
+                 n_agents=n_agents,
+                 agent_ids=agent_ids,
+                 max_action=max_action,
+                 min_action=min_action,
+                 discrete_actions=discrete_actions)   # Create MADDPG agent
+
+  checkpoint_path = "path/to/checkpoint"
+  agent.saveCheckpoint(checkpoint_path)
+
+To load a saved agent, use the ``load`` method:
+
+.. code-block:: python
+
+  from agilerl.algorithms.maddpg import MADDPG
+
+  checkpoint_path = "path/to/checkpoint"
+  agent = MADDPG.load(checkpoint_path)
 
 Parameters
 ------------
