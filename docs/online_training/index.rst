@@ -174,11 +174,11 @@ easiest to use our training function, which returns a population of trained agen
 
 .. code-block:: python
 
-    from agilerl.training.train import train
+    from agilerl.training.train_off_policy import train_off_policy
     import gymnasium as gym
     import torch
 
-    trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+    trained_pop, pop_fitnesses = train_off_policy(env=env,                                 # Gym-style environment
                                        env_name='LunarLander-v2',               # Environment name
                                        algo='DQN',                              # Algorithm
                                        pop=agent_pop,                           # Population of agents

@@ -140,13 +140,13 @@ Next, create the tournament, mutations and experience replay buffer objects that
                           rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
                           device=torch.device("cuda"))
 
-The easiest training loop implementation is to use our ``training.train()`` function. It requires the agent have functions ``getAction()`` and ``learn()``.
+The easiest training loop implementation is to use our ``train_off_policy()`` function. It requires the agent have functions ``getAction()`` and ``learn()``.
 
 .. code-block:: python
 
-    from agilerl.training.train import train
+    from agilerl.training.train_off_policy import train_off_policy
 
-    trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+    trained_pop, pop_fitnesses = train_off_policy(env=env,                      # Gym-style environment
                                        env_name=INIT_HP['ENV_NAME'],            # Environment name
                                        algo=INIT_HP['ALGO'],                    # Algorithm
                                        pop=agent_pop,                           # Population of agents

@@ -206,11 +206,11 @@ mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Al
                       rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
                       device=device)
 ```
-The easiest training loop implementation is to use our <code>training.train.train()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
+The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
 ```python
-from agilerl.training.train import train
+from agilerl.training.train_off_policy import train_off_policy
 
-trained_pop, pop_fitnesses = train(env=env,                                 # Gym-style environment
+trained_pop, pop_fitnesses = train_off_policy(env=env,                                 # Gym-style environment
                                    env_name=INIT_HP['ENV_NAME'],            # Environment name
                                    algo=INIT_HP['ALGO'],                    # Algorithm
                                    pop=agent_pop,                           # Population of agents

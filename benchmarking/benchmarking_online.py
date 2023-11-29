@@ -1,10 +1,13 @@
 import torch
 import yaml
 
+import sys
+sys.path.append('../')
+
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train import train
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -75,7 +78,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    trained_pop, pop_fitnesses = train(
+    trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],
@@ -88,8 +91,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         evo_epochs=INIT_HP["EVO_EPOCHS"],
         evo_loop=1,
         target=INIT_HP["TARGET_SCORE"],
-        tournament=tournament,
-        mutation=mutations,
+        tournament=None,
+        mutation=None,
         wb=INIT_HP["WANDB"],
     )
 

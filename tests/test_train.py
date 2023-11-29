@@ -7,7 +7,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 
-import agilerl.training.train
+import AgileRL.agilerl.training.train_off_policy
 import agilerl.training.train_multi_agent
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
@@ -19,7 +19,7 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
-from agilerl.training.train import train
+from AgileRL.agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
@@ -810,8 +810,8 @@ def dummy_h5py_data(action_size, state_size):
 @pytest.mark.parametrize(
     "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
 )
-def test_train(env, population_off_policy, tournament, mutations, memory):
-    pop, pop_fitnesses = train(
+def test_train_off_policy(env, population_off_policy, tournament, mutations, memory):
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -845,7 +845,7 @@ def test_train(env, population_off_policy, tournament, mutations, memory):
         ((6,), 2, True, True, True, RainbowDQN),
     ],
 )
-def test_train_agent_calls_made(
+def test_train_off_policy_agent_calls_made(
     env,
     algo,
     mocked_agent_off_policy,
@@ -867,7 +867,7 @@ def test_train_agent_calls_made(
             n_step = False
         mock_population = [mocked_agent_off_policy for _ in range(6)]
 
-        pop, pop_fitnesses = train(
+        pop, pop_fitnesses = train_off_policy(
             env,
             "env_name",
             "algo",
@@ -900,10 +900,10 @@ def test_train_agent_calls_made(
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
-def test_train_replay_buffer_calls(
+def test_train_off_policy_replay_buffer_calls(
     mocked_memory, env, population_off_policy, tournament, mutations
 ):
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -932,7 +932,7 @@ def test_train_replay_buffer_calls(
     "state_size, action_size, vect, per",
     [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_alternate_buffer_calls(
+def test_train_off_policy_alternate_buffer_calls(
     env,
     mocked_memory,
     population_off_policy,
@@ -941,7 +941,7 @@ def test_train_alternate_buffer_calls(
     mocked_n_step_memory,
     per,
 ):
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -977,10 +977,10 @@ def test_train_alternate_buffer_calls(
         ((6,), 2, True),
     ],
 )
-def test_train_env_calls(
+def test_train_off_policy_env_calls(
     mocked_env, memory, population_off_policy, tournament, mutations
 ):
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         mocked_env,
         "env_name",
         "algo",
@@ -1011,10 +1011,10 @@ def test_train_env_calls(
         ((6,), 2, True),
     ],
 )
-def test_train_tourn_mut_calls(
+def test_train_off_policy_tourn_mut_calls(
     env, memory, population_off_policy, mocked_tournament, mocked_mutations
 ):
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1040,8 +1040,8 @@ def test_train_tourn_mut_calls(
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((250, 160, 3), 2, False)])
-def test_train_rgb_input(env, population_off_policy, tournament, mutations, memory):
-    pop, pop_fitnesses = train(
+def test_train_off_policy_rgb_input(env, population_off_policy, tournament, mutations, memory):
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1070,10 +1070,10 @@ def test_train_rgb_input(env, population_off_policy, tournament, mutations, memo
     "state_size, action_size, vect, per",
     [((6,), 2, True, True), ((6,), 2, True, False)],
 )
-def test_train_using_alternate_buffers(
+def test_train_off_policy_using_alternate_buffers(
     env, memory, population_off_policy, tournament, mutations, n_step_memory, per
 ):
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1099,10 +1099,10 @@ def test_train_using_alternate_buffers(
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((3, 64, 64), 2, True)])
-def test_train_using_alternate_buffers_rgb(
+def test_train_off_policy_using_alternate_buffers_rgb(
     env, memory, population_off_policy, tournament, mutations, n_step_memory
 ):
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1130,9 +1130,9 @@ def test_train_using_alternate_buffers_rgb(
 @pytest.mark.parametrize(
     "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
 )
-def test_train_distributed(env, population_off_policy, tournament, mutations, memory):
+def test_train_off_policy_distributed(env, population_off_policy, tournament, mutations, memory):
     accelerator = Accelerator()
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1185,7 +1185,7 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "agilerl.training.train.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train.train(
+        agilerl.training.train_off_policy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1266,7 +1266,7 @@ def test_wandb_init_log_distributed(
         "agilerl.training.train.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train.train(
+        agilerl.training.train_off_policy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1334,7 +1334,7 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "agilerl.training.train.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train.train(
+        agilerl.training.train_off_policy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1362,9 +1362,9 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
-def test_train_save_elite(env, population_off_policy, tournament, mutations, memory):
+def test_train_off_policy_save_elite(env, population_off_policy, tournament, mutations, memory):
     elite_path = "checkpoint.pt"
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",
@@ -1403,7 +1403,7 @@ def test_train_save_checkpoint(
     else:
         accelerator = None
     checkpoint_path = "checkpoint"
-    pop, pop_fitnesses = train(
+    pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
         "algo",

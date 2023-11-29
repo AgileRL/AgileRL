@@ -8,87 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agilerl.networks.custom_components import GumbelSoftmax
-
-
-class NoisyLinear(nn.Module):
-    """The Noisy Linear Neural Network class.
-
-    :param in_features: Input features size
-    :type in_features: int
-    :param out_features: Output features size
-    :type out_features: int
-    :param std_init: Standard deviation, defaults to 0.5
-    :type std_init: float, optional
-    """
-
-    def __init__(self, in_features, out_features, std_init=0.5):
-        super().__init__()
-
-        self.in_features = in_features
-        self.out_features = out_features
-        self.std_init = std_init
-
-        self.weight_mu = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        self.weight_sigma = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        self.register_buffer(
-            "weight_epsilon", torch.FloatTensor(out_features, in_features)
-        )
-
-        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features))
-        self.bias_sigma = nn.Parameter(torch.FloatTensor(out_features))
-        self.register_buffer("bias_epsilon", torch.FloatTensor(out_features))
-
-        self.reset_parameters()
-        self.reset_noise()
-
-    def forward(self, x):
-        """Returns output of neural network.
-
-        :param x: Neural network input
-        :type x: torch.Tensor()
-        """
-        weight_epsilon = self.weight_epsilon.to(x.device)
-        bias_epsilon = self.bias_epsilon.to(x.device)
-
-        if self.training:
-            weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
-            bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
-        else:
-            weight = self.weight_mu
-            bias = self.bias_mu
-
-        return F.linear(x, weight, bias)
-
-    def reset_parameters(self):
-        """Resets neural network parameters."""
-        mu_range = 1 / math.sqrt(self.in_features)
-
-        self.weight_mu.data.uniform_(-mu_range, mu_range)
-        self.weight_sigma.data.fill_(
-            self.std_init / math.sqrt(self.in_features)
-        )
-
-        self.bias_mu.data.uniform_(-mu_range, mu_range)
-        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
-
-    def reset_noise(self):
-        """Resets neural network noise."""
-        epsilon_in = self._scale_noise(self.in_features)
-        epsilon_out = self._scale_noise(self.out_features)
-
-        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
-        self.bias_epsilon.copy_(epsilon_out)
-
-    def _scale_noise(self, size):
-        """Returns noisy tensor.
-
-        :param size: Tensor of same size as noisy output
-        :type size: torch.Tensor()
-        """
-        x = torch.randn(size)
-        x = x.sign().mul(x.abs().sqrt())
-        return x
+from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
 
 
 class EvolvableMLP(nn.Module):
@@ -100,6 +20,8 @@ class EvolvableMLP(nn.Module):
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
     :type hidden_size: list[int]
+    :param feature_hidden_size: Hidden size for the feature network when using Rainbow DQN, defaults to [128]
+    :type feature_hidden_size: list[int]
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
     :type num_atoms: int, optional
     :param mlp_activation: Activation layer, defaults to 'relu'
@@ -135,6 +57,7 @@ class EvolvableMLP(nn.Module):
         num_inputs: int,
         num_outputs: int,
         hidden_size: List[int],
+        feature_hidden_size=[128],
         num_atoms=50,
         mlp_activation="ReLU",
         mlp_output_activation=None,
@@ -187,6 +110,7 @@ class EvolvableMLP(nn.Module):
         self.rainbow = rainbow
         self.device = device
         self.accelerator = accelerator
+        self.feature_hidden_size = feature_hidden_size
 
         self.feature_net, self.value_net, self.advantage_net = self.create_net()
 
@@ -230,6 +154,7 @@ class EvolvableMLP(nn.Module):
         output_vanish,
         output_activation,
         noisy=False,
+        rainbow_feature_net=False
     ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
@@ -241,7 +166,9 @@ class EvolvableMLP(nn.Module):
             net_dict["linear_layer_0"] = self.layer_init(net_dict["linear_layer_0"])
         if self.layer_norm:
             net_dict["layer_norm_0"] = nn.LayerNorm(hidden_size[0])
-        net_dict["activation_0"] = self.get_activation(self.mlp_activation)
+        net_dict["activation_0"] = self.get_activation(
+            self.mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else self.mlp_activation
+        )
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
                 if noisy:
@@ -261,57 +188,76 @@ class EvolvableMLP(nn.Module):
                         hidden_size[l_no]
                     )
                 net_dict[f"activation_{str(l_no)}"] = self.get_activation(
-                    self.mlp_activation
+                    self.mlp_activation if not rainbow_feature_net else self.mlp_output_activation
                 )
-        if noisy:
-            output_layer = NoisyLinear(hidden_size[-1], output_size)
-        else:
-            output_layer = nn.Linear(hidden_size[-1], output_size)
-        if self.init_layers:
-            output_layer = self.layer_init(output_layer)
-        if output_vanish:
-            output_layer.weight.data.mul_(0.1)
-            output_layer.bias.data.mul_(0.1)
-        net_dict["linear_layer_output"] = output_layer
-        if output_activation is not None:
-            net_dict["activation_output"] = self.get_activation(output_activation)
+        if not rainbow_feature_net:
+            if noisy:
+                output_layer = NoisyLinear(hidden_size[-1], output_size)
+            else:
+                output_layer = nn.Linear(hidden_size[-1], output_size)
+            if self.init_layers:
+                output_layer = self.layer_init(output_layer)
+            if output_vanish:
+                output_layer.weight.data.mul_(0.1)
+                output_layer.bias.data.mul_(0.1)
+            net_dict["linear_layer_output"] = output_layer
+            if output_activation is not None:
+                net_dict["activation_output"] = self.get_activation(output_activation)
         net = nn.Sequential(net_dict)
         return net
 
     def create_net(self):
         """Creates and returns neural network."""
-        feature_net = self.create_mlp(
-            input_size=self.num_inputs,
-            output_size=self.hidden_size[-1] if self.rainbow else self.num_outputs,
-            hidden_size=self.hidden_size,
-            output_vanish=False,
-            output_activation=self.mlp_output_activation,
-        )
-        if self.accelerator is None:
-            feature_net = feature_net.to(self.device)
+        if not self.rainbow:
+            feature_net = self.create_mlp(
+                input_size=self.num_inputs,
+                output_size=self.hidden_size[-1] if self.rainbow else self.num_outputs,
+                hidden_size=self.hidden_size,
+                output_vanish=False,
+                output_activation=self.mlp_output_activation,
+            )
+            if self.accelerator is None:
+                feature_net = feature_net.to(self.device)
 
         value_net, advantage_net = None, None
         if self.rainbow:
+            ####
+            # feature_net = nn.Sequential(
+            #     nn.Linear(self.num_inputs, 128),
+            #     nn.ReLU()
+            # )
+            # feature_net = feature_net.to(self.device)
+
+            feature_net = self.create_mlp(
+                input_size=self.num_inputs,
+                output_size=self.feature_hidden_size[-1],
+                hidden_size=self.feature_hidden_size,
+                output_vanish=False,
+                output_activation=self.mlp_output_activation,
+                rainbow_feature_net=True
+            )
+
             value_net = self.create_mlp(
-                input_size=self.hidden_size[-1],
+                input_size=128, #self.hidden_size[-1],
                 output_size=self.num_atoms,
-                hidden_size=[self.hidden_size[-1]],
+                hidden_size=[128, 128], #[self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
             )
             advantage_net = self.create_mlp(
-                input_size=self.hidden_size[-1],
+                input_size=128,#self.hidden_size[-1],
                 output_size=self.num_atoms * self.num_outputs,
-                hidden_size=[self.hidden_size[-1]],
+                hidden_size=[128, 128], #[self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
             )
             if self.accelerator is None:
-                self.value_net, self.advantage_net = (
+                value_net, advantage_net, feature_net = (
                     value_net.to(self.device),
                     advantage_net.to(self.device),
+                    feature_net.to(self.device)
                 )
 
         return feature_net, value_net, advantage_net

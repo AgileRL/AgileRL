@@ -12,7 +12,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.utils.utils import calculate_vectorized_scores
 
 
-def train(
+def train_off_policy(
     env,
     env_name,
     algo,
@@ -337,7 +337,8 @@ def train(
                         )
 
                 if per:
-                    fraction = min((idx_step + 1) / max_steps, 1.0)
+                    # fraction = min((idx_step + 1)/ max_steps, 1.0)
+                    fraction = min((total_steps + 1) / (max_steps*n_episodes), 1.0) ####
                     agent.beta += fraction * (1.0 - agent.beta)
 
                 # Learn according to learning frequency
@@ -373,7 +374,7 @@ def train(
 
             if is_vectorised:
                 scores = calculate_vectorized_scores(
-                    np.array(rewards), np.array(terminations)
+                    np.array(rewards).transpose((1,0)), np.array(terminations).transpose((1,0))
                 )
                 score = np.mean(scores)
 
