@@ -1,11 +1,11 @@
 import copy
+
 import dill
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
-import random
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
@@ -225,7 +225,9 @@ class RainbowDQN:
         # Create the target network by copying the actor network
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr, eps=0.0003125)
+        self.optimizer_type = optim.Adam(
+            self.actor.parameters(), lr=self.lr, eps=0.0003125
+        )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
@@ -351,7 +353,11 @@ class RainbowDQN:
         """
         if per:
             if n_step:
-                (states, actions, rewards, next_states,
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
                     dones,
                     weights,
                     idxs,
@@ -374,7 +380,15 @@ class RainbowDQN:
                     n_next_states = n_next_states.to(self.accelerator.device)
                     n_dones = n_dones.to(self.accelerator.device)
             else:
-                (states, actions, rewards, next_states, dones, weights, idxs) = experiences
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                ) = experiences
                 if self.accelerator is not None:
                     states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
@@ -382,7 +396,9 @@ class RainbowDQN:
                     next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
-            elementwise_loss = self._dqn_loss(states, actions, rewards, next_states, dones, self.gamma)
+            elementwise_loss = self._dqn_loss(
+                states, actions, rewards, next_states, dones, self.gamma
+            )
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
@@ -414,7 +430,7 @@ class RainbowDQN:
                 states, actions, rewards, next_states, dones, n_gamma
             )
             loss = torch.mean(elementwise_loss)
-            
+
         self.optimizer.zero_grad()
         if self.accelerator is not None:
             self.accelerator.backward(loss)

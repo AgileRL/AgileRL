@@ -1,5 +1,4 @@
 import copy
-import math
 from collections import OrderedDict
 from typing import List
 
@@ -154,7 +153,7 @@ class EvolvableMLP(nn.Module):
         output_vanish,
         output_activation,
         noisy=False,
-        rainbow_feature_net=False
+        rainbow_feature_net=False,
     ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
@@ -167,7 +166,9 @@ class EvolvableMLP(nn.Module):
         if self.layer_norm:
             net_dict["layer_norm_0"] = nn.LayerNorm(hidden_size[0])
         net_dict["activation_0"] = self.get_activation(
-            self.mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else self.mlp_activation
+            self.mlp_output_activation
+            if (len(hidden_size) == 1 and rainbow_feature_net)
+            else self.mlp_activation
         )
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
@@ -188,7 +189,9 @@ class EvolvableMLP(nn.Module):
                         hidden_size[l_no]
                     )
                 net_dict[f"activation_{str(l_no)}"] = self.get_activation(
-                    self.mlp_activation if not rainbow_feature_net else self.mlp_output_activation
+                    self.mlp_activation
+                    if not rainbow_feature_net
+                    else self.mlp_output_activation
                 )
         if not rainbow_feature_net:
             if noisy:
@@ -234,21 +237,21 @@ class EvolvableMLP(nn.Module):
                 hidden_size=self.feature_hidden_size,
                 output_vanish=False,
                 output_activation=self.mlp_output_activation,
-                rainbow_feature_net=True
+                rainbow_feature_net=True,
             )
 
             value_net = self.create_mlp(
-                input_size=128, #self.hidden_size[-1],
+                input_size=128,  # self.hidden_size[-1],
                 output_size=self.num_atoms,
-                hidden_size=[128, 128], #[self.hidden_size[-1]],
+                hidden_size=[128, 128],  # [self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
             )
             advantage_net = self.create_mlp(
-                input_size=128,#self.hidden_size[-1],
+                input_size=128,  # self.hidden_size[-1],
                 output_size=self.num_atoms * self.num_outputs,
-                hidden_size=[128, 128], #[self.hidden_size[-1]],
+                hidden_size=[128, 128],  # [self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
@@ -257,7 +260,7 @@ class EvolvableMLP(nn.Module):
                 value_net, advantage_net, feature_net = (
                     value_net.to(self.device),
                     advantage_net.to(self.device),
-                    feature_net.to(self.device)
+                    feature_net.to(self.device),
                 )
 
         return feature_net, value_net, advantage_net

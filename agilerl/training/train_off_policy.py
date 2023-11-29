@@ -266,7 +266,7 @@ def train_off_policy(
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
 
-    action_dim = env.single_action_space.n ####
+    action_dim = env.single_action_space.n  ####
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
@@ -286,7 +286,7 @@ def train_off_policy(
                     action = agent.getAction(state)
                 else:
                     action = agent.getAction(state, epsilon)
-                
+
                 for a in action:
                     train_actions_hist[a] += 1
 
@@ -338,7 +338,9 @@ def train_off_policy(
 
                 if per:
                     # fraction = min((idx_step + 1)/ max_steps, 1.0)
-                    fraction = min((total_steps + 1) / (max_steps*n_episodes), 1.0) ####
+                    fraction = min(
+                        (total_steps + 1) / (max_steps * n_episodes), 1.0
+                    )  ####
                     agent.beta += fraction * (1.0 - agent.beta)
 
                 # Learn according to learning frequency
@@ -374,7 +376,8 @@ def train_off_policy(
 
             if is_vectorised:
                 scores = calculate_vectorized_scores(
-                    np.array(rewards).transpose((1,0)), np.array(terminations).transpose((1,0))
+                    np.array(rewards).transpose((1, 0)),
+                    np.array(terminations).transpose((1, 0)),
                 )
                 score = np.mean(scores)
 
@@ -399,17 +402,19 @@ def train_off_policy(
 
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
-            train_actions_hist = [freq/sum(train_actions_hist) for freq in train_actions_hist]
+            train_actions_hist = [
+                freq / sum(train_actions_hist) for freq in train_actions_hist
+            ]
             train_actions_dict = {
-                  f"train/action_{index}": action
-                  for index, action in enumerate(train_actions_hist)
-               }
+                f"train/action_{index}": action
+                for index, action in enumerate(train_actions_hist)
+            }
             wandb_dict = {
-                            "global_step": total_steps,
-                            "train/mean_score": np.mean(mean_scores),
-                            "eval/mean_fitness": np.mean(fitnesses),
-                            "eval/best_fitness": np.max(fitnesses),
-                        }
+                "global_step": total_steps,
+                "train/mean_score": np.mean(mean_scores),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
             wandb_dict.update(train_actions_dict)
 
             if wb:
@@ -427,9 +432,7 @@ def train_off_policy(
                         )
                     accelerator.wait_for_everyone()
                 else:
-                    wandb.log(
-                        wandb_dict
-                    )
+                    wandb.log(wandb_dict)
 
             # Update step counter
             for agent in pop:

@@ -5,6 +5,7 @@ from datetime import datetime
 import numpy as np
 import wandb
 from tqdm import trange
+
 from agilerl.utils.utils import calculate_vectorized_scores
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
@@ -259,7 +260,8 @@ def train_on_policy(
 
             if is_vectorised:
                 scores = calculate_vectorized_scores(
-                    np.array(rewards).transpose((1,0)), np.array(dones).transpose((1,0))
+                    np.array(rewards).transpose((1, 0)),
+                    np.array(dones).transpose((1, 0)),
                 )
                 score = np.mean(scores)
 

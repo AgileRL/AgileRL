@@ -1,7 +1,8 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
 
 class GumbelSoftmax(nn.Module):
@@ -83,9 +84,7 @@ class NoisyLinear(nn.Module):
         mu_range = 1 / math.sqrt(self.in_features)
 
         self.weight_mu.data.uniform_(-mu_range, mu_range)
-        self.weight_sigma.data.fill_(
-            self.std_init / math.sqrt(self.in_features)
-        )
+        self.weight_sigma.data.fill_(self.std_init / math.sqrt(self.in_features))
 
         self.bias_mu.data.uniform_(-mu_range, mu_range)
         self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))

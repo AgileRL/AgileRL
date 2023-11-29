@@ -7,10 +7,10 @@ import pytest
 import torch
 from accelerate import Accelerator
 
-import AgileRL.agilerl.training.train_off_policy
 import agilerl.training.train_multi_agent
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
+from AgileRL.agilerl.training.train_off_policy import train_off_policy
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -19,7 +19,6 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
-from AgileRL.agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
@@ -1040,7 +1039,9 @@ def test_train_off_policy_tourn_mut_calls(
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((250, 160, 3), 2, False)])
-def test_train_off_policy_rgb_input(env, population_off_policy, tournament, mutations, memory):
+def test_train_off_policy_rgb_input(
+    env, population_off_policy, tournament, mutations, memory
+):
     pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
@@ -1130,7 +1131,9 @@ def test_train_off_policy_using_alternate_buffers_rgb(
 @pytest.mark.parametrize(
     "state_size, action_size, vect", [((6,), 2, True), ((6,), 2, False)]
 )
-def test_train_off_policy_distributed(env, population_off_policy, tournament, mutations, memory):
+def test_train_off_policy_distributed(
+    env, population_off_policy, tournament, mutations, memory
+):
     accelerator = Accelerator()
     pop, pop_fitnesses = train_off_policy(
         env,
@@ -1362,7 +1365,9 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, True)])
-def test_train_off_policy_save_elite(env, population_off_policy, tournament, mutations, memory):
+def test_train_off_policy_save_elite(
+    env, population_off_policy, tournament, mutations, memory
+):
     elite_path = "checkpoint.pt"
     pop, pop_fitnesses = train_off_policy(
         env,
