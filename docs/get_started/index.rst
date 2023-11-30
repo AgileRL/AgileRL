@@ -37,34 +37,65 @@ Explore our Algorithms!
     /* Lighter background color on hover */
     .tile:hover {
     background-color: #666; /* Lighter grey on hover */
+    color:white;
     }
+    
+    .tile:hover .algorithm-list {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        height: 100%;
+    }
+
     /* Adjustments for initially hiding the algorithm list */
     .algorithm-list {
         display: none; /* Hide all algorithm lists by default */
     }
 
-    /* Display algorithm list on tile hover */
-    .tile:hover .algorithm-list {
-        display: block; /* Show the algorithm list on hover */
-    }
-
+    
     /* Title styles */
     .tile h2 {
     margin-bottom: 8px; /* Adjust the margin */
     font-size: 24px; /* Adjust the font size */
     }
 
-    /* Algorithm list styles */
-    .algorithm-list {
-    list-style: none;
-    padding: 0;
-    margin-bottom: 8px; /* Adjust the margin */
-    font-size: 18px; /* Adjust the font size */
+    .tile:hover h2 {
+        visibility: hidden;
     }
 
-    .algorithm-list li {
-    margin-bottom: 3px; /* Adjust the margin */
+    /* Initially hide algorithm list */
+    .algorithm-list {
+        display: none;
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        text-align: center;
     }
+
+    /* Match font size and color with tile titles */
+    .algorithm-list li {
+        font-size: 24px; /* Match font size with tile titles */
+        color: white; /* Match font color with tile titles */
+        font-weight: bold; /* Make the font bold */
+    }
+
+   /* Display algorithm list on tile hover */
+    .tile:hover .algorithm-list {
+        display: flex;
+    }
+
+    /* Center algorithm list on tile hover */
+    .tile:hover .algorithm-list {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        height: 100%;
+        padding: 0;
+        margin: 0;
+    }
+    
 
     /* Learn more link styles */
     .tile a {
