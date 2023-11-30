@@ -178,7 +178,7 @@ easiest to use our training function, which returns a population of trained agen
     import gymnasium as gym
     import torch
 
-    trained_pop, pop_fitnesses = train_off_policy(env=env,                                 # Gym-style environment
+    trained_pop, pop_fitnesses = train_off_policy(env=env,                      # Gym-style environment
                                        env_name='LunarLander-v2',               # Environment name
                                        algo='DQN',                              # Algorithm
                                        pop=agent_pop,                           # Population of agents

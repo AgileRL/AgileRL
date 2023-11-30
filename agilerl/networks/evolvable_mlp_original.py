@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agilerl.networks.custom_activation import GumbelSoftmax
+from agilerl.networks.custom_components import GumbelSoftmax
 
 
 class NoisyLinear(nn.Module):

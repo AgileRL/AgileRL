@@ -5,7 +5,7 @@ import yaml
 
 sys.path.append("../")
 
-from AgileRL.agilerl.training.train_off_policy import train_off_policy
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
@@ -126,7 +126,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         n_step_memory=n_step_memory,
         n_step=n_step,
         per=per,
-        noisy=True,
+        noisy=False,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
@@ -157,28 +157,28 @@ if __name__ == "__main__":
     # Run number 1 = use only the normal buffer
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
 
-    # # Run number 2 = use per and n step
-    # INIT_HP["N_STEP"] = 3
-    # INIT_HP["PER"] = True
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    # Run number 2 = use per and n step
+    INIT_HP["N_STEP"] = 3
+    INIT_HP["PER"] = True
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
 
-    # # Run number 3 = use just per
-    # INIT_HP["N_STEP"] = 1
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    # Run number 3 = use just per
+    INIT_HP["N_STEP"] = 1
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
 
-    # # Run number 4 = use just n step
-    # INIT_HP["N_STEP"] = 3
-    # INIT_HP["PER"] = False
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    # Run number 4 = use just n step
+    INIT_HP["N_STEP"] = 3
+    INIT_HP["PER"] = False
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
 
-    # # Run normal DQN
-    # with open("../configs/training/dqn.yaml") as file:
-    #     dqn_config = yaml.safe_load(file)
-    # INIT_HP = dqn_config["INIT_HP"]
-    # INIT_HP["PER"] = False
-    # INIT_HP["N_STEP"] = 1
-    # INIT_HP["NUM_ENVS"] = 16
-    # INIT_HP["EVO_LOOP"] = 3
-    # MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-    # NET_CONFIG = dqn_config["NET_CONFIG"]
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    # Run normal DQN
+    with open("../configs/training/dqn.yaml") as file:
+        dqn_config = yaml.safe_load(file)
+    INIT_HP = dqn_config["INIT_HP"]
+    INIT_HP["PER"] = False
+    INIT_HP["N_STEP"] = 1
+    INIT_HP["NUM_ENVS"] = 16
+    INIT_HP["EVO_LOOP"] = 3
+    MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
+    NET_CONFIG = dqn_config["NET_CONFIG"]
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

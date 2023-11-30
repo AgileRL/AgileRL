@@ -70,12 +70,15 @@ class NoisyLinear(nn.Module):
         weight_epsilon = self.weight_epsilon.to(x.device)
         bias_epsilon = self.bias_epsilon.to(x.device)
 
-        if self.training:
-            weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
-            bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
-        else:
-            weight = self.weight_mu
-            bias = self.bias_mu
+        # if self.training:
+        #     weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
+        #     bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
+        # else:
+        #     weight = self.weight_mu
+        #     bias = self.bias_mu
+
+        weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
+        bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
 
         return F.linear(x, weight, bias)
 

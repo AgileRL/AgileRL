@@ -11,7 +11,7 @@ import torch.optim as optim
 from accelerate import Accelerator
 
 from agilerl.algorithms.matd3 import MATD3
-from agilerl.networks.custom_activation import GumbelSoftmax
+from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable

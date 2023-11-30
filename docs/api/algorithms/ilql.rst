@@ -1,3 +1,6 @@
+.. _ilql:
+
+
 Implicit Language Q-Learning (ILQL)
 ===================================
 

@@ -1,13 +1,13 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: CartPole-v1   # Gym environment name
+    ENV_NAME: LunarLander-v2   # Gym environment name
     ALGO: DQN                                         # Algorithm
     DOUBLE: false
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
-    BATCH_SIZE: 8            # Batch size
-    LR: 0.00046875              # Learning rate
+    BATCH_SIZE: 16            # Batch size
+    LR: 0.001              # Learning rate
     EPISODES: 1000             # Max no. episodes
     TARGET_SCORE: 470.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
@@ -17,7 +17,7 @@ INIT_HP:
     TAU: 0.001                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 3                # Population size
+    POP_SIZE: 1                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
     WANDB: true              # Log with Weights and Biases
 

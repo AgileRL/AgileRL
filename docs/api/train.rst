@@ -7,7 +7,7 @@ If you are training on static, offline data, you can use our offline RL training
 
 The multi agent training function handles Pettingzoo-style environments and multi-agent algorithms.
 
-.. autofunction:: agilerl.training.train.train
+.. autofunction:: agilerl.training.train_off_policy.train_off_policy
 
 .. autofunction:: agilerl.training.train_offline.train_offline
 

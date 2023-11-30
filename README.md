@@ -26,7 +26,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 </p>
 <p align="center">AgileRL offers 10x faster hyperparameter optimization than SOTA.<br> Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.</p>
 
-## Table of Contents
+<!-- ## Table of Contents
   * [Benchmarks](#benchmarks)
   * [Get Started](#get-started)
   * [Tutorials](#tutorials)
@@ -41,7 +41,7 @@ We are constantly adding more algorithms and features. AgileRL already includes 
   * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
   * [Distributed training](#distributed-training)
   * [Multi-agent training](#multi-agent-training)
-  * [Citing AgileRL](#citing-agilerl)
+  * [Citing AgileRL](#citing-agilerl) -->
 
 ## Benchmarks
 
@@ -100,8 +100,8 @@ Our demo files also provide examples on how to train agents using AgileRL, and m
   * MADDPG
   * MATD3
 
-## Train an agent on a Gym environment (Online)
-### Off-policy Reinforcement Learning
+## Train your first agent on a Gym environment 
+
 Before starting training, there are some meta-hyperparameters and settings that must be set. These are defined in <code>INIT_HP</code>, for general parameters, and <code>MUTATION_PARAMS</code>, which define the evolutionary probabilities, and <code>NET_CONFIG</code>, which defines the network architecture. For example:
 ```python
 INIT_HP = {
@@ -225,7 +225,7 @@ trained_pop, pop_fitnesses = train_off_policy(env=env,                          
                                    wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
 ```
 
-### Custom Off-policy Training Loop
+<!-- ### Custom Off-policy Training Loop
 Alternatively, use a custom training loop. Combining all of the above:
 
 ```python
@@ -1174,7 +1174,7 @@ The easiest training loop implementation is to use our ```training.train_multi_a
                                                 mutation=mutations,                      # Mutations object
                                                 wb=INIT_HP["WANDB"])                     # Weights and Biases tracking
 
-```
+``` -->
 View <a href="https://docs.agilerl.com">documentation</a>.
 
 ## Citing AgileRL

@@ -157,6 +157,7 @@ class EvolvableMLP(nn.Module):
     ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
+        noisy=False
         if noisy:
             net_dict["linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
         else:
@@ -241,17 +242,17 @@ class EvolvableMLP(nn.Module):
             )
 
             value_net = self.create_mlp(
-                input_size=128,  # self.hidden_size[-1],
+                input_size=self.feature_hidden_size[-1],  # self.hidden_size[-1],
                 output_size=self.num_atoms,
-                hidden_size=[128, 128],  # [self.hidden_size[-1]],
+                hidden_size=self.hidden_size,  # [self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
             )
             advantage_net = self.create_mlp(
-                input_size=128,  # self.hidden_size[-1],
+                input_size=self.feature_hidden_size[-1],  # self.hidden_size[-1],
                 output_size=self.num_atoms * self.num_outputs,
-                hidden_size=[128, 128],  # [self.hidden_size[-1]],
+                hidden_size=self.hidden_size,  # [self.hidden_size[-1]],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
