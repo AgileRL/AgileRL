@@ -1,6 +1,127 @@
 Get started
 ===========
 
+Explore our Algorithms!
+-----------------------
+
+.. raw:: html
+
+   <style>
+    /* CSS styles for tiles with dark grey background and lighter hover */
+
+    /* Style for the container */
+    .tiles {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr); /* 2 columns */
+    grid-template-rows: auto auto; /* 2 rows */
+    gap: 25px; /* Adjust the gap between tiles */
+    margin-top: 48px;
+    }
+
+    /* Style for each tile */
+    .tile {
+    padding: 20px; /* Fixed padding */
+    text-align: center;
+    transition: background-color 0.3s ease; /* Smooth transition */
+    text-decoration: none;
+    color: white; /* Text color */
+    width: 300px; /* Fixed width */
+    height: 150px; /* Fixed height */
+    overflow: hidden; /* Hide overflow content */
+    display: flex; /* Use flexbox for content alignment */
+    flex-direction: column; /* Align content vertically */
+    justify-content: center; /* Center content vertically */
+    background-color: #333; /* Dark grey background */
+    }
+
+    /* Lighter background color on hover */
+    .tile:hover {
+    background-color: #666; /* Lighter grey on hover */
+    }
+    /* Adjustments for initially hiding the algorithm list */
+    .algorithm-list {
+        display: none; /* Hide all algorithm lists by default */
+    }
+
+    /* Display algorithm list on tile hover */
+    .tile:hover .algorithm-list {
+        display: block; /* Show the algorithm list on hover */
+    }
+
+    /* Title styles */
+    .tile h2 {
+    margin-bottom: 8px; /* Adjust the margin */
+    font-size: 24px; /* Adjust the font size */
+    }
+
+    /* Algorithm list styles */
+    .algorithm-list {
+    list-style: none;
+    padding: 0;
+    margin-bottom: 8px; /* Adjust the margin */
+    font-size: 18px; /* Adjust the font size */
+    }
+
+    .algorithm-list li {
+    margin-bottom: 3px; /* Adjust the margin */
+    }
+
+    /* Learn more link styles */
+    .tile a {
+    display: block;
+    margin-top: 8px; /* Adjust the margin */
+    text-decoration: none;
+    color: white; /* Link color */
+    font-size: 14px; /* Adjust the font size */
+    }
+
+    .tile a:hover {
+    color: white; /* Link color on hover */
+    }
+
+
+   </style>
+
+.. container:: tiles-container
+
+   .. raw:: html
+
+      <div class="tiles">
+         <a href="on_policy_docs.html" class="tile on-policy">
+            <h2>On-policy</h2>
+            <ul class="algorithm-list">
+                  <li>PPO</li>
+            </ul>
+         </a>
+         <a href="off_policy_docs.html" class="tile off-policy">
+            <h2>Off-policy</h2>
+            <ul class="algorithm-list">
+                  <li>DQN</li>
+                  <li>Rainbow DQN</li>
+                  <li>DDPG</li>
+                  <li>TD3</li>
+                  <!-- Add more algorithms as needed -->
+            </ul>
+         </a>
+         <a href="online_docs.html" class="tile online">
+            <h2>Offline</h2>
+            <ul class="algorithm-list">
+                  <li>CQL</li>
+                  <!-- Add more algorithms as needed -->
+            </ul>
+         </a>
+         <a href="multi_agent_docs.html" class="tile multi-agent">
+            <h2>Multi Agent</h2>
+            <ul class="algorithm-list">
+                  <li>MADDPG</li>
+                  <li>MATD3</li>
+                  <!-- Add more algorithms as needed -->
+            </ul>
+         </a>
+      </div>
+
+
+
 .. _install:
 
 Install AgileRL
@@ -20,57 +141,6 @@ Or install in development mode:
 
    git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
    pip install -e .
-
-.. .. raw:: html
-
-..    <style>
-..    /* CSS styles for tiles - paste your CSS styles here */
-..    </style>
-
-.. .. container:: tiles-container
-
-..    .. raw:: html
-
-..       <div class="tiles">
-..         <a href="on_policy_docs.html" class="tile on-policy">
-..           <h2>On-policy</h2>
-..           <ul class="algorithm-list">
-..             <li>Proximal Policy Optimisation (PPO)</li>
-..           </ul>
-..           <a href="on_policy_docs.html">Learn More</a>
-..         </a>
-..         <a href="off_policy_docs.html" class="tile off-policy">
-..           <h2>Off-policy</h2>
-..           <ul class="algorithm-list">
-..             <li>Algorithm X</li>
-..             <li>Algorithm Y</li>
-..             <!-- Add more algorithms as needed -->
-..           </ul>
-..           <a href="off_policy_docs.html">Learn More</a>
-..         </a>
-..         <a href="online_docs.html" class="tile online">
-..           <h2>Online</h2>
-..           <ul class="algorithm-list">
-..             <li>Algorithm P</li>
-..             <li>Algorithm Q</li>
-..             <!-- Add more algorithms as needed -->
-..           </ul>
-..           <a href="online_docs.html">Learn More</a>
-..         </a>
-..         <a href="multi_agent_docs.html" class="tile multi-agent">
-..           <h2>Multi Agent</h2>
-..           <ul class="algorithm-list">
-..             <li>Algorithm M</li>
-..             <li>Algorithm N</li>
-..             <!-- Add more algorithms as needed -->
-..           </ul>
-..           <a href="multi_agent_docs.html">Learn More</a>
-..         </a>
-..       </div>
-
-
-    
-
 
 
 .. Quickstart: Training an off-policy RL agent
@@ -190,7 +260,6 @@ Or install in development mode:
 ..                           arch=NET_CONFIG['arch'],                              # Network architecture
 ..                           rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
 ..                           device=torch.device("cuda"))
-
 .. The easiest training loop implementation is to use our ``train_off_policy()`` function. It requires the agent have functions ``getAction()`` and ``learn()``.
 
 .. .. code-block:: python
@@ -198,6 +267,7 @@ Or install in development mode:
 ..     from agilerl.training.train_off_policy import train_off_policy
 
 ..     trained_pop, pop_fitnesses = train_off_policy(env=env,                      # Gym-style environment
+
 ..                                        env_name=INIT_HP['ENV_NAME'],            # Environment name
 ..                                        algo=INIT_HP['ALGO'],                    # Algorithm
 ..                                        pop=agent_pop,                           # Population of agents
