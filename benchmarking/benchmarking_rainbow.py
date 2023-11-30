@@ -126,7 +126,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         n_step_memory=n_step_memory,
         n_step=n_step,
         per=per,
-        noisy=False,
+        noisy=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],

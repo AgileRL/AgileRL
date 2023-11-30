@@ -87,13 +87,13 @@ Explore our Algorithms!
    .. raw:: html
 
       <div class="tiles">
-         <a href="on_policy_docs.html" class="tile on-policy">
+         <a href="../on_policy/index.rst" class="tile on-policy">
             <h2>On-policy</h2>
             <ul class="algorithm-list">
                   <li>PPO</li>
             </ul>
          </a>
-         <a href="off_policy_docs.html" class="tile off-policy">
+         <a href="../off_policy/index.rst" class="tile off-policy">
             <h2>Off-policy</h2>
             <ul class="algorithm-list">
                   <li>DQN</li>
@@ -103,14 +103,14 @@ Explore our Algorithms!
                   <!-- Add more algorithms as needed -->
             </ul>
          </a>
-         <a href="online_docs.html" class="tile online">
+         <a href="../offline_training/index.rst" class="tile online">
             <h2>Offline</h2>
             <ul class="algorithm-list">
                   <li>CQL</li>
                   <!-- Add more algorithms as needed -->
             </ul>
          </a>
-         <a href="multi_agent_docs.html" class="tile multi-agent">
+         <a href="../multi_agent_training/index.rst" class="tile multi-agent">
             <h2>Multi Agent</h2>
             <ul class="algorithm-list">
                   <li>MADDPG</li>

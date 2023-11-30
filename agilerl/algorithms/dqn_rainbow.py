@@ -247,7 +247,7 @@ class RainbowDQN:
 
 
 
-    def getAction(self, state, epsilon=0, action_mask=None):
+    def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -271,50 +271,50 @@ class RainbowDQN:
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
-        # self.actor.eval()
-        # with torch.no_grad():
-        #     action_values = self.actor(state)
-        # self.actor.train()
+        self.actor.eval()
+        with torch.no_grad():
+            action_values = self.actor(state)
+        self.actor.train()
 
-        # if action_mask is None:
-        #     action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
-        # else:
-        #     inv_mask = 1 - action_mask
-        #     masked_action_values = np.ma.array(
-        #         action_values.cpu().data.numpy(), mask=inv_mask
-        #     )
-        #     action = np.argmax(masked_action_values, axis=-1)
-
-        # return action
-        import random
-        # epsilon-greedy
-        if random.random() < epsilon:
-            if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=state.size()[0])
-            else:
-                inv_mask = 1 - action_mask
-
-                available_actions = np.ma.array(
-                    np.arange(0, self.action_dim), mask=inv_mask
-                ).compressed()
-                action = np.random.choice(available_actions, size=state.size()[0])
-
+        if action_mask is None:
+            action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:
-            self.actor.eval()
-            with torch.no_grad():
-                action_values = self.actor(state)
-            self.actor.train()
-
-            if action_mask is None:
-                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
-            else:
-                inv_mask = 1 - action_mask
-                masked_action_values = np.ma.array(
-                    action_values.cpu().data.numpy(), mask=inv_mask
-                )
-                action = np.argmax(masked_action_values, axis=-1)
+            inv_mask = 1 - action_mask
+            masked_action_values = np.ma.array(
+                action_values.cpu().data.numpy(), mask=inv_mask
+            )
+            action = np.argmax(masked_action_values, axis=-1)
 
         return action
+        # import random
+        # # epsilon-greedy
+        # if random.random() < epsilon:
+        #     if action_mask is None:
+        #         action = np.random.randint(0, self.action_dim, size=state.size()[0])
+        #     else:
+        #         inv_mask = 1 - action_mask
+
+        #         available_actions = np.ma.array(
+        #             np.arange(0, self.action_dim), mask=inv_mask
+        #         ).compressed()
+        #         action = np.random.choice(available_actions, size=state.size()[0])
+
+        # else:
+        #     self.actor.eval()
+        #     with torch.no_grad():
+        #         action_values = self.actor(state)
+        #     self.actor.train()
+
+        #     if action_mask is None:
+        #         action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
+        #     else:
+        #         inv_mask = 1 - action_mask
+        #         masked_action_values = np.ma.array(
+        #             action_values.cpu().data.numpy(), mask=inv_mask
+        #         )
+        #         action = np.argmax(masked_action_values, axis=-1)
+
+        # return action
 
     def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
         if self.one_hot:

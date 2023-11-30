@@ -48,7 +48,8 @@ Contents
    :maxdepth: 1
    :caption: Training
 
-   online_training/index
+   off_policy/index
+   on_policy/index
    offline_training/index
    multi_agent_training/index
    distributed_training/index

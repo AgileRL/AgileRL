@@ -1,3 +1,5 @@
+.. _ppo
+
 Proximal Policy Optimization (PPO)
 =========================================
 

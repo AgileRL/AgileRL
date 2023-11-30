@@ -17,7 +17,7 @@ INIT_HP:
     # NOTE: If using a population of agents, a standard replay buffer
     # (i.e. not multi-step or prioritized) is best, hence the defaults below
     N_STEP: 1                  # Step number to calculate td error
-    PER: true                 # Use prioritized experience replay buffer
+    PER: false                 # Use prioritized experience replay buffer
     ALPHA: 0.6                 # Prioritized replay buffer parameter
     BETA: 0.4                  # Importance sampling coefficient
     TAU: 0.001                  # For soft update of target parameters
