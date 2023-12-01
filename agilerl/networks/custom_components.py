@@ -21,12 +21,10 @@ class GumbelSoftmax(nn.Module):
         """
         epsilon = torch.rand_like(logits)  # epsilon = U
         gumbel_noise = -torch.log(-torch.log(epsilon + eps) + eps)
-        # print("GUMBEL NOISE", gumbel_noise)
         y = logits + gumbel_noise
         return F.softmax(y / tau, dim=-1)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # print("GBSM input", input)
         return self.gumbel_softmax(input)
 
 
@@ -69,13 +67,6 @@ class NoisyLinear(nn.Module):
         """
         weight_epsilon = self.weight_epsilon.to(x.device)
         bias_epsilon = self.bias_epsilon.to(x.device)
-
-        # if self.training:
-        #     weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
-        #     bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
-        # else:
-        #     weight = self.weight_mu
-        #     bias = self.bias_mu
 
         weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
         bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)

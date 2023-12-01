@@ -23,6 +23,13 @@ At regular intervals, after learning from shared experiences, a population of ag
 best agents are selected to survive until the next generation, and their offspring are mutated to further explore the hyperparameter space.
 Eventually, the optimal hyperparameters for learning in a given environment can be reached in significantly less steps than are required using other HPO methods.
 
+####
+
+Off-policy reinforcement learning involves decoupling the learning policy from the data collection policy. Algorithms like Q-learning and DDPG enable learning 
+from experiences collected by a different, possibly exploratory policy, allowing for greater flexibility in exploration and improved sample efficiency. By learning
+from a diverse set of experiences, off-policy methods can leverage past data more effectively, separating the exploration strategy from the learning strategy and 
+enabling the agent to learn optimal policies even from suboptimal or random exploration policies. This independence between data collection and learning policies 
+often results in higher potential for reuse of previously gathered experiences and facilitates more efficient learning.
 
 .. _initpop_online:
 
@@ -32,6 +39,7 @@ Population Creation
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
+
 
 .. code-block:: python
 

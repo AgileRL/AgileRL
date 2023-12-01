@@ -68,7 +68,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                 device=device,
             )
     elif n_step:
-        memory = MultiStepReplayBuffer(
+        memory = ReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            device=device,
+        )
+        n_step_memory = MultiStepReplayBuffer(
             action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
@@ -126,7 +132,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         n_step_memory=n_step_memory,
         n_step=n_step,
         per=per,
-        noisy=True,
+        noisy=False,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],

@@ -55,8 +55,8 @@ class Sampler:
                 warnings.warn("Memory is not an agilerl ReplayBuffer.")
             self.sample = self.sample_standard
 
-    def sample_standard(self, batch_size):
-        return self.memory.sample(batch_size)
+    def sample_standard(self, batch_size, return_idx=False):
+        return self.memory.sample(batch_size, return_idx)
 
     def sample_distributed(self, batch_size):
         self.dataset.batch_size = batch_size

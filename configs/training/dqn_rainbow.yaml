@@ -6,7 +6,7 @@ INIT_HP:
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 16               # Number of parallel environments for training
-    BATCH_SIZE: 256           # Batch size
+    BATCH_SIZE: 128           # Batch size
     LR: 0.001                    # Learning rate
     EPISODES: 1000             # Max no. episodes
     TARGET_SCORE: 470.          # Early training stop at avg score of last 100 episodes
@@ -16,8 +16,8 @@ INIT_HP:
     LEARN_STEP: 1              # Learning frequency
     # NOTE: If using a population of agents, a standard replay buffer
     # (i.e. not multi-step or prioritized) is best, hence the defaults below
-    N_STEP: 1                  # Step number to calculate td error
-    PER: false                 # Use prioritized experience replay buffer
+    N_STEP: 3                  # Step number to calculate td error
+    PER: true                 # Use prioritized experience replay buffer
     ALPHA: 0.6                 # Prioritized replay buffer parameter
     BETA: 0.4                  # Importance sampling coefficient
     TAU: 0.001                  # For soft update of target parameters
@@ -30,7 +30,7 @@ INIT_HP:
     POP_SIZE: 1                # Population size
     EVO_LOOP: 3                # Number of evaluation episodes
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: true               # Log with Weights and Biases
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

@@ -157,6 +157,7 @@ class EvolvableMLP(nn.Module):
     ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
+        noisy=False
         if noisy:
             net_dict["linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
         else:
