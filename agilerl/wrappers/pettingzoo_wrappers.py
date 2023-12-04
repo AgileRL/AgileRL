@@ -1,14 +1,12 @@
 from __future__ import annotations
-
 import warnings
-
 import gymnasium.spaces
 import numpy as np
 from gymnasium.utils import seeding
 from pettingzoo.utils.env import ActionType, AgentID, ObsType, ParallelEnv
 
 
-class PettingZooBaseParallelWrapper(ParallelEnv[AgentID, ObsType, ActionType]):
+class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
         self.env = env
 
@@ -44,9 +42,10 @@ class PettingZooBaseParallelWrapper(ParallelEnv[AgentID, ObsType, ActionType]):
         dict[AgentID, bool],
         dict[AgentID, dict],
     ]:
-        res = self.env.step(actions)
-        self.agents = self.env.agents
-        return res
+        obs, rewards, terminations, truncations, infos = self.env.step(actions)
+        if np.any(list(terminations.values())) or np.any(list(truncations.values())):
+            obs, infos = self.env.reset()
+        return obs, rewards, terminations, truncations, infos
 
     def render(self) -> None | np.ndarray | str | list:
         return self.env.render()
@@ -96,24 +95,3 @@ class PettingZooBaseParallelWrapper(ParallelEnv[AgentID, ObsType, ActionType]):
 
     def action_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.env.action_space(agent)
-
-
-class PettingZooAutoResetParallelWrapper(
-    PettingZooBaseParallelWrapper[AgentID, ObsType, ActionType]
-):
-    def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
-        super().__init__(env)
-
-    def step(
-        self, actions: dict[AgentID, ActionType]
-    ) -> tuple[
-        dict[AgentID, ObsType],
-        dict[AgentID, float],
-        dict[AgentID, bool],
-        dict[AgentID, bool],
-        dict[AgentID, dict],
-    ]:
-        obs, rewards, terminations, truncations, infos = self.env.step(actions)
-        if np.any(list(terminations.values())) or np.any(list(truncations.values())):
-            obs, infos = self.env.reset()
-        return obs, rewards, terminations, truncations, infos
