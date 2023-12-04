@@ -1,5 +1,6 @@
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooAutoResetParallelWrapper
 from testing_env import parallel_env
+
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooAutoResetParallelWrapper
 
 
 def test_autoreset_wrapper_autoreset():
