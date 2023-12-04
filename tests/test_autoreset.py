@@ -1,8 +1,10 @@
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooAutoResetParallelWrapper
 import functools
+
 import gymnasium
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
+
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooAutoResetParallelWrapper
 
 ROCK = 0
 PAPER = 1
