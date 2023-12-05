@@ -1,5 +1,6 @@
 import functools
 
+from unittest.mock import patch
 import gymnasium
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
@@ -155,14 +156,29 @@ def test_autoreset_wrapper_autoreset():
     """Tests the autoreset wrapper actually automatically resets correctly."""
     env = parallel_env(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
-
     observations, infos = env.reset()
-    assert list(infos.values())[0] == 0, "Game didn't reset properly"
-    for _ in range(500):
-        # this is where you would insert your policy
-        actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-        observations, rewards, terminations, truncations, infos = env.step(actions)
-        assert list(infos.values())[0] < 100, "Game went on for too long"
+    with patch("__main__.parallel_env.reset", wraps=env.env.reset) as autoreset_patch:
+        # Environment truncates after 100 steps, so we expect 1 reset.
+        for _ in range(100):
+            # this is where you would insert your policy
+            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+            observations, rewards, terminations, truncations, infos = env.step(actions)
+        autoreset_patch.assert_called()
+        autoreset_patch.reset_mock()
+        # Environment truncates after 100 steps, so we expect 5 resets.
+        for _ in range(500):
+            # this is where you would insert your policy
+            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+            observations, rewards, terminations, truncations, infos = env.step(actions)
+        autoreset_patch.assert_called()
+        assert autoreset_patch.call_count == 5
+        autoreset_patch.reset_mock()
+        # Environment truncates after 100 steps, so we expect no reset.
+        for _ in range(99):
+            # this is where you would insert your policy
+            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
+            observations, rewards, terminations, truncations, infos = env.step(actions)
+        autoreset_patch.assert_not_called()
 
 
 if __name__ == "__main__":
