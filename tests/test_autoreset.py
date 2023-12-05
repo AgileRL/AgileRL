@@ -157,7 +157,9 @@ def test_autoreset_wrapper_autoreset():
     env = parallel_env(render_mode="human")
     env = PettingZooAutoResetParallelWrapper(env)
     observations, infos = env.reset()
-    with patch("__main__.parallel_env.reset", wraps=env.env.reset) as autoreset_patch:
+    with patch(
+        f"{__name__}.parallel_env.reset", wraps=env.env.reset
+    ) as autoreset_patch:
         # Environment truncates after 100 steps, so we expect 1 reset.
         for _ in range(100):
             # this is where you would insert your policy
