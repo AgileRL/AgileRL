@@ -1,4 +1,4 @@
-.. _ppo
+.. _ppo:
 
 Proximal Policy Optimization (PPO)
 =========================================

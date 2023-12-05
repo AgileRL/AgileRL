@@ -43,11 +43,13 @@ Contents
    :caption: Introduction
 
    get_started/index
+   
 
 .. toctree::
    :maxdepth: 1
    :caption: Training
 
+   evo_hyperparam_opt/index
    off_policy/index
    on_policy/index
    offline_training/index
@@ -60,6 +62,7 @@ Contents
    :caption: Tutorials
 
    tutorials/pettingzoo/index
+   tutorials/gymnasium/index
 
 .. toctree::
    :maxdepth: 1

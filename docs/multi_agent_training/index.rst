@@ -8,6 +8,18 @@ co-operative and competitive scenarios. With AgileRL, agents can be trained to a
 using our implementation of the MADDPG or MATD3 algorithms alongside our Evolutionary Hyperparameter
 Optimisation algorithm.
 
+.. list-table::
+   :widths: 50 50
+   :header-rows: 1
+
+   * - **Algorithms**
+     - **Tutorials**
+   * - :ref:`MADDPG<maddpg>`
+     - :ref:`Space Invaders <MADDPG tutorial>`
+   * - :ref:`MATD3<matd3>` 
+     - :ref:`Simple Speaker Listener <MATD3 tutorial>` 
+  
+
 .. _initpop_ma:
 
 Population Creation

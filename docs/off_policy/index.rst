@@ -7,29 +7,27 @@ update its policy. To enable our agent to interact in this way, the agent needs 
 AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our
 Evolutionary Hyperparameter Optimization algorithm.
 
-.. _evoHPO_online:
-
-Evolutionary Hyperparameter Optimization
-----------------------------------------
-
-Traditionally, hyperparameter optimization (HPO) for reinforcement learning (RL) is particularly difficult when compared to other types of machine learning.
-This is for several reasons, including the relative sample inefficiency of RL and its sensitivity to hyperparameters.
-
-AgileRL is initially focused on improving HPO for RL in order to allow faster development with robust training.
-Evolutionary algorithms have been shown to allow faster, automatic convergence to optimal hyperparameters than other HPO methods by taking advantage of
-shared memory between a population of agents acting in identical environments.
-
-At regular intervals, after learning from shared experiences, a population of agents can be evaluated in an environment. Through tournament selection, the
-best agents are selected to survive until the next generation, and their offspring are mutated to further explore the hyperparameter space.
-Eventually, the optimal hyperparameters for learning in a given environment can be reached in significantly less steps than are required using other HPO methods.
-
-####
-
 Off-policy reinforcement learning involves decoupling the learning policy from the data collection policy. Algorithms like Q-learning and DDPG enable learning 
 from experiences collected by a different, possibly exploratory policy, allowing for greater flexibility in exploration and improved sample efficiency. By learning
 from a diverse set of experiences, off-policy methods can leverage past data more effectively, separating the exploration strategy from the learning strategy and 
 enabling the agent to learn optimal policies even from suboptimal or random exploration policies. This independence between data collection and learning policies 
 often results in higher potential for reuse of previously gathered experiences and facilitates more efficient learning.
+
+.. list-table::
+   :widths: 50 50
+   :header-rows: 1
+
+   * - **Algorithms**
+     - **Tutorials**
+   * - :ref:`DQN<dqn>`
+     - :ref:`Curriculum learning with self-play<DQN tutorial>`
+   * - :ref:`Rainbow DQN<dqn_rainbow>` 
+     - Cartpole 
+   * - :ref:`DDPG<ddpg>` 
+     - --
+   * - :ref:`TD3<td3>`
+     - Lunar Lander 
+
 
 .. _initpop_online:
 
