@@ -1,6 +1,6 @@
 import functools
-
 from unittest.mock import patch
+
 import gymnasium
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
