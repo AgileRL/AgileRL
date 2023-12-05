@@ -314,7 +314,9 @@ def train_off_policy(
                             next_state,
                             done,
                         )
+                    #print("ONE STEP TRANSITION", one_step_transition)
                     if one_step_transition:
+                        #print("hello from if statement")
                         memory.save2memoryVectEnvs(*one_step_transition)
                 else:
                     if swap_channels:
