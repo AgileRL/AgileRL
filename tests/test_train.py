@@ -10,7 +10,6 @@ from accelerate import Accelerator
 import agilerl.training.train_multi_agent
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
-from agilerl.training.train_off_policy import train_off_policy
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -20,6 +19,7 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.training.train_multi_agent import train_multi_agent
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
 
