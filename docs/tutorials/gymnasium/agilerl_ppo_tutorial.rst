@@ -422,4 +422,3 @@ Save test episosdes as a gif
     os.makedirs(gif_path, exist_ok=True)
     imageio.mimwrite(os.path.join("./videos/", "ppo_acrobot.gif"), frames, loop=0)
     mean_fitness = np.mean(rewards)
-

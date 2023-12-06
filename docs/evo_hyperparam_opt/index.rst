@@ -17,8 +17,3 @@ Eventually, the optimal hyperparameters for learning in a given environment can 
 
    Our evolutionary approach allows for HPO in a single training run compared to Bayesian methods that require multiple sequential training runs
    to achieve similar, and often inferior, results.
-
-   
-
-   
-

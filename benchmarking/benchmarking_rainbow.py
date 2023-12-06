@@ -1,11 +1,6 @@
-import sys
-
 import torch
 import yaml
 
-sys.path.append("../")
-
-from agilerl.training.train_off_policy import train_off_policy
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
@@ -13,6 +8,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -140,8 +136,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         evo_epochs=INIT_HP["EVO_EPOCHS"],
         evo_loop=INIT_HP["EVO_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
-        tournament=None,
-        mutation=None,
+        tournament=tournament,
+        mutation=mutations,
         wb=INIT_HP["WANDB"],
     )
 
@@ -159,32 +155,4 @@ if __name__ == "__main__":
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
     NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
-
-    # Run number 1 = use only the normal buffer
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
-
-    # Run number 2 = use per and n step
-    # INIT_HP["N_STEP"] = 3
-    # INIT_HP["PER"] = True
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
-
-    # # Run number 3 = use just per
-    # INIT_HP["N_STEP"] = 1
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
-
-    # # Run number 4 = use just n step
-    # INIT_HP["N_STEP"] = 3
-    # INIT_HP["PER"] = False
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
-
-    # # Run normal DQN
-    # with open("../configs/training/dqn.yaml") as file:
-    #     dqn_config = yaml.safe_load(file)
-    # INIT_HP = dqn_config["INIT_HP"]
-    # INIT_HP["PER"] = False
-    # INIT_HP["N_STEP"] = 1
-    # INIT_HP["NUM_ENVS"] = 16
-    # INIT_HP["EVO_LOOP"] = 3
-    # MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-    # NET_CONFIG = dqn_config["NET_CONFIG"]
-    # main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

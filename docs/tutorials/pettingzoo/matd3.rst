@@ -5,6 +5,12 @@ AgileRL Tutorial: Implementing MATD3
 
 This tutorial shows how to train an :ref:`MATD3<matd3>` agent on the `simple speaker listener <https://pettingzoo.farama.org/environments/mpe/simple_speaker_listener/>`_ multi-particle environment.
 
+.. figure:: mpe_looped.gif
+   :height: 400
+   :align: center
+
+   Performance of trained MATD3 algorithm on 6 random episodes
+
 What is MATD3?
 --------------
 

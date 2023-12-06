@@ -3,8 +3,8 @@
 Gymnasium Single-agent Tutorials
 ================================
 
-These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_ 
-with `Gymnasium <https://gymnasium.farama.org/>`_. 
+These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
+with `Gymnasium <https://gymnasium.farama.org/>`_.
 
 
 .. raw:: html
@@ -22,7 +22,7 @@ with `Gymnasium <https://gymnasium.farama.org/>`_.
         margin-bottom: 48px;
         width: 100%;
         align-content: start;
-        height: auto;
+        /*height: auto;
     }
 
     /* Style for each tile */
@@ -35,12 +35,13 @@ with `Gymnasium <https://gymnasium.farama.org/>`_.
         overflow: hidden; /* Hide overflow content */
         /* display: flex; /* Use flexbox for content alignment */
         flex-direction: column; /* Align content vertically */
-        /*justify-content: center; /* Center content vertically */
+        justify-content: center; /* Center content vertically */
         align-items: flex-start;*/
         background-color: transparent; /* Dark grey background */
         border-radius: 7px; /* Rounded corners */
         box-shadow: 0 4px 8px rgba(0, 150, 150, 0.5);
         margin-bottom: 0px;
+
     }
 
     .column {
@@ -64,9 +65,9 @@ with `Gymnasium <https://gymnasium.farama.org/>`_.
         margin-top: 20px;
         margin-bottom: 20px;
         padding: 4px 4px 4px 4px;
-        
+
     }
-      
+
 
     /* Learn more link styles */
     .tile a {
@@ -99,15 +100,15 @@ with `Gymnasium <https://gymnasium.farama.org/>`_.
       </a>
       <a href="../gymnasium/agilerl_td3_tutorial.html" class="tile online">
       <img src="../../_images/agilerl_td3_lunar_lander.gif" alt="Acrobot gif" class="thumbnail-image">
-         <h2>TD3 - LunarLander</h2>
+         <h2>TD3 - Lunar Lander</h2>
       </a>
-      
+
    </div>
 
 
 .. toctree::
    :maxdepth: 2
-   :hidden: 
+   :hidden:
 
    agilerl_ppo_tutorial
    agilerl_td3_tutorial

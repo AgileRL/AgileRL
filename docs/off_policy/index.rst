@@ -7,10 +7,10 @@ update its policy. To enable our agent to interact in this way, the agent needs 
 AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our
 Evolutionary Hyperparameter Optimization algorithm.
 
-Off-policy reinforcement learning involves decoupling the learning policy from the data collection policy. Algorithms like Q-learning and DDPG enable learning 
+Off-policy reinforcement learning involves decoupling the learning policy from the data collection policy. Algorithms like Q-learning and DDPG enable learning
 from experiences collected by a different, possibly exploratory policy, allowing for greater flexibility in exploration and improved sample efficiency. By learning
-from a diverse set of experiences, off-policy methods can leverage past data more effectively, separating the exploration strategy from the learning strategy and 
-enabling the agent to learn optimal policies even from suboptimal or random exploration policies. This independence between data collection and learning policies 
+from a diverse set of experiences, off-policy methods can leverage past data more effectively, separating the exploration strategy from the learning strategy and
+enabling the agent to learn optimal policies even from suboptimal or random exploration policies. This independence between data collection and learning policies
 often results in higher potential for reuse of previously gathered experiences and facilitates more efficient learning.
 
 .. list-table::
@@ -21,12 +21,12 @@ often results in higher potential for reuse of previously gathered experiences a
      - **Tutorials**
    * - :ref:`DQN<dqn>`
      - :ref:`Curriculum learning with self-play<DQN tutorial>`
-   * - :ref:`Rainbow DQN<dqn_rainbow>` 
-     - Cartpole 
-   * - :ref:`DDPG<ddpg>` 
+   * - :ref:`Rainbow DQN<dqn_rainbow>`
+     - *Coming soon*
+   * - :ref:`DDPG<ddpg>`
      - --
    * - :ref:`TD3<td3>`
-     - Lunar Lander 
+     - :ref:`Lunar Lander<td3_tutorial>`
 
 
 .. _initpop_online:

@@ -245,8 +245,6 @@ class RainbowDQN:
 
         self.criterion = nn.MSELoss()
 
-
-
     def getAction(self, state, epsilon=0, action_mask=None):
         """Returns the next action to take in the environment.
 
@@ -287,6 +285,7 @@ class RainbowDQN:
 
         # return action
         import random
+
         # epsilon-greedy
         if random.random() < epsilon:
             if action_mask is None:
@@ -385,7 +384,20 @@ class RainbowDQN:
         """
         if per:
             if n_step:
-                (states, actions, rewards, next_states, dones, weights, idxs, n_states, n_actions, n_rewards, n_next_states, n_dones,) = experiences
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                    n_states,
+                    n_actions,
+                    n_rewards,
+                    n_next_states,
+                    n_dones,
+                ) = experiences
                 if self.accelerator is not None:
                     states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
@@ -399,7 +411,15 @@ class RainbowDQN:
                     n_next_states = n_next_states.to(self.accelerator.device)
                     n_dones = n_dones.to(self.accelerator.device)
             else:
-                (states, actions, rewards, next_states, dones, weights, idxs,) = experiences
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                ) = experiences
                 if self.accelerator is not None:
                     states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
@@ -408,7 +428,7 @@ class RainbowDQN:
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
             elementwise_loss = self._dqn_loss(
-                 states, actions, rewards, next_states, dones, self.gamma
+                states, actions, rewards, next_states, dones, self.gamma
             )
             if n_step:
                 n_gamma = self.gamma**self.n_step
@@ -420,7 +440,19 @@ class RainbowDQN:
 
         else:
             if n_step:
-                (states, actions, rewards, next_states, dones, idxs, n_states, n_actions, n_rewards, n_next_states, n_dones,) = experiences
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    idxs,
+                    n_states,
+                    n_actions,
+                    n_rewards,
+                    n_next_states,
+                    n_dones,
+                ) = experiences
                 if self.accelerator is not None:
                     states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
@@ -433,7 +465,12 @@ class RainbowDQN:
                     n_next_states = n_next_states.to(self.accelerator.device)
                     n_dones = n_dones.to(self.accelerator.device)
             else:
-                (states, actions, rewards, next_states, dones,
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
                 ) = experiences
                 if self.accelerator is not None:
                     states = states.to(self.accelerator.device)
@@ -441,7 +478,7 @@ class RainbowDQN:
                     rewards = rewards.to(self.accelerator.device)
                     next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
-                idxs =  None
+                idxs = None
             new_priorities = None
             elementwise_loss = self._dqn_loss(
                 states, actions, rewards, next_states, dones, self.gamma
@@ -449,7 +486,8 @@ class RainbowDQN:
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
-                n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma)
+                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                )
                 elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss)
 

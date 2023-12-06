@@ -16,9 +16,9 @@ Optimisation algorithm.
      - **Tutorials**
    * - :ref:`MADDPG<maddpg>`
      - :ref:`Space Invaders <MADDPG tutorial>`
-   * - :ref:`MATD3<matd3>` 
-     - :ref:`Simple Speaker Listener <MATD3 tutorial>` 
-  
+   * - :ref:`MATD3<matd3>`
+     - :ref:`Simple Speaker Listener <MATD3 tutorial>`
+
 
 .. _initpop_ma:
 

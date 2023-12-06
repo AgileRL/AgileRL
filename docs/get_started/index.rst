@@ -67,7 +67,7 @@ Explore our Algorithms!
          text-align: left;
          word-wrap: break-word;
       }
-      
+
 
     /* Learn more link styles */
     .tile a {
@@ -134,5 +134,3 @@ Or install in development mode:
 
    git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
    pip install -e .
-
-

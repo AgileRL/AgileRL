@@ -46,7 +46,7 @@ Dependencies
     import os
 
     import imageio
-    import numpy as np  
+    import numpy as np
     import torch
     from agilerl.algorithms.td3 import TD3
     from agilerl.components.replay_buffer import ReplayBuffer
@@ -243,7 +243,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         arch=net_config["arch"],
         rand_seed=MUT_P["RAND_SEED"],
         device=device,
-)
+    )
 
 
 Training and Saving an Agent
@@ -409,7 +409,7 @@ Load agent
 
 Test loop for inference
 ~~~~~~~~~~~~~~~~~~~~~~~
-.. code-blcok:: python
+.. code-block:: python
 
     test_env = gym.make("LunarLanderContinuous-v2", render_mode="rgb_array")
     rewards = []
@@ -467,5 +467,3 @@ Save test episosdes as a gif
         os.path.join("./videos/", "td3_lunar_lander.gif"), frames, duration=50, loop=0
     )
     mean_fitness = np.mean(rewards)
-
-

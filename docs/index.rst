@@ -43,7 +43,7 @@ Contents
    :caption: Introduction
 
    get_started/index
-   
+
 
 .. toctree::
    :maxdepth: 1

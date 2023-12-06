@@ -1,9 +1,5 @@
-import sys
-
 import torch
 import yaml
-
-sys.path.append("../")
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -92,8 +88,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         evo_epochs=INIT_HP["EVO_EPOCHS"],
         evo_loop=1,
         target=INIT_HP["TARGET_SCORE"],
-        tournament=None,
-        mutation=None,
+        tournament=tournament,
+        mutation=mutations,
         wb=INIT_HP["WANDB"],
     )
 

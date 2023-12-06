@@ -157,7 +157,7 @@ class EvolvableMLP(nn.Module):
     ):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
-        noisy=False
+        noisy = False
         if noisy:
             net_dict["linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
         else:
@@ -288,8 +288,6 @@ class EvolvableMLP(nn.Module):
             x = torch.FloatTensor(np.array(x))
             if self.accelerator is None:
                 x = x.to(self.device)
-
-        batch_size = x.size(0)
 
         if x.dtype != torch.float32:
             x = x.to(torch.float32)

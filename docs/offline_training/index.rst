@@ -15,7 +15,7 @@ AgileRL's offline RL training framework enables you to leverage evolutionary HPO
      - **Tutorials**
    * - :ref:`CQL<cql>`
      - --
-   * - :ref:`ILQL<ilql>` 
+   * - :ref:`ILQL<ilql>`
      - --
 
 .. _initpop_offline:
