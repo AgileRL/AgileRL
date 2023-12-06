@@ -6,11 +6,11 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
+from AgileRL.agilerl.training.train_off_policy import train_off_policy
 
 import agilerl.training.train_multi_agent
 import agilerl.training.train_offline
 import agilerl.training.train_on_policy
-from AgileRL.agilerl.training.train_off_policy import train_off_policy
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
