@@ -373,7 +373,7 @@ class RainbowDQN:
         elementwise_loss = -(proj_dist * log_p).sum(1)
         return elementwise_loss
 
-    def learn(self, experiences, n_step=True, per=False):
+    def learn(self, experiences, n_step=False, per=False):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -407,15 +407,15 @@ class RainbowDQN:
                     next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
-            # elementwise_loss = self._dqn_loss(
-            #     states, actions, rewards, next_states, dones, self.gamma
-            # )
+            elementwise_loss = self._dqn_loss(
+                 states, actions, rewards, next_states, dones, self.gamma
+            )
             if n_step:
                 n_gamma = self.gamma**self.n_step
-                elementwise_loss = self._dqn_loss(
+                n_step_elementwise_loss = self._dqn_loss(
                     n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
                 )
-                #elementwise_loss += n_step_elementwise_loss
+                elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss * weights)
 
         else:

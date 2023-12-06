@@ -89,7 +89,6 @@ class ReplayBuffer:
             transition["idxs"] = idxs
         else:
             experiences = random.sample(self.memory, k=batch_size)
-            print(experiences)
             transition = self._process_transition(experiences)            
 
         return tuple(transition.values())
@@ -206,7 +205,10 @@ class MultiStepReplayBuffer(ReplayBuffer):
             buffer.append(transition)
 
         # single step transition is not ready
-        if len(self.n_step_buffers[0]) < self.n_step:
+
+        #### should really be if any()
+        if any(len(buffer) < self.n_step for buffer in self.n_step_buffers):
+        #if len(self.n_step_buffers[0]) < self.n_step:
             return ()
         else:
             for buffer in self.n_step_buffers:
@@ -271,7 +273,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         transition["action"] = transition["action"][0]
 
         return tuple(transition.values())
-
+    
 
 class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     """The Prioritized Experience Replay Buffer class. Used to store experiences and allow

@@ -341,7 +341,7 @@ def train_off_policy(
                 if per:
                     # fraction = min((idx_step + 1)/ max_steps, 1.0)
                     fraction = min(
-                        (total_steps + 1) / (max_steps * n_episodes), 1.0
+                        (total_steps + idx_step + 1) / (max_steps * n_episodes), 1.0
                     )  ####
                     agent.beta += fraction * (1.0 - agent.beta)
 
@@ -362,13 +362,12 @@ def train_off_policy(
                         )
                         memory.update_priorities(idxs, priorities)
                     else:
-                        experiences = sampler.sample(agent.batch_size, return_idx=True)
+                        experiences = sampler.sample(agent.batch_size, return_idx=True if n_step_memory is not None else False)
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[5])
                             experiences += n_step_experiences
-                            agent.learn(experiences, n_step=n_step)
-                        else:
-                            agent.learn(experiences)
+                        agent.learn(experiences, n_step=n_step)
+                
 
                 if is_vectorised:
                     terminations.append(done)

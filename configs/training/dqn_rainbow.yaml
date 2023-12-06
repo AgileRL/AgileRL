@@ -6,8 +6,8 @@ INIT_HP:
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 8               # Number of parallel environments for training
-    BATCH_SIZE: 128            # Batch size
-    LR: 0.0001                  # Learning rate
+    BATCH_SIZE: 16            # Batch size
+    LR: 0.001                  # Learning rate
     EPISODES: 1000             # Max no. episodes
     TARGET_SCORE: 470.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
@@ -27,7 +27,7 @@ INIT_HP:
     V_MAX: 200.                # Maximum value of support
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 3                # Population size
+    POP_SIZE: 1                # Population size
     EVO_LOOP: 3                # Number of evaluation episodes
     EVO_EPOCHS: 20             # Evolution frequency
     WANDB: true               # Log with Weights and Biases

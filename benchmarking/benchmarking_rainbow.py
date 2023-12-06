@@ -140,8 +140,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         evo_epochs=INIT_HP["EVO_EPOCHS"],
         evo_loop=INIT_HP["EVO_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
-        tournament=tournament,
-        mutation=mutations,
+        tournament=None,
+        mutation=None,
         wb=INIT_HP["WANDB"],
     )
 
