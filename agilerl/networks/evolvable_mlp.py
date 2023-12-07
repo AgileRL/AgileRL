@@ -132,6 +132,7 @@ class EvolvableMLP(nn.Module):
             "LeakyReLU": nn.LeakyReLU,
             "PReLU": nn.PReLU,
             "GELU": nn.GELU,
+            None: nn.Identity,
         }
 
         return (

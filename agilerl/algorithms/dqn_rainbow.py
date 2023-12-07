@@ -226,9 +226,7 @@ class RainbowDQN:
         # Create the target network by copying the actor network
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer_type = optim.Adam(
-            self.actor.parameters(), lr=self.lr, eps=0.0003125
-        )
+        self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch

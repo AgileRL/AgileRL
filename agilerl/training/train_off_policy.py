@@ -266,7 +266,6 @@ def train_off_policy(
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
 
-    action_dim = env.single_action_space.n  ####
     # RL training loop
     for idx_epi in pbar:
         if accelerator is not None:
@@ -276,7 +275,8 @@ def train_off_policy(
             rewards, terminations, truncs = [], [], []
             score = 0
 
-            train_actions_hist = [0] * action_dim
+            if algo in ["DQN", "RainbowDQN"]:
+                train_actions_hist = [0] * agent.action_dim
 
             for idx_step in range(max_steps):
                 if swap_channels:
@@ -287,8 +287,11 @@ def train_off_policy(
                 else:
                     action = agent.getAction(state, epsilon)
 
-                for a in action:
-                    train_actions_hist[a] += 1
+                if algo in ["DQN", "RainbowDQN"]:
+                    for a in action:
+                        if not isinstance(a, int):
+                            a = int(a)
+                        train_actions_hist[a] += 1
 
                 if not is_vectorised:
                     action = action[0]
@@ -314,9 +317,7 @@ def train_off_policy(
                             next_state,
                             done,
                         )
-                    # print("ONE STEP TRANSITION", one_step_transition)
                     if one_step_transition:
-                        # print("hello from if statement")
                         memory.save2memoryVectEnvs(*one_step_transition)
                 else:
                     if swap_channels:
@@ -369,7 +370,9 @@ def train_off_policy(
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[5])
                             experiences += n_step_experiences
-                        agent.learn(experiences, n_step=n_step)
+                            agent.learn(experiences, n_step=n_step)
+                        else:
+                            agent.learn(experiences)
 
                 if is_vectorised:
                     terminations.append(done)
@@ -407,20 +410,22 @@ def train_off_policy(
 
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
-            train_actions_hist = [
-                freq / sum(train_actions_hist) for freq in train_actions_hist
-            ]
-            train_actions_dict = {
-                f"train/action_{index}": action
-                for index, action in enumerate(train_actions_hist)
-            }
             wandb_dict = {
                 "global_step": total_steps,
                 "train/mean_score": np.mean(mean_scores),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
             }
-            wandb_dict.update(train_actions_dict)
+
+            if algo in ["DQN", "RainbowDQN"]:
+                train_actions_hist = [
+                    freq / sum(train_actions_hist) for freq in train_actions_hist
+                ]
+                train_actions_dict = {
+                    f"train/action_{index}": action
+                    for index, action in enumerate(train_actions_hist)
+                }
+                wandb_dict.update(train_actions_dict)
 
             if wb:
                 if accelerator is not None:

@@ -58,7 +58,7 @@ class Sampler:
     def sample_standard(self, batch_size, return_idx=False):
         return self.memory.sample(batch_size, return_idx)
 
-    def sample_distributed(self, batch_size):
+    def sample_distributed(self, batch_size, return_idx=None):
         self.dataset.batch_size = batch_size
         return next(iter(self.dataloader))
 
