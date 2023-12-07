@@ -6,6 +6,8 @@ import numpy as np
 import wandb
 from tqdm import trange
 
+from agilerl.utils.utils import calculate_vectorized_scores
+
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 
@@ -145,7 +147,7 @@ def train_on_policy(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="EvoWrappers",
+                project="AgileRL",
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
@@ -227,6 +229,7 @@ def train_on_policy(
             rewards = []
             dones = []
             values = []
+            truncs = []
 
             for idx_step in range(max_steps):
                 if swap_channels:
@@ -247,12 +250,20 @@ def train_on_policy(
                 rewards.append(reward)
                 dones.append(done)
                 values.append(value)
+                truncs.append(trunc)
 
                 state = next_state
                 score += reward
 
             if swap_channels:
                 next_state = np.moveaxis(next_state, [-1], [-3])
+
+            if is_vectorised:
+                scores = calculate_vectorized_scores(
+                    np.array(rewards).transpose((1, 0)),
+                    np.array(dones).transpose((1, 0)),
+                )
+                score = np.mean(scores)
 
             agent.scores.append(score)
 
@@ -282,7 +293,7 @@ def train_on_policy(
             ]
             pop_fitnesses.append(fitnesses)
 
-            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+            mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
             if wb:
                 if accelerator is not None:
