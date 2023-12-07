@@ -1058,6 +1058,11 @@ class MADDPG:
         :type accelerator: accelerate.Accelerator(), optional
         """
         checkpoint = torch.load(path, pickle_module=dill)
+        for idx, _ in enumerate(checkpoint["agent_ids"]):
+            checkpoint["actors_init_dict"][idx]["device"] = device
+            checkpoint["actor_targets_init_dict"][idx]["device"] = device
+            checkpoint["critics_init_dict"][idx]["device"] = device
+            checkpoint["critic_targets_init_dict"][idx]["device"] = device
 
         if checkpoint["net_config"] is not None:
             agent = cls(
