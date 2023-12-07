@@ -383,13 +383,32 @@ def test_learns_from_experiences_n_step(accelerator):
     )
 
     # Create a batch of experiences
+    # Create a batch of experiences
     states = torch.randn(batch_size, state_dim[0])
     actions = torch.randint(0, action_dim, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
     next_states = torch.randn(batch_size, state_dim[0])
     dones = torch.randint(0, 2, (batch_size, 1))
+    idxs = np.arange(batch_size)
+    n_states = torch.randn(batch_size, state_dim[0])
+    n_actions = torch.randint(0, action_dim, (batch_size, 1))
+    n_rewards = torch.randn((batch_size, 1))
+    n_next_states = torch.randn(batch_size, state_dim[0])
+    n_dones = torch.randint(0, 2, (batch_size, 1))
 
-    experiences = [states, actions, rewards, next_states, dones]
+    experiences = [
+        states,
+        actions,
+        rewards,
+        next_states,
+        dones,
+        idxs,
+        n_states,
+        n_actions,
+        n_rewards,
+        n_next_states,
+        n_dones,
+    ]
 
     # Copy state dict before learning - should be different to after updating weights
     actor = dqn.actor
@@ -400,7 +419,7 @@ def test_learns_from_experiences_n_step(accelerator):
     # Call the learn method
     new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=False)
 
-    assert new_idxs is None
+    assert new_idxs is not None
     assert new_priorities is None
     assert actor == dqn.actor
     assert actor_target == dqn.actor_target

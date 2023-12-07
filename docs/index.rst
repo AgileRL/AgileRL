@@ -44,11 +44,14 @@ Contents
 
    get_started/index
 
+
 .. toctree::
    :maxdepth: 1
    :caption: Training
 
-   online_training/index
+   evo_hyperparam_opt/index
+   off_policy/index
+   on_policy/index
    offline_training/index
    multi_agent_training/index
    distributed_training/index
@@ -59,6 +62,7 @@ Contents
    :caption: Tutorials
 
    tutorials/pettingzoo/index
+   tutorials/gymnasium/index
 
 .. toctree::
    :maxdepth: 1

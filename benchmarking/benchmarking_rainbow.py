@@ -8,7 +8,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train import train
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -64,7 +64,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
                 device=device,
             )
     elif n_step:
-        memory = MultiStepReplayBuffer(
+        memory = ReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            device=device,
+        )
+        n_step_memory = MultiStepReplayBuffer(
             action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
@@ -113,7 +119,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    trained_pop, pop_fitnesses = train(
+    trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],

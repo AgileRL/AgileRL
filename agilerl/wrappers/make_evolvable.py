@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from agilerl.networks.custom_activation import GumbelSoftmax
+from agilerl.networks.custom_components import GumbelSoftmax
 
 
 class MakeEvolvable(nn.Module):

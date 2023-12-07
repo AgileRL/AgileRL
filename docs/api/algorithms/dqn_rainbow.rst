@@ -1,5 +1,7 @@
+.. _dqn_rainbow:
+
 Rainbow DQN
-=====================
+===========
 
 Rainbow DQN is an extension of DQN that integrates multiple improvements and techniques to achieve state-of-the-art performance.
 These improvements include:

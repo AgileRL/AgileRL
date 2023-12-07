@@ -4,7 +4,7 @@ import yaml
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train import train
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -75,7 +75,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    trained_pop, pop_fitnesses = train(
+    trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],

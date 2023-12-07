@@ -1,5 +1,4 @@
 import copy
-import math
 from collections import OrderedDict
 from typing import List
 
@@ -8,87 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from agilerl.networks.custom_activation import GumbelSoftmax
-
-
-class NoisyLinear(nn.Module):
-    """The Noisy Linear Neural Network class.
-
-    :param in_features: Input features size
-    :type in_features: int
-    :param out_features: Output features size
-    :type out_features: int
-    :param std_init: Standard deviation, defaults to 0.4
-    :type std_init: float, optional
-    """
-
-    def __init__(self, in_features, out_features, std_init=0.4):
-        super().__init__()
-
-        self.in_features = in_features
-        self.out_features = out_features
-        self.std_init = std_init
-
-        self.weight_mu = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        self.weight_sigma = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        self.register_buffer(
-            "weight_epsilon", torch.FloatTensor(out_features, in_features)
-        )
-
-        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features))
-        self.bias_sigma = nn.Parameter(torch.FloatTensor(out_features))
-        self.register_buffer("bias_epsilon", torch.FloatTensor(out_features))
-
-        self.reset_parameters()
-        self.reset_noise()
-
-    def forward(self, x):
-        """Returns output of neural network.
-
-        :param x: Neural network input
-        :type x: torch.Tensor()
-        """
-        weight_epsilon = self.weight_epsilon.to(x.device)
-        bias_epsilon = self.bias_epsilon.to(x.device)
-
-        if self.training:
-            weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
-            bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
-        else:
-            weight = self.weight_mu
-            bias = self.bias_mu
-
-        return F.linear(x, weight, bias)
-
-    def reset_parameters(self):
-        """Resets neural network parameters."""
-        mu_range = 1 / math.sqrt(self.weight_mu.size(1))
-
-        self.weight_mu.data.uniform_(-mu_range, mu_range)
-        self.weight_sigma.data.fill_(
-            self.std_init / math.sqrt(self.weight_sigma.size(1))
-        )
-
-        self.bias_mu.data.uniform_(-mu_range, mu_range)
-        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.bias_sigma.size(0)))
-
-    def reset_noise(self):
-        """Resets neural network noise."""
-        epsilon_in = self._scale_noise(self.in_features)
-        epsilon_out = self._scale_noise(self.out_features)
-
-        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
-        self.bias_epsilon.copy_(epsilon_out)
-
-    def _scale_noise(self, size):
-        """Returns noisy tensor.
-
-        :param size: Tensor of same size as noisy output
-        :type size: torch.Tensor()
-        """
-        x = torch.randn(size)
-        x = x.sign().mul(x.abs().sqrt())
-        return x
+from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
 
 
 class EvolvableCNN(nn.Module):
