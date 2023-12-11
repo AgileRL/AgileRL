@@ -147,7 +147,7 @@ def train_on_policy(
         else:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="EvoWrappers",
+                project="AgileRL",
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),

@@ -61,8 +61,9 @@ Contents
    :maxdepth: 1
    :caption: Tutorials
 
-   tutorials/pettingzoo/index
    tutorials/gymnasium/index
+   tutorials/pettingzoo/index
+   tutorials/skills/index
 
 .. toctree::
    :maxdepth: 1

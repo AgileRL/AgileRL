@@ -495,6 +495,8 @@ class DQN:
         :type accelerator: accelerate.Accelerator(), optional
         """
         checkpoint = torch.load(path, pickle_module=dill)
+        checkpoint["actor_init_dict"]["device"] = device
+        checkpoint["actor_target_init_dict"]["device"] = device
 
         if checkpoint["net_config"] is not None:
             agent = cls(

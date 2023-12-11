@@ -405,7 +405,7 @@ class PPO:
             num_steps = rewards.size(0)
             next_state = self.prepare_state(next_state)
             next_value = self.critic(next_state).reshape(1, -1).cpu()
-            advantages = torch.zeros_like(rewards)
+            advantages = torch.zeros_like(rewards).float()
             last_gae_lambda = 0
             for t in reversed(range(num_steps)):
                 if t == num_steps - 1:
@@ -740,6 +740,8 @@ class PPO:
         :type accelerator: accelerate.Accelerator(), optional
         """
         checkpoint = torch.load(path, pickle_module=dill)
+        checkpoint["actor_init_dict"]["device"] = device
+        checkpoint["critic_init_dict"]["device"] = device
 
         if checkpoint["net_config"] is not None:
             agent = cls(

@@ -15,10 +15,12 @@ from agilerl.algorithms.td3 import TD3
 from agilerl.utils.utils import (
     calculate_vectorized_scores,
     initialPopulation,
+    makeSkillVectEnvs,
     makeVectEnvs,
     plotPopulationScore,
     printHyperparams,
 )
+from agilerl.wrappers.learning import Skill
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -62,6 +64,15 @@ SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
 def test_returns_asyncvectorenv_object():
     num_envs = 3
     env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    assert isinstance(env, gym.vector.AsyncVectorEnv)
+    assert env.num_envs == num_envs
+
+
+# Returns an AsyncVectorEnv object when given a valid environment name and number of environments
+def test_returns_asyncvectorenv_object_skill():
+    num_envs = 3
+    skill = Skill
+    env = makeSkillVectEnvs("CartPole-v1", skill=skill, num_envs=num_envs)
     assert isinstance(env, gym.vector.AsyncVectorEnv)
     assert env.num_envs == num_envs
 

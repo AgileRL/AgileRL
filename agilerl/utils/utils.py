@@ -25,6 +25,21 @@ def makeVectEnvs(env_name, num_envs=1):
     )
 
 
+def makeSkillVectEnvs(env_name, skill, num_envs=1):
+    """Returns async-vectorized gym environments.
+
+    :param env_name: Gym environment name
+    :type env_name: str
+    :param skill: Skill wrapper to apply to environment
+    :type skill: agilerl.wrappers.learning.Skill
+    :param num_envs: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
+    """
+    return gym.vector.AsyncVectorEnv(
+        [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
+    )
+
+
 def initialPopulation(
     algo,
     state_dim,
