@@ -52,14 +52,17 @@ def worker(remote, parent_remote, env_fn_wrapper):
 
 
 class VecEnv(object):
-    """An abstract asynchronous, vectorized environment
+    """
+    An abstract asynchronous, vectorized environment
 
     References:
         https://github.com/openai/baselines/tree/master/baselines/common/vec_env
     """
 
-    def __init__(self, num_envs, possible_agents):
+    def __init__(self, num_envs, observation_space, action_space, possible_agents):
         self.num_envs = num_envs
+        self.observation_space = observation_space
+        self.action_space = action_space
         self.agents = possible_agents
         self.num_agents = len(self.agents)
 
@@ -142,8 +145,6 @@ class SubprocVecEnv(VecEnv):
     def __init__(self, env_fns):
         self.env = env_fns[0]()
         self.waiting = False
-        self.observation_space = self.env.observation_space
-        self.action_space = self.env.action_space
         self.closed = False
         self.nenvs = len(env_fns)
         self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(self.nenvs)])
@@ -162,9 +163,13 @@ class SubprocVecEnv(VecEnv):
             p.start()
         for remote in self.work_remotes:
             remote.close()
+        self.remotes[0].send(("get_spaces", None))
+        self.observation_space, self.action_space = self.remotes[0].recv()
         VecEnv.__init__(
             self,
             len(env_fns),
+            self.observation_space,
+            self.action_space,
             self.env.possible_agents,
         )
 

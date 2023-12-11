@@ -109,4 +109,6 @@ class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper)
         self.env.observation_spaces = self.observation_spaces
 
         self.env = SubprocVecEnv([lambda: self.env for _ in range(n_envs)])
+        self.observation_space = self.env.observation_space
+        self.action_space = self.env.action_space
         return
