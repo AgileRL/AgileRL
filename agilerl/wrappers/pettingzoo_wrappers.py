@@ -6,6 +6,8 @@ import gymnasium.spaces
 import numpy as np
 from gymnasium.utils import seeding
 from pettingzoo.utils.env import ActionType, AgentID, ObsType, ParallelEnv
+from agilerl.utils.multiprocessing_env import SubprocVecEnv
+from gymnasium.spaces import Box
 
 
 class PettingZooAutoResetParallelWrapper(ParallelEnv):
@@ -97,3 +99,14 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
 
     def action_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.env.action_space(agent)
+
+
+class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
+    def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType], n_envs: int):
+        super().__init__(env=env)
+
+        self.env.action_spaces = self.action_spaces
+        self.env.observation_spaces = self.observation_spaces
+
+        self.env = SubprocVecEnv([lambda: self.env for _ in range(n_envs)])
+        return
