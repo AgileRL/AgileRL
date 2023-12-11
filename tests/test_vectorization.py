@@ -153,9 +153,12 @@ class parallel_env(ParallelEnv):
 
 
 def test_vectorization_wrapper():
-    """Tests the autoreset wrapper actually automatically resets correctly."""
-    env = parallel_env(render_mode="human")
-    env = PettingZooVectorizationParallelWrapper(env, 1)
+    """
+    Tests the vectorization wrapper vectorizes correctly.
+    """
+    env = PettingZooVectorizationParallelWrapper(
+        parallel_env(render_mode="human"), n_envs=4
+    )
     observations, infos = env.reset()
     with patch(
         f"{__name__}.parallel_env.reset", wraps=env.env.reset
