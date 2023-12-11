@@ -417,7 +417,7 @@ def test_sample_nstep_experiences_from_memory():
     action = np.array([0, 1, 0, 1])
     reward = np.array([0.1])
     next_state = np.array([5, 6, 7, 8])
-    done = np.array([False])
+    done = False
 
     print(state, state.shape)
 
@@ -453,7 +453,7 @@ def test_sample_experiences_from_memory_with_indices():
     action = np.array([0, 1, 0, 1])
     reward = np.array([0.1])
     next_state = np.array([5, 6, 7, 8])
-    done = np.array([False])
+    done = False
 
     replay_buffer.save2memory(state, action, reward, next_state, done)
     replay_buffer.save2memory(state, action, reward, next_state, done)
@@ -467,7 +467,7 @@ def test_sample_experiences_from_memory_with_indices():
     assert experiences[1].shape == (len(indices),) + action.shape
     assert experiences[2].shape == (len(indices),) + reward.shape
     assert experiences[3].shape == (len(indices),) + next_state.shape
-    assert experiences[4].shape == (len(indices),) + done.shape
+    assert experiences[4].shape == (len(indices),) + (1,)
 
 
 # Can return transition with n-step rewards
@@ -480,11 +480,11 @@ def test_returns_tuple_of_n_step_reward_next_state_and_done():
     Transition = namedtuple("Transition", field_names)
 
     # Add some transitions to the n_step_buffer
-    n_step_buffer.append(Transition([0, 0, 0], 0, 1, [0, 0, 0], False))
-    n_step_buffer.append(Transition([1, 1, 1], 1, 2, [1, 1, 1], False))
-    n_step_buffer.append(Transition([2, 2, 2], 0, 3, [2, 2, 2], True))
-    n_step_buffer.append(Transition([3, 3, 3], 1, 4, [3, 3, 3], False))
-    n_step_buffer.append(Transition([4, 4, 4], 0, 5, [4, 4, 4], False))
+    n_step_buffer.append(Transition([0, 0, 0], 0, 1.0, [0, 0, 0], False))
+    n_step_buffer.append(Transition([1, 1, 1], 1, 2.0, [1, 1, 1], False))
+    n_step_buffer.append(Transition([2, 2, 2], 0, 3.0, [2, 2, 2], True))
+    n_step_buffer.append(Transition([3, 3, 3], 1, 4.0, [3, 3, 3], False))
+    n_step_buffer.append(Transition([4, 4, 4], 0, 5.0, [4, 4, 4], False))
 
     # Create an instance of the MultiStepReplayBuffer class
     replay_buffer = MultiStepReplayBuffer(
@@ -508,11 +508,11 @@ def test_calculates_n_step_reward():
     Transition = namedtuple("Transition", field_names)
 
     # Add some transitions to the n_step_buffer
-    n_step_buffer.append(Transition([0, 0, 0], 0, 1, [0, 0, 0], False))
-    n_step_buffer.append(Transition([1, 1, 1], 1, 2, [1, 1, 1], False))
-    n_step_buffer.append(Transition([2, 2, 2], 0, 3, [2, 2, 2], False))
-    n_step_buffer.append(Transition([3, 3, 3], 1, 4, [3, 3, 3], False))
-    n_step_buffer.append(Transition([4, 4, 4], 0, 5, [4, 4, 4], True))
+    n_step_buffer.append(Transition([0, 0, 0], 0, 1.0, [0, 0, 0], False))
+    n_step_buffer.append(Transition([1, 1, 1], 1, 2.0, [1, 1, 1], False))
+    n_step_buffer.append(Transition([2, 2, 2], 0, 3.0, [2, 2, 2], False))
+    n_step_buffer.append(Transition([3, 3, 3], 1, 4.0, [3, 3, 3], False))
+    n_step_buffer.append(Transition([4, 4, 4], 0, 5.0, [4, 4, 4], True))
 
     # Create an instance of the MultiStepReplayBuffer class
     replay_buffer = MultiStepReplayBuffer(
@@ -522,7 +522,13 @@ def test_calculates_n_step_reward():
     # Invoke the _get_n_step_info method
     result = replay_buffer._get_n_step_info(n_step_buffer, gamma)
 
-    expected_reward = 1 + gamma * (2 + gamma * (3 + gamma * (4 + gamma * 5)))
+    expected_reward = (
+        1.0
+        + gamma * (2.0)
+        + gamma**2 * (3.0)
+        + gamma**3 * (4.0)
+        + gamma**4 * (5.0)
+    )
     assert np.array_equal(result[2], np.array([expected_reward]))
 
 
