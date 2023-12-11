@@ -5,6 +5,12 @@ AgileRL Tutorial: Implementing MADDPG
 
 This tutorial shows how to train an :ref:`MADDPG<maddpg>` agent on the `space invaders <https://pettingzoo.farama.org/environments/atari/space_invaders/>`_ atari environment.
 
+.. figure:: atari_space_invaders.gif
+   :height: 400
+   :align: center
+
+   Atari Space Invaders
+
 What is MADDPG?
 ---------------
 

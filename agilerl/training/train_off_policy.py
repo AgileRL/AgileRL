@@ -12,7 +12,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.utils.utils import calculate_vectorized_scores
 
 
-def train(
+def train_off_policy(
     env,
     env_name,
     algo,
@@ -274,6 +274,10 @@ def train(
             state = env.reset()[0]  # Reset environment at start of episode
             rewards, terminations, truncs = [], [], []
             score = 0
+
+            if algo in ["DQN", "RainbowDQN"]:
+                train_actions_hist = [0] * agent.action_dim
+
             for idx_step in range(max_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [-1], [-3])
@@ -282,6 +286,13 @@ def train(
                     action = agent.getAction(state)
                 else:
                     action = agent.getAction(state, epsilon)
+
+                if algo in ["DQN", "RainbowDQN"]:
+                    for a in action:
+                        if not isinstance(a, int):
+                            a = int(a)
+                        train_actions_hist[a] += 1
+
                 if not is_vectorised:
                     action = action[0]
                 next_state, reward, done, trunc, _ = env.step(
@@ -329,7 +340,10 @@ def train(
                         )
 
                 if per:
-                    fraction = min((idx_step + 1) / max_steps, 1.0)
+                    # fraction = min((idx_step + 1)/ max_steps, 1.0)
+                    fraction = min(
+                        (total_steps + idx_step + 1) / (max_steps * n_episodes), 1.0
+                    )  ####
                     agent.beta += fraction * (1.0 - agent.beta)
 
                 # Learn according to learning frequency
@@ -349,8 +363,13 @@ def train(
                         )
                         memory.update_priorities(idxs, priorities)
                     else:
-                        experiences = sampler.sample(agent.batch_size)
-                        if n_step:
+                        experiences = sampler.sample(
+                            agent.batch_size,
+                            return_idx=True if n_step_memory is not None else False,
+                        )
+                        if n_step_memory is not None:
+                            n_step_experiences = n_step_sampler.sample(experiences[5])
+                            experiences += n_step_experiences
                             agent.learn(experiences, n_step=n_step)
                         else:
                             agent.learn(experiences)
@@ -365,7 +384,8 @@ def train(
 
             if is_vectorised:
                 scores = calculate_vectorized_scores(
-                    np.array(rewards), np.array(terminations)
+                    np.array(rewards).transpose((1, 0)),
+                    np.array(terminations).transpose((1, 0)),
                 )
                 score = np.mean(scores)
 
@@ -390,6 +410,23 @@ def train(
 
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
+            wandb_dict = {
+                "global_step": total_steps,
+                "train/mean_score": np.mean(mean_scores),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+
+            if algo in ["DQN", "RainbowDQN"]:
+                train_actions_hist = [
+                    freq / sum(train_actions_hist) for freq in train_actions_hist
+                ]
+                train_actions_dict = {
+                    f"train/action_{index}": action
+                    for index, action in enumerate(train_actions_hist)
+                }
+                wandb_dict.update(train_actions_dict)
+
             if wb:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
@@ -405,14 +442,7 @@ def train(
                         )
                     accelerator.wait_for_everyone()
                 else:
-                    wandb.log(
-                        {
-                            "global_step": total_steps,
-                            "train/mean_score": np.mean(mean_scores),
-                            "eval/mean_fitness": np.mean(fitnesses),
-                            "eval/best_fitness": np.max(fitnesses),
-                        }
-                    )
+                    wandb.log(wandb_dict)
 
             # Update step counter
             for agent in pop:

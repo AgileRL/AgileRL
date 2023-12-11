@@ -1,11 +1,10 @@
-.. _PettingZoo_tutorials:
+.. _Gymnasium_tutorials:
 
-PettingZoo Multi-agent Tutorials
+Gymnasium Single-agent Tutorials
 ================================
 
-These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_ with
-`PettingZoo <https://pettingzoo.farama.org/>`_. AgileRL's multi-agent algorithms make use of the PettingZoo
-parallel API and allow users to train multiple-agents in parallel in both competitive and co-operative environments.
+These tutorials provide an introductory guide to using `AgileRL <https://github.com/AgileRL/AgileRL>`_
+with `Gymnasium <https://gymnasium.farama.org/>`_.
 
 
 .. raw:: html
@@ -95,17 +94,13 @@ parallel API and allow users to train multiple-agents in parallel in both compet
 
 
    <div class="tiles article">
-      <a href="../pettingzoo/dqn.html" class="tile">
-         <img src="../../_images/connect_four_self_opp.gif" alt="Connect4 gif" class="thumbnail-image">
-         <h2>DQN - Connect4</h2>
+      <a href="../gymnasium/agilerl_ppo_tutorial.html" class="tile">
+         <img src="../../_images/agilerl_ppo_acrobot.gif" alt="Acrobot gif" class="thumbnail-image">
+         <h2>PPO - Acrobot</h2>
       </a>
-      <a href="../pettingzoo/maddpg.html" class="tile online">
-      <img src="../../_images/atari_space_invaders.gif" alt="Space Invaders gif" class="thumbnail-image">
-         <h2>MADDPG - Space Invaders</h2>
-      </a>
-      <a href="../pettingzoo/matd3.html" class="tile online">
-      <img src="../../_images/mpe_looped.gif" alt="Speaker Listener gif" class="thumbnail-image">
-         <h2>MATD3 - Speaker Listener</h2>
+      <a href="../gymnasium/agilerl_td3_tutorial.html" class="tile online">
+      <img src="../../_images/agilerl_td3_lunar_lander.gif" alt="Acrobot gif" class="thumbnail-image">
+         <h2>TD3 - Lunar Lander</h2>
       </a>
 
    </div>
@@ -115,6 +110,5 @@ parallel API and allow users to train multiple-agents in parallel in both compet
    :maxdepth: 2
    :hidden:
 
-   dqn
-   maddpg
-   matd3
+   agilerl_ppo_tutorial
+   agilerl_td3_tutorial

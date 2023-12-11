@@ -1,6 +1,6 @@
 import torch
 
-from agilerl.networks.custom_activation import GumbelSoftmax
+from agilerl.networks.custom_components import GumbelSoftmax
 
 
 def test_apply_gumbel_softmax():

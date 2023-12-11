@@ -1,3 +1,5 @@
+.. _cql:
+
 Conservative Q-Learning (CQL)
 =============================
 

@@ -1,5 +1,5 @@
-Online Training
-===============
+Off-Policy Online Training
+=========================
 
 In online reinforcement learning, an agent is able to gather data by directly interacting with its environment. It can then use this experience to learn from and
 update its policy. To enable our agent to interact in this way, the agent needs to act either in the real world, or in a simulation.
@@ -7,21 +7,26 @@ update its policy. To enable our agent to interact in this way, the agent needs 
 AgileRL's online training framework enables agents to learn in environments, using the standard Gym interface, 10x faster than SOTA by using our
 Evolutionary Hyperparameter Optimization algorithm.
 
-.. _evoHPO_online:
+Off-policy reinforcement learning involves decoupling the learning policy from the data collection policy. Algorithms like Q-learning and DDPG enable learning
+from experiences collected by a different, possibly exploratory policy, allowing for greater flexibility in exploration and improved sample efficiency. By learning
+from a diverse set of experiences, off-policy methods can leverage past data more effectively, separating the exploration strategy from the learning strategy and
+enabling the agent to learn optimal policies even from suboptimal or random exploration policies. This independence between data collection and learning policies
+often results in higher potential for reuse of previously gathered experiences and facilitates more efficient learning.
 
-Evolutionary Hyperparameter Optimization
-----------------------------------------
+.. list-table::
+   :widths: 50 50
+   :header-rows: 1
 
-Traditionally, hyperparameter optimization (HPO) for reinforcement learning (RL) is particularly difficult when compared to other types of machine learning.
-This is for several reasons, including the relative sample inefficiency of RL and its sensitivity to hyperparameters.
-
-AgileRL is initially focused on improving HPO for RL in order to allow faster development with robust training.
-Evolutionary algorithms have been shown to allow faster, automatic convergence to optimal hyperparameters than other HPO methods by taking advantage of
-shared memory between a population of agents acting in identical environments.
-
-At regular intervals, after learning from shared experiences, a population of agents can be evaluated in an environment. Through tournament selection, the
-best agents are selected to survive until the next generation, and their offspring are mutated to further explore the hyperparameter space.
-Eventually, the optimal hyperparameters for learning in a given environment can be reached in significantly less steps than are required using other HPO methods.
+   * - **Algorithms**
+     - **Tutorials**
+   * - :ref:`DQN<dqn>`
+     - :ref:`Curriculum learning with self-play<DQN tutorial>`
+   * - :ref:`Rainbow DQN<dqn_rainbow>`
+     - *Coming soon*
+   * - :ref:`DDPG<ddpg>`
+     - --
+   * - :ref:`TD3<td3>`
+     - :ref:`Lunar Lander<td3_tutorial>`
 
 
 .. _initpop_online:
@@ -32,6 +37,7 @@ Population Creation
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
+
 
 .. code-block:: python
 
@@ -319,206 +325,6 @@ Alternatively, use a custom training loop. Combining all of the above:
             print(f'Episode {idx_epi+1}/{max_episodes}')
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
             print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
-
-            # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
-
-    env.close()
-
-
-.. _onpolicytrainloop:
-
-On-policy Training Loop
------------------------
-
-While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences
-collected using a different or previous policy, we have still chosen to include an efficient, evolvable PPO implementation in AgileRL. This
-algorithm can be used in a variety of settings, with both discrete and continuous actions, and is widely popular across domains including
-robotics, games, finance, and RLHF.
-
-The setup for PPO is very similar to the off-policy example above, except it does not require the use of an experience replay buffer. It also requires some different hyperparameters, shown below in the custom loop.
-
-The easiest way to train a population of agents using PPO is to use our online training function:
-
-.. code-block:: python
-
-    from agilerl.training.train_on_policy import train_on_policy
-
-    trained_pop, pop_fitnesses = train_on_policy(
-                                    env=env,                              # Gym-style environment
-                                    env_name=INIT_HP['ENV_NAME'],            # Environment name
-                                    algo=INIT_HP['ALGO'],                    # Algorithm
-                                    pop=agent_pop,                           # Population of agents
-                                    swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                    n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
-                                    evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
-                                    evo_loop=1,                              # Number of evaluation episodes per agent
-                                    target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
-                                    tournament=tournament,                   # Tournament selection object
-                                    mutation=mutations,                      # Mutations object
-                                    wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                    )
-
-Alternatively, use a custom on-policy training loop:
-
-.. code-block:: python
-
-    import numpy as np
-    import torch
-    from tqdm import trange
-    from agilerl.hpo.mutation import Mutations
-    from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
-        "h_size": [32, 32],  # Actor hidden size
-    }
-
-    INIT_HP = {
-        "POPULATION_SIZE": 6,  # Population size
-        "DISCRETE_ACTIONS": True,  # Discrete action space
-        "BATCH_SIZE": 128,  # Batch size
-        "LR": 1e-3,  # Learning rate
-        "GAMMA": 0.99,  # Discount factor
-        "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
-        "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
-        "CLIP_COEF": 0.2,  # Surrogate clipping coefficient
-        "ENT_COEF": 0.01,  # Entropy coefficient
-        "VF_COEF": 0.5,  # Value function coefficient
-        "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
-        "TARGET_KL": None, # Target KL divergence threshold
-        "UPDATE_EPOCHS": 4,  # Number of policy update epochs
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        "CHANNELS_LAST": False,
-    }
-
-    env = makeVectEnvs("LunarLander-v2", num_envs=8)  # Create environment
-    try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
-
-    if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
-
-    pop = initialPopulation(
-        algo="PPO",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
-        net_config=NET_CONFIG,  # Network configuration
-        INIT_HP=INIT_HP,  # Initial hyperparameters
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        device=device,
-    )
-
-    tournament = TournamentSelection(
-        tournament_size=2,  # Tournament selection size
-        elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        evo_step=1,
-    )  # Evaluate using last N fitness scores
-
-    mutations = Mutations(
-        algo="PPO",  # Algorithm
-        no_mutation=0.4,  # No mutation
-        architecture=0.2,  # Architecture mutation
-        new_layer_prob=0.2,  # New layer mutation
-        parameters=0.2,  # Network parameters mutation
-        activation=0,  # Activation layer mutation
-        rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
-        rand_seed=1,  # Random seed
-        device=device,
-    )
-
-    max_episodes = 1000  # Max training episodes
-    max_steps = 500  # Max steps per episode
-
-    evo_epochs = 5  # Evolution frequency
-    evo_loop = 3  # Number of evaluation episodes
-
-    print("Training...")
-
-    # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
-        for agent in pop:  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
-
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
-
-            for idx_step in range(max_steps):
-                if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [3], [1])
-
-                # Get next action from agent
-                action, log_prob, _, value = agent.getAction(state)
-                next_state, reward, done, trunc, _ = env.step(
-                    action
-                )  # Act in environment
-
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
-
-                state = next_state
-                score += reward
-
-            agent.scores.append(score)
-
-            experiences = (
-                states,
-                actions,
-                log_probs,
-                rewards,
-                dones,
-                values,
-                next_state,
-            )
-            # Learn according to agent's RL algorithm
-            agent.learn(experiences)
-
-            agent.steps[-1] += idx_step + 1
-
-        # Now evolve population if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=max_steps,
-                    loop=evo_loop,
-                )
-                for agent in pop
-            ]
-
-            print(f"Episode {idx_epi+1}/{max_episodes}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
-            )
 
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)

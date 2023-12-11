@@ -74,14 +74,23 @@ class ReplayBuffer:
             transition[field] = ts
         return transition
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, return_idx=False):
         """Returns sample of experiences from memory.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
+        :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
+        :type return_idx: bool
         """
-        experiences = random.sample(self.memory, k=batch_size)
-        transition = self._process_transition(experiences)
+        if return_idx:
+            idxs = np.random.choice(len(self.memory), size=batch_size, replace=False)
+            experiences = list(map(lambda i: self.memory[i], idxs))
+            transition = self._process_transition(experiences)
+            transition["idxs"] = idxs
+        else:
+            experiences = random.sample(self.memory, k=batch_size)
+            transition = self._process_transition(experiences)
+
         return tuple(transition.values())
 
     def save2memorySingleEnv(self, *args):
@@ -196,7 +205,10 @@ class MultiStepReplayBuffer(ReplayBuffer):
             buffer.append(transition)
 
         # single step transition is not ready
-        if len(self.n_step_buffers[0]) < self.n_step:
+
+        #### should really be if any()
+        if any(len(buffer) < self.n_step for buffer in self.n_step_buffers):
+            # if len(self.n_step_buffers[0]) < self.n_step:
             return ()
         else:
             for buffer in self.n_step_buffers:
@@ -213,7 +225,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :param idxs: Indices to sample
         :type idxs: list[int]
         """
-        experiences = [self.memory[i] for i in idxs]
+        experiences = list(map(lambda i: self.memory[i], idxs))
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 

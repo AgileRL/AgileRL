@@ -218,6 +218,38 @@ def test_sample_experiences_from_memory():
     assert experiences[2].shape == (batch_size, 1)
 
 
+def test_sample_experiences_from_memory_return_idx():
+    action_dim = 1
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    device = "cpu"
+
+    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+
+    # Add experiences to memory
+    buffer.save2memorySingleEnv(np.array([1, 1]), 2, 3)
+    buffer.save2memorySingleEnv(np.array([4, 4]), 5, 6)
+    buffer.save2memorySingleEnv(np.array([7, 7]), 8, 9)
+
+    # Sample experiences from memory
+    batch_size = 2
+    experiences = buffer.sample(batch_size, return_idx=True)
+    print(experiences)
+    print(experiences[3])
+    print(len(buffer))
+
+    assert len(experiences[0]) == batch_size
+    assert len(experiences[1]) == batch_size
+    assert len(experiences[2]) == batch_size
+    assert isinstance(experiences[0], torch.Tensor)
+    assert experiences[0].shape == (batch_size, 2)
+    assert isinstance(experiences[1], torch.Tensor)
+    assert experiences[1].shape == (batch_size, action_dim)
+    assert isinstance(experiences[2], torch.Tensor)
+    assert experiences[2].shape == (batch_size, 1)
+    assert any(experiences[3] < len(buffer))
+
+
 # Can process transition from experiences with _process_transition method
 def test_process_transition_from_experiences():
     action_dim = 1

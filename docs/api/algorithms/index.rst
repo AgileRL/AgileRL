@@ -1,3 +1,5 @@
+.. _algorithms:
+
 Algorithms
 ==========
 
