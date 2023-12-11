@@ -1,6 +1,6 @@
 .. _DQN tutorial:
 
-AgileRL: Implementing DQN - Curriculum Learning and Self-play
+Self-play Connect4 with DQN + curriculum learning
 =============================================================
 
 .. figure:: connect_four_self_opp.gif

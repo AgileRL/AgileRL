@@ -171,6 +171,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         ), "Done/termination must be saved in replay buffer under the field name 'done', 'termination', or 'terminated'."
         self.num_envs = num_envs
         self.n_step_buffers = [deque(maxlen=n_step) for i in range(num_envs)]
+        self.args_deque = deque(maxlen=n_step)
         self.n_step = n_step
         self.gamma = gamma
 
@@ -180,6 +181,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :param *args: Variable length argument list. Contains transition elements in consistent order,
             e.g. state, action, reward, next_state, done
         """
+        self.args_deque.append(args)
         transition = self.experience(*args)
         self.n_step_buffers[0].append(transition)
 
@@ -192,7 +194,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         self._add(*args)
         self.counter += 1
 
-        return transition
+        return self.args_deque[0]
 
     def save2memoryVectEnvs(self, *args):
         """Saves multiple experiences to memory.
@@ -200,15 +202,13 @@ class MultiStepReplayBuffer(ReplayBuffer):
         :param *args: Variable length argument list. Contains transition elements in consistent order,
             e.g. state, action, reward, next_state, done
         """
+        self.args_deque.append(args)
         for buffer, *transition in zip(self.n_step_buffers, *args):
             transition = self.experience(*transition)
             buffer.append(transition)
 
         # single step transition is not ready
-
-        #### should really be if any()
         if any(len(buffer) < self.n_step for buffer in self.n_step_buffers):
-            # if len(self.n_step_buffers[0]) < self.n_step:
             return ()
         else:
             for buffer in self.n_step_buffers:
@@ -217,7 +217,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
                 self._add(*single_step_args)
                 self.counter += 1
 
-            return args
+            return self.args_deque[0]
 
     def sample_from_indices(self, idxs):
         """Returns sample of experiences from memory using provided indices.
@@ -232,7 +232,8 @@ class MultiStepReplayBuffer(ReplayBuffer):
     def _get_n_step_info(self, n_step_buffer, gamma):
         """Returns n step reward, next_state, and done, as well as other saved transition elements, in order."""
         # info of the last transition
-        t = [n_step_buffer[-1]]
+        # t = [n_step_buffer[0]]
+        t = [n_step_buffer[0]]
         transition = self._process_transition(t, np_array=True)
 
         vect_reward = transition["reward"][0]
@@ -244,22 +245,20 @@ class MultiStepReplayBuffer(ReplayBuffer):
         else:
             vect_done = transition["terminated"][0]
 
-        for ts in reversed(list(n_step_buffer)[:-1]):
-            vect_r, vect_n_s = (ts.reward, ts.next_state)
+        for idx, ts in enumerate(list(n_step_buffer)[1:]):
+            if not vect_done:
+                vect_r, vect_n_s = (ts.reward, ts.next_state)
 
-            if "done" in transition.keys():
-                vect_d = ts.done
-            elif "termination" in transition.keys():
-                vect_d = ts.termination
-            else:
-                vect_d = ts.terminated
+                if "done" in transition.keys():
+                    vect_d = ts.done
+                elif "termination" in transition.keys():
+                    vect_d = ts.termination
+                else:
+                    vect_d = ts.terminated
 
-            vect_reward = vect_r + gamma * vect_reward * (1 - vect_d)
-            vect_next_state, vect_done = (
-                (vect_n_s, np.array([vect_d]))
-                if vect_d
-                else (vect_next_state, vect_done)
-            )
+                vect_reward += vect_r * gamma ** (idx + 1)
+                vect_done = np.array([vect_d])
+                vect_next_state = vect_n_s
 
         transition["reward"] = vect_reward
         transition["next_state"] = vect_next_state
