@@ -404,7 +404,7 @@ Load agent
 ~~~~~~~~~~
 .. code-block:: python
 
-    td3 = TD3.loadCheckpoint(save_path)
+    td3 = TD3.loadCheckpoint(save_path, device=device)
 
 
 Test loop for inference

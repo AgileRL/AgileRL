@@ -367,7 +367,7 @@ Load agent
 ~~~~~~~~~~
 .. code-block:: python
 
-    ppo = PPO.load(save_path)
+    ppo = PPO.load(save_path, device=device)
 
 Test loop for inference
 ~~~~~~~~~~~~~~~~~~~~~~~

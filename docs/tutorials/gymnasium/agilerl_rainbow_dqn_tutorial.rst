@@ -212,7 +212,7 @@ for both the tournament and mutation arguments.
 
     trained_pop, pop_fitnesses = train_off_policy(
         env=env,
-        env_name="MounatainCar-v0",
+        env_name="CartPole-v1",
         algo="RainbowDQN",
         pop=[rainbow_dqn],
         memory=memory,
