@@ -88,7 +88,7 @@ Explore our Algorithms!
       <a href="../on_policy/index.html" class="tile on-policy article">
          <h2>On-policy</h2>
          <p>
-               <li>Algorithms:<i> PPO</i></li>
+               <li><i>Algorithms:PPO</i></li>
          </p>
       </a>
       <a href="../off_policy/index.html" class="tile off-policy">

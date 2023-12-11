@@ -243,7 +243,7 @@ class RainbowDQN:
 
         self.criterion = nn.MSELoss()
 
-    def getAction(self, state, action_mask=None):
+    def getAction(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -267,10 +267,9 @@ class RainbowDQN:
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
-        self.actor.eval()
+        self.actor.train(mode=training)
         with torch.no_grad():
             action_values = self.actor(state)
-        self.actor.train()
 
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
@@ -297,6 +296,8 @@ class RainbowDQN:
             )
         delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
 
+        self.actor.eval()
+        self.actor_target.eval()
         with torch.no_grad():
             next_actions = self.actor(next_states).argmax(1)
             next_dist = self.actor_target(next_states, q=False)
@@ -511,7 +512,7 @@ class RainbowDQN:
                         if not hasattr(env, "num_envs"):
                             state = np.expand_dims(state, 0)
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state)
+                    action = self.getAction(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     score += reward[0]
                     if done[0] or trunc[0]:

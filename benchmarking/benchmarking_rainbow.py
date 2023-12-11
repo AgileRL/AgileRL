@@ -139,6 +139,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         tournament=tournament,
         mutation=mutations,
         wb=INIT_HP["WANDB"],
+        save_elite=True,
+        elite_path="elite_rainbow.pt",
     )
 
     printHyperparams(trained_pop)

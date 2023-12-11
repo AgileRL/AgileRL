@@ -1,6 +1,6 @@
 .. _ppo_tutorial:
 
-AgileRL PPO Implementation
+Acrobot with PPO
 ==========================
 
 In this tutorial, we will be training and optimising the hyperparameters of a population of PPO agents
@@ -367,7 +367,7 @@ Load agent
 ~~~~~~~~~~
 .. code-block:: python
 
-    ppo = PPO.load(save_path)
+    ppo = PPO.load(save_path, device=device)
 
 Test loop for inference
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -1,7 +1,7 @@
 .. _td3_tutorial:
 
 
-AgileRL TD3 Implementation
+Lunar Lander with TD3
 ==========================
 
 In this tutorial, we will be training and optimising the hyperparameters of a population of TD3 agents
@@ -404,7 +404,7 @@ Load agent
 ~~~~~~~~~~
 .. code-block:: python
 
-    td3 = TD3.loadCheckpoint(save_path)
+    td3 = TD3.loadCheckpoint(save_path, device=device)
 
 
 Test loop for inference

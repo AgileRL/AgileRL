@@ -275,7 +275,7 @@ def train_off_policy(
             rewards, terminations, truncs = [], [], []
             score = 0
 
-            if algo in ["DQN", "RainbowDQN"]:
+            if algo in ["DQN", "Rainbow DQN"]:
                 train_actions_hist = [0] * agent.action_dim
 
             for idx_step in range(max_steps):
@@ -287,7 +287,7 @@ def train_off_policy(
                 else:
                     action = agent.getAction(state, epsilon)
 
-                if algo in ["DQN", "RainbowDQN"]:
+                if algo in ["DQN", "Rainbow DQN"]:
                     for a in action:
                         if not isinstance(a, int):
                             a = int(a)
@@ -417,7 +417,7 @@ def train_off_policy(
                 "eval/best_fitness": np.max(fitnesses),
             }
 
-            if algo in ["DQN", "RainbowDQN"]:
+            if algo in ["DQN", "Rainbow DQN"]:
                 train_actions_hist = [
                     freq / sum(train_actions_hist) for freq in train_actions_hist
                 ]
