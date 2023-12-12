@@ -174,7 +174,7 @@ class SubprocVecEnv(VecEnv):
 
     def step_async(self, actions):
         for remote, action in zip(self.remotes, actions):
-            remote.send(("step", action))
+            remote.send(("step", action.squeeze().tolist()))
         self.waiting = True
 
     def step_wait(self):
@@ -184,7 +184,7 @@ class SubprocVecEnv(VecEnv):
 
         return (
             {
-                possible_agent: np.stack(obs)[:, idx, :]
+                possible_agent: np.stack(obs)[:, idx, np.newaxis]
                 for idx, possible_agent in enumerate(self.env.possible_agents)
             },
             {
@@ -213,7 +213,7 @@ class SubprocVecEnv(VecEnv):
 
         return (
             {
-                possible_agent: np.stack(obs)[:, idx]
+                possible_agent: np.stack(obs)[:, idx, np.newaxis]
                 for idx, possible_agent in enumerate(self.env.possible_agents)
             },
             {

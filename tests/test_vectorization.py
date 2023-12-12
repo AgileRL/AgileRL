@@ -4,8 +4,8 @@ from unittest.mock import patch
 import gymnasium
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
-
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+import numpy as np
 
 ROCK = 0
 PAPER = 1
@@ -101,7 +101,7 @@ class parallel_env(ParallelEnv):
         self.agents = self.possible_agents[:]
         self.num_moves = 0
         observations = {agent: NONE for agent in self.agents}
-        infos = {agent: self.num_moves for agent in self.agents}
+        infos = {agent: "just reset" for agent in self.agents}
         self.state = observations
 
         return observations, infos
@@ -154,36 +154,33 @@ class parallel_env(ParallelEnv):
 
 def test_vectorization_wrapper():
     """
-    Tests the vectorization wrapper vectorizes correctly.
+    Test the vectorization wrapper vectorizes and autoresets correctly.
     """
+    n_envs = 4
     env = PettingZooVectorizationParallelWrapper(
-        parallel_env(render_mode="human"), n_envs=4
+        parallel_env(render_mode="human"), n_envs=n_envs
     )
     observations, infos = env.reset()
-    with patch(
-        f"{__name__}.parallel_env.reset", wraps=env.env.reset
-    ) as autoreset_patch:
-        # Environment truncates after 100 steps, so we expect 1 reset.
-        for _ in range(100):
-            # this is where you would insert your policy
-            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
-        autoreset_patch.assert_called()
-        autoreset_patch.reset_mock()
-        # Environment truncates after 100 steps, so we expect 5 resets.
-        for _ in range(500):
-            # this is where you would insert your policy
-            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
-        autoreset_patch.assert_called()
-        assert autoreset_patch.call_count == 5
-        autoreset_patch.reset_mock()
-        # Environment truncates after 100 steps, so we expect no reset.
-        for _ in range(99):
-            # this is where you would insert your policy
-            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
-            observations, rewards, terminations, truncations, infos = env.step(actions)
-        autoreset_patch.assert_not_called()
+    # Environment truncates after 100 steps, so we expect 1 reset.
+    for ep in range(103):
+        # this is where you would insert your policy
+        actions = {
+            agent: [(env.action_space(agent).sample(),) for n in range(n_envs)]
+            for agent in env.agents
+        }
+        observations, rewards, terminations, truncations, infos = env.step(actions)
+        for agent in env.agents:
+            assert len(observations[agent]) == n_envs
+            assert len(rewards[agent]) == n_envs
+            assert len(terminations[agent]) == n_envs
+            assert len(truncations[agent]) == n_envs
+            assert len(infos[agent]) == n_envs
+        if ep == 99:
+            for agent in env.agents:
+                assert np.all(infos[agent].flatten() == "just reset")
+        else:
+            for agent in env.agents:
+                assert np.all(infos[agent].flatten() != "just reset")
 
 
 if __name__ == "__main__":
