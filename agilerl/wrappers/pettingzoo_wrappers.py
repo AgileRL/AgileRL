@@ -6,8 +6,8 @@ import gymnasium.spaces
 import numpy as np
 from gymnasium.utils import seeding
 from pettingzoo.utils.env import ActionType, AgentID, ObsType, ParallelEnv
+
 from agilerl.utils.multiprocessing_env import SubprocVecEnv
-from gymnasium.spaces import Box
 
 
 class PettingZooAutoResetParallelWrapper(ParallelEnv):

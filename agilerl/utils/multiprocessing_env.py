@@ -1,8 +1,9 @@
 """
 Author: Burak M Gonultas
 """
+from multiprocessing import Pipe, Process
+
 import numpy as np
-from multiprocessing import Process, Pipe
 
 
 def worker(remote, parent_remote, env_fn_wrapper):
@@ -51,7 +52,7 @@ def worker(remote, parent_remote, env_fn_wrapper):
             raise NotImplementedError
 
 
-class VecEnv(object):
+class VecEnv:
     """An abstract asynchronous, vectorized environment
 
     References:
@@ -107,7 +108,7 @@ class VecEnv(object):
         return self.step_wait()
 
 
-class CloudpickleWrapper(object):
+class CloudpickleWrapper:
     """Uses cloudpickle to serialize contents
     (otherwise multiprocessing tries to use pickle)
 
