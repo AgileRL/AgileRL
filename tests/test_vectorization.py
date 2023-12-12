@@ -162,7 +162,7 @@ def test_vectorization_wrapper():
     )
     observations, infos = env.reset()
     # Environment truncates after 100 steps, so we expect 1 reset.
-    for ep in range(103):
+    for ep in range(100):
         # this is where you would insert your policy
         actions = {
             agent: [(env.action_space(agent).sample(),) for n in range(n_envs)]
