@@ -166,10 +166,7 @@ def test_vectorization_wrapper():
         # Environment truncates after 100 steps, so we expect 1 reset.
         for _ in range(100):
             # this is where you would insert your policy
-            actions = {
-                agent: env.action_space[idx].sample()
-                for idx, agent in enumerate(env.agents)
-            }
+            actions = {agent: env.action_space(agent).sample() for agent in env.agents}
             observations, rewards, terminations, truncations, infos = env.step(actions)
         autoreset_patch.assert_called()
         autoreset_patch.reset_mock()
