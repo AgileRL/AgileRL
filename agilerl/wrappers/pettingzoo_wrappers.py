@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import warnings
-
 import gymnasium.spaces
 import numpy as np
 from gymnasium.utils import seeding
