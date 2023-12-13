@@ -64,36 +64,6 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def state(self) -> np.ndarray:
         return self.env.state()
 
-    @property
-    def observation_spaces(self) -> dict[AgentID, gymnasium.spaces.Space]:
-        warnings.warn(
-            "The `observation_spaces` dictionary is deprecated. Use the"
-            " `observation_space` function instead."
-        )
-        try:
-            return {
-                agent: self.observation_space(agent) for agent in self.possible_agents
-            }
-        except AttributeError as e:
-            raise AttributeError(
-                "The base environment does not have an `observation_spaces` dict"
-                " attribute. Use the environments `observation_space` method instead"
-            ) from e
-
-    @property
-    def action_spaces(self) -> dict[AgentID, gymnasium.spaces.Space]:
-        warnings.warn(
-            "The `action_spaces` dictionary is deprecated. Use the `action_space`"
-            " function instead."
-        )
-        try:
-            return {agent: self.action_space(agent) for agent in self.possible_agents}
-        except AttributeError as e:
-            raise AttributeError(
-                "The base environment does not have an action_spaces dict attribute."
-                " Use the environments `action_space` method instead"
-            ) from e
-
     def observation_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.env.observation_space(agent)
 
@@ -104,9 +74,5 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
 class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType], n_envs: int):
         super().__init__(env=env)
-
-        self.env.action_spaces = self.action_spaces
-        self.env.observation_spaces = self.observation_spaces
-
         self.env = SubprocVecEnv([lambda: self.env for _ in range(n_envs)])
         return

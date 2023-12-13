@@ -40,10 +40,6 @@ def worker(remote, parent_remote, env_fn_wrapper):
         elif cmd == "close":
             remote.close()
             break
-        elif cmd == "get_spaces":
-            observation_spaces = list(env.observation_spaces.values())
-            action_spaces = list(env.action_spaces.values())
-            remote.send((observation_spaces, action_spaces))
         elif cmd == "seed":
             env.seed(data)
         elif cmd == "render":
