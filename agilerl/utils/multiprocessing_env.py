@@ -195,13 +195,13 @@ class SubprocVecEnv(VecEnv):
             possible_agent: []
             for idx, possible_agent in enumerate(self.env.possible_agents)
         }
-        for idx, _ in enumerate(obs):
-            for idx, possible_agent in enumerate(self.env.possible_agents):
-                ret_obs_dict[possible_agent].append(obs[idx])
-                ret_rews_dict[possible_agent].append(rews[idx])
-                ret_dones_dict[possible_agent].append(dones[idx])
-                ret_truncs_dict[possible_agent].append(truncs[idx])
-                ret_infos_dict[possible_agent].append(infos[idx])
+        for env_idx, _ in enumerate(obs):
+            for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+                ret_obs_dict[possible_agent].append(obs[env_idx][agent_idx])
+                ret_rews_dict[possible_agent].append(rews[env_idx][agent_idx])
+                ret_dones_dict[possible_agent].append(dones[env_idx][agent_idx])
+                ret_truncs_dict[possible_agent].append(truncs[env_idx][agent_idx])
+                ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
 
         return (
             ret_obs_dict,
@@ -224,10 +224,10 @@ class SubprocVecEnv(VecEnv):
             possible_agent: []
             for idx, possible_agent in enumerate(self.env.possible_agents)
         }
-        for idx, _ in enumerate(obs):
-            for idx, possible_agent in enumerate(self.env.possible_agents):
-                ret_obs_dict[possible_agent].append(obs[idx])
-                ret_infos_dict[possible_agent].append(infos[idx])
+        for env_idx, _ in enumerate(obs):
+            for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+                ret_obs_dict[possible_agent].append(obs[env_idx][agent_idx])
+                ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
         return (ret_obs_dict, ret_infos_dict)
 
     def render(self):
