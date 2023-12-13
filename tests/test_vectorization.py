@@ -1,12 +1,11 @@
 import functools
 
 import gymnasium
-import numpy as np
 from gymnasium.spaces import Discrete
 from pettingzoo import ParallelEnv
+from pettingzoo.mpe import simple_speaker_listener_v4
 
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
-from pettingzoo.mpe import simple_speaker_listener_v4
 
 ROCK = 0
 PAPER = 1
