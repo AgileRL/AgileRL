@@ -1,5 +1,6 @@
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 from pettingzoo.mpe import simple_speaker_listener_v4
+
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 def test_vectorization_wrapper():
