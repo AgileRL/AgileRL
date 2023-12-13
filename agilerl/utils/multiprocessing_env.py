@@ -22,9 +22,7 @@ def worker(remote, parent_remote, env_fn_wrapper):
                 for idx, possible_agent in enumerate(env.possible_agents)
             }
             ob, reward, dones, truncs, info = env.step(data)
-            ob = list(
-                ob.values()
-            )  # NOTE Assuming same observation format between agents
+            ob = list(ob.values())
             reward = list(reward.values())
             dones = list(dones.values())
             info = list(info.values())
@@ -32,9 +30,7 @@ def worker(remote, parent_remote, env_fn_wrapper):
             remote.send((ob, reward, dones, truncs, info))
         elif cmd == "reset":
             ob, infos = env.reset(seed=data, options=None)
-            ob = list(
-                ob.values()
-            )  # NOTE Assuming same observation format between agents
+            ob = list(ob.values())
             infos = list(infos.values())
             remote.send((ob, infos))
         elif cmd == "close":
@@ -179,27 +175,40 @@ class SubprocVecEnv(VecEnv):
         self.waiting = False
         obs, rews, dones, truncs, infos = zip(*results)
 
+        ret_obs_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        ret_rews_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        ret_dones_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        ret_truncs_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        ret_infos_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        for idx, _ in enumerate(obs):
+            for idx, possible_agent in enumerate(self.env.possible_agents):
+                ret_obs_dict[possible_agent].append(obs[idx])
+                ret_rews_dict[possible_agent].append(rews[idx])
+                ret_dones_dict[possible_agent].append(dones[idx])
+                ret_truncs_dict[possible_agent].append(truncs[idx])
+                ret_infos_dict[possible_agent].append(infos[idx])
+
         return (
-            {
-                possible_agent: np.stack(obs)[:, idx, np.newaxis]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
-            {
-                possible_agent: np.stack(rews)[:, idx]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
-            {
-                possible_agent: np.stack(dones)[:, idx]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
-            {
-                possible_agent: np.stack(truncs)[:, idx]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
-            {
-                possible_agent: np.stack(infos)[:]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
+            ret_obs_dict,
+            ret_rews_dict,
+            ret_dones_dict,
+            ret_truncs_dict,
+            ret_infos_dict,
         )
 
     def reset(self, seed=None, options=None):
@@ -207,17 +216,19 @@ class SubprocVecEnv(VecEnv):
             remote.send(("reset", seed))
         results = [remote.recv() for remote in self.remotes]
         obs, infos = zip(*results)
-
-        return (
-            {
-                possible_agent: np.stack(obs)[:, idx, np.newaxis]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
-            {
-                possible_agent: np.stack(infos)[:]
-                for idx, possible_agent in enumerate(self.env.possible_agents)
-            },
-        )
+        ret_obs_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        ret_infos_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+        for idx, _ in enumerate(obs):
+            for idx, possible_agent in enumerate(self.env.possible_agents):
+                ret_obs_dict[possible_agent].append(obs[idx])
+                ret_infos_dict[possible_agent].append(infos[idx])
+        return (ret_obs_dict, ret_infos_dict)
 
     def render(self):
         self.remotes[0].send(("render", None))
