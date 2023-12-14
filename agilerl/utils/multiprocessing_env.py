@@ -1,5 +1,6 @@
 """
 Author: Burak M Gonultas
+https://github.com/gonultasbu
 """
 from multiprocessing import Pipe, Process
 
@@ -18,7 +19,7 @@ def worker(remote, parent_remote, env_fn_wrapper):
         cmd, data = remote.recv()
         if cmd == "step":
             data = {
-                possible_agent: data[idx]
+                possible_agent: np.array(data[idx]).squeeze()
                 for idx, possible_agent in enumerate(env.possible_agents)
             }
             ob, reward, dones, truncs, info = env.step(data)
@@ -34,6 +35,7 @@ def worker(remote, parent_remote, env_fn_wrapper):
             infos = list(infos.values())
             remote.send((ob, infos))
         elif cmd == "close":
+            env.close()
             remote.close()
             break
         elif cmd == "seed":
@@ -95,8 +97,11 @@ class VecEnv:
         pass
 
     def step(self, actions):
-        actions = np.stack(list(actions.values()), axis=1)
-        self.step_async(actions)
+        passed_actions_list =[[] for _ in list(actions.values())[0]]
+        for env_idx, _ in enumerate(list(actions.values())[0]):
+            for agent_idx, possible_agent in enumerate(self.agents):
+                passed_actions_list[env_idx].append(actions[possible_agent][agent_idx])
+        self.step_async(passed_actions_list)
         return self.step_wait()
 
 
@@ -167,7 +172,7 @@ class SubprocVecEnv(VecEnv):
 
     def step_async(self, actions):
         for remote, action in zip(self.remotes, actions):
-            remote.send(("step", action.squeeze().tolist()))
+            remote.send(("step", action))
         self.waiting = True
 
     def step_wait(self):
