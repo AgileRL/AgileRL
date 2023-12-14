@@ -1,8 +1,9 @@
-import numpy as np
-import pytest
-from pettingzoo.mpe import simple_speaker_listener_v4
-from pettingzoo.atari import space_invaders_v2
 from unittest.mock import patch
+
+import pytest
+from pettingzoo.atari import space_invaders_v2
+from pettingzoo.mpe import simple_speaker_listener_v4
+
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
@@ -133,7 +134,9 @@ def test_close(env, request):
     }
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
     vec_env.render()
-    with patch("agilerl.wrappers.pettingzoo_wrappers.PettingZooVectorizationParallelWrapper.close") as mock_close:
+    with patch(
+        "agilerl.wrappers.pettingzoo_wrappers.PettingZooVectorizationParallelWrapper.close"
+    ) as mock_close:
         vec_env.close()
         mock_close.assert_called()
     pass
