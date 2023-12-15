@@ -2,7 +2,7 @@
 Author: Burak M Gonultas
 https://github.com/gonultasbu
 ---
-Original Reference: 
+Original Reference:
 https://github.com/Farama-Foundation/SuperSuit/issues/43#issuecomment-751792111
 """
 from multiprocessing import Pipe, Process
@@ -247,7 +247,8 @@ class SubprocVecEnv(VecEnv):
                 ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
         for agent_idx, possible_agent in enumerate(self.env.possible_agents):
             for op_dict in [
-                ret_obs_dict, ret_infos_dict,
+                ret_obs_dict,
+                ret_infos_dict,
             ]:
                 op_dict[possible_agent] = np.stack(op_dict[possible_agent])
         return (ret_obs_dict, ret_infos_dict)
