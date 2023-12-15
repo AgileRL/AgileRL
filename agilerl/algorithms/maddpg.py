@@ -11,6 +11,7 @@ import torch.optim as optim
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 class MADDPG:
@@ -354,6 +355,8 @@ class MADDPG:
                 for agent, actor in zip(agent_mask.keys(), self.actors)
                 if agent_mask[agent]
             ]
+
+        # states = {key: np.vstack(value) for key, value in states.items()}
 
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
@@ -704,7 +707,12 @@ class MADDPG:
                         action = cont_actions
                     state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
-                        agent_reward[agent_id] += r
+                        # agent_reward[agent_id] += r
+                        agent_reward[agent_id] += (
+                            r[0]
+                            if isinstance(env, PettingZooVectorizationParallelWrapper)
+                            else r
+                        )
                     score = sum(agent_reward.values())
                 rewards.append(score)
         mean_fit = np.mean(rewards)

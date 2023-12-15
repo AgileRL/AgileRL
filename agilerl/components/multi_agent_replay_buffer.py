@@ -77,7 +77,7 @@ class MultiAgentReplayBuffer:
             transition[field] = field_dict
         return transition
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, *args):
         """Returns sample of experiences from memory.
 
         :param batch_size: Number of samples to return
