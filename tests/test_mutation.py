@@ -1,5 +1,6 @@
 import copy
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 
@@ -440,41 +441,44 @@ def test_mutation_applies_rl_hp_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                0,
-                1,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+            for rl_hp_mut in ["batch_size", "lr", "learn_step"]:
+                mutations = Mutations(
+                    algo,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    [rl_hp_mut],
+                    0.1,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
+                new_population = copy.deepcopy(population)
+                mutated_population = mutations.mutation(
+                    new_population, pre_training_mut
+                )
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "bs", "lr", "ls"]
-                if individual.mut == "bs":
-                    assert (
-                        mutations.min_batch_size
-                        <= individual.batch_size
-                        <= mutations.max_batch_size
-                    )
-                if individual.mut == "lr":
-                    assert mutations.min_lr <= individual.lr <= mutations.max_lr
-                if individual.mut == "ls":
-                    assert (
-                        mutations.min_learn_step
-                        <= individual.learn_step
-                        <= mutations.max_learn_step
-                    )
-                assert old.index == individual.index
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut in ["None", "bs", "lr", "ls"]
+                    if individual.mut == "bs":
+                        assert (
+                            mutations.min_batch_size
+                            <= individual.batch_size
+                            <= mutations.max_batch_size
+                        )
+                    if individual.mut == "lr":
+                        assert mutations.min_lr <= individual.lr <= mutations.max_lr
+                    if individual.mut == "ls":
+                        assert (
+                            mutations.min_learn_step
+                            <= individual.learn_step
+                            <= mutations.max_learn_step
+                        )
+                    assert old.index == individual.index
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
@@ -758,41 +762,56 @@ def test_mutation_applies_architecture_mutations():
 
     for distributed in [False, True]:
         for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+            for p in [0.1, 0.4, 0.6, 0.9]:
+                population = initialPopulation(
+                    algo=algo,
+                    state_dim=state_dim,
+                    action_dim=action_dim,
+                    one_hot=one_hot,
+                    net_config=net_config,
+                    INIT_HP=SHARED_INIT_HP,
+                    population_size=population_size,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            mutations = Mutations(
-                algo,
-                0,
-                1,
-                0.5,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+                mutations = Mutations(
+                    algo,
+                    0,
+                    1,
+                    0.5,
+                    0,
+                    0,
+                    0,
+                    ["batch_size", "lr", "learn_step"],
+                    0.5,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
+                class return_fake_rand:
+                    def __init__(self, prob):
+                        self.p = prob
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "arch"
-                # Due to randomness and constraints on size, sometimes architectures are not different
-                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                assert old.index == individual.index
+                    def uniform(self, x, y):
+                        return self.p
+
+                    def choice(self, a, b, p):
+                        return np.random.choice(a, b, p)
+
+                mutations.rng = return_fake_rand(p)
+
+                new_population = copy.deepcopy(population)
+                mutated_population = mutations.mutation(
+                    new_population, pre_training_mut
+                )
+
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut == "arch"
+                    # Due to randomness and constraints on size, sometimes architectures are not different
+                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                    assert old.index == individual.index
 
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
@@ -825,42 +844,57 @@ def test_mutation_applies_cnn_architecture_mutations():
 
     for distributed in [False, True]:
         for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+            for pr in [0.1, 0.4, 0.6, 0.9]:
+                population = initialPopulation(
+                    algo=algo,
+                    state_dim=state_dim,
+                    action_dim=action_dim,
+                    one_hot=one_hot,
+                    net_config=net_config,
+                    INIT_HP=SHARED_INIT_HP,
+                    population_size=population_size,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            mutations = Mutations(
-                algo,
-                0,
-                1,
-                0.5,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+                mutations = Mutations(
+                    algo,
+                    0,
+                    1,
+                    0.5,
+                    0,
+                    0,
+                    0,
+                    ["batch_size", "lr", "learn_step"],
+                    0.5,
+                    arch="cnn",
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
+                class return_fake_rand:
+                    def __init__(self, prob):
+                        self.prob = prob
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "arch"
-                # Due to randomness and constraints on size, sometimes architectures are not different
-                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                assert old.index == individual.index
+                    def uniform(self, x, y):
+                        return self.prob
+
+                    def choice(self, a, b, p):
+                        return np.random.choice(a, b, p)
+
+                mutations.rng = return_fake_rand(pr)
+
+                new_population = copy.deepcopy(population)
+                mutated_population = mutations.mutation(
+                    new_population, pre_training_mut
+                )
+
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut == "arch"
+                    # Due to randomness and constraints on size, sometimes architectures are not different
+                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                    assert old.index == individual.index
 
 
 #### Multi-agent algorithm mutations ####
