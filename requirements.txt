@@ -18,3 +18,4 @@ torch==2.0.1
 tqdm==4.65.0
 transformers==4.30.0
 wandb==0.13.10
+multi-agent-ale-py==0.1.11;sys_platform != 'win32'
