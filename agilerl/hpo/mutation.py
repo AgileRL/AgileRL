@@ -431,44 +431,35 @@ class Mutations:
         mutate_param = self.rng.choice(rl_params, 1)[0]
 
         # Increase or decrease HP randomly (within clipped limits)
-        random_num = self.rng.uniform(0, 1)
         if mutate_param == "batch_size":
-            if random_num > 0.5:
-                individual.batch_size = min(
-                    self.max_batch_size,
-                    max(self.min_batch_size, int(individual.batch_size * 1.2)),
-                )
-            else:
-                individual.batch_size = min(
-                    self.max_batch_size,
-                    max(self.min_batch_size, int(individual.batch_size * 0.8)),
-                )
+            bs_multiplication_options = [1.2, 0.8]  # Grow or shrink
+            bs_probs = [0.5, 0.5]  # Equal probability
+            bs_mult = self.rng.choice(bs_multiplication_options, size=1, p=bs_probs)[0]
+            individual.batch_size = min(
+                self.max_batch_size,
+                max(self.min_batch_size, int(individual.batch_size * bs_mult)),
+            )
             individual.mut = "bs"
 
         elif mutate_param == "lr":
-            if random_num > 0.5:
-                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 1.2))
-            else:
-                individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * 0.8))
-
-            # Reinitialise optimizer if new learning rate
-            self.reinit_opt(individual)
+            lr_multiplication_options = [1.2, 0.8]  # Grow or shrink
+            lr_probs = [0.5, 0.5]  # Equal probability
+            lr_mult = self.rng.choice(lr_multiplication_options, size=1, p=lr_probs)[0]
+            individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * lr_mult))
+            self.reinit_opt(individual)  # Reinitialise optimizer if new learning rate
             individual.mut = "lr"
 
         elif mutate_param == "learn_step":
             if individual.algo in ["PPO"]:  # Needs to stay constant for on-policy
                 individual.mut = "None"
                 return individual
-            if random_num > 0.5:
-                individual.learn_step = min(
-                    self.max_learn_step,
-                    max(self.min_learn_step, int(individual.learn_step * 1.5)),
-                )
-            else:
-                individual.learn_step = min(
-                    self.max_learn_step,
-                    max(self.min_learn_step, int(individual.learn_step * 0.75)),
-                )
+            ls_multiplication_options = [1.5, 0.75]  # Grow or shrink
+            ls_probs = [0.5, 0.5]  # Equal probability
+            ls_mult = self.rng.choice(ls_multiplication_options, size=1, p=ls_probs)[0]
+            individual.learn_step = min(
+                self.max_learn_step,
+                max(self.min_learn_step, int(individual.learn_step * ls_mult)),
+            )
             individual.mut = "ls"
 
         return individual
