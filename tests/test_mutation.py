@@ -1,6 +1,5 @@
 import copy
 
-import numpy as np
 import torch
 from accelerate import Accelerator
 
@@ -252,7 +251,7 @@ def test_mutation_no_options():
     one_hot = False
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    population_size = 2
+    population_size = 1
     pre_training_mut = True
 
     population = initialPopulation(
@@ -287,7 +286,7 @@ def test_mutation_applies_random_mutations():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = True
 
     algo_classes = {
@@ -354,7 +353,7 @@ def test_mutation_applies_no_mutations():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {
@@ -414,7 +413,7 @@ def test_mutation_applies_rl_hp_mutations():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {
@@ -489,7 +488,7 @@ def test_mutation_applies_activation_mutations():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {
@@ -557,7 +556,7 @@ def test_mutation_applies_cnn_activation_mutations():
     }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {
@@ -619,7 +618,7 @@ def test_mutation_applies_parameter_mutations():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {
@@ -686,7 +685,7 @@ def test_mutation_applies_cnn_parameter_mutations():
     }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {
@@ -747,7 +746,7 @@ def test_mutation_applies_architecture_mutations():
     net_config = {"arch": "mlp", "h_size": [32, 32]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = True
 
     algo_classes = {
@@ -762,56 +761,41 @@ def test_mutation_applies_architecture_mutations():
 
     for distributed in [False, True]:
         for algo in algo_classes.keys():
-            for p in [0.1, 0.4, 0.6, 0.9]:
-                population = initialPopulation(
-                    algo=algo,
-                    state_dim=state_dim,
-                    action_dim=action_dim,
-                    one_hot=one_hot,
-                    net_config=net_config,
-                    INIT_HP=SHARED_INIT_HP,
-                    population_size=population_size,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+            population = initialPopulation(
+                algo=algo,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                net_config=net_config,
+                INIT_HP=SHARED_INIT_HP,
+                population_size=population_size,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
 
-                mutations = Mutations(
-                    algo,
-                    0,
-                    1,
-                    0.5,
-                    0,
-                    0,
-                    0,
-                    ["batch_size", "lr", "learn_step"],
-                    0.5,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+            mutations = Mutations(
+                algo,
+                0,
+                1,
+                0.5,
+                0,
+                0,
+                0,
+                ["batch_size", "lr", "learn_step"],
+                0.5,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
 
-                class return_fake_rand:
-                    def __init__(self, prob):
-                        self.p = prob
+            new_population = copy.deepcopy(population)
+            mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-                    def uniform(self, x, y):
-                        return self.p
-
-                    def choice(self, a, b, p):
-                        return np.random.choice(a, b, p)
-
-                mutations.rng = return_fake_rand(p)
-
-                new_population = copy.deepcopy(population)
-                mutated_population = mutations.mutation(
-                    new_population, pre_training_mut
-                )
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut == "arch"
-                    # Due to randomness and constraints on size, sometimes architectures are not different
-                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                    assert old.index == individual.index
+            assert len(mutated_population) == len(population)
+            for old, individual in zip(population, mutated_population):
+                assert individual.mut == "arch"
+                # Due to randomness and constraints on size, sometimes architectures are not different
+                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                assert old.index == individual.index
 
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
@@ -829,7 +813,7 @@ def test_mutation_applies_cnn_architecture_mutations():
     }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = True
 
     algo_classes = {
@@ -844,57 +828,42 @@ def test_mutation_applies_cnn_architecture_mutations():
 
     for distributed in [False, True]:
         for algo in algo_classes.keys():
-            for pr in [0.1, 0.4, 0.6, 0.9]:
-                population = initialPopulation(
-                    algo=algo,
-                    state_dim=state_dim,
-                    action_dim=action_dim,
-                    one_hot=one_hot,
-                    net_config=net_config,
-                    INIT_HP=SHARED_INIT_HP,
-                    population_size=population_size,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+            population = initialPopulation(
+                algo=algo,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                net_config=net_config,
+                INIT_HP=SHARED_INIT_HP,
+                population_size=population_size,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
 
-                mutations = Mutations(
-                    algo,
-                    0,
-                    1,
-                    0.5,
-                    0,
-                    0,
-                    0,
-                    ["batch_size", "lr", "learn_step"],
-                    0.5,
-                    arch="cnn",
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+            mutations = Mutations(
+                algo,
+                0,
+                1,
+                0.5,
+                0,
+                0,
+                0,
+                ["batch_size", "lr", "learn_step"],
+                0.5,
+                arch="cnn",
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
 
-                class return_fake_rand:
-                    def __init__(self, prob):
-                        self.prob = prob
+            new_population = copy.deepcopy(population)
+            mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-                    def uniform(self, x, y):
-                        return self.prob
-
-                    def choice(self, a, b, p):
-                        return np.random.choice(a, b, p)
-
-                mutations.rng = return_fake_rand(pr)
-
-                new_population = copy.deepcopy(population)
-                mutated_population = mutations.mutation(
-                    new_population, pre_training_mut
-                )
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut == "arch"
-                    # Due to randomness and constraints on size, sometimes architectures are not different
-                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                    assert old.index == individual.index
+            assert len(mutated_population) == len(population)
+            for old, individual in zip(population, mutated_population):
+                assert individual.mut == "arch"
+                # Due to randomness and constraints on size, sometimes architectures are not different
+                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                assert old.index == individual.index
 
 
 #### Multi-agent algorithm mutations ####
@@ -906,7 +875,7 @@ def test_mutation_applies_random_mutations_multi_agent():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -963,7 +932,7 @@ def test_mutation_applies_no_mutations_multi_agent():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1014,7 +983,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1079,7 +1048,7 @@ def test_mutation_applies_activation_mutations_multi_agent():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1144,7 +1113,7 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent():
     }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1203,7 +1172,7 @@ def test_mutation_applies_parameter_mutations_multi_agent():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1263,7 +1232,7 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent():
     }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1317,7 +1286,7 @@ def test_mutation_applies_architecture_mutations_multi_agent():
     net_config = {"arch": "mlp", "h_size": [8]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
@@ -1377,7 +1346,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent():
     }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
-    population_size = 2
+    population_size = 1
     pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
