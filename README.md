@@ -11,7 +11,7 @@
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
-**_NEW: AgileRL now supports custom network architectures and pre-trained models with the new `MakeEvolvable` [wrapper](https://docs.agilerl.com/en/latest/custom_architecture/index.html)!_**
+**_NEW: AgileRL now supports teaching agents Skills with [hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html)!_**
 
 </div>
 
@@ -82,22 +82,25 @@ or to demo distributed training:
 cd demos
 accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_online_distributed.py
 ```
-> Note: If you are running demo or benchmarking scripts in development mode, without having installed AgileRL, you will need to uncomment two lines at the beginning of the file.
 
 ## Tutorials
-We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent tasks that will guide you through the process of training both on and off-policy agents to beat
-a variety of gymnasium environments. Additionally, we have multi-agent tutorials that make use of PettingZoo environments such as training DQN to
-play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs <a href="https://docs.agilerl.com/en/latest/tutorials/index.html">here</a>.
+We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks.
+
+Currently, we have [tutorials for single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html)
+that will guide you through the process of training both on and off-policy agents to beat a variety of Gymnasium environments. Additionally, we have [multi-agent tutorials](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html)
+that make use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. We also have a
+[tutorial on using hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) to teach agents Skills.
+
 Our demo files also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
 
 ## Evolvable algorithms implemented (more coming soon!)
   * DQN
   * Rainbow DQN
   * DDPG
+  * TD3
   * PPO
   * CQL
   * ILQL
-  * TD3
   * MADDPG
   * MATD3
 
