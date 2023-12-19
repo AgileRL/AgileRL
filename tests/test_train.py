@@ -299,7 +299,7 @@ class DummyMultiMemory(DummyMemory):
         super().__init__()
         self.agents = ["agent_0", "agent_1"]
 
-    def save2memory(self, state, action, reward, next_state, done):
+    def save2memory(self, state, action, reward, next_state, done, is_vectorised=False):
         self.state_size = list(state.values())[0].shape
         self.action_size = list(action.values())[0].shape
         self.next_state_size = list(next_state.values())[0].shape
@@ -653,7 +653,7 @@ def mocked_multi_memory():
     mock_memory.__len__.return_value = 10000
     mock_memory.agents = ["agent_0", "agent_1"]
 
-    def save2memory(state, action, reward, next_state, done):
+    def save2memory(state, action, reward, next_state, done, is_vectorised=False):
         mock_memory.state_size = list(state.values())[0].shape
         mock_memory.action_size = list(action.values())[0].shape
         mock_memory.next_state_size = list(next_state.values())[0].shape

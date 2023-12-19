@@ -11,12 +11,8 @@ from agilerl.utils.multiprocessing_env import SubprocVecEnv
 class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
         self.env = env
-
         self.metadata = env.metadata
-        try:
-            self.possible_agents = env.possible_agents
-        except AttributeError:
-            pass
+        self.possible_agents = env.possible_agents
 
         # Not every environment has the .state_space attribute implemented
         try:
@@ -59,8 +55,9 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def unwrapped(self) -> ParallelEnv:
         return self.env.unwrapped
 
+    @property
     def state(self) -> np.ndarray:
-        return self.env.state()
+        return self.env.state
 
     def observation_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.env.observation_space(agent)
