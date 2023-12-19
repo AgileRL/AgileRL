@@ -9,6 +9,8 @@ from tqdm import trange
 
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
+from agilerl.utils.utils import calculate_vectorized_scores
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 def train_multi_agent(
@@ -199,6 +201,11 @@ def train_multi_agent(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
+    if isinstance(env, PettingZooVectorizationParallelWrapper):
+        is_vectorised = True
+    else:
+        is_vectorised = False
+
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -252,6 +259,10 @@ def train_multi_agent(
         for agent in pop:  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
+            if is_vectorised:
+                rewards = {agent: [] for agent in env.agents}
+                terminations = {agent: [] for agent in env.agents}
+
             if swap_channels:
                 state = {
                     agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
@@ -259,7 +270,6 @@ def train_multi_agent(
                 }
 
             for _ in range(max_steps):
-                total_steps += 1
                 # Get next action from agent
                 agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
                 env_defined_actions = (
@@ -277,7 +287,6 @@ def train_multi_agent(
                 next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
-
                 # Save experience to replay buffer
                 if swap_channels:
                     state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
@@ -286,13 +295,18 @@ def train_multi_agent(
                         for agent_id, ns in next_state.items()
                     }
 
-                if any(truncation.values()) or any(done.values()):
-                    break
+                if not is_vectorised:
+                    if any(truncation.values()) or any(done.values()):
+                        break
 
-                memory.save2memory(state, cont_actions, reward, next_state, done)
-
-                for agent_id, r in reward.items():
-                    agent_reward[agent_id] += r
+                memory.save2memory(
+                    state,
+                    cont_actions,
+                    reward,
+                    next_state,
+                    done,
+                    is_vectorised=is_vectorised,
+                )
 
                 # Learn according to learning frequency
                 if (memory.counter % agent.learn_step == 0) and (
@@ -309,12 +323,35 @@ def train_multi_agent(
                         agent_id: np.expand_dims(ns, 0)
                         for agent_id, ns in next_state.items()
                     }
+
+                if is_vectorised:
+                    for agent_id in env.agents:
+                        rewards[agent_id].append(reward[agent_id])
+                        terminations[agent_id].append(reward[agent_id])
+                else:
+                    for agent_id, r in reward.items():
+                        agent_reward[agent_id] += r
+
                 state = next_state
 
-            score = sum(agent_reward.values())
+            if is_vectorised:
+                scores = [
+                    np.mean(
+                        calculate_vectorized_scores(
+                            np.array(rewards[agent_id]).transpose((1, 0)),
+                            np.array(terminations[agent_id]).transpose((1, 0)),
+                        )
+                    )
+                    for agent_id in env.agents
+                ]
+                # print("SCROES", scores)
+                score = sum(scores)
+            else:
+                score = sum(agent_reward.values())
             agent.scores.append(score)
 
-            agent.steps[-1] += total_steps
+            agent.steps[-1] += max_steps
+            total_steps += max_steps
 
         # Update epsilon for exploration
         epsilon = max(eps_end, epsilon * eps_decay)

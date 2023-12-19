@@ -183,5 +183,21 @@ def test_autoreset_wrapper_autoreset():
         autoreset_patch.assert_not_called()
 
 
+def test_return_unwrapped():
+    env = parallel_env(render_mode="human")
+    env = PettingZooAutoResetParallelWrapper(env)
+    observations, infos = env.reset()
+    unwrapped = env.unwrapped
+    assert isinstance(unwrapped, ParallelEnv)
+
+
+def test_return_state():
+    env = parallel_env(render_mode="human")
+    env = PettingZooAutoResetParallelWrapper(env)
+    observations, infos = env.reset()
+    state = env.state
+    assert state == observations
+
+
 if __name__ == "__main__":
     test_autoreset_wrapper_autoreset()

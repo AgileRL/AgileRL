@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-import warnings
-
 import gymnasium.spaces
 import numpy as np
 from gymnasium.utils import seeding
 from pettingzoo.utils.env import ActionType, AgentID, ObsType, ParallelEnv
 
+from agilerl.utils.multiprocessing_env import SubprocVecEnv
+
 
 class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
         self.env = env
-
         self.metadata = env.metadata
-        try:
-            self.possible_agents = env.possible_agents
-        except AttributeError:
-            pass
+        self.possible_agents = env.possible_agents
 
         # Not every environment has the .state_space attribute implemented
         try:
@@ -59,41 +55,19 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def unwrapped(self) -> ParallelEnv:
         return self.env.unwrapped
 
+    @property
     def state(self) -> np.ndarray:
-        return self.env.state()
-
-    @property
-    def observation_spaces(self) -> dict[AgentID, gymnasium.spaces.Space]:
-        warnings.warn(
-            "The `observation_spaces` dictionary is deprecated. Use the"
-            " `observation_space` function instead."
-        )
-        try:
-            return {
-                agent: self.observation_space(agent) for agent in self.possible_agents
-            }
-        except AttributeError as e:
-            raise AttributeError(
-                "The base environment does not have an `observation_spaces` dict"
-                " attribute. Use the environments `observation_space` method instead"
-            ) from e
-
-    @property
-    def action_spaces(self) -> dict[AgentID, gymnasium.spaces.Space]:
-        warnings.warn(
-            "The `action_spaces` dictionary is deprecated. Use the `action_space`"
-            " function instead."
-        )
-        try:
-            return {agent: self.action_space(agent) for agent in self.possible_agents}
-        except AttributeError as e:
-            raise AttributeError(
-                "The base environment does not have an action_spaces dict attribute."
-                " Use the environments `action_space` method instead"
-            ) from e
+        return self.env.state
 
     def observation_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.env.observation_space(agent)
 
     def action_space(self, agent: AgentID) -> gymnasium.spaces.Space:
         return self.env.action_space(agent)
+
+
+class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
+    def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType], n_envs: int):
+        super().__init__(env=env)
+        self.env = SubprocVecEnv([lambda: self.env for _ in range(n_envs)])
+        return

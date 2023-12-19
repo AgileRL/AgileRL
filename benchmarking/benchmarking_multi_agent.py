@@ -38,6 +38,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         max_cycles=25, continuous_actions=True
     )
 
+    # env = PettingZooVectorizationParallelWrapper(env, 4)
+
     if INIT_HP["CHANNELS_LAST"]:
         # Environment processing for image based observations
         env = ss.frame_skip_v0(env, 4)
@@ -73,8 +75,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
     INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
-
-    print(state_dim)
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = MultiAgentReplayBuffer(
@@ -139,7 +139,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         n_episodes=INIT_HP["EPISODES"],
         evo_epochs=INIT_HP["EVO_EPOCHS"],
         evo_loop=1,
-        max_steps=900,
+        max_steps=25,
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -155,7 +155,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/maddpg.yaml") as file:
+    with open("../configs/training/matd3.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
