@@ -22,7 +22,7 @@ class ConstantTokenReward(TokenReward):
         return [self.c] * (len(tokens) - 1)
 
 
-class SepcifiedTokenReward(TokenReward):
+class SpecifiedTokenReward(TokenReward):
     def __init__(
         self, token_data: Dict[int, float], scale: float = 1.0, shift: float = 0.0
     ):
@@ -91,6 +91,7 @@ class DataPoint:
             meta = {**obs_meta, **meta}
         elif obs_meta is not None:
             meta = obs_meta
+        print(meta, obs_meta)
         if len(sequence) == 0 or sequence[0][1] is not None:
             raw_str = tokenizer.id_to_token(tokenizer.boa_token_id)
         else:
