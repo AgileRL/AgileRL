@@ -9,11 +9,11 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset
 from tqdm.auto import tqdm
+from wordle.load_objects import load_item
 
 from agilerl.data.rl_data import Iterable_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset, GeneralIterDataset
 from agilerl.utils.ilql_utils import add_system_configs, convert_path
-from agilerl.utils.load_objects import load_item
 from agilerl.utils.log_utils import DistributeCombineLogs, label_logs
 from agilerl.utils.torch_utils import to
 

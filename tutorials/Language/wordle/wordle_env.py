@@ -1,7 +1,8 @@
 from typing import List, Optional, Tuple
 
+from wordle.wordle_game import Vocabulary, WordleGame
+
 from agilerl.data.language_environment import Language_Environment, Language_Observation
-from agilerl.wordle.wordle_game import Vocabulary, WordleGame
 
 
 class WordleObservation(Language_Observation):

@@ -70,7 +70,6 @@ Or install in development mode:
 git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
 pip install -e .
 ```
-If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>.
 
 Demo:
 ```bash
@@ -89,9 +88,9 @@ We are in the process of creating tutorials on how to use AgileRL and train agen
 Currently, we have [tutorials for single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html)
 that will guide you through the process of training both on and off-policy agents to beat a variety of Gymnasium environments. Additionally, we have [multi-agent tutorials](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html)
 that make use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. We also have a
-[tutorial on using hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) to teach agents Skills.
+[tutorial on using hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) to teach agents Skills. We also have files for a tutorial on training a language model with reinforcement learning using ILQL on Wordle in ``tutorials/Language``. If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>.
 
-Our demo files also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
+Our demo files in ``demos`` also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
 
 ## Evolvable algorithms implemented (more coming soon!)
   * DQN

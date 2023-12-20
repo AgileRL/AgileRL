@@ -1,6 +1,27 @@
 import json
 
 import torch
+from wordle.policy import (
+    MixturePolicy,
+    MonteCarloPolicy,
+    OptimalPolicy,
+    RandomMixturePolicy,
+    RepeatPolicy,
+    StartWordPolicy,
+    UserPolicy,
+    WrongPolicy,
+)
+from wordle.wordle_dataset import (
+    WordleHumanDataset,
+    WordleIterableDataset,
+    WordleListDataset,
+)
+from wordle.wordle_env import WordleEnvironment
+from wordle.wordle_evaluators import (
+    Action_Ranking_Evaluator,
+    Action_Ranking_Evaluator_Adversarial,
+)
+from wordle.wordle_game import Vocabulary
 
 from agilerl.algorithms.bc_lm import BC_LM, BC_Evaluator, BC_Policy
 from agilerl.algorithms.ilql import (
@@ -12,27 +33,6 @@ from agilerl.algorithms.ilql import (
 from agilerl.data.rl_data import ConstantTokenReward, SepcifiedTokenReward
 from agilerl.networks.evolvable_gpt import EvolvableGPT
 from agilerl.utils.ilql_utils import convert_path
-from agilerl.wordle.policy import (
-    MixturePolicy,
-    MonteCarloPolicy,
-    OptimalPolicy,
-    RandomMixturePolicy,
-    RepeatPolicy,
-    StartWordPolicy,
-    UserPolicy,
-    WrongPolicy,
-)
-from agilerl.wordle.wordle_dataset import (
-    WordleHumanDataset,
-    WordleIterableDataset,
-    WordleListDataset,
-)
-from agilerl.wordle.wordle_env import WordleEnvironment
-from agilerl.wordle.wordle_evaluators import (
-    Action_Ranking_Evaluator,
-    Action_Ranking_Evaluator_Adversarial,
-)
-from agilerl.wordle.wordle_game import Vocabulary
 
 registry = {}
 cache = {}
