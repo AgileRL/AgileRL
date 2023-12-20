@@ -91,7 +91,6 @@ class DataPoint:
             meta = {**obs_meta, **meta}
         elif obs_meta is not None:
             meta = obs_meta
-        print(meta, obs_meta)
         if len(sequence) == 0 or sequence[0][1] is not None:
             raw_str = tokenizer.id_to_token(tokenizer.boa_token_id)
         else:
