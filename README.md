@@ -26,22 +26,13 @@ We are constantly adding more algorithms and features. AgileRL already includes 
 </p>
 <p align="center">AgileRL offers 10x faster hyperparameter optimization than SOTA.<br> Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.</p>
 
-<!-- ## Table of Contents
+## Table of Contents
   * [Benchmarks](#benchmarks)
   * [Get Started](#get-started)
   * [Tutorials](#tutorials)
   * [Algorithms implemented](#evolvable-algorithms-implemented-more-coming-soon)
-  * [Train an agent on a Gym environment (Online)](#train-an-agent-on-a-gym-environment-online)
-    + [Off-policy Reinforcement Learning](#off-policy-reinforcement-learning)
-    + [Custom Off-policy Training Loop](#custom-off-policy-training-loop)
-    + [On-policy Reinforcement Learning](#on-policy-reinforcement-learning)
-    + [Custom On-policy Training Loop](#custom-on-policy-training-loop)
-  * [Train an agent on data (Offline)](#train-an-agent-on-data-offline)
-    + [Custom Offline Training Loop](#custom-offline-training-loop)
-  * [Train an agent on a language environment (RLHF)](#train-an-agent-on-a-language-environment-rlhf)
-  * [Distributed training](#distributed-training)
-  * [Multi-agent training](#multi-agent-training)
-  * [Citing AgileRL](#citing-agilerl) -->
+  * [Train an agent](#train-an-agent-to-beat-a-gym-environment)
+  * [Citing AgileRL](#citing-agilerl)
 
 ## Benchmarks
 
