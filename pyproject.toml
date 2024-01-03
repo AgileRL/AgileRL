@@ -27,7 +27,7 @@ SuperSuit = "^3.9.0"
 termcolor = "^1.1.0"
 torch = "^2.0.1"
 tqdm = "^4.65.0"
-transformers = "^4.30.0"
+transformers = "^4.36.0"
 wandb = "^0.13.10"
 
 
