@@ -1,7 +1,7 @@
 PettingZoo Vectorization Parallel Wrapper
 ==========================================
-The `PettingZooVectorizationParallelWrapper` class is a wrapper that vectorizes the environment, 
-allowing multiple instances of the environment to be run in parallel. 
+The `PettingZooVectorizationParallelWrapper` class is a wrapper that vectorizes the environment,
+allowing multiple instances of the environment to be run in parallel.
 
 
 .. code-block:: python
@@ -25,5 +25,3 @@ Parameters
 .. autoclass:: agilerl.wrappers.pettingzoo_wrappers.PettingZooVectorizationParallelWrapper
   :members:
   :inherited-members:
-
-
