@@ -2,8 +2,11 @@ import numpy as np
 import torch
 
 from agilerl.utils.sampling_utils import (
+    always_terminate,
     get_relevant_kvs,
+    map_decoder_kvs,
     pad_sequence,
+    process_logits,
     select_batch_idxs,
     update_decoder_kvs,
     update_kvs,
@@ -130,3 +133,43 @@ def test_get_relevant_kvs():
     )
 
     assert str(get_relevant_kvs(kvs, lens_chosen, idx)) == str(expected_output)
+
+
+def test_map_decoder_kvs():
+    kvs = (
+        (
+            torch.tensor([[[[[[1, 2, 3], [4, 5, 6]]]]]]),
+            torch.tensor([[[[[[7, 8, 9], [10, 11, 12]]]]]]),
+        ),
+        (
+            torch.tensor([[[[[[13, 14, 15], [16, 17, 18]]]]]]),
+            torch.tensor([[[[[[19, 20, 21], [22, 23, 24]]]]]]),
+        ),
+    )
+    lens_chosen = torch.tensor([0])
+    kvs = map_decoder_kvs(lambda x: select_batch_idxs(x, lens_chosen), kvs)
+
+    expected_output = (
+        (
+            torch.tensor([[[[[[1, 2, 3], [4, 5, 6]]]]]]),
+            torch.tensor([[[[[[7, 8, 9], [10, 11, 12]]]]]]),
+        ),
+        (
+            torch.tensor([[[[[[13, 14, 15], [16, 17, 18]]]]]]),
+            torch.tensor([[[[[[19, 20, 21], [22, 23, 24]]]]]]),
+        ),
+    )
+
+    assert str(kvs) == str(expected_output)
+
+
+def test_process_logits():
+    logits = torch.randn(8, 4, 8, 4)
+
+    out_logits = process_logits(logits, top_k=2, top_p=2)
+
+    assert logits.shape == out_logits.shape
+
+
+def test_always_terminate():
+    assert always_terminate(np.array([0]))
