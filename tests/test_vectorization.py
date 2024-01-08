@@ -152,6 +152,9 @@ class parallel_env_disc(ParallelEnv):
             self.render()
         return observations, rewards, terminations, truncations, infos
 
+    def seed(self, seed):
+        self.seed = seed
+
 
 class parallel_env_cont(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "rps_v2"}
@@ -380,5 +383,62 @@ def test_close(env, request):
     pass
 
 
-if __name__ == "__main__":
-    pass
+@pytest.mark.parametrize(
+    "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
+)
+def test_seed(env, request):
+    env = request.getfixturevalue(env)
+    n_envs = 4
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    observations, infos = vec_env.reset()
+    actions = {
+        agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
+        for agent in vec_env.agents
+    }
+    observations, rewards, terminations, truncations, infos = vec_env.step(actions)
+    vec_env.env.seed(0)
+
+
+@pytest.mark.parametrize(
+    "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
+)
+def test_subproc_close(env, request):
+    env = request.getfixturevalue(env)
+    n_envs = 1
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    observations, infos = vec_env.reset()
+
+    class DummyRemote:
+        def recv(self, *args):
+            return None
+
+        def send(self, *args):
+            pass
+
+    vec_env.env.remotes = [DummyRemote()]
+
+    vec_env.env.waiting = True
+    vec_env.env.close()
+    vec_env.env.close()
+
+    assert vec_env.env.closed is True
+
+
+@pytest.mark.parametrize(
+    "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
+)
+def test_sample_personas(env, request):
+    env = request.getfixturevalue(env)
+
+    def dummy_sp(is_train, is_val, path):
+        return None
+
+    env.sample_personas = dummy_sp
+
+    n_envs = 1
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    observations, infos = vec_env.reset()
+
+    result = vec_env.env.sample_personas(False)
+
+    assert result is None
