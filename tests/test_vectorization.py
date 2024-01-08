@@ -152,6 +152,9 @@ class parallel_env_disc(ParallelEnv):
             self.render()
         return observations, rewards, terminations, truncations, infos
 
+    def seed(self, seed):
+        self.seed = seed
+
 
 class parallel_env_cont(ParallelEnv):
     metadata = {"render_modes": ["human"], "name": "rps_v2"}
