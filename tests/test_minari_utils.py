@@ -5,6 +5,7 @@ import minari
 import numpy as np
 import pytest
 import torch
+from accelerate import Accelerator
 from minari import MinariDataset
 
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -164,6 +165,22 @@ def test_load_minari_dataset_errors(dataset_id):
 )
 def test_load_remote_minari_dataset(dataset_id):
     dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
+
+    assert isinstance(dataset, MinariDataset)
+
+    check_delete_dataset(dataset_id)
+
+
+@pytest.mark.parametrize(
+    "dataset_id",
+    [("door-human-v1")],
+)
+def test_load_remote_minari_dataset_accelerator(dataset_id):
+    accelerator = Accelerator()
+
+    dataset = minari_utils.load_minari_dataset(
+        dataset_id, accelerator=accelerator, remote=True
+    )
 
     assert isinstance(dataset, MinariDataset)
 
