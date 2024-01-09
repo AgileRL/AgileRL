@@ -110,7 +110,12 @@ class MultiAgentReplayBuffer:
         num_entries = len(next(iter(args[0].values())))
         for i in range(num_entries):
             for j, arg in enumerate(args):
-                new_dict = {key: np.array(value[i]) for key, value in arg.items()}
+                new_dict = {
+                    key: np.array(value[i])
+                    if type(value[i]) != np.ndarray
+                    else value[i]
+                    for key, value in arg.items()
+                }
                 results[j].append(new_dict)
         return tuple(results)
 
