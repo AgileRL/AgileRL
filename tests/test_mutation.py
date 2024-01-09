@@ -1,5 +1,6 @@
 import copy
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 
@@ -13,7 +14,11 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.mutation import Mutations
+from agilerl.networks.evolvable_bert import EvolvableBERT
 from agilerl.utils.utils import initialPopulation
+
+# from pytest_mock import mocker
+
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -405,6 +410,66 @@ def test_mutation_applies_no_mutations():
                 assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
 
 
+# The mutation method applies no mutations to the population and returns the mutated population.
+def test_mutation_applies_no_mutations_pre_training_mut():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    net_config = {"arch": "mlp", "h_size": [8]}
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
+    population_size = 1
+    pre_training_mut = True
+
+    algo_classes = {
+        "DQN": DQN,
+        "Rainbow DQN": RainbowDQN,
+        "DDPG": DDPG,
+        "TD3": TD3,
+        "PPO": PPO,
+        "CQN": CQN,
+        "ILQL": ILQL,
+    }
+
+    for distributed in [False, True]:
+        for algo in algo_classes.keys():
+            population = initialPopulation(
+                algo=algo,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                net_config=net_config,
+                INIT_HP=SHARED_INIT_HP,
+                population_size=population_size,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
+
+            mutations = Mutations(
+                algo,
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                ["batch_size", "lr", "learn_step"],
+                0.1,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
+
+            new_population = copy.deepcopy(population)
+            mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+            assert len(mutated_population) == len(population)
+            for old, individual in zip(population, mutated_population):
+                assert individual.mut in ["None", "bs", "lr", "ls"]
+                assert old.index == individual.index
+                assert old.actor != individual.actor
+                assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
+
+
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 def test_mutation_applies_rl_hp_mutations():
     state_dim = [4]
@@ -529,6 +594,61 @@ def test_mutation_applies_activation_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
+            new_population = copy.deepcopy(population)
+            mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+            assert len(mutated_population) == len(population)
+            for old, individual in zip(population, mutated_population):
+                assert individual.mut in ["None", "act"]
+                if individual.mut == "act":
+                    assert old.actor.mlp_activation != individual.actor.mlp_activation
+                    assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
+                assert old.index == individual.index
+
+
+# The mutation method applies activation mutations to the population and returns the mutated population.
+def test_mutation_applies_activation_mutations_no_skip():
+    state_dim = [3]
+    action_dim = 2
+    one_hot = False
+    net_config = {"arch": "mlp", "h_size": [8]}
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
+    population_size = 1
+    pre_training_mut = False
+
+    algo_classes = {"DDPG": DDPG}
+
+    for distributed in [False, True]:
+        for algo in algo_classes.keys():
+            population = initialPopulation(
+                algo=algo,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                net_config=net_config,
+                INIT_HP=SHARED_INIT_HP,
+                population_size=population_size,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
+
+            mutations = Mutations(
+                algo,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                ["batch_size", "lr", "learn_step"],
+                0.1,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
+
+            for individual in population:
+                individual.algo = None
             new_population = copy.deepcopy(population)
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
@@ -747,7 +867,6 @@ def test_mutation_applies_architecture_mutations():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
     population_size = 1
-    pre_training_mut = True
 
     algo_classes = {
         "DQN": DQN,
@@ -761,41 +880,53 @@ def test_mutation_applies_architecture_mutations():
 
     for distributed in [False, True]:
         for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+            for mut_method in [
+                ["add_mlp_layer", "remove_mlp_layer"],
+                ["add_mlp_node", "remove_mlp_node"],
+            ]:
+                population = initialPopulation(
+                    algo=algo,
+                    state_dim=state_dim,
+                    action_dim=action_dim,
+                    one_hot=one_hot,
+                    net_config=net_config,
+                    INIT_HP=SHARED_INIT_HP,
+                    population_size=population_size,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            mutations = Mutations(
-                algo,
-                0,
-                1,
-                0.5,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+                mutations = Mutations(
+                    algo,
+                    0,
+                    1,
+                    0.5,
+                    0,
+                    0,
+                    0,
+                    ["batch_size", "lr", "learn_step"],
+                    0.5,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
+                class DummyRNG:
+                    def choice(self, a, size=None, replace=True, p=None):
+                        return [np.random.choice(mut_method)]
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "arch"
-                # Due to randomness and constraints on size, sometimes architectures are not different
-                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                assert old.index == individual.index
+                mutations.rng = DummyRNG()
+
+                new_population = copy.deepcopy(population)
+                mutated_population = [
+                    mutations.architecture_mutate(agent) for agent in new_population
+                ]
+
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut == "arch"
+                    # Due to randomness and constraints on size, sometimes architectures are not different
+                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                    assert old.index == individual.index
 
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
@@ -864,6 +995,80 @@ def test_mutation_applies_cnn_architecture_mutations():
                 # Due to randomness and constraints on size, sometimes architectures are not different
                 # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
                 assert old.index == individual.index
+
+
+# The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+def test_mutation_applies_bert_architecture_mutations():
+    state_dim = [3]
+    action_dim = 2
+    one_hot = False
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
+    population_size = 1
+
+    algo_classes = {"DDPG": DDPG}
+
+    for distributed in [False, True]:
+        for algo in algo_classes.keys():
+            for mut_method in [
+                [
+                    "add_encoder_layer",
+                    "remove_encoder_layer",
+                    "add_decoder_layer",
+                    "remove_decoder_layer",
+                ],
+                ["add_node", "remove_node"],
+            ]:
+                population = initialPopulation(
+                    algo=algo,
+                    state_dim=state_dim,
+                    action_dim=action_dim,
+                    one_hot=one_hot,
+                    INIT_HP=SHARED_INIT_HP,
+                    net_config={"arch": "mlp", "h_size": [32, 32]},
+                    population_size=population_size,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
+
+                mutations = Mutations(
+                    algo,
+                    0,
+                    1,
+                    0.5,
+                    0,
+                    0,
+                    0,
+                    ["batch_size", "lr", "learn_step"],
+                    0.5,
+                    arch="bert",
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
+
+                class DummyRNG:
+                    def choice(self, a, size=None, replace=True, p=None):
+                        return [np.random.choice(mut_method)]
+
+                mutations.rng = DummyRNG()
+
+                for individual in population:
+                    individual.actor = EvolvableBERT([12], [12])
+                    individual.actor_target = copy.deepcopy(individual.actor)
+                    individual.critic = EvolvableBERT([12], [12])
+                    individual.critic_target = copy.deepcopy(individual.critic)
+
+                new_population = copy.deepcopy(population)
+                mutated_population = [
+                    mutations.architecture_mutate(agent) for agent in new_population
+                ]
+
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut == "arch"
+                    # Due to randomness and constraints on size, sometimes architectures are not different
+                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                    assert old.index == individual.index
 
 
 #### Multi-agent algorithm mutations ####
@@ -1089,12 +1294,74 @@ def test_mutation_applies_activation_mutations_multi_agent():
             for old, individual in zip(population, mutated_population):
                 assert individual.mut in ["None", "act"]
                 if individual.mut == "act":
-                    assert old.actor.mlp_activation != individual.actor.mlp_activation
-                    assert individual.actors[0].mlp_activation in [
-                        "ReLU",
-                        "ELU",
-                        "GELU",
-                    ]
+                    for old_actor, actor in zip(old.actors, individual.actors):
+                        assert old_actor.mlp_activation != actor.mlp_activation
+                        assert individual.actors[0].mlp_activation in [
+                            "ReLU",
+                            "ELU",
+                            "GELU",
+                        ]
+                assert old.index == individual.index
+
+
+# The mutation method applies activation mutations to the population and returns the mutated population.
+def test_mutation_applies_activation_mutations_multi_agent_no_skip():
+    state_dim = [[4], [4]]
+    action_dim = [2, 2]
+    one_hot = False
+    net_config = {"arch": "mlp", "h_size": [8]}
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
+    population_size = 1
+    pre_training_mut = False
+
+    algo_classes = {"MADDPG": MADDPG}
+
+    for distributed in [False, True]:
+        for algo in algo_classes.keys():
+            population = initialPopulation(
+                algo=algo,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                one_hot=one_hot,
+                net_config=net_config,
+                INIT_HP=SHARED_INIT_HP_MA,
+                population_size=population_size,
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
+
+            mutations = Mutations(
+                algo,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                ["batch_size", "lr", "learn_step"],
+                0.1,
+                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+                device=device if not distributed else None,
+                accelerator=accelerator if distributed else None,
+            )
+
+            for individual in population:
+                individual.algo = None
+            new_population = copy.deepcopy(population)
+            mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+            assert len(mutated_population) == len(population)
+            for old, individual in zip(population, mutated_population):
+                assert individual.mut in ["None", "act"]
+                if individual.mut == "act":
+                    for old_actor, actor in zip(old.actors, individual.actors):
+                        assert old_actor.mlp_activation != actor.mlp_activation
+                        assert individual.actors[0].mlp_activation in [
+                            "ReLU",
+                            "ELU",
+                            "GELU",
+                        ]
                 assert old.index == individual.index
 
 
@@ -1287,48 +1554,59 @@ def test_mutation_applies_architecture_mutations_multi_agent():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
     population_size = 1
-    pre_training_mut = False
 
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
     for distributed in [False, True]:
         for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+            for mut_method in [
+                ["add_mlp_layer", "remove_mlp_layer"],
+                ["add_mlp_node", "remove_mlp_node"],
+            ]:
+                population = initialPopulation(
+                    algo=algo,
+                    state_dim=state_dim,
+                    action_dim=action_dim,
+                    one_hot=one_hot,
+                    net_config=net_config,
+                    INIT_HP=SHARED_INIT_HP_MA,
+                    population_size=population_size,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            mutations = Mutations(
-                algo,
-                0,
-                1,
-                0.5,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+                mutations = Mutations(
+                    algo,
+                    0,
+                    1,
+                    0.5,
+                    0,
+                    0,
+                    0,
+                    ["batch_size", "lr", "learn_step"],
+                    0.5,
+                    agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
+                class DummyRNG:
+                    def choice(self, a, size=None, replace=True, p=None):
+                        return [np.random.choice(mut_method)]
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "arch"
-                # Due to randomness and constraints on size, sometimes architectures are not different
-                # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-                assert old.index == individual.index
+                mutations.rng = DummyRNG()
+
+                new_population = copy.deepcopy(population)
+                mutated_population = [
+                    mutations.architecture_mutate(agent) for agent in new_population
+                ]
+
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut == "arch"
+                    # Due to randomness and constraints on size, sometimes architectures are not different
+                    # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
+                    assert old.index == individual.index
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
@@ -1390,6 +1668,91 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent():
                 # Due to randomness and constraints on size, sometimes architectures are not different
                 # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
                 assert old.index == individual.index
+
+
+# The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+def test_mutation_applies_bert_architecture_mutations_multi_agent():
+    state_dim = [[4], [4]]
+    action_dim = [2, 2]
+    one_hot = False
+    net_config = {"arch": "mlp", "h_size": [8]}
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
+    population_size = 1
+
+    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+
+    for distributed in [False, True]:
+        for algo in algo_classes.keys():
+            for mut_method in [
+                [
+                    "add_encoder_layer",
+                    "remove_encoder_layer",
+                    "add_decoder_layer",
+                    "remove_decoder_layer",
+                ],
+                ["add_node", "remove_node"],
+            ]:
+                population = initialPopulation(
+                    algo=algo,
+                    state_dim=state_dim,
+                    action_dim=action_dim,
+                    one_hot=one_hot,
+                    net_config=net_config,
+                    INIT_HP=SHARED_INIT_HP_MA,
+                    population_size=population_size,
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
+
+                mutations = Mutations(
+                    algo,
+                    0,
+                    1,
+                    0.5,
+                    0,
+                    0,
+                    0,
+                    ["batch_size", "lr", "learn_step"],
+                    0.5,
+                    arch="bert",
+                    device=device if not distributed else None,
+                    accelerator=accelerator if distributed else None,
+                )
+
+                class DummyRNG:
+                    def choice(self, a, size=None, replace=True, p=None):
+                        return [np.random.choice(mut_method)]
+
+                mutations.rng = DummyRNG()
+
+                for individual in population:
+                    individual.actors = [EvolvableBERT([12], [12])]
+                    individual.actor_targets = copy.deepcopy(individual.actors)
+                    if algo == "MADDPG":
+                        individual.critics = [EvolvableBERT([12], [12])]
+                        individual.critic_targets = copy.deepcopy(individual.critics)
+                    else:
+                        individual.critics_1 = [EvolvableBERT([12], [12])]
+                        individual.critic_targets_1 = copy.deepcopy(
+                            individual.critics_1
+                        )
+                        individual.critics_2 = [EvolvableBERT([12], [12])]
+                        individual.critic_targets_2 = copy.deepcopy(
+                            individual.critics_2
+                        )
+
+                new_population = copy.deepcopy(population)
+                mutated_population = [
+                    mutations.architecture_mutate(agent) for agent in new_population
+                ]
+
+                assert len(mutated_population) == len(population)
+                for old, individual in zip(population, mutated_population):
+                    assert individual.mut == "arch"
+                    # Due to randomness and constraints on size, sometimes architectures are not different
+                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+                    assert old.index == individual.index
 
 
 def test_reinit_opt():
