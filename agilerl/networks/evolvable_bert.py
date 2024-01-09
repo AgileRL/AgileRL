@@ -62,7 +62,7 @@ class EvolvableBERT(nn.Module):
         d_model: int = 512,
         n_head: int = 8,
         dropout: float = 0.1,
-        activation: str = "ReLU",
+        activation: str = "relu",
         layer_norm_eps: float = 1e-5,
         batch_first: bool = False,
         norm_first: bool = False,
