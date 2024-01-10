@@ -44,8 +44,6 @@ class EvolvableBERT(nn.Module):
     :type max_encoder_layers: int, optional
     :param max_decoder_layers: Maximum number of decoder layers, defaults to 12
     :type max_decoder_layers: int, optional
-    :param stored_values: Stored network weights, defaults to None
-    :type stored_values: numpy.array(), optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -68,7 +66,6 @@ class EvolvableBERT(nn.Module):
         norm_first: bool = False,
         max_encoder_layers: int = 12,
         max_decoder_layers: int = 12,
-        stored_values=None,
         device="cpu",
     ):
         super().__init__()
@@ -107,9 +104,6 @@ class EvolvableBERT(nn.Module):
         self.encoder, self.decoder = self.create_nets()
         self.encoder_keys = list(self.encoder.keys())
         self.decoder_keys = list(self.decoder.keys())
-
-        if stored_values is not None:
-            self.inject_parameters(pvec=stored_values, without_layer_norm=False)
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.
@@ -355,7 +349,7 @@ class EvolvableBERT(nn.Module):
         if convert_to_nested:
             encoder_output = encoder_output.to_padded_tensor(0.0)
             all_hidden_states = all_hidden_states + (encoder_output,)
-        if ["encoder_norm_0"] in self.encoder_keys:
+        if "encoder_norm_0" in self.encoder_keys:
             encoder_output = self.encoder["encoder_norm_0"](encoder_output)
             all_hidden_states = all_hidden_states + (encoder_output,)
         return encoder_output, all_hidden_states
@@ -403,7 +397,7 @@ class EvolvableBERT(nn.Module):
                     memory_key_padding_mask=memory_key_padding_mask,
                 )
         all_hidden_states = all_hidden_states + (decoder_output,)
-        if ["decoder_norm_0"] in self.decoder_keys:
+        if "decoder_norm_0" in self.decoder_keys:
             decoder_output = self.decoder["decoder_norm_0"](decoder_output)
             all_hidden_states = all_hidden_states + (decoder_output,)
         return decoder_output, all_hidden_states
@@ -434,93 +428,70 @@ class EvolvableBERT(nn.Module):
         :param src_key_padding_mask_for_layers: Tensor mask for src keys per batch for layers
         :type src_key_padding_mask_for_layers: torch.Tensor
         """
-        why_not_sparsity_fast_path = ""
         convert_to_nested = False
-        if not isinstance(first_layer, torch.nn.TransformerEncoderLayer):
-            why_not_sparsity_fast_path = (
-                f"{str_first_layer} was not TransformerEncoderLayer"
-            )
-        elif first_layer.norm_first:
-            why_not_sparsity_fast_path = f"{str_first_layer}.norm_first was True"
-        elif first_layer.training:
-            why_not_sparsity_fast_path = f"{str_first_layer} was in training mode"
-        elif not first_layer.self_attn.batch_first:
-            why_not_sparsity_fast_path = (
-                f" {str_first_layer}.self_attn.batch_first was not True"
-            )
-        elif not first_layer.self_attn._qkv_same_embed_dim:
-            why_not_sparsity_fast_path = (
-                f"{str_first_layer}.self_attn._qkv_same_embed_dim was not True"
-            )
-        elif not first_layer.activation_ReLU_or_GELU:
-            why_not_sparsity_fast_path = (
-                f" {str_first_layer}.activation_ReLU_or_GELU was not True"
-            )
-        elif not (first_layer.norm1.eps == first_layer.norm2.eps):
-            why_not_sparsity_fast_path = f"{str_first_layer}.norm1.eps was not equal to {str_first_layer}.norm2.eps"
-        elif not src.dim() == 3:
-            why_not_sparsity_fast_path = (
-                f"input not batched; expected src.dim() of 3 but got {src.dim()}"
-            )
-        elif not self.enable_nested_tensor:
-            why_not_sparsity_fast_path = "enable_nested_tensor was not True"
-        elif src_key_padding_mask is None:
-            why_not_sparsity_fast_path = "src_key_padding_mask was None"
-        elif (
-            (not hasattr(self, "mask_check")) or self.mask_check
-        ) and not torch._nested_tensor_from_mask_left_aligned(
-            src, src_key_padding_mask.logical_not()
-        ):
-            why_not_sparsity_fast_path = "mask_check enabled, and src and src_key_padding_mask was not left aligned"
-        elif output.is_nested:
-            why_not_sparsity_fast_path = "NestedTensor input is not supported"
-        elif mask is not None:
-            why_not_sparsity_fast_path = (
-                "src_key_padding_mask and mask were both supplied"
-            )
-        elif first_layer.self_attn.num_heads % 2 == 1:
-            why_not_sparsity_fast_path = "num_head is odd"
-        elif torch.is_autocast_enabled():
-            why_not_sparsity_fast_path = "autocast is enabled"
+        if isinstance(first_layer, torch.nn.TransformerEncoderLayer):
+            if first_layer.norm_first:
+                if first_layer.training:
+                    if first_layer.self_attn.batch_first:
+                        if first_layer.self_attn._qkv_same_embed_dim:
+                            if first_layer.norm1.eps == first_layer.norm2.eps:
+                                if src.dim() == 3:
+                                    if src_key_padding_mask is not None:
+                                        if torch._nested_tensor_from_mask_left_aligned(
+                                            src, src_key_padding_mask.logical_not()
+                                        ):
+                                            if not output.is_nested:
+                                                if mask is None:
+                                                    if (
+                                                        first_layer.self_attn.num_heads
+                                                        % 2
+                                                        != 1
+                                                    ):
+                                                        if (
+                                                            not torch.is_autocast_enabled()
+                                                        ):
+                                                            tensor_args = (
+                                                                src,
+                                                                first_layer.self_attn.in_proj_weight,
+                                                                first_layer.self_attn.in_proj_bias,
+                                                                first_layer.self_attn.out_proj.weight,
+                                                                first_layer.self_attn.out_proj.bias,
+                                                                first_layer.norm1.weight,
+                                                                first_layer.norm1.bias,
+                                                                first_layer.norm2.weight,
+                                                                first_layer.norm2.bias,
+                                                                first_layer.linear1.weight,
+                                                                first_layer.linear1.bias,
+                                                                first_layer.linear2.weight,
+                                                                first_layer.linear2.bias,
+                                                            )
 
-        if not why_not_sparsity_fast_path:
-            tensor_args = (
-                src,
-                first_layer.self_attn.in_proj_weight,
-                first_layer.self_attn.in_proj_bias,
-                first_layer.self_attn.out_proj.weight,
-                first_layer.self_attn.out_proj.bias,
-                first_layer.norm1.weight,
-                first_layer.norm1.bias,
-                first_layer.norm2.weight,
-                first_layer.norm2.bias,
-                first_layer.linear1.weight,
-                first_layer.linear1.bias,
-                first_layer.linear2.weight,
-                first_layer.linear2.bias,
-            )
-
-            if not (src.is_cuda or "cpu" in str(src.device)):
-                why_not_sparsity_fast_path = "src is neither CUDA nor CPU"
-            elif torch.is_grad_enabled() and any(x.requires_grad for x in tensor_args):
-                why_not_sparsity_fast_path = "grad is enabled and at least one of query or the i/o projection weights or biases requires_grad"
-
-            if (not why_not_sparsity_fast_path) and (src_key_padding_mask is not None):
-                convert_to_nested = True
-                output = torch._nested_tensor_from_mask(
-                    output, src_key_padding_mask.logical_not(), mask_check=False
-                )
-                src_key_padding_mask_for_layers = None
+                                                            if (
+                                                                src.is_cuda
+                                                                or "cpu"
+                                                                in str(src.device)
+                                                            ):
+                                                                if torch.is_grad_enabled() and any(
+                                                                    x.requires_grad
+                                                                    for x in tensor_args
+                                                                ):
+                                                                    if (
+                                                                        src_key_padding_mask
+                                                                        is not None
+                                                                    ):
+                                                                        convert_to_nested = (
+                                                                            True
+                                                                        )
+                                                                        output = torch._nested_tensor_from_mask(
+                                                                            output,
+                                                                            src_key_padding_mask.logical_not(),
+                                                                            mask_check=False,
+                                                                        )
+                                                                        src_key_padding_mask_for_layers = (
+                                                                            None
+                                                                        )
 
         return output, convert_to_nested, src_key_padding_mask_for_layers
-
-    def get_model_dict(self):
-        """Returns dictionary with model information and weights."""
-        model_dict = self.init_dict
-        model_dict.update(
-            {"stored_values": self.extract_parameters(without_layer_norm=False)}
-        )
-        return model_dict
 
     def count_parameters(self, without_layer_norm=False):
         """Returns number of parameters in neural network.
@@ -533,59 +504,6 @@ class EvolvableBERT(nn.Module):
             if not without_layer_norm or "layer_norm" not in name:
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
-
-    def extract_grad(self, without_layer_norm=False):
-        """Returns current pytorch gradient in same order as genome's flattened parameter vector.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.grad.data.cpu().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.grad.data.cpu().numpy().flatten()
-                count += sz
-        return pvec.copy()
-
-    def extract_parameters(self, without_layer_norm=False):
-        """Returns current flattened neural network weights.
-
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        tot_size = self.count_parameters(without_layer_norm)
-        pvec = np.zeros(tot_size, np.float32)
-        count = 0
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().detach().numpy().flatten().shape[0]
-                pvec[count : count + sz] = param.data.cpu().detach().numpy().flatten()
-                count += sz
-        return copy.deepcopy(pvec)
-
-    def inject_parameters(self, pvec, without_layer_norm=False):
-        """Injects a flat vector of neural network parameters into the model's current neural network weights.
-
-        :param pvec: Network weights
-        :type pvec: np.array()
-        :param without_layer_norm: Exclude normalization layers, defaults to False
-        :type without_layer_norm: bool, optional
-        """
-        count = 0
-
-        for name, param in self.named_parameters():
-            if not without_layer_norm or "layer_norm" not in name:
-                sz = param.data.cpu().numpy().flatten().shape[0]
-                raw = pvec[count : count + sz]
-                reshaped = raw.reshape(param.data.cpu().numpy().shape)
-                param.data = torch.from_numpy(copy.deepcopy(reshaped)).type(
-                    torch.FloatTensor
-                )
-                count += sz
-        return pvec
 
     @property
     def init_dict(self):
