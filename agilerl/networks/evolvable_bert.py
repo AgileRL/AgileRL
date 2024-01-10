@@ -32,7 +32,7 @@ class EvolvableBERT(nn.Module):
     :type n_head: int, optional
     :param dropout: Dropout value, defaults to 0.1
     :type dropout: float, optional
-    :param activation: Activation function of encoder/decoder intermediate layer, defaults to 'relu'
+    :param activation: Activation function of encoder/decoder intermediate layer, defaults to 'ReLU'
     :type activation: str, optional
     :param layer_norm_eps: Epsilon value in layer normalization components, defaults to 1e-5
     :type layer_norm_eps: float, optional
@@ -112,17 +112,17 @@ class EvolvableBERT(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            "tanh": nn.Tanh,
-            "identity": nn.Identity,
-            "relu": nn.ReLU,
-            "elu": nn.ELU,
-            "softsign": nn.Softsign,
-            "sigmoid": nn.Sigmoid,
-            "softplus": nn.Softplus,
-            "softmax": nn.Softmax,
-            "leakyrelu": nn.LeakyReLU,
-            "prelu": nn.PReLU,
-            "gelu": nn.GELU,
+            "Tanh": nn.Tanh,
+            "Identity": nn.Identity,
+            "ReLU": nn.ReLU,
+            "ELU": nn.ELU,
+            "Softsign": nn.Softsign,
+            "Sigmoid": nn.Sigmoid,
+            "Softplus": nn.Softplus,
+            "Softmax": nn.Softmax,
+            "LeakyReLU": nn.LeakyReLU,
+            "PReLU": nn.PReLU,
+            "GELU": nn.GELU,
         }
 
         return activation_functions[activation_names]()

@@ -306,17 +306,17 @@ def test_causal_self_attention_forward():
 # Returns nn.ReLU for activation name "ReLU".
 def test_returns_activation_mlp():
     activation_functions = {
-        "tanh": nn.Tanh,
-        "identity": nn.Identity,
-        "relu": nn.ReLU,
-        "elu": nn.ELU,
-        "softsign": nn.Softsign,
-        "sigmoid": nn.Sigmoid,
-        "softplus": nn.Softplus,
-        "softmax": nn.Softmax,
-        "leakyrelu": nn.LeakyReLU,
-        "prelu": nn.PReLU,
-        "gelu": new_gelu,
+        "Tanh": nn.Tanh,
+        "Identity": nn.Identity,
+        "ReLU": nn.ReLU,
+        "ELU": nn.ELU,
+        "Softsign": nn.Softsign,
+        "Sigmoid": nn.Sigmoid,
+        "Softplus": nn.Softplus,
+        "Softmax": nn.Softmax,
+        "LeakyReLU": nn.LeakyReLU,
+        "PReLU": nn.PReLU,
+        "GELU": new_gelu,
     }
 
     model = MLP(32, 0.1, 64)

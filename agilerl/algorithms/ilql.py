@@ -87,7 +87,7 @@ class ILQL(nn.Module):
             "n_head": 12,
             "dim_feedfwd": 3072,
             "block_size": 1024,
-            "activation": "gelu",
+            "activation": "GELU",
             "dropout": 0.1,
             "layer_norm_eps": 1e-5,
             "min_layers": 8,
