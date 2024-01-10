@@ -32,7 +32,7 @@ class EvolvableBERT(nn.Module):
     :type n_head: int, optional
     :param dropout: Dropout value, defaults to 0.1
     :type dropout: float, optional
-    :param activation: Activation function of encoder/decoder intermediate layer, defaults to 'ReLU'
+    :param activation: Activation function of encoder/decoder intermediate layer, defaults to 'relu'
     :type activation: str, optional
     :param layer_norm_eps: Epsilon value in layer normalization components, defaults to 1e-5
     :type layer_norm_eps: float, optional

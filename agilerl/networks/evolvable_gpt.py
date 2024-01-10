@@ -28,7 +28,7 @@ class EvolvableGPT(nn.Module):
     :type block_size: int, optional
     :param dropout: Dropout value, defaults to 0.0
     :type dropout: float, optional
-    :param activation: Activation function of transformer intermediate layer, defaults to 'GELU'
+    :param activation: Activation function of transformer intermediate layer, defaults to 'gelu'
     :type activation: str, optional
     :param layer_norm_eps: Epsilon value in layer normalization components, defaults to 1e-5
     :type layer_norm_eps: float, optional
@@ -53,7 +53,7 @@ class EvolvableGPT(nn.Module):
         dim_feedfwd: int = 3072,
         block_size: int = 1024,
         dropout: float = 0.0,
-        activation: str = "GELU",
+        activation: str = "gelu",
         layer_norm_eps: float = 1e-5,
         min_layers: int = 8,
         max_layers: int = 16,
@@ -163,17 +163,17 @@ class EvolvableGPT(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            "Tanh": nn.Tanh,
-            "Identity": nn.Identity,
-            "ReLU": nn.ReLU,
-            "ELU": nn.ELU,
-            "Softsign": nn.Softsign,
-            "Sigmoid": nn.Sigmoid,
-            "Softplus": nn.Softplus,
-            "Softmax": nn.Softmax,
-            "LeakyReLU": nn.LeakyReLU,
-            "PReLU": nn.PReLU,
-            "GELU": new_gelu,
+            "tanh": nn.Tanh,
+            "identity": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "softplus": nn.Softplus,
+            "softmax": nn.Softmax,
+            "leakyrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": new_gelu,
         }
 
         return activation_functions[activation_names]()
