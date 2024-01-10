@@ -807,17 +807,17 @@ class MLP(EvolvableMLP):
         :type activation_names: str
         """
         activation_functions = {
-            "Tanh": nn.Tanh,
-            "Identity": nn.Identity,
-            "ReLU": nn.ReLU,
-            "ELU": nn.ELU,
-            "Softsign": nn.Softsign,
-            "Sigmoid": nn.Sigmoid,
-            "Softplus": nn.Softplus,
-            "Softmax": nn.Softmax,
-            "LeakyReLU": nn.LeakyReLU,
-            "PReLU": nn.PReLU,
-            "GELU": new_gelu,
+            "tanh": nn.Tanh,
+            "identity": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "softplus": nn.Softplus,
+            "softmax": nn.Softmax,
+            "leakyrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": new_gelu,
         }
 
         return activation_functions[activation_names]()

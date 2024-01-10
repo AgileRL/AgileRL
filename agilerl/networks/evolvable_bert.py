@@ -112,17 +112,17 @@ class EvolvableBERT(nn.Module):
         :type activation_names: str
         """
         activation_functions = {
-            "Tanh": nn.Tanh,
-            "Identity": nn.Identity,
-            "ReLU": nn.ReLU,
-            "ELU": nn.ELU,
-            "Softsign": nn.Softsign,
-            "Sigmoid": nn.Sigmoid,
-            "Softplus": nn.Softplus,
-            "Softmax": nn.Softmax,
-            "LeakyReLU": nn.LeakyReLU,
-            "PReLU": nn.PReLU,
-            "GELU": nn.GELU,
+            "tanh": nn.Tanh,
+            "identity": nn.Identity,
+            "relu": nn.ReLU,
+            "elu": nn.ELU,
+            "softsign": nn.Softsign,
+            "sigmoid": nn.Sigmoid,
+            "softplus": nn.Softplus,
+            "softmax": nn.Softmax,
+            "leakyrelu": nn.LeakyReLU,
+            "prelu": nn.PReLU,
+            "gelu": nn.GELU,
         }
 
         return activation_functions[activation_names]()
