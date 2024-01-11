@@ -102,8 +102,8 @@ class VecEnv:
     def step(self, actions):
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
-            for agent_idx, possible_agent in enumerate(self.agents):
-                passed_actions_list[env_idx].append(actions[possible_agent][agent_idx])
+            for possible_agent in self.agents:
+                passed_actions_list[env_idx].append(actions[possible_agent][env_idx])
         self.step_async(passed_actions_list)
         return self.step_wait()
 
