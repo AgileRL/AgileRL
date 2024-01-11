@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from agilerl.algorithms.ilql import ILQL
+from agilerl.algorithms.ilql import ILQL, ILQL_Policy
 from agilerl.data.language_environment import Language_Observation
 from agilerl.data.rl_data import ConstantTokenReward, DataPoint, List_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset
@@ -578,3 +578,81 @@ def test_save_load_checkpoint(tmpdir):
     assert algo.cql_temp == 1.0
     assert algo.weight_decay == 0.0
     assert algo.device == "cpu"
+
+
+def test_init_policy():
+    List_RL_Dataset.__abstractmethods__ = set()
+
+    tokenizer = WordleTokenizer()
+    token_reward = ConstantTokenReward(1)
+    rl_ds = List_RL_Dataset(tokenizer, token_reward, 10)
+    net_config = {
+        "arch": "gpt",
+        "vocab_size": 12,
+        "n_layer": 2,
+        "n_embd": 12,
+        "n_head": 2,
+        "dim_feedfwd": 8,
+        "block_size": 8,
+        "activation": "GELU",
+        "dropout": 0.1,
+        "layer_norm_eps": 1e-5,
+        "min_layers": 8,
+        "max_layers": 16,
+        "bias": True,
+    }
+
+    algo = ILQL(rl_ds, net_config=net_config, double_q=True)
+
+    policy = ILQL_Policy(algo, "beam")
+
+    assert policy.iql_model == algo
+    assert policy.kind == "beam"
+    assert policy.generation_kwargs == {}
+    assert policy.kls_all == []
+    assert policy.logprobs_all == []
+
+
+def test_act():
+    List_RL_Dataset.__abstractmethods__ = set()
+    GeneralDataset.__abstractmethods__ = set()
+
+    class LangObs(Language_Observation):
+        def to_sequence(self, **kwargs):
+            return [("asdfg", None), ("zxcvb", 1)], True
+
+    lang_obs = LangObs()
+
+    tokenizer = WordleTokenizer()
+    token_reward = ConstantTokenReward(1)
+    rl_ds = List_RL_Dataset(tokenizer, token_reward, 8)
+    net_config = {
+        "arch": "gpt",
+        "vocab_size": 50,
+        "n_layer": 2,
+        "n_embd": 12,
+        "n_head": 2,
+        "dim_feedfwd": 8,
+        "block_size": 12,
+        "activation": "GELU",
+        "dropout": 0.1,
+        "layer_norm_eps": 1e-5,
+        "min_layers": 8,
+        "max_layers": 16,
+        "bias": True,
+    }
+
+    algo = ILQL(rl_ds, net_config=net_config, double_q=True)
+    algo.max_length = None
+
+    policy = ILQL_Policy(algo, "beam", beam_width=5)
+
+    action = policy.act(lang_obs)
+
+    assert isinstance(action, str)
+
+    policy = ILQL_Policy(algo, "sample")
+
+    action = policy.act(lang_obs)
+
+    assert isinstance(action, str)

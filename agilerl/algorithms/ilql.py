@@ -1288,7 +1288,9 @@ class ILQL_Policy:
             prefix_embs=prefix_embs,
             prefix_attn_mask=prefix_attn_mask,
             remove_prefix_position_embs=remove_prefix_position_embs,
-            is_causal=False,
+            qv_kwargs={"is_causal": False},
+            target_kwargs={"is_causal": False},
+            policy_kwargs={"is_causal": False},
         )["model_outputs"]
         kvs = {"qv": model_outputs["qv_model_outputs"]["past_key_values"]}
         if self.iql_model.actor_target is not None:
@@ -1566,7 +1568,9 @@ class ILQL_Policy:
             prefix_embs=prefix_embs,
             prefix_attn_mask=prefix_attn_mask,
             remove_prefix_position_embs=remove_prefix_position_embs,
-            is_causal=False,
+            qv_kwargs={"is_causal": False},
+            target_kwargs={"is_causal": False},
+            policy_kwargs={"is_causal": False},
         )["model_outputs"]
         kvs = {"qv": model_outputs["qv_model_outputs"]["past_key_values"]}
         if self.iql_model.actor_target is not None:
