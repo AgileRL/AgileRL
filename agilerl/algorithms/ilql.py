@@ -87,7 +87,7 @@ class ILQL(nn.Module):
             "n_head": 12,
             "dim_feedfwd": 3072,
             "block_size": 1024,
-            "activation": "gelu",
+            "activation": "GELU",
             "dropout": 0.1,
             "layer_norm_eps": 1e-5,
             "min_layers": 8,
@@ -1016,48 +1016,6 @@ class ILQL(nn.Module):
             action_mask,
         )
 
-    def next_score(
-        self,
-        tokens: torch.Tensor,
-        state: Any,
-        beta: float = 1.0,
-        exp_weights: bool = False,
-        clip_weight: Optional[float] = None,
-        logit_temp: float = 1.0,
-        logit_top_k: Optional[int] = None,
-        logit_top_p: Optional[float] = None,
-        include_logits: bool = False,
-        include_advantage: bool = True,
-    ) -> Tuple[torch.Tensor, Any]:
-        qv_kvs, policy_kvs, target_kvs, action_mask = state
-        action_mask *= (tokens != self.dataset.tokenizer.eoa_token_id).float()
-        action_mask += (tokens == self.dataset.tokenizer.eos_token_id).float()
-        action_mask = (action_mask > 0.0).float()
-        scores, model_outputs = self.score(
-            tokens.unsqueeze(1),
-            None,
-            None,
-            None,
-            qv_kwargs={"past_key_values": qv_kvs},
-            policy_kwargs={"past_key_values": policy_kvs},
-            target_kwargs={"past_key_values": target_kvs},
-            beta=beta,
-            exp_weights=exp_weights,
-            clip_weight=clip_weight,
-            logit_temp=logit_temp,
-            logit_top_k=logit_top_k,
-            logit_top_p=logit_top_p,
-            include_logits=include_logits,
-            include_advantage=include_advantage,
-            action_mask=action_mask,
-        )
-        return scores.squeeze(1), (
-            model_outputs["qv_model_outputs"]["past_key_values"],
-            model_outputs["policy_model_outputs"]["past_key_values"],
-            model_outputs["target_model_outputs"]["past_key_values"],
-            action_mask,
-        )
-
     def softUpdate(self):
         """Soft updates target networks."""
         for target_param, local_param in zip(
@@ -1135,6 +1093,13 @@ class ILQL(nn.Module):
             device=self.device,
         )
 
+        clone.v = self.v.clone().to(self.device)
+        clone.pi = self.pi.clone().to(self.device)
+        clone.q = self.q.clone().to(self.device)
+        clone.target_q = self.target_q.clone().to(self.device)
+        if self.double_q:
+            clone.q2 = self.q2.clone().to(self.device)
+            clone.target_q2 = self.target_q2.clone().to(self.device)
         clone.model = self.model.clone().to(self.device)
         clone.actor = self.actor.clone().to(self.device)
         clone.actor_target = self.actor_target.clone().to(self.device)
@@ -1161,6 +1126,22 @@ class ILQL(nn.Module):
                 "actor_state_dict": self.actor.state_dict(),
                 "actor_target_init_dict": self.actor_target.init_dict,
                 "actor_target_state_dict": self.actor_target.state_dict(),
+                "v_init_dict": self.v.init_dict,
+                "v_state_dict": self.v.state_dict(),
+                "pi_init_dict": self.pi.init_dict,
+                "pi_state_dict": self.pi.state_dict(),
+                "q_init_dict": self.q.init_dict,
+                "q_state_dict": self.q.state_dict(),
+                "target_q_init_dict": self.target_q.init_dict,
+                "target_q_state_dict": self.target_q.state_dict(),
+                "q2_init_dict": self.q2.init_dict if self.double_q else None,
+                "q2_state_dict": self.q.state_dict() if self.double_q else None,
+                "target_q2_init_dict": self.target_q2.init_dict
+                if self.double_q
+                else None,
+                "target_q2_state_dict": self.target_q2.state_dict()
+                if self.double_q
+                else None,
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "dataset": self.dataset,
                 "net_config": self.net_config,
@@ -1199,13 +1180,27 @@ class ILQL(nn.Module):
         :type path: string
         """
         checkpoint = torch.load(path)
+        self.double_q = checkpoint["double_q"]
         self.net_config = checkpoint["net_config"]
         self.model = EvolvableGPT(**checkpoint["model_init_dict"])
         self.actor = EvolvableGPT(**checkpoint["actor_init_dict"])
         self.actor_target = EvolvableGPT(**checkpoint["actor_target_init_dict"])
+        self.v = EvolvableMLP(**checkpoint["v_init_dict"])
+        self.pi = EvolvableMLP(**checkpoint["pi_init_dict"])
+        self.q = EvolvableMLP(**checkpoint["q_init_dict"])
+        self.target_q = EvolvableMLP(**checkpoint["target_q_init_dict"])
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
+        self.v.load_state_dict(checkpoint["v_state_dict"])
+        self.pi.load_state_dict(checkpoint["pi_state_dict"])
+        self.q.load_state_dict(checkpoint["q_state_dict"])
+        self.target_q.load_state_dict(checkpoint["target_q_state_dict"])
+        if self.double_q:
+            self.q2 = EvolvableMLP(**checkpoint["q2_init_dict"])
+            self.target_q2 = EvolvableMLP(**checkpoint["target_q2_init_dict"])
+            self.q2.load_state_dict(checkpoint["q2_state_dict"])
+            self.target_q2.load_state_dict(checkpoint["target_q2_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.batch_size = checkpoint["batch_size"]
         self.lr = checkpoint["lr"]
@@ -1221,7 +1216,6 @@ class ILQL(nn.Module):
         self.detach_v = checkpoint["detach_v"]
         self.detach_q = checkpoint["detach_q"]
         self.detach_pi = checkpoint["detach_pi"]
-        self.double_q = checkpoint["double_q"]
         self.per_token = checkpoint["per_token"]
         self.exp_weights = checkpoint["exp_weights"]
         self.dm_margin = checkpoint["dm_margin"]
@@ -1294,7 +1288,9 @@ class ILQL_Policy:
             prefix_embs=prefix_embs,
             prefix_attn_mask=prefix_attn_mask,
             remove_prefix_position_embs=remove_prefix_position_embs,
-            is_causal=False,
+            qv_kwargs={"is_causal": False},
+            target_kwargs={"is_causal": False},
+            policy_kwargs={"is_causal": False},
         )["model_outputs"]
         kvs = {"qv": model_outputs["qv_model_outputs"]["past_key_values"]}
         if self.iql_model.actor_target is not None:
@@ -1572,7 +1568,9 @@ class ILQL_Policy:
             prefix_embs=prefix_embs,
             prefix_attn_mask=prefix_attn_mask,
             remove_prefix_position_embs=remove_prefix_position_embs,
-            is_causal=False,
+            qv_kwargs={"is_causal": False},
+            target_kwargs={"is_causal": False},
+            policy_kwargs={"is_causal": False},
         )["model_outputs"]
         kvs = {"qv": model_outputs["qv_model_outputs"]["past_key_values"]}
         if self.iql_model.actor_target is not None:
