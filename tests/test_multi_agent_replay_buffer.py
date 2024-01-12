@@ -243,6 +243,32 @@ def test_sample_experiences_from_memory():
     assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
 
 
+# Can sample experiences from memory using sample method
+def test_sample_experiences_from_memory_images():
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    agent_ids = ["agent1", "agent2"]
+
+    buffer = MultiAgentReplayBuffer(memory_size, field_names, agent_ids)
+
+    state = {
+        "agent1": np.random.rand(3, 128, 128),
+        "agent2": np.random.rand(3, 128, 128),
+    }
+    action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
+    reward = {"agent1": np.array([6]), "agent2": np.array([7])}
+
+    buffer.save2memory(state, action, reward)
+
+    batch_size = 1
+    transition = buffer.sample(batch_size)
+
+    assert len(transition) == len(field_names)
+    assert transition[0]["agent1"].shape == (batch_size,) + state["agent1"].shape
+    assert transition[1]["agent1"].shape == (batch_size,) + action["agent1"].shape
+    assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
+
+
 # Can process a transition from experiences and return a dictionary of numpy arrays.
 def test_returns_np_transition_dictionary():
     memory_size = 100
@@ -376,6 +402,73 @@ def test_returns_np_transition_asingle_experience_dictionary():
     assert np.array_equal(transition["next_state"]["agent2"], np.array([[6]]))
     assert np.array_equal(transition["done"]["agent1"], np.array([[1]]))
     assert np.array_equal(transition["done"]["agent2"], np.array([[0]]))
+
+
+# Can process a transition from experiences and return a dictionary of numpy arrays.
+def test_returns_np_transition_dictionary_images():
+    memory_size = 100
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    agent_ids = ["agent1", "agent2"]
+
+    # Initialize the class object
+    buffer = MultiAgentReplayBuffer(
+        memory_size=memory_size, field_names=field_names, agent_ids=agent_ids
+    )
+
+    # Create some dummy experiences
+    experience1 = buffer.experience(
+        state={"agent1": np.random.rand(3, 128, 128), "agent2": np.array([4])},
+        action={"agent1": np.array([0]), "agent2": np.array([1])},
+        reward={"agent1": np.array([0]), "agent2": np.array([1])},
+        next_state={"agent1": np.random.rand(3, 128, 128), "agent2": np.array([6])},
+        done={"agent1": np.array([True]), "agent2": np.array([False])},
+    )
+    experience2 = buffer.experience(
+        state={"agent1": np.random.rand(3, 128, 128), "agent2": np.array([7])},
+        action={"agent1": np.array([1]), "agent2": np.array([0])},
+        reward={"agent1": np.array([1]), "agent2": np.array([0])},
+        next_state={"agent1": np.random.rand(3, 128, 128), "agent2": np.array([9])},
+        done={"agent1": np.array([False]), "agent2": np.array([True])},
+    )
+    experiences = [experience1, experience2]
+
+    # Call the method under test
+    transition = buffer._process_transition(experiences, np_array=True)
+
+    # Check the transition dictionary returned
+    assert isinstance(transition, dict)
+    assert set(transition.keys()) == set(field_names)
+    assert isinstance(transition["state"], dict)
+    assert isinstance(transition["action"], dict)
+    assert isinstance(transition["reward"], dict)
+    assert isinstance(transition["next_state"], dict)
+    assert isinstance(transition["done"], dict)
+    assert set(transition["state"].keys()) == set(agent_ids)
+    assert set(transition["action"].keys()) == set(agent_ids)
+    assert set(transition["reward"].keys()) == set(agent_ids)
+    assert set(transition["next_state"].keys()) == set(agent_ids)
+    assert set(transition["done"].keys()) == set(agent_ids)
+    assert isinstance(transition["state"]["agent1"], np.ndarray)
+    assert isinstance(transition["state"]["agent2"], np.ndarray)
+    assert isinstance(transition["action"]["agent1"], np.ndarray)
+    assert isinstance(transition["action"]["agent2"], np.ndarray)
+    assert isinstance(transition["reward"]["agent1"], np.ndarray)
+    assert isinstance(transition["reward"]["agent2"], np.ndarray)
+    assert isinstance(transition["next_state"]["agent1"], np.ndarray)
+    assert isinstance(transition["next_state"]["agent2"], np.ndarray)
+    assert isinstance(transition["done"]["agent1"], np.ndarray)
+    assert isinstance(transition["done"]["agent2"], np.ndarray)
+    assert transition["state"]["agent1"].shape == (len(experiences), 3, 128, 128)
+    assert transition["action"]["agent1"].shape == (len(experiences), 1)
+    assert transition["reward"]["agent1"].shape == (len(experiences), 1)
+    assert transition["next_state"]["agent1"].shape == (len(experiences), 3, 128, 128)
+    assert transition["done"]["agent1"].shape == (len(experiences), 1)
+    assert np.array_equal(transition["action"]["agent1"], np.array([[0], [1]]))
+    assert np.array_equal(transition["action"]["agent2"], np.array([[1], [0]]))
+    assert np.array_equal(transition["reward"]["agent1"], np.array([[0], [1]]))
+    assert np.array_equal(transition["reward"]["agent2"], np.array([[1], [0]]))
+    assert np.array_equal(transition["done"]["agent1"], np.array([[1], [0]]))
+    assert np.array_equal(transition["done"]["agent2"], np.array([[0], [1]]))
 
 
 # Can process a transition from experiences and return a dictionary of torch tensors.
