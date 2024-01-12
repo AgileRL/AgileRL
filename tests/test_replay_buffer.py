@@ -218,6 +218,35 @@ def test_sample_experiences_from_memory():
     assert experiences[2].shape == (batch_size, 1)
 
 
+# Can sample experiences from memory of desired batch size with sample method
+def test_sample_experiences_from_memory_images():
+    action_dim = 1
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    device = "cpu"
+
+    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+
+    # Add experiences to memory
+    buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 2, 3)
+    buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 5, 6)
+    buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 8, 9)
+
+    # Sample experiences from memory
+    batch_size = 2
+    experiences = buffer.sample(batch_size)
+
+    assert len(experiences[0]) == batch_size
+    assert len(experiences[1]) == batch_size
+    assert len(experiences[2]) == batch_size
+    assert isinstance(experiences[0], torch.Tensor)
+    assert experiences[0].shape == (batch_size, 3, 128, 128)
+    assert isinstance(experiences[1], torch.Tensor)
+    assert experiences[1].shape == (batch_size, action_dim)
+    assert isinstance(experiences[2], torch.Tensor)
+    assert experiences[2].shape == (batch_size, 1)
+
+
 def test_sample_experiences_from_memory_return_idx():
     action_dim = 1
     memory_size = 100
@@ -293,6 +322,31 @@ def test_process_single_transition_from_experiences():
 
     assert isinstance(transition["state"], torch.Tensor)
     assert transition["state"].shape == (len(experiences), 2)
+    assert isinstance(transition["action"], torch.Tensor)
+    assert transition["action"].shape == (len(experiences), action_dim)
+    assert isinstance(transition["reward"], torch.Tensor)
+    assert transition["reward"].shape == (len(experiences), 1)
+
+
+# Can process transition from experiences with _process_transition method
+def test_process_transition_from_experiences_images():
+    action_dim = 1
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    device = "cpu"
+
+    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+
+    # Create experiences
+    experience1 = buffer.experience(np.random.rand(3, 128, 128), 2, 3)
+    experience2 = buffer.experience(np.random.rand(3, 128, 128), 5, 6)
+    experiences = [experience1, experience2]
+
+    # Process transition from experiences
+    transition = buffer._process_transition(experiences)
+
+    assert isinstance(transition["state"], torch.Tensor)
+    assert transition["state"].shape == (len(experiences), 3, 128, 128)
     assert isinstance(transition["action"], torch.Tensor)
     assert transition["action"].shape == (len(experiences), action_dim)
     assert isinstance(transition["reward"], torch.Tensor)
@@ -397,6 +451,48 @@ def test_save_multiple_env_transitions():
     assert one_step_transition[1].shape == (num_envs, 4)
     assert one_step_transition[2].shape == (num_envs, 1)
     assert one_step_transition[3].shape == (num_envs, 4)
+    assert one_step_transition[4].shape == (num_envs, 1)
+
+
+# Can save vectorized environment transitions to memory
+def test_save_multiple_env_image_transitions():
+    action_dim = 4
+    memory_size = 10000
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    num_envs = 2
+    n_step = 2
+    gamma = 0.99
+
+    replay_buffer = MultiStepReplayBuffer(
+        action_dim, memory_size, field_names, num_envs, n_step, gamma
+    )
+
+    state = np.random.rand(num_envs, 3, 128, 128)
+    action = np.array([[0, 1, 0, 1], [1, 0, 1, 0]])
+    reward = np.array([[0.1], [0.5]])
+    next_state = np.random.rand(num_envs, 3, 128, 128)
+    done = np.array([[False], [True]])
+
+    replay_buffer.save2memory(
+        state, action, reward, next_state, done, is_vectorised=True
+    )
+
+    assert len(replay_buffer.memory) == 0
+    assert len(replay_buffer.n_step_buffers[0]) == 1
+    assert len(replay_buffer.n_step_buffers[1]) == 1
+
+    one_step_transition = replay_buffer.save2memoryVectEnvs(
+        state, action, reward, next_state, done
+    )
+
+    assert len(replay_buffer.memory) == num_envs
+    assert len(replay_buffer.n_step_buffers[0]) == n_step
+    assert len(replay_buffer.n_step_buffers[1]) == n_step
+    assert len(one_step_transition) == len(field_names)
+    assert one_step_transition[0].shape == (num_envs, 3, 128, 128)
+    assert one_step_transition[1].shape == (num_envs, 4)
+    assert one_step_transition[2].shape == (num_envs, 1)
+    assert one_step_transition[3].shape == (num_envs, 3, 128, 128)
     assert one_step_transition[4].shape == (num_envs, 1)
 
 
