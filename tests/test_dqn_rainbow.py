@@ -125,7 +125,7 @@ def test_initialize_dqn_with_cnn_accelerator():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     actor_network = None
     accelerator = Accelerator()
     wrap = True
@@ -141,7 +141,7 @@ def test_initialize_dqn_with_cnn_accelerator():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         actor_network=actor_network,
         accelerator=accelerator,
         wrap=wrap,
@@ -156,7 +156,7 @@ def test_initialize_dqn_with_cnn_accelerator():
     assert dqn.learn_step == learn_step
     assert dqn.gamma == gamma
     assert dqn.tau == tau
-    assert dqn.mut == mutation
+    assert dqn.mut == mut
     assert dqn.accelerator == accelerator
     assert dqn.index == index
     assert dqn.scores == []
@@ -552,7 +552,7 @@ def test_soft_update():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     actor_network = None
     device = "cpu"
     accelerator = None
@@ -568,7 +568,7 @@ def test_soft_update():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         actor_network=actor_network,
         device=device,
         accelerator=accelerator,
@@ -675,6 +675,9 @@ def test_clone_returns_identical_agent():
     one_hot = False
 
     dqn = RainbowDQN(state_dim, action_dim, one_hot)
+    dqn.fitness = [200, 200, 200]
+    dqn.scores = [94, 94, 94]
+    dqn.steps = [2500]
     clone_agent = dqn.clone()
 
     assert clone_agent.state_dim == dqn.state_dim
@@ -788,7 +791,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -849,7 +852,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -913,7 +916,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint

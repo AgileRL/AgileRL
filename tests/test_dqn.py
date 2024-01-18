@@ -127,7 +127,7 @@ def test_initialize_dqn_with_cnn_accelerator():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     double = True
     actor_network = None
     accelerator = Accelerator()
@@ -144,7 +144,7 @@ def test_initialize_dqn_with_cnn_accelerator():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         double=double,
         actor_network=actor_network,
         accelerator=accelerator,
@@ -160,7 +160,7 @@ def test_initialize_dqn_with_cnn_accelerator():
     assert dqn.learn_step == learn_step
     assert dqn.gamma == gamma
     assert dqn.tau == tau
-    assert dqn.mut == mutation
+    assert dqn.mut == mut
     assert dqn.accelerator == accelerator
     assert dqn.index == index
     assert dqn.scores == []
@@ -410,7 +410,7 @@ def test_soft_update():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     double = False
     actor_network = None
     device = "cpu"
@@ -427,7 +427,7 @@ def test_soft_update():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         double=double,
         actor_network=actor_network,
         device=device,
@@ -644,7 +644,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -705,7 +705,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -769,7 +769,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint

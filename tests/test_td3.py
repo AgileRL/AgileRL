@@ -182,7 +182,7 @@ def test_initialize_td3_with_cnn_accelerator():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     actor_network = None
     accelerator = Accelerator()
     wrap = True
@@ -199,7 +199,7 @@ def test_initialize_td3_with_cnn_accelerator():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         actor_network=actor_network,
         accelerator=accelerator,
         wrap=wrap,
@@ -215,7 +215,7 @@ def test_initialize_td3_with_cnn_accelerator():
     assert td3.learn_step == learn_step
     assert td3.gamma == gamma
     assert td3.tau == tau
-    assert td3.mut == mutation
+    assert td3.mut == mut
     assert td3.accelerator == accelerator
     assert td3.index == index
     assert td3.scores == []
@@ -620,7 +620,7 @@ def test_soft_update():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     actor_network = None
     device = "cpu"
     accelerator = None
@@ -637,7 +637,7 @@ def test_soft_update():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         actor_network=actor_network,
         device=device,
         accelerator=accelerator,
@@ -775,6 +775,9 @@ def test_clone_returns_identical_agent():
     max_action = 1
 
     td3 = TD3(state_dim, action_dim, one_hot, max_action)
+    td3.fitness = [200, 200, 200]
+    td3.scores = [94, 94, 94]
+    td3.steps = [2500]
     clone_agent = td3.clone()
 
     assert clone_agent.state_dim == td3.state_dim
@@ -961,7 +964,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -1044,7 +1047,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -1149,7 +1152,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
