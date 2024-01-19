@@ -805,6 +805,9 @@ class MATD3:
                             else r
                         )
                     score = sum(agent_reward.values())
+                    if not isinstance(env, PettingZooVectorizationParallelWrapper):
+                        if any(done.values()) or all(trunc.values()):
+                            break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

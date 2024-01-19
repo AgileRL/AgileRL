@@ -705,7 +705,7 @@ class MADDPG:
                         action = discrete_action
                     else:
                         action = cont_actions
-                    state, reward, done, trunc, info = env.step(action)
+                    state, reward, done, trunc, info = env.step(action)                        
                     for agent_id, r in reward.items():
                         # agent_reward[agent_id] += r
                         agent_reward[agent_id] += (
@@ -714,6 +714,9 @@ class MADDPG:
                             else r
                         )
                     score = sum(agent_reward.values())
+                    if not isinstance(env, PettingZooVectorizationParallelWrapper):
+                        if any(done.values()) or all(trunc.values()):
+                            break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
