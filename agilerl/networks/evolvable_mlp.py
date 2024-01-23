@@ -315,6 +315,7 @@ class EvolvableMLP(nn.Module):
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,
+            "feature_hidden_size": self.feature_hidden_size,
             "num_atoms": self.num_atoms,
             "mlp_activation": self.mlp_activation,
             "mlp_output_activation": self.mlp_output_activation,
