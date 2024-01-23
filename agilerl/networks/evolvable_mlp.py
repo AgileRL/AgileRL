@@ -224,14 +224,8 @@ class EvolvableMLP(nn.Module):
                 feature_net = feature_net.to(self.device)
 
         value_net, advantage_net = None, None
-        if self.rainbow:
-            ####
-            # feature_net = nn.Sequential(
-            #     nn.Linear(self.num_inputs, 128),
-            #     nn.ReLU()
-            # )
-            # feature_net = feature_net.to(self.device)
 
+        if self.rainbow:
             feature_net = self.create_mlp(
                 input_size=self.num_inputs,
                 output_size=self.feature_hidden_size[-1],
@@ -240,19 +234,18 @@ class EvolvableMLP(nn.Module):
                 output_activation=self.mlp_output_activation,
                 rainbow_feature_net=True,
             )
-
             value_net = self.create_mlp(
-                input_size=self.feature_hidden_size[-1],  # self.hidden_size[-1],
+                input_size=self.feature_hidden_size[-1],
                 output_size=self.num_atoms,
-                hidden_size=self.hidden_size,  # [self.hidden_size[-1]],
+                hidden_size=self.hidden_size,
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
             )
             advantage_net = self.create_mlp(
-                input_size=self.feature_hidden_size[-1],  # self.hidden_size[-1],
+                input_size=self.feature_hidden_size[-1],
                 output_size=self.num_atoms * self.num_outputs,
-                hidden_size=self.hidden_size,  # [self.hidden_size[-1]],
+                hidden_size=self.hidden_size,
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
@@ -315,6 +308,7 @@ class EvolvableMLP(nn.Module):
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,
+            "feature_hidden_size": self.feature_hidden_size,
             "num_atoms": self.num_atoms,
             "mlp_activation": self.mlp_activation,
             "mlp_output_activation": self.mlp_output_activation,
