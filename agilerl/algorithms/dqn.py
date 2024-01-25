@@ -1,4 +1,5 @@
 import copy
+import inspect
 import random
 
 import dill
@@ -6,7 +7,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import inspect
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
@@ -205,8 +205,6 @@ class DQN:
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        print(state.shape)
-        print(state)
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
             state = state.to(self.device)
@@ -250,8 +248,6 @@ class DQN:
                 )
                 action = np.argmax(masked_action_values, axis=-1)
 
-        print("HERE is the action", action, type(action))
-
         return action
 
     def learn(self, experiences):
@@ -261,7 +257,6 @@ class DQN:
         :type state: list[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
-        print(states.shape, actions.shape, rewards.shape, dones.shape)
         if self.accelerator is not None:
             states = states.to(self.accelerator.device)
             actions = actions.to(self.accelerator.device)
@@ -304,7 +299,6 @@ class DQN:
 
         # soft update target network
         self.softUpdate()
-        print("Ross", loss.item(), type(loss.item()))
         return loss.item()
 
     def softUpdate(self):
@@ -362,14 +356,11 @@ class DQN:
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
-        # DQN agent must have the following guarded attributes
-        # actor, actor_target, optmizer
-
         input_args = self.inspect_attributes(input_args_only=True)
-        input_args['wrap'] = wrap
+        input_args["wrap"] = wrap
 
         if index is None:
-            input_args['index'] = self.index
+            input_args["index"] = self.index
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
@@ -397,27 +388,38 @@ class DQN:
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(clone_attr, torch.Tensor):
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
                     if torch.equal(attr, clone_attr):
-                        setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
                 else:
                     if getattr(self, attribute) != getattr(clone, attribute):
-                        setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
 
         return clone
-    
+
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not(inspect.isroutine(a)))
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
         guarded_attributes = ["actor", "actor_target", "optimizer", "optimizer_type"]
 
         # Exclude private and built-in attributes
-        attributes = [a for a in attributes if not(a[0].startswith('__') and a[0].endswith('__'))]
+        attributes = [
+            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
+        ]
 
         if input_args_only:
             constructor_params = inspect.signature(self.__init__).parameters.keys()
-            print(constructor_params)
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes and k in constructor_params}
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in guarded_attributes and k in constructor_params
+            }
         else:
             # Remove the algo specific guarded variables
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
@@ -450,7 +452,7 @@ class DQN:
             "actor_state_dict": self.actor.state_dict(),
             "actor_target_init_dict": self.actor_target.init_dict,
             "actor_target_state_dict": self.actor_target.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict()
+            "optimizer_state_dict": self.optimizer.state_dict(),
         }
 
         attribute_dict.update(network_info)
@@ -460,16 +462,23 @@ class DQN:
             path,
             pickle_module=dill,
         )
-        
+
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from
         :type path: string
         """
-        network_info = ["actor_state_dict", "actor_target_state_dict", "optimizer_state_dict", 
-                              "actor_init_dict", "actor_target_init_dict", "net_config", "lr"]
-        
+        network_info = [
+            "actor_state_dict",
+            "actor_target_state_dict",
+            "optimizer_state_dict",
+            "actor_init_dict",
+            "actor_target_init_dict",
+            "net_config",
+            "lr",
+        ]
+
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
@@ -491,8 +500,8 @@ class DQN:
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         for attribute in checkpoint.keys():
-          if not attribute in network_info:
-            setattr(self, attribute, checkpoint[attribute])
+            if attribute not in network_info:
+                setattr(self, attribute, checkpoint[attribute])
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -515,33 +524,26 @@ class DQN:
         actor_target_state_dict = checkpoint.pop("actor_target_state_dict")
         optimizer_state_dict = checkpoint.pop("optimizer_state_dict")
 
-        checkpoint['device'] = device
-        checkpoint['accelerator'] = accelerator 
+        checkpoint["device"] = device
+        checkpoint["accelerator"] = accelerator
 
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {k: v for k, v in checkpoint.items() if k in constructor_params}
-
+        class_init_dict = {
+            k: v for k, v in checkpoint.items() if k in constructor_params
+        }
 
         if checkpoint["net_config"] is not None:
-            agent = cls(
-                **class_init_dict
-            )
+            agent = cls(**class_init_dict)
             agent.arch = checkpoint["net_config"]["arch"]
             if agent.arch == "mlp":
                 agent.actor = EvolvableMLP(**actor_init_dict)
-                agent.actor_target = EvolvableMLP(
-                    **actor_target_init_dict
-                )
+                agent.actor_target = EvolvableMLP(**actor_target_init_dict)
             elif agent.arch == "cnn":
                 agent.actor = EvolvableCNN(**actor_init_dict)
-                agent.actor_target = EvolvableCNN(
-                    **actor_target_init_dict
-                )
+                agent.actor_target = EvolvableCNN(**actor_target_init_dict)
         else:
             class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
-            agent = cls(
-                **class_init_dict
-            )
+            agent = cls(**class_init_dict)
             agent.actor_target = MakeEvolvable(**actor_target_init_dict)
 
         agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
@@ -553,7 +555,6 @@ class DQN:
             agent.wrap_models()
 
         for attribute in agent.inspect_attributes().keys():
-            #if hasattr(agent, attribute) and getattr(agent, attribute) != checkpoint[attribute]:
             setattr(agent, attribute, checkpoint[attribute])
 
         return agent

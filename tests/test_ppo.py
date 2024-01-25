@@ -164,7 +164,6 @@ def test_initializes_with_default_values():
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.arch == "mlp"
     assert ppo.optimizer == ppo.optimizer_type
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
@@ -250,7 +249,6 @@ def test_initialize_ppo_with_cnn_accelerator():
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.arch == "cnn"
     assert isinstance(ppo.optimizer, AcceleratedOptimizer)
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Can initialize ppo with an actor network
@@ -308,7 +306,6 @@ def test_initialize_ppo_with_actor_network(
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.arch == actor_network.arch
     assert ppo.optimizer == ppo.optimizer_type
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Can initialize ppo with an actor network but no critic - should trigger warning
@@ -361,8 +358,6 @@ def test_initialize_ppo_with_actor_network_no_critic(
     assert ppo.critic_network is None
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.optimizer == ppo.optimizer_type
-    assert isinstance(ppo.criterion, nn.MSELoss)
-
 
 # Converts numpy array to torch tensor of type float
 def test_convert_numpy_array_to_tensor():

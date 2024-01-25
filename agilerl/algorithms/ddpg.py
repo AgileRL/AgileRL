@@ -1,7 +1,7 @@
 import copy
+import inspect
 import random
 import warnings
-import inspect 
 
 import dill
 import numpy as np
@@ -455,14 +455,12 @@ class DDPG:
         :type index: int, optional
         """
         input_args = self.inspect_attributes(input_args_only=True)
-        input_args['wrap'] = wrap
+        input_args["wrap"] = wrap
 
         if index is None:
-            input_args['index'] = self.index
+            input_args["index"] = self.index
 
-        clone = type(self)(
-            **input_args
-        )
+        clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
@@ -519,29 +517,47 @@ class DDPG:
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(clone_attr, torch.Tensor):
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
                     if torch.equal(attr, clone_attr):
-                        setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
                 else:
                     if getattr(self, attribute) != getattr(clone, attribute):
-                        setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
 
         return clone
-    
+
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not(inspect.isroutine(a)))
-        guarded_attributes = ["actor", "critic", "actor_target", "critic_target", 
-                              "actor_optimizer", "critic_optimizer", "actor_optimizer_type",
-                              "critic_optimizer_type"]
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        guarded_attributes = [
+            "actor",
+            "critic",
+            "actor_target",
+            "critic_target",
+            "actor_optimizer",
+            "critic_optimizer",
+            "actor_optimizer_type",
+            "critic_optimizer_type",
+        ]
 
         # Exclude private and built-in attributes
-        attributes = [a for a in attributes if not(a[0].startswith('__') and a[0].endswith('__'))]
+        attributes = [
+            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
+        ]
 
         if input_args_only:
             constructor_params = inspect.signature(self.__init__).parameters.keys()
-            print(constructor_params)
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes and k in constructor_params}
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in guarded_attributes and k in constructor_params
+            }
         else:
             # Remove the algo specific guarded variables
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
@@ -593,8 +609,8 @@ class DDPG:
             "critic_target_init_dict": self.critic_target.init_dict,
             "critic_target_state_dict": self.critic_target.state_dict(),
             "actor_optimizer_state_dict": self.actor_optimizer.state_dict(),
-            "critic_optimizer_state_dict": self.critic_optimizer.state_dict()
-        } 
+            "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
+        }
 
         attribute_dict.update(network_info)
 
@@ -610,11 +626,21 @@ class DDPG:
         :param path: Location to load checkpoint from
         :type path: string
         """
-        network_info = ["actor_state_dict", "actor_target_state_dict", "actor_optimizer_state_dict", 
-                        "actor_init_dict", "actor_target_init_dict", "critic_state_dict", 
-                        "critic_target_state_dict", "critic_optimizer_state_dict", 
-                        "critic_init_dict", "critic_target_init_dict","net_config", "lr"]
-        
+        network_info = [
+            "actor_state_dict",
+            "actor_target_state_dict",
+            "actor_optimizer_state_dict",
+            "actor_init_dict",
+            "actor_target_init_dict",
+            "critic_state_dict",
+            "critic_target_state_dict",
+            "critic_optimizer_state_dict",
+            "critic_init_dict",
+            "critic_target_init_dict",
+            "net_config",
+            "lr",
+        ]
+
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
@@ -642,9 +668,8 @@ class DDPG:
         self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
 
         for attribute in checkpoint.keys():
-          if not attribute in network_info:
-            setattr(self, attribute, checkpoint[attribute])
-        
+            if attribute not in network_info:
+                setattr(self, attribute, checkpoint[attribute])
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -674,41 +699,31 @@ class DDPG:
         critic_target_state_dict = checkpoint.pop("critic_target_state_dict")
         critic_optimizer_state_dict = checkpoint.pop("critic_optimizer_state_dict")
 
-        checkpoint['device'] = device
-        checkpoint['accelerator'] = accelerator 
+        checkpoint["device"] = device
+        checkpoint["accelerator"] = accelerator
 
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {k: v for k, v in checkpoint.items() if k in constructor_params}
+        class_init_dict = {
+            k: v for k, v in checkpoint.items() if k in constructor_params
+        }
 
         if checkpoint["net_config"] is not None:
-            agent = cls(
-                **class_init_dict
-            )
+            agent = cls(**class_init_dict)
             agent.arch = checkpoint["net_config"]["arch"]
             if agent.arch == "mlp":
                 agent.actor = EvolvableMLP(**actor_init_dict)
-                agent.actor_target = EvolvableMLP(
-                    **actor_target_init_dict
-                )
+                agent.actor_target = EvolvableMLP(**actor_target_init_dict)
                 agent.critic = EvolvableMLP(**critic_init_dict)
-                agent.critic_target = EvolvableMLP(
-                    **critic_target_init_dict
-                )
+                agent.critic_target = EvolvableMLP(**critic_target_init_dict)
             elif agent.arch == "cnn":
                 agent.actor = EvolvableCNN(**actor_init_dict)
-                agent.actor_target = EvolvableCNN(
-                    **actor_target_init_dict
-                )
+                agent.actor_target = EvolvableCNN(**actor_target_init_dict)
                 agent.critic = EvolvableCNN(**critic_init_dict)
-                agent.critic_target = EvolvableCNN(
-                    **critic_target_init_dict
-                )
+                agent.critic_target = EvolvableCNN(**critic_target_init_dict)
         else:
             class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
             class_init_dict["critic_network"] = MakeEvolvable(**critic_init_dict)
-            agent = cls(
-                **class_init_dict
-            )
+            agent = cls(**class_init_dict)
             agent.actor_target = MakeEvolvable(**actor_target_init_dict)
             agent.critic_target = MakeEvolvable(**critic_target_init_dict)
 
@@ -720,15 +735,12 @@ class DDPG:
         agent.critic_optimizer = optim.Adam(agent.critic.parameters(), lr=agent.lr)
         agent.critic.load_state_dict(critic_state_dict)
         agent.critic_target.load_state_dict(critic_target_state_dict)
-        agent.critic_optimizer.load_state_dict(
-            critic_optimizer_state_dict
-        )
+        agent.critic_optimizer.load_state_dict(critic_optimizer_state_dict)
 
         if accelerator is not None:
             agent.wrap_models()
 
         for attribute in agent.inspect_attributes().keys():
-            #f hasattr(agent, attribute) and getattr(agent, attribute) != checkpoint[attribute]:
             setattr(agent, attribute, checkpoint[attribute])
 
         return agent

@@ -705,7 +705,7 @@ class MADDPG:
                         action = discrete_action
                     else:
                         action = cont_actions
-                    state, reward, done, trunc, info = env.step(action)                        
+                    state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
                         # agent_reward[agent_id] += r
                         agent_reward[agent_id] += (

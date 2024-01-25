@@ -502,7 +502,7 @@ def train_off_policy(
                 avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
                 agents = [agent.index for agent in pop]
                 num_steps = [agent.steps[-1] for agent in pop]
-                muts = [agent.mutation for agent in pop]
+                muts = [agent.mut for agent in pop]
                 pbar.update(0)
 
                 print(

@@ -344,7 +344,6 @@ def train_multi_agent(
                     )
                     for agent_id in env.agents
                 ]
-                # print("SCROES", scores)
                 score = sum(scores)
             else:
                 score = sum(agent_reward.values())
