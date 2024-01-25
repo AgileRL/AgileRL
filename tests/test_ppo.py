@@ -359,6 +359,7 @@ def test_initialize_ppo_with_actor_network_no_critic(
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.optimizer == ppo.optimizer_type
 
+
 # Converts numpy array to torch tensor of type float
 def test_convert_numpy_array_to_tensor():
     state = np.array([1, 2, 3, 4])
