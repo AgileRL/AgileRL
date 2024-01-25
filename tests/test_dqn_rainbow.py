@@ -16,6 +16,13 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
+class DummyRainbowDQN(RainbowDQN):
+    def __init__(self, state_dim, action_dim, one_hot, *args, **kwargs):
+        super().__init__(state_dim, action_dim, one_hot, *args, **kwargs)
+
+        self.tensor_test = torch.randn(1)
+
+
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
@@ -674,10 +681,11 @@ def test_clone_returns_identical_agent():
     action_dim = 2
     one_hot = False
 
-    dqn = RainbowDQN(state_dim, action_dim, one_hot)
+    dqn = DummyRainbowDQN(state_dim, action_dim, one_hot)
     dqn.fitness = [200, 200, 200]
     dqn.scores = [94, 94, 94]
     dqn.steps = [2500]
+    dqn.tensor_attribute = torch.randn(1)
     clone_agent = dqn.clone()
 
     assert clone_agent.state_dim == dqn.state_dim
@@ -701,6 +709,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+    assert clone_agent.tensor_attribute == dqn.tensor_attribute
+    assert clone_agent.tensor_test == dqn.tensor_test
 
     accelerator = Accelerator()
     dqn = RainbowDQN(state_dim, action_dim, one_hot, accelerator=accelerator)

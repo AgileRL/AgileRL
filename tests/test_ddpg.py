@@ -16,6 +16,13 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
+class DummyDDPG(DDPG):
+    def __init__(self, state_dim, action_dim, one_hot, *args, **kwargs):
+        super().__init__(state_dim, action_dim, one_hot, *args, **kwargs)
+
+        self.tensor_test = torch.randn(1)
+
+
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
@@ -623,6 +630,7 @@ def test_clone_returns_identical_agent():
     ddpg.fitness = [200, 200, 200]
     ddpg.scores = [94, 94, 94]
     ddpg.steps = [2500]
+    ddpg.tensor_attribute = torch.randn(1)
     clone_agent = ddpg.clone()
 
     assert clone_agent.state_dim == ddpg.state_dim
@@ -656,6 +664,7 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == ddpg.fitness
     assert clone_agent.steps == ddpg.steps
     assert clone_agent.scores == ddpg.scores
+    assert clone_agent.tensor_attribute == ddpg.tensor_attribute
 
     accelerator = Accelerator()
     ddpg = DDPG(state_dim, action_dim, one_hot, accelerator=accelerator)

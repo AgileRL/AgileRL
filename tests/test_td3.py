@@ -16,6 +16,13 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
+class DummyTD3(TD3):
+    def __init__(self, state_dim, action_dim, one_hot, *args, **kwargs):
+        super().__init__(state_dim, action_dim, one_hot, *args, **kwargs)
+
+        self.tensor_test = torch.randn(1)
+
+
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
@@ -774,10 +781,11 @@ def test_clone_returns_identical_agent():
     one_hot = False
     max_action = 1
 
-    td3 = TD3(state_dim, action_dim, one_hot, max_action)
+    td3 = DummyTD3(state_dim, action_dim, one_hot, max_action)
     td3.fitness = [200, 200, 200]
     td3.scores = [94, 94, 94]
     td3.steps = [2500]
+    td3.tensor_attribute = torch.randn(1)
     clone_agent = td3.clone()
 
     assert clone_agent.state_dim == td3.state_dim
@@ -819,6 +827,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
     assert clone_agent.scores == td3.scores
+    assert clone_agent.tensor_attribute == td3.tensor_attribute
+    assert clone_agent.tensor_test == td3.tensor_test
 
     accelerator = Accelerator()
     td3 = TD3(state_dim, action_dim, one_hot, max_action, accelerator=accelerator)

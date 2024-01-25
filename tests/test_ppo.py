@@ -16,6 +16,17 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
+class DummyPPO(PPO):
+    def __init__(
+        self, state_dim, action_dim, one_hot, discrete_actions, *args, **kwargs
+    ):
+        super().__init__(
+            state_dim, action_dim, one_hot, discrete_actions, *args, **kwargs
+        )
+
+        self.tensor_test = torch.randn(1)
+
+
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
@@ -657,10 +668,11 @@ def test_clone_returns_identical_agent():
     one_hot = False
     discrete_actions = True
 
-    ppo = PPO(state_dim, action_dim, one_hot, discrete_actions)
+    ppo = DummyPPO(state_dim, action_dim, one_hot, discrete_actions)
     ppo.fitness = [200, 200, 200]
     ppo.scores = [94, 94, 94]
     ppo.steps = [2500]
+    ppo.tensor_attribute = torch.randn(1)
     clone_agent = ppo.clone()
 
     assert clone_agent.state_dim == ppo.state_dim
@@ -689,6 +701,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.tensor_attribute == ppo.tensor_attribute
+    assert clone_agent.tensor_test == ppo.tensor_test
 
     accelerator = Accelerator()
     ppo = PPO(state_dim, action_dim, one_hot, discrete_actions, accelerator=accelerator)

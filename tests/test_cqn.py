@@ -15,6 +15,13 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
+class DummyCQN(CQN):
+    def __init__(self, state_dim, action_dim, one_hot, *args, **kwargs):
+        super().__init__(state_dim, action_dim, one_hot, *args, **kwargs)
+
+        self.tensor_test = torch.randn(1)
+
+
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
@@ -126,7 +133,7 @@ def test_initialize_cqn_with_cnn_accelerator():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     double = True
     actor_network = None
     accelerator = Accelerator()
@@ -143,7 +150,7 @@ def test_initialize_cqn_with_cnn_accelerator():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         double=double,
         actor_network=actor_network,
         accelerator=accelerator,
@@ -159,7 +166,7 @@ def test_initialize_cqn_with_cnn_accelerator():
     assert cqn.learn_step == learn_step
     assert cqn.gamma == gamma
     assert cqn.tau == tau
-    assert cqn.mut == mutation
+    assert cqn.mut == mut
     assert cqn.accelerator == accelerator
     assert cqn.index == index
     assert cqn.scores == []
@@ -355,7 +362,7 @@ def test_soft_update():
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
-    mutation = None
+    mut = None
     double = False
     actor_network = None
     device = "cpu"
@@ -372,7 +379,7 @@ def test_soft_update():
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
-        mutation=mutation,
+        mut=mut,
         double=double,
         actor_network=actor_network,
         device=device,
@@ -479,7 +486,8 @@ def test_clone_returns_identical_agent():
     action_dim = 2
     one_hot = False
 
-    cqn = CQN(state_dim, action_dim, one_hot)
+    cqn = DummyCQN(state_dim, action_dim, one_hot)
+    cqn.tensor_attribute = torch.randn(1)
     clone_agent = cqn.clone()
 
     assert clone_agent.state_dim == cqn.state_dim
@@ -503,6 +511,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == cqn.fitness
     assert clone_agent.steps == cqn.steps
     assert clone_agent.scores == cqn.scores
+    assert clone_agent.tensor_attribute == cqn.tensor_attribute
+    assert clone_agent.tensor_test == cqn.tensor_test
 
     accelerator = Accelerator()
     cqn = CQN(state_dim, action_dim, one_hot, accelerator=accelerator)
@@ -589,7 +599,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -650,7 +660,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -714,7 +724,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint

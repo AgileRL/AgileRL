@@ -391,15 +391,17 @@ class DQN:
                 if isinstance(attr, torch.Tensor) or isinstance(
                     clone_attr, torch.Tensor
                 ):
-                    if torch.equal(attr, clone_attr):
+                    if not torch.equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
                 else:
-                    if getattr(self, attribute) != getattr(clone, attribute):
+                    if attr != clone_attr:
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
         return clone
 
