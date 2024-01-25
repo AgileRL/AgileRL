@@ -236,6 +236,7 @@ def train_on_policy(
                     state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
                 action, log_prob, _, value = agent.getAction(state)
+
                 if not is_vectorised:
                     action = action[0]
                     log_prob = log_prob[0]

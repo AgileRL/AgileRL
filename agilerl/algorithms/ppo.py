@@ -1,4 +1,5 @@
 import copy
+import inspect
 
 import dill
 import numpy as np
@@ -35,8 +36,8 @@ class PPO:
     :type gamma: float, optional
     :param gae_lambda: Lambda for general advantage estimation, defaults to 0.95
     :type gae_lambda: float, optional
-    :param mutation: Most recent mutation to agent, defaults to None
-    :type mutation: str, optional
+    :param mut: Most recent mutation to agent, defaults to None
+    :type mut: str, optional
     :param action_std_init: Initial action standard deviation, defaults to 0.6
     :type action_std_init: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
@@ -75,7 +76,7 @@ class PPO:
         lr=1e-4,
         gamma=0.99,
         gae_lambda=0.95,
-        mutation=None,
+        mut=None,
         action_std_init=0.6,
         clip_coef=0.2,
         ent_coef=0.01,
@@ -169,7 +170,7 @@ class PPO:
         self.lr = lr
         self.gamma = gamma
         self.gae_lambda = gae_lambda
-        self.mut = mutation
+        self.mut = mut
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef
         self.ent_coef = ent_coef
@@ -299,8 +300,6 @@ class PPO:
             self.actor = self.actor.to(self.device)
             self.critic = self.critic.to(self.device)
             self.optimizer = self.optimizer_type
-
-        self.criterion = nn.MSELoss()
 
     def prepare_state(self, state):
         """Prepares state for forward pass through neural network.
@@ -562,34 +561,14 @@ class PPO:
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
-        if index is None:
-            index = self.index
+        input_args = self.inspect_attributes(input_args_only=True)
+        input_args["wrap"] = wrap
 
-        clone = type(self)(
-            state_dim=self.state_dim,
-            action_dim=self.action_dim,
-            one_hot=self.one_hot,
-            discrete_actions=self.discrete_actions,
-            index=index,
-            net_config=self.net_config,
-            batch_size=self.batch_size,
-            lr=self.lr,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            action_std_init=self.action_std_init,
-            clip_coef=self.clip_coef,
-            ent_coef=self.ent_coef,
-            vf_coef=self.vf_coef,
-            max_grad_norm=self.max_grad_norm,
-            target_kl=self.target_kl,
-            update_epochs=self.update_epochs,
-            actor_network=self.actor_network,
-            critic_network=self.critic_network,
-            mutation=self.mut,
-            device=self.device,
-            accelerator=self.accelerator,
-            wrap=wrap,
-        )
+        if index is None:
+            input_args["index"] = self.index
+        clone = type(self)(**input_args)
+
+        clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
@@ -625,11 +604,48 @@ class PPO:
             clone.critic = critic.to(self.device)
             clone.optimizer = optimizer
 
-        clone.fitness = copy.deepcopy(self.fitness)
-        clone.steps = copy.deepcopy(self.steps)
-        clone.scores = copy.deepcopy(self.scores)
+        for attribute in self.inspect_attributes().keys():
+            if hasattr(self, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                else:
+                    if attr != clone_attr:
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
         return clone
+
+    def inspect_attributes(self, input_args_only=False):
+        # Get all attributes of the current object
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        guarded_attributes = ["actor", "critic", "optimizer", "optimizer_type"]
+
+        # Exclude private and built-in attributes
+        attributes = [
+            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
+        ]
+
+        if input_args_only:
+            constructor_params = inspect.signature(self.__init__).parameters.keys()
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in guarded_attributes and k in constructor_params
+            }
+        else:
+            # Remove the algo specific guarded variables
+            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
+
+        return attributes
 
     def wrap_models(self):
         if self.accelerator is not None:
@@ -649,35 +665,21 @@ class PPO:
         :param path: Location to save checkpoint at
         :type path: string
         """
+
+        attribute_dict = self.inspect_attributes()
+
+        network_info = {
+            "actor_init_dict": self.actor.init_dict,
+            "actor_state_dict": self.actor.state_dict(),
+            "critic_init_dict": self.critic.init_dict,
+            "critic_state_dict": self.critic.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
+
+        attribute_dict.update(network_info)
+
         torch.save(
-            {
-                "state_dim": self.state_dim,
-                "action_dim": self.action_dim,
-                "one_hot": self.one_hot,
-                "discrete_actions": self.discrete_actions,
-                "actor_init_dict": self.actor.init_dict,
-                "actor_state_dict": self.actor.state_dict(),
-                "critic_init_dict": self.critic.init_dict,
-                "critic_state_dict": self.critic.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "net_config": self.net_config,
-                "batch_size": self.batch_size,
-                "lr": self.lr,
-                "gamma": self.gamma,
-                "gae_lambda": self.gae_lambda,
-                "action_std_init": self.action_std_init,
-                "clip_coef": self.clip_coef,
-                "ent_coef": self.ent_coef,
-                "vf_coef": self.vf_coef,
-                "max_grad_norm": self.max_grad_norm,
-                "target_kl": self.target_kl,
-                "update_epochs": self.update_epochs,
-                "mutation": self.mut,
-                "index": self.index,
-                "scores": self.scores,
-                "fitness": self.fitness,
-                "steps": self.steps,
-            },
+            attribute_dict,
             path,
             pickle_module=dill,
         )
@@ -688,19 +690,28 @@ class PPO:
         :param path: Location to load checkpoint from
         :type path: string
         """
+        network_info = [
+            "actor_state_dict",
+            "critic_state_dict",
+            "optimizer_state_dict",
+            "actor_init_dict",
+            "xritic_init_dict",
+            "net_config",
+            "lr",
+        ]
+
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
             self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
-                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-                self.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
+                network_class = EvolvableMLP
             elif self.arch == "cnn":
-                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-                self.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+                network_class = EvolvableCNN
         else:
-            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
-            self.critic = MakeEvolvable(**checkpoint["critic_init_dict"])
+            network_class = MakeEvolvable
+        self.actor = network_class(**checkpoint["actor_init_dict"])
+        self.critic = network_class(**checkpoint["critic_init_dict"])
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(
             [
@@ -711,22 +722,10 @@ class PPO:
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.critic.load_state_dict(checkpoint["critic_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.discrete_actions = checkpoint["discrete_actions"]
-        self.batch_size = checkpoint["batch_size"]
-        self.gamma = checkpoint["gamma"]
-        self.gae_lambda = checkpoint["gae_lambda"]
-        self.action_std_init = checkpoint["action_std_init"]
-        self.clip_coef = checkpoint["clip_coef"]
-        self.ent_coef = checkpoint["ent_coef"]
-        self.vf_coef = checkpoint["vf_coef"]
-        self.max_grad_norm = checkpoint["max_grad_norm"]
-        self.target_kl = checkpoint["target_kl"]
-        self.update_epochs = checkpoint["update_epochs"]
-        self.mut = checkpoint["mutation"]
-        self.index = checkpoint["index"]
-        self.scores = checkpoint["scores"]
-        self.fitness = checkpoint["fitness"]
-        self.steps = checkpoint["steps"]
+
+        for attribute in checkpoint.keys():
+            if attribute not in network_info:
+                setattr(self, attribute, checkpoint[attribute])
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -743,77 +742,48 @@ class PPO:
         checkpoint["actor_init_dict"]["device"] = device
         checkpoint["critic_init_dict"]["device"] = device
 
+        actor_init_dict = checkpoint.pop("actor_init_dict")
+        critic_init_dict = checkpoint.pop("critic_init_dict")
+        actor_state_dict = checkpoint.pop("actor_state_dict")
+        critic_state_dict = checkpoint.pop("critic_state_dict")
+        optimizer_state_dict = checkpoint.pop("optimizer_state_dict")
+
+        checkpoint["device"] = device
+        checkpoint["accelerator"] = accelerator
+
+        constructor_params = inspect.signature(cls.__init__).parameters.keys()
+        class_init_dict = {
+            k: v for k, v in checkpoint.items() if k in constructor_params
+        }
+
         if checkpoint["net_config"] is not None:
-            agent = cls(
-                state_dim=checkpoint["state_dim"],
-                action_dim=checkpoint["action_dim"],
-                one_hot=checkpoint["one_hot"],
-                discrete_actions=checkpoint["discrete_actions"],
-                index=checkpoint["index"],
-                net_config=checkpoint["net_config"],
-                batch_size=checkpoint["batch_size"],
-                lr=checkpoint["lr"],
-                gamma=checkpoint["gamma"],
-                gae_lambda=checkpoint["gae_lambda"],
-                action_std_init=checkpoint["action_std_init"],
-                clip_coef=checkpoint["clip_coef"],
-                ent_coef=checkpoint["ent_coef"],
-                vf_coef=checkpoint["vf_coef"],
-                max_grad_norm=checkpoint["max_grad_norm"],
-                target_kl=checkpoint["target_kl"],
-                update_epochs=checkpoint["update_epochs"],
-                mutation=checkpoint["mutation"],
-                device=device,
-                accelerator=accelerator,
-            )
+            agent = cls(**class_init_dict)
             agent.arch = checkpoint["net_config"]["arch"]
             if agent.arch == "mlp":
-                agent.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-                agent.critic = EvolvableMLP(**checkpoint["critic_init_dict"])
+                agent.actor = EvolvableMLP(**actor_init_dict)
+                agent.critic = EvolvableMLP(**critic_init_dict)
             elif agent.arch == "cnn":
-                agent.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-                agent.critic = EvolvableCNN(**checkpoint["critic_init_dict"])
+                agent.actor = EvolvableCNN(**actor_init_dict)
+                agent.critic = EvolvableCNN(**critic_init_dict)
         else:
-            agent = cls(
-                state_dim=checkpoint["state_dim"],
-                action_dim=checkpoint["action_dim"],
-                one_hot=checkpoint["one_hot"],
-                discrete_actions=checkpoint["discrete_actions"],
-                index=checkpoint["index"],
-                net_config=checkpoint["net_config"],
-                batch_size=checkpoint["batch_size"],
-                lr=checkpoint["lr"],
-                gamma=checkpoint["gamma"],
-                gae_lambda=checkpoint["gae_lambda"],
-                action_std_init=checkpoint["action_std_init"],
-                clip_coef=checkpoint["clip_coef"],
-                ent_coef=checkpoint["ent_coef"],
-                vf_coef=checkpoint["vf_coef"],
-                max_grad_norm=checkpoint["max_grad_norm"],
-                target_kl=checkpoint["target_kl"],
-                update_epochs=checkpoint["update_epochs"],
-                mutation=checkpoint["mutation"],
-                actor_network=MakeEvolvable(**checkpoint["actor_init_dict"]),
-                critic_network=MakeEvolvable(**checkpoint["critic_init_dict"]),
-                device=device,
-                accelerator=accelerator,
-            )
+            class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
+            class_init_dict["critic_network"] = MakeEvolvable(**critic_init_dict)
+            agent = cls(**class_init_dict)
 
-        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
-        agent.critic.load_state_dict(checkpoint["critic_state_dict"])
+        agent.actor.load_state_dict(actor_state_dict)
+        agent.critic.load_state_dict(critic_state_dict)
         agent.optimizer = optim.Adam(
             [
                 {"params": agent.actor.parameters(), "lr": agent.lr},
                 {"params": agent.critic.parameters(), "lr": agent.lr},
             ]
         )
-        agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        agent.optimizer.load_state_dict(optimizer_state_dict)
 
         if accelerator is not None:
             agent.wrap_models()
 
-        agent.scores = checkpoint["scores"]
-        agent.fitness = checkpoint["fitness"]
-        agent.steps = checkpoint["steps"]
+        for attribute in agent.inspect_attributes().keys():
+            setattr(agent, attribute, checkpoint[attribute])
 
         return agent

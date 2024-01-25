@@ -22,7 +22,7 @@ often results in higher potential for reuse of previously gathered experiences a
    * - :ref:`DQN<dqn>`
      - :ref:`Curriculum learning with self-play<DQN tutorial>`
    * - :ref:`Rainbow DQN<dqn_rainbow>`
-     - *Coming soon*
+     - :ref:`Cartpole<rainbow_tutorial>`
    * - :ref:`DDPG<ddpg>`
      - --
    * - :ref:`TD3<td3>`

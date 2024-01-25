@@ -88,27 +88,27 @@ Explore our Algorithms!
       <a href="../on_policy/index.html" class="tile on-policy article">
          <h2>On-policy</h2>
          <p>
-               <li><i>Algorithms:PPO</i></li>
+               <li>Algorithms: PPO</li>
          </p>
       </a>
       <a href="../off_policy/index.html" class="tile off-policy">
          <h2> Off-policy</h2>
             <p>
-                  <li><i>Algorithms: DQN, Rainbow DQN, TD3, DDPG</i></li>
+                  <li>Algorithms: DQN, Rainbow DQN, TD3, DDPG</li>
                   <!-- Add more algorithms as needed -->
             </p>
       </a>
       <a href="../offline_training/index.html" class="tile online">
          <h2>Offline</h2>
          <p>
-               <li><i>Algorithms: CQL, ILQL</i></li>
+               <li>Algorithms: CQL, ILQL</li>
                <!-- Add more algorithms as needed -->
          </p>
       </a>
       <a href="../multi_agent_training/index.html" class="tile multi-agent">
          <h2>Multi Agent</h2>
          <p>
-               <li><i>Algorithms: MADDPG, MATD3</i></li>
+               <li>Algorithms: MADDPG, MATD3</li>
                <!-- Add more algorithms as needed -->
          </p>
       </a>

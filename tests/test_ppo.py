@@ -16,6 +16,17 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
+class DummyPPO(PPO):
+    def __init__(
+        self, state_dim, action_dim, one_hot, discrete_actions, *args, **kwargs
+    ):
+        super().__init__(
+            state_dim, action_dim, one_hot, discrete_actions, *args, **kwargs
+        )
+
+        self.tensor_test = torch.randn(1)
+
+
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
         self.state_size = state_size
@@ -164,7 +175,6 @@ def test_initializes_with_default_values():
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.arch == "mlp"
     assert ppo.optimizer == ppo.optimizer_type
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
@@ -186,7 +196,7 @@ def test_initialize_ppo_with_cnn_accelerator():
     lr = 1e-4
     gamma = 0.99
     gae_lambda = 0.95
-    mutation = None
+    mut = None
     action_std_init = 0.6
     clip_coef = 0.2
     ent_coef = 0.01
@@ -210,7 +220,7 @@ def test_initialize_ppo_with_cnn_accelerator():
         lr=lr,
         gamma=gamma,
         gae_lambda=gae_lambda,
-        mutation=mutation,
+        mut=mut,
         action_std_init=action_std_init,
         clip_coef=clip_coef,
         ent_coef=ent_coef,
@@ -235,7 +245,7 @@ def test_initialize_ppo_with_cnn_accelerator():
     assert ppo.lr == lr
     assert ppo.gamma == gamma
     assert ppo.gae_lambda == gae_lambda
-    assert ppo.mut == mutation
+    assert ppo.mut == mut
     assert ppo.action_std_init == action_std_init
     assert ppo.clip_coef == clip_coef
     assert ppo.ent_coef == ent_coef
@@ -250,7 +260,6 @@ def test_initialize_ppo_with_cnn_accelerator():
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.arch == "cnn"
     assert isinstance(ppo.optimizer, AcceleratedOptimizer)
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Can initialize ppo with an actor network
@@ -308,7 +317,6 @@ def test_initialize_ppo_with_actor_network(
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.arch == actor_network.arch
     assert ppo.optimizer == ppo.optimizer_type
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Can initialize ppo with an actor network but no critic - should trigger warning
@@ -361,7 +369,6 @@ def test_initialize_ppo_with_actor_network_no_critic(
     assert ppo.critic_network is None
     assert isinstance(ppo.optimizer_type, optim.Adam)
     assert ppo.optimizer == ppo.optimizer_type
-    assert isinstance(ppo.criterion, nn.MSELoss)
 
 
 # Converts numpy array to torch tensor of type float
@@ -661,7 +668,11 @@ def test_clone_returns_identical_agent():
     one_hot = False
     discrete_actions = True
 
-    ppo = PPO(state_dim, action_dim, one_hot, discrete_actions)
+    ppo = DummyPPO(state_dim, action_dim, one_hot, discrete_actions)
+    ppo.fitness = [200, 200, 200]
+    ppo.scores = [94, 94, 94]
+    ppo.steps = [2500]
+    ppo.tensor_attribute = torch.randn(1)
     clone_agent = ppo.clone()
 
     assert clone_agent.state_dim == ppo.state_dim
@@ -690,6 +701,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
+    assert clone_agent.tensor_attribute == ppo.tensor_attribute
+    assert clone_agent.tensor_test == ppo.tensor_test
 
     accelerator = Accelerator()
     ppo = PPO(state_dim, action_dim, one_hot, discrete_actions, accelerator=accelerator)
@@ -784,7 +797,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "lr" in checkpoint
     assert "gamma" in checkpoint
     assert "gae_lambda" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "action_std_init" in checkpoint
     assert "clip_coef" in checkpoint
     assert "ent_coef" in checkpoint
@@ -792,7 +805,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "max_grad_norm" in checkpoint
     assert "target_kl" in checkpoint
     assert "update_epochs" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -864,7 +877,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "lr" in checkpoint
     assert "gamma" in checkpoint
     assert "gae_lambda" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "action_std_init" in checkpoint
     assert "clip_coef" in checkpoint
     assert "ent_coef" in checkpoint
@@ -872,7 +885,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "max_grad_norm" in checkpoint
     assert "target_kl" in checkpoint
     assert "update_epochs" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -954,7 +967,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "lr" in checkpoint
     assert "gamma" in checkpoint
     assert "gae_lambda" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "action_std_init" in checkpoint
     assert "clip_coef" in checkpoint
     assert "ent_coef" in checkpoint
@@ -962,7 +975,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "max_grad_norm" in checkpoint
     assert "target_kl" in checkpoint
     assert "update_epochs" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint

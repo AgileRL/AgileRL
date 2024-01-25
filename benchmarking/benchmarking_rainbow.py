@@ -26,7 +26,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
-        state_dim = env.single_observation_space.n
+        state_dim = (env.single_observation_space.n,)
         one_hot = True
     except Exception:
         state_dim = env.single_observation_space.shape

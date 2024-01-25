@@ -1,4 +1,5 @@
 import copy
+import inspect
 import random
 
 import dill
@@ -35,8 +36,8 @@ class DQN:
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 1e-3
     :type tau: float, optional
-    :param mutation: Most recent mutation to agent, defaults to None
-    :type mutation: str, optional
+    :param mut: Most recent mutation to agent, defaults to None
+    :type mut: str, optional
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
     :param actor_network: Custom actor network, defaults to None
@@ -61,7 +62,7 @@ class DQN:
         learn_step=5,
         gamma=0.99,
         tau=1e-3,
-        mutation=None,
+        mut=None,
         double=False,
         actor_network=None,
         device="cpu",
@@ -107,7 +108,7 @@ class DQN:
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
-        self.mut = mutation
+        self.mut = mut
         self.device = device
         self.accelerator = accelerator
         self.index = index
@@ -298,7 +299,6 @@ class DQN:
 
         # soft update target network
         self.softUpdate()
-
         return loss.item()
 
     def softUpdate(self):
@@ -356,26 +356,12 @@ class DQN:
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
-        if index is None:
-            index = self.index
+        input_args = self.inspect_attributes(input_args_only=True)
+        input_args["wrap"] = wrap
 
-        clone = type(self)(
-            state_dim=self.state_dim,
-            action_dim=self.action_dim,
-            one_hot=self.one_hot,
-            index=index,
-            net_config=self.net_config,
-            actor_network=self.actor_network,
-            batch_size=self.batch_size,
-            lr=self.lr,
-            learn_step=self.learn_step,
-            gamma=self.gamma,
-            tau=self.tau,
-            mutation=self.mut,
-            device=self.device,
-            accelerator=self.accelerator,
-            wrap=wrap,
-        )
+        if index is None:
+            input_args["index"] = self.index
+        clone = type(self)(**input_args)
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
@@ -398,11 +384,49 @@ class DQN:
             clone.actor = actor.to(self.device)
             clone.actor_target = actor_target.to(self.device)
             clone.optimizer = optimizer
-        clone.fitness = copy.deepcopy(self.fitness)
-        clone.steps = copy.deepcopy(self.steps)
-        clone.scores = copy.deepcopy(self.scores)
+
+        for attribute in self.inspect_attributes().keys():
+            if hasattr(self, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                else:
+                    if attr != clone_attr:
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
         return clone
+
+    def inspect_attributes(self, input_args_only=False):
+        # Get all attributes of the current object
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        guarded_attributes = ["actor", "actor_target", "optimizer", "optimizer_type"]
+
+        # Exclude private and built-in attributes
+        attributes = [
+            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
+        ]
+
+        if input_args_only:
+            constructor_params = inspect.signature(self.__init__).parameters.keys()
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in guarded_attributes and k in constructor_params
+            }
+        else:
+            # Remove the algo specific guarded variables
+            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
+
+        return attributes
 
     def wrap_models(self):
         if self.accelerator is not None:
@@ -422,29 +446,21 @@ class DQN:
         :param path: Location to save checkpoint at
         :type path: string
         """
+
+        attribute_dict = self.inspect_attributes()
+
+        network_info = {
+            "actor_init_dict": self.actor.init_dict,
+            "actor_state_dict": self.actor.state_dict(),
+            "actor_target_init_dict": self.actor_target.init_dict,
+            "actor_target_state_dict": self.actor_target.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
+
+        attribute_dict.update(network_info)
+
         torch.save(
-            {
-                "state_dim": self.state_dim,
-                "action_dim": self.action_dim,
-                "one_hot": self.one_hot,
-                "actor_init_dict": self.actor.init_dict,
-                "actor_state_dict": self.actor.state_dict(),
-                "actor_target_init_dict": self.actor_target.init_dict,
-                "actor_target_state_dict": self.actor_target.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "net_config": self.net_config,
-                "batch_size": self.batch_size,
-                "lr": self.lr,
-                "learn_step": self.learn_step,
-                "gamma": self.gamma,
-                "tau": self.tau,
-                "mutation": self.mut,
-                "double": self.double,
-                "index": self.index,
-                "scores": self.scores,
-                "fitness": self.fitness,
-                "steps": self.steps,
-            },
+            attribute_dict,
             path,
             pickle_module=dill,
         )
@@ -455,33 +471,39 @@ class DQN:
         :param path: Location to load checkpoint from
         :type path: string
         """
+        network_info = [
+            "actor_state_dict",
+            "actor_target_state_dict",
+            "optimizer_state_dict",
+            "actor_init_dict",
+            "actor_target_init_dict",
+            "net_config",
+            "lr",
+        ]
+
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
             self.arch = checkpoint["net_config"]["arch"]
             if self.net_config["arch"] == "mlp":
-                self.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-                self.actor_target = EvolvableMLP(**checkpoint["actor_target_init_dict"])
+                network_class = EvolvableMLP
             elif self.net_config["arch"] == "cnn":
-                self.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-                self.actor_target = EvolvableCNN(**checkpoint["actor_target_init_dict"])
+                network_class = EvolvableCNN
         else:
-            self.actor = MakeEvolvable(**checkpoint["actor_init_dict"])
-            self.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+            network_class = MakeEvolvable
+
+        self.actor = network_class(**checkpoint["actor_init_dict"])
+        self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
+
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.batch_size = checkpoint["batch_size"]
-        self.learn_step = checkpoint["learn_step"]
-        self.gamma = checkpoint["gamma"]
-        self.tau = checkpoint["tau"]
-        self.mut = checkpoint["mutation"]
-        self.index = checkpoint["index"]
-        self.scores = checkpoint["scores"]
-        self.fitness = checkpoint["fitness"]
-        self.steps = checkpoint["steps"]
+
+        for attribute in checkpoint.keys():
+            if attribute not in network_info:
+                setattr(self, attribute, checkpoint[attribute])
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -498,64 +520,43 @@ class DQN:
         checkpoint["actor_init_dict"]["device"] = device
         checkpoint["actor_target_init_dict"]["device"] = device
 
+        actor_init_dict = checkpoint.pop("actor_init_dict")
+        actor_target_init_dict = checkpoint.pop("actor_target_init_dict")
+        actor_state_dict = checkpoint.pop("actor_state_dict")
+        actor_target_state_dict = checkpoint.pop("actor_target_state_dict")
+        optimizer_state_dict = checkpoint.pop("optimizer_state_dict")
+
+        checkpoint["device"] = device
+        checkpoint["accelerator"] = accelerator
+
+        constructor_params = inspect.signature(cls.__init__).parameters.keys()
+        class_init_dict = {
+            k: v for k, v in checkpoint.items() if k in constructor_params
+        }
+
         if checkpoint["net_config"] is not None:
-            agent = cls(
-                state_dim=checkpoint["state_dim"],
-                action_dim=checkpoint["action_dim"],
-                one_hot=checkpoint["one_hot"],
-                index=checkpoint["index"],
-                net_config=checkpoint["net_config"],
-                batch_size=checkpoint["batch_size"],
-                lr=checkpoint["lr"],
-                learn_step=checkpoint["learn_step"],
-                gamma=checkpoint["gamma"],
-                tau=checkpoint["tau"],
-                mutation=checkpoint["mutation"],
-                double=checkpoint["double"],
-                device=device,
-                accelerator=accelerator,
-            )
+            agent = cls(**class_init_dict)
             agent.arch = checkpoint["net_config"]["arch"]
             if agent.arch == "mlp":
-                agent.actor = EvolvableMLP(**checkpoint["actor_init_dict"])
-                agent.actor_target = EvolvableMLP(
-                    **checkpoint["actor_target_init_dict"]
-                )
+                agent.actor = EvolvableMLP(**actor_init_dict)
+                agent.actor_target = EvolvableMLP(**actor_target_init_dict)
             elif agent.arch == "cnn":
-                agent.actor = EvolvableCNN(**checkpoint["actor_init_dict"])
-                agent.actor_target = EvolvableCNN(
-                    **checkpoint["actor_target_init_dict"]
-                )
+                agent.actor = EvolvableCNN(**actor_init_dict)
+                agent.actor_target = EvolvableCNN(**actor_target_init_dict)
         else:
-            agent = cls(
-                state_dim=checkpoint["state_dim"],
-                action_dim=checkpoint["action_dim"],
-                one_hot=checkpoint["one_hot"],
-                index=checkpoint["index"],
-                net_config=checkpoint["net_config"],
-                batch_size=checkpoint["batch_size"],
-                lr=checkpoint["lr"],
-                learn_step=checkpoint["learn_step"],
-                gamma=checkpoint["gamma"],
-                tau=checkpoint["tau"],
-                mutation=checkpoint["mutation"],
-                double=checkpoint["double"],
-                actor_network=MakeEvolvable(**checkpoint["actor_init_dict"]),
-                device=device,
-                accelerator=accelerator,
-            )
-            agent.actor_target = MakeEvolvable(**checkpoint["actor_target_init_dict"])
+            class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
+            agent = cls(**class_init_dict)
+            agent.actor_target = MakeEvolvable(**actor_target_init_dict)
 
         agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
-        agent.actor.load_state_dict(checkpoint["actor_state_dict"])
-        agent.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
-        agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        agent.actor.load_state_dict(actor_state_dict)
+        agent.actor_target.load_state_dict(actor_target_state_dict)
+        agent.optimizer.load_state_dict(optimizer_state_dict)
 
         if accelerator is not None:
             agent.wrap_models()
 
-        agent.scores = checkpoint["scores"]
-        agent.fitness = checkpoint["fitness"]
-        agent.steps = checkpoint["steps"]
+        for attribute in agent.inspect_attributes().keys():
+            setattr(agent, attribute, checkpoint[attribute])
 
         return agent

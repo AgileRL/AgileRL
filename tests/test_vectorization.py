@@ -293,7 +293,6 @@ def test_vectorisation_wrapper_petting_zoo_step(env, request):
             agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
             for agent in vec_env.agents
         }
-        print("ACTIONS", actions)
         observations, rewards, terminations, truncations, infos = vec_env.step(actions)
         for agent in vec_env.agents:
             assert len(observations[agent]) == n_envs
@@ -372,7 +371,6 @@ def test_close(env, request):
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
         for agent in vec_env.agents
     }
-    print(actions)
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
     vec_env.render()
     with patch(
