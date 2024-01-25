@@ -1,6 +1,6 @@
 .. _rainbow_tutorial:
 
-Cart-pole with Rainbow DQN
+Cartpole with Rainbow DQN
 ==================================
 
 In this tutorial, we will be training a single Rainbow-DQN agent (without HPO) to beat the
@@ -106,7 +106,7 @@ is the case, we do not need to define a mutatinos parameters dictionary.
 
 Create the Environment
 ----------------------
-In this particular tutorial, we will be focussing on the cart-pole environment as Rainbow-DQN can only be
+In this particular tutorial, we will be focussing on the cartpole environment as Rainbow-DQN can only be
 used with discrete action environments. The snippet below creates a vectorised environment and then assigns the
 correct values for ``state_dim`` and ``one_hot``, depending on whether the observation or action spaces are discrete
 or continuous.
