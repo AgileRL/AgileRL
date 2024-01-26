@@ -269,6 +269,7 @@ def train_offline(
     else:
         pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
+    pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
 
@@ -281,12 +282,13 @@ def train_offline(
     for idx_epi in pbar:
         if accelerator is not None:
             accelerator.wait_for_everyone()
-        for agent in pop:  # Loop through population
+        for agent_idx, agent in enumerate(pop):  # Loop through population
             for idx_step in range(max_steps):
                 experiences = sampler.sample(agent.batch_size)  # Sample replay buffer
                 # Learn according to agent's RL algorithm
-                agent.learn(experiences)
+                loss = agent.learn(experiences)
 
+            pop_loss[agent_idx].append(loss)
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
@@ -301,26 +303,30 @@ def train_offline(
             ]
             pop_fitnesses.append(fitnesses)
 
+            epoch_loss = [agent_loss[idx_epi] for agent_loss in pop_loss]
+
+            agent_loss_dict = {f"train/agent_{index}_loss": loss for index, loss in enumerate(epoch_loss)}
+    
+            wandb_dict = {
+                "global_step": total_steps
+                * accelerator.state.num_processes if accelerator is not None else total_steps,
+                "train/mean_pop_loss": np.mean(epoch_loss),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+            wandb_dict.update(agent_loss_dict)
+
             if wb:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         wandb.log(
-                            {
-                                "global_step": total_steps
-                                * accelerator.state.num_processes,
-                                "eval/mean_fitness": np.mean(fitnesses),
-                                "eval/best_fitness": np.max(fitnesses),
-                            }
+                            wandb_dict
                         )
                     accelerator.wait_for_everyone()
                 else:
                     wandb.log(
-                        {
-                            "global_step": total_steps,
-                            "eval/mean_fitness": np.mean(fitnesses),
-                            "eval/best_fitness": np.max(fitnesses),
-                        }
+                        wandb_dict
                     )
 
             # Update step counter

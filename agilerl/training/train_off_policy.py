@@ -258,6 +258,7 @@ def train_off_policy(
     else:
         pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
+    pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
 
@@ -270,7 +271,7 @@ def train_off_policy(
     for idx_epi in pbar:
         if accelerator is not None:
             accelerator.wait_for_everyone()
-        for agent in pop:  # Loop through population
+        for agent_idx, agent in enumerate(pop):  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             rewards, terminations, truncs = [], [], []
             score = 0
@@ -370,9 +371,9 @@ def train_off_policy(
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[5])
                             experiences += n_step_experiences
-                            agent.learn(experiences, n_step=n_step)
+                            loss , *_ = agent.learn(experiences, n_step=n_step)
                         else:
-                            agent.learn(experiences)
+                            loss = agent.learn(experiences)
 
                 if is_vectorised:
                     terminations.append(done)
@@ -390,7 +391,7 @@ def train_off_policy(
                 score = np.mean(scores)
 
             agent.scores.append(score)
-
+            pop_loss[agent_idx].append(loss)
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
@@ -410,12 +411,28 @@ def train_off_policy(
 
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
+            epoch_loss = [agent_loss[idx_epi] for agent_loss in pop_loss]
+
+            print("ALGO", algo)
+            # Create the loss dictionaries
+            if algo in ["RainbowDQN", "DQN"]:
+                actor_loss_dict = {f"train/agent_{index}_actor_loss": loss for index, loss in enumerate(epoch_loss)}
+            elif algo in ["TD3", "DDPG"]:
+                actor_loss_dict = {f"train/agent_{index}_actor_loss": actor_loss for index, (actor_loss, _) in enumerate(epoch_loss)}
+                critic_loss_dict = {f"train/agent_{index}_critic_loss": critic_loss for index, (_, critic_loss) in enumerate(epoch_loss)}
+
             wandb_dict = {
                 "global_step": total_steps,
                 "train/mean_score": np.mean(mean_scores),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
             }
+
+            if algo in ["RainbowDQN", "DQN", "DDPG", "TD3"]:
+                wandb_dict.update(actor_loss_dict)
+
+            if algo in ["DDPG", "TD3"]:
+                wandb_dict.update(critic_loss_dict)
 
             if algo in ["DQN", "Rainbow DQN"]:
                 train_actions_hist = [
