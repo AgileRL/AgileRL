@@ -69,7 +69,7 @@ class DummyAgentOffPolicy:
 
     def learn(self, experiences, n_step=False, per=False):
         if n_step and per:
-            return None, None
+            return None, None, None
         else:
             return
 

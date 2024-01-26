@@ -315,8 +315,9 @@ def test_learns_from_experiences(accelerator):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
 
+    assert loss > 0.0
     assert new_idxs is None
     assert new_priorities is None
     assert actor == dqn.actor
@@ -360,8 +361,9 @@ def test_learns_from_experiences_one_hot(accelerator):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=False)
 
+    assert loss > 0.0
     assert new_idxs is None
     assert new_priorities is None
     assert actor == dqn.actor
@@ -424,8 +426,9 @@ def test_learns_from_experiences_n_step(accelerator):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=False)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=False)
 
+    assert loss > 0.0
     assert new_idxs is not None
     assert new_priorities is None
     assert actor == dqn.actor
@@ -471,8 +474,9 @@ def test_learns_from_experiences_per(accelerator):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=True)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=False, per=True)
 
+    assert loss > 0.0
     assert isinstance(new_idxs, np.ndarray)
     assert isinstance(new_priorities, np.ndarray)
     assert np.array_equal(new_idxs, idxs)
@@ -537,8 +541,9 @@ def test_learns_from_experiences_per_n_step(accelerator):
     actor_target_pre_learn_sd = str(copy.deepcopy(dqn.actor_target.state_dict()))
 
     # Call the learn method
-    new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=True)
+    loss, new_idxs, new_priorities = dqn.learn(experiences, n_step=True, per=True)
 
+    assert loss > 0.0
     assert isinstance(new_idxs, np.ndarray)
     assert isinstance(new_priorities, np.ndarray)
     assert np.array_equal(new_idxs, idxs)

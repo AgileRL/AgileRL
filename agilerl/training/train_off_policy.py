@@ -358,7 +358,7 @@ def train_off_policy(
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[6])
                             experiences += n_step_experiences
-                        _, idxs, priorities = agent.learn(
+                        loss, idxs, priorities = agent.learn(
                             experiences, n_step=n_step, per=per
                         )
                         memory.update_priorities(idxs, priorities)
