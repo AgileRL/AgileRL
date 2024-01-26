@@ -305,11 +305,15 @@ def train_offline(
 
             epoch_loss = [agent_loss[idx_epi] for agent_loss in pop_loss]
 
-            agent_loss_dict = {f"train/agent_{index}_loss": loss for index, loss in enumerate(epoch_loss)}
-    
+            agent_loss_dict = {
+                f"train/agent_{index}_loss": loss
+                for index, loss in enumerate(epoch_loss)
+            }
+
             wandb_dict = {
-                "global_step": total_steps
-                * accelerator.state.num_processes if accelerator is not None else total_steps,
+                "global_step": total_steps * accelerator.state.num_processes
+                if accelerator is not None
+                else total_steps,
                 "train/mean_pop_loss": np.mean(epoch_loss),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
@@ -320,14 +324,10 @@ def train_offline(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        wandb.log(
-                            wandb_dict
-                        )
+                        wandb.log(wandb_dict)
                     accelerator.wait_for_everyone()
                 else:
-                    wandb.log(
-                        wandb_dict
-                    )
+                    wandb.log(wandb_dict)
 
             # Update step counter
             for agent in pop:

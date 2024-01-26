@@ -371,7 +371,7 @@ def train_off_policy(
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[5])
                             experiences += n_step_experiences
-                            loss , *_ = agent.learn(experiences, n_step=n_step)
+                            loss, *_ = agent.learn(experiences, n_step=n_step)
                         else:
                             loss = agent.learn(experiences)
 
@@ -416,10 +416,19 @@ def train_off_policy(
             print("ALGO", algo)
             # Create the loss dictionaries
             if algo in ["RainbowDQN", "DQN"]:
-                actor_loss_dict = {f"train/agent_{index}_actor_loss": loss for index, loss in enumerate(epoch_loss)}
+                actor_loss_dict = {
+                    f"train/agent_{index}_actor_loss": loss
+                    for index, loss in enumerate(epoch_loss)
+                }
             elif algo in ["TD3", "DDPG"]:
-                actor_loss_dict = {f"train/agent_{index}_actor_loss": actor_loss for index, (actor_loss, _) in enumerate(epoch_loss)}
-                critic_loss_dict = {f"train/agent_{index}_critic_loss": critic_loss for index, (_, critic_loss) in enumerate(epoch_loss)}
+                actor_loss_dict = {
+                    f"train/agent_{index}_actor_loss": actor_loss
+                    for index, (actor_loss, _) in enumerate(epoch_loss)
+                }
+                critic_loss_dict = {
+                    f"train/agent_{index}_critic_loss": critic_loss
+                    for index, (_, critic_loss) in enumerate(epoch_loss)
+                }
 
             wandb_dict = {
                 "global_step": total_steps,
