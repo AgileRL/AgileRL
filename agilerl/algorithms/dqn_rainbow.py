@@ -476,7 +476,7 @@ class RainbowDQN:
         if per:
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
             new_priorities = loss_for_prior + self.prior_eps
-        
+
         print(loss, idxs, new_priorities)
         return loss, idxs, new_priorities
 
