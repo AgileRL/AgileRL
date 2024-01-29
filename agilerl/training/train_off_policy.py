@@ -371,7 +371,7 @@ def train_off_policy(
                         if n_step_memory is not None:
                             n_step_experiences = n_step_sampler.sample(experiences[5])
                             experiences += n_step_experiences
-                            loss , *_ = agent.learn(experiences, n_step=n_step)
+                            loss, *_ = agent.learn(experiences, n_step=n_step)
                         else:
                             loss = agent.learn(experiences)
 
@@ -409,7 +409,6 @@ def train_off_policy(
             ]
             pop_fitnesses.append(fitnesses)
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
-            #epoch_loss = [agent_loss[idx_epi] for agent_loss in pop_loss]
 
             wandb_dict = {
                 "global_step": total_steps

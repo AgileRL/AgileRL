@@ -1,4 +1,5 @@
 import os
+import random
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
@@ -6,7 +7,6 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
-import random
 
 import agilerl.training.train_multi_agent
 import agilerl.training.train_off_policy

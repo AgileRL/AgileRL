@@ -319,14 +319,10 @@ def train_offline(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        wandb.log(
-                            wandb_dict
-                        )
+                        wandb.log(wandb_dict)
                     accelerator.wait_for_everyone()
                 else:
-                    wandb.log(
-                        wandb_dict
-                    )
+                    wandb.log(wandb_dict)
 
             # Update step counter
             for agent in pop:
