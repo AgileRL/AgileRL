@@ -34,7 +34,7 @@ jobs:
                   codespell --skip=*.css,*.js,*.map,*.scss,*.svg --ignore-words-list=magent,pres,roate
             - name: Lint with ruff
               run: |
-                  ruff check --target-version=py37 --ignore E501 .
+                  ruff check .
             - name: Run isort
               run: |
                   isort . --profile black
