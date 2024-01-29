@@ -134,18 +134,18 @@ class EvolvableBERT(nn.Module):
 
         # Create the encoder
         for n, dim_feedfwd in enumerate(self.encoder_layers):
-            encoder_dict[
-                f"encoder_layer_{str(n)}"
-            ] = nn.modules.TransformerEncoderLayer(
-                self.d_model,
-                self.n_head,
-                dim_feedfwd,
-                self.dropout,
-                self.activation,
-                self.layer_norm_eps,
-                self.batch_first,
-                self.norm_first,
-                device=self.device,
+            encoder_dict[f"encoder_layer_{str(n)}"] = (
+                nn.modules.TransformerEncoderLayer(
+                    self.d_model,
+                    self.n_head,
+                    dim_feedfwd,
+                    self.dropout,
+                    self.activation,
+                    self.layer_norm_eps,
+                    self.batch_first,
+                    self.norm_first,
+                    device=self.device,
+                )
             )
         if self.encoder_norm:
             encoder_dict["encoder_norm_0"] = nn.modules.normalization.LayerNorm(
@@ -154,18 +154,18 @@ class EvolvableBERT(nn.Module):
 
         # Create the decoder
         for n, dim_feedfwd in enumerate(self.decoder_layers):
-            decoder_dict[
-                f"decoder_layer_{str(n)}"
-            ] = nn.modules.TransformerDecoderLayer(
-                self.d_model,
-                self.n_head,
-                dim_feedfwd,
-                self.dropout,
-                self.activation,
-                self.layer_norm_eps,
-                self.batch_first,
-                self.norm_first,
-                device=self.device,
+            decoder_dict[f"decoder_layer_{str(n)}"] = (
+                nn.modules.TransformerDecoderLayer(
+                    self.d_model,
+                    self.n_head,
+                    dim_feedfwd,
+                    self.dropout,
+                    self.activation,
+                    self.layer_norm_eps,
+                    self.batch_first,
+                    self.norm_first,
+                    device=self.device,
+                )
             )
         if self.decoder_norm:
             decoder_dict["decoder_norm_0"] = nn.modules.normalization.LayerNorm(
