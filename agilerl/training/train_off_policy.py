@@ -411,9 +411,9 @@ def train_off_policy(
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
             wandb_dict = {
-                "global_step": total_steps
-                * accelerator.state.num_processes if accelerator is not None and accelerator.is_main_process \
-                                    else total_steps,
+                "global_step": total_steps * accelerator.state.num_processes
+                if accelerator is not None and accelerator.is_main_process
+                else total_steps,
                 "train/mean_score": np.mean(mean_scores),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
@@ -421,14 +421,22 @@ def train_off_policy(
 
             # Create the loss dictionaries
             if algo in ["RainbowDQN", "DQN"]:
-                actor_loss_dict = {f"train/agent_{index}_actor_loss": loss[-1] for index, loss in enumerate(pop_loss)}
+                actor_loss_dict = {
+                    f"train/agent_{index}_actor_loss": loss[-1]
+                    for index, loss in enumerate(pop_loss)
+                }
                 wandb_dict.update(actor_loss_dict)
             elif algo in ["TD3", "DDPG"]:
-                actor_loss_dict = {f"train/agent_{index}_actor_loss": actor_loss[-1] for index, (actor_loss, _) in enumerate(pop_loss)}
-                critic_loss_dict = {f"train/agent_{index}_critic_loss": critic_loss[-1] for index, (_, critic_loss) in enumerate(pop_loss)}
+                actor_loss_dict = {
+                    f"train/agent_{index}_actor_loss": actor_loss[-1]
+                    for index, (actor_loss, _) in enumerate(pop_loss)
+                }
+                critic_loss_dict = {
+                    f"train/agent_{index}_critic_loss": critic_loss[-1]
+                    for index, (_, critic_loss) in enumerate(pop_loss)
+                }
                 wandb_dict.update(actor_loss_dict)
                 wandb_dict.update(critic_loss_dict)
-            
 
             if algo in ["DQN", "Rainbow DQN"]:
                 train_actions_hist = [
@@ -444,9 +452,7 @@ def train_off_policy(
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        wandb.log(
-                            wandb_dict
-                        )
+                        wandb.log(wandb_dict)
                     accelerator.wait_for_everyone()
                 else:
                     wandb.log(wandb_dict)

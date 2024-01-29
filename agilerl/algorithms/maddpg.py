@@ -14,6 +14,7 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
+
 class MADDPG:
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
 

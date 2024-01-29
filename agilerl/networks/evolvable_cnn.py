@@ -314,7 +314,6 @@ class EvolvableCNN(nn.Module):
         with torch.no_grad():
             if self.multi:
                 if self.critic:
-
                     critic_input = (
                         torch.zeros(1, *self.input_shape)
                         .unsqueeze(2)

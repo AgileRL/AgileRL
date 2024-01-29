@@ -1,8 +1,8 @@
 import copy
 import random
 import warnings
-
 from collections import defaultdict
+
 import dill
 import numpy as np
 import torch
@@ -725,10 +725,8 @@ class MATD3:
                     actor_loss.backward()
                 actor_optimizer.step()
 
-            
-
             try:
-                loss_dict["actors"][f"{agent_id}"] = actor_loss.item() 
+                loss_dict["actors"][f"{agent_id}"] = actor_loss.item()
             except:
                 loss_dict["actors"][f"{agent_id}"] = None
             loss_dict["critics"][f"{agent_id}"] = critic_loss.item()

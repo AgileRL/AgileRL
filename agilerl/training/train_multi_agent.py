@@ -244,8 +244,8 @@ def train_multi_agent(
     else:
         pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
-    pop_actor_loss = [{agent_id : [] for agent_id in env.agents} for _ in pop]
-    pop_critic_loss = [{agent_id : [] for agent_id in env.agents} for _ in pop]
+    pop_actor_loss = [{agent_id: [] for agent_id in env.agents} for _ in pop]
+    pop_critic_loss = [{agent_id: [] for agent_id in env.agents} for _ in pop]
     pop_fitnesses = []
     total_steps = 0
     loss = None
@@ -356,7 +356,9 @@ def train_multi_agent(
             if loss is not None:
                 for agent_id in env.agents:
                     pop_actor_loss[agent_idx][agent_id].append(loss["actors"][agent_id])
-                    pop_critic_loss[agent_idx][agent_id].append(loss["critics"][agent_id])
+                    pop_critic_loss[agent_idx][agent_id].append(
+                        loss["critics"][agent_id]
+                    )
 
             agent.steps[-1] += max_steps
             total_steps += max_steps
@@ -378,38 +380,43 @@ def train_multi_agent(
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
 
             wandb_dict = {
-                            "global_step": total_steps
-                            * accelerator.state.num_processes if accelerator is not None and accelerator.is_main_process \
-                                else total_steps,
-                            "train/mean_score": np.mean(mean_scores),
-                            "train/best_score": np.max(
-                                [agent.scores[-1] for agent in pop]
-                            ),
-                            "eval/mean_fitness": np.mean(fitnesses),
-                            "eval/best_fitness": np.max(fitnesses),
-                        }
+                "global_step": total_steps * accelerator.state.num_processes
+                if accelerator is not None and accelerator.is_main_process
+                else total_steps,
+                "train/mean_score": np.mean(mean_scores),
+                "train/best_score": np.max([agent.scores[-1] for agent in pop]),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
 
             for agent_idx, agent in enumerate(pop):
-                    for agent_id, actor_loss, critic_loss in zip(pop_actor_loss[agent_idx].keys(), pop_actor_loss[agent_idx].values(), pop_critic_loss[agent_idx].values()):
-                        if actor_loss:
-                            actor_loss_dict = {f"train/agent_{agent_idx}_{agent_id}_actor_loss": actor_loss[-1]}
-                            critic_loss_dict = {f"train/agent_{agent_idx}_{agent_id}_critic_loss": critic_loss[-1]}
-                            wandb_dict.update(actor_loss_dict)
-                            wandb_dict.update(critic_loss_dict)
-
+                for agent_id, actor_loss, critic_loss in zip(
+                    pop_actor_loss[agent_idx].keys(),
+                    pop_actor_loss[agent_idx].values(),
+                    pop_critic_loss[agent_idx].values(),
+                ):
+                    if actor_loss:
+                        actor_loss_dict = {
+                            f"train/agent_{agent_idx}_{agent_id}_actor_loss": actor_loss[
+                                -1
+                            ]
+                        }
+                        critic_loss_dict = {
+                            f"train/agent_{agent_idx}_{agent_id}_critic_loss": critic_loss[
+                                -1
+                            ]
+                        }
+                        wandb_dict.update(actor_loss_dict)
+                        wandb_dict.update(critic_loss_dict)
 
             if wb:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        wandb.log(
-                            wandb_dict
-                        )
+                        wandb.log(wandb_dict)
                     accelerator.wait_for_everyone()
                 else:
-                    wandb.log(
-                            wandb_dict
-                    )
+                    wandb.log(wandb_dict)
 
                 for idx, agent in enumerate(pop):
                     wandb.log(
