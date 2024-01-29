@@ -665,6 +665,7 @@ class MATD3:
             critic_1_optimizer.step()
             critic_2_optimizer.step()
 
+            actor_loss = None
             # update actor and targets every policy_freq episodes
             if len(self.scores) % self.policy_freq == 0:
                 if self.arch == "mlp":
@@ -725,9 +726,9 @@ class MATD3:
                     actor_loss.backward()
                 actor_optimizer.step()
 
-            try:
+            if hasattr(actor_loss, "item"):
                 loss_dict["actors"][f"{agent_id}"] = actor_loss.item()
-            except:
+            else:
                 loss_dict["actors"][f"{agent_id}"] = None
             loss_dict["critics"][f"{agent_id}"] = critic_loss.item()
 
