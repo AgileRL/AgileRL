@@ -78,7 +78,7 @@ class EvolvableCNN(nn.Module):
         hidden_size: List[int],
         num_actions: int,
         num_atoms=51,
-        mlp_output_activation="Softmax",
+        mlp_output_activation=None,
         mlp_activation="ReLU",
         cnn_activation="ReLU",
         min_hidden_layers=1,
