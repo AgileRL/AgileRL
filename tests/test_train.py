@@ -155,8 +155,11 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def getAction(self, *args):
         return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
 
-    def learn(self, experiences, n_step=False, per=False):
-        super().learn(experiences, n_step=False, per=False)
+    def learn(self, experiences):
+        return {
+            "actors": {"agent_0": random.random(), "agent_1": random.random()},
+            "critics": {"agent_0": random.random(), "agent_1": random.random()}
+        }
 
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
@@ -469,7 +472,10 @@ def mocked_multi_agent(multi_env, algo):
 
     mock_agent.getAction.side_effect = getAction
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
-    mock_agent.learn.side_effect = lambda experiences: random.random()
+    mock_agent.learn.side_effect = lambda experiences: {
+            "actors": {"agent_0": random.random(), "agent_1": random.random()},
+            "critics": {"agent_0": random.random(), "agent_1": random.random()}
+        }
     mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None

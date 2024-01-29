@@ -295,21 +295,17 @@ def train_on_policy(
             ]
             pop_fitnesses.append(fitnesses)
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
-            epoch_loss = [agent_loss[idx_epi] for agent_loss in pop_loss]
-
-            agent_loss_dict = {f"train/agent_{index}_loss": loss for index, loss in enumerate(epoch_loss)}
-
-    
 
             wandb_dict = {
                 "global_step": total_steps
-                * accelerator.state.num_processes if accelerator is not None else total_steps,
+                * accelerator.state.num_processes if accelerator is not None and accelerator.is_main_process \
+                                    else total_steps,
                 "train/mean_score": np.mean(mean_scores),
-                "train/mean_pop_loss": np.mean(epoch_loss),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),
             }
 
+            agent_loss_dict = {f"train/agent_{index}_loss": loss[-1] for index, loss in enumerate(pop_loss)}
             wandb_dict.update(agent_loss_dict)
 
             if wb:

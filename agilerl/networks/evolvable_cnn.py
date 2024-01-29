@@ -314,13 +314,7 @@ class EvolvableCNN(nn.Module):
         with torch.no_grad():
             if self.multi:
                 if self.critic:
-                    critic_input = torch.stack(
-                        (
-                            torch.zeros(1, *self.input_shape),
-                            torch.zeros(1, *self.input_shape),
-                        ),
-                        dim=2,
-                    )
+                    critic_input = torch.zeros(*self.input_shape).unsqueeze(0).unsqueeze(2).repeat(1, 1, self.n_agents, 1, 1)
                     input_size = feature_net(critic_input).view(1, -1).size(1)
                 else:
                     input_size = (

@@ -1,6 +1,7 @@
 import copy
 import random
 import warnings
+from collections import defaultdict
 
 import dill
 import numpy as np
@@ -12,7 +13,6 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
-
 
 class MADDPG:
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
@@ -331,6 +331,7 @@ class MADDPG:
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
+
         # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
         if agent_mask is None:
             agent_ids = self.agent_ids
@@ -462,7 +463,7 @@ class MADDPG:
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
-
+        loss_dict = defaultdict(dict)
         for idx, (
             agent_id,
             actor,
@@ -648,13 +649,16 @@ class MADDPG:
                 actor_loss.backward()
             actor_optimizer.step()
 
+            loss_dict["actors"][f"{agent_id}"] = actor_loss.item()
+            loss_dict["critics"][f"{agent_id}"] = critic_loss.item()
+
         for actor, actor_target, critic, critic_target in zip(
             self.actors, self.actor_targets, self.critics, self.critic_targets
         ):
             self.softUpdate(actor, actor_target)
             self.softUpdate(critic, critic_target)
 
-        return actor_loss.item(), critic_loss.item()
+        return loss_dict
 
     def softUpdate(self, net, target):
         """Soft updates target network."""

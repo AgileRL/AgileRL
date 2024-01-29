@@ -2,6 +2,7 @@ import copy
 import random
 import warnings
 
+from collections import defaultdict
 import dill
 import numpy as np
 import torch
@@ -510,7 +511,7 @@ class MATD3:
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
-
+        loss_dict = defaultdict(dict)
         for idx, (
             agent_id,
             actor,
@@ -724,6 +725,14 @@ class MATD3:
                     actor_loss.backward()
                 actor_optimizer.step()
 
+            
+
+            try:
+                loss_dict["actors"][f"{agent_id}"] = actor_loss.item() 
+            except:
+                loss_dict["actors"][f"{agent_id}"] = None
+            loss_dict["critics"][f"{agent_id}"] = critic_loss.item()
+
         if len(self.scores) % self.policy_freq == 0:
             for (
                 actor,
@@ -744,9 +753,7 @@ class MATD3:
                 self.softUpdate(critic_1, critic_target_1)
                 self.softUpdate(critic_2, critic_target_2)
 
-            return actor_loss.item(), critic_loss.item()
-        else:
-            return None, critic_loss.item()
+        return loss_dict
 
     def softUpdate(self, net, target):
         """Soft updates target network."""
