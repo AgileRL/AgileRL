@@ -129,7 +129,7 @@ class MATD3:
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(policy_freq, int), "Policy frequency must be an integer."
-        assert policy_freq > 0, "Policy frequency must be grateer than zero."
+        assert policy_freq > 0, "Policy frequency must be greater than zero."
         assert n_agents == len(
             agent_ids
         ), "Number of agents must be equal to the length of the agent IDs list."
@@ -171,6 +171,7 @@ class MATD3:
         self.scores = []
         self.fitness = []
         self.steps = [0]
+        self.learn_counter = 0
         self.max_action = max_action
         self.expl_noise = expl_noise
         self.min_action = min_action
@@ -664,8 +665,9 @@ class MATD3:
             critic_1_optimizer.step()
             critic_2_optimizer.step()
 
-            # update actor and targets every policy_freq episodes
-            if len(self.scores) % self.policy_freq == 0:
+            # update actor and targets every policy_freq learn steps
+            self.learn_counter += 1
+            if self.learn_counter % self.policy_freq == 0:
                 if self.arch == "mlp":
                     if self.accelerator is not None:
                         with actor.no_sync():
@@ -724,7 +726,7 @@ class MATD3:
                     actor_loss.backward()
                 actor_optimizer.step()
 
-        if len(self.scores) % self.policy_freq == 0:
+        if self.learn_counter % self.policy_freq == 0:
             for (
                 actor,
                 actor_target,
@@ -948,6 +950,7 @@ class MATD3:
         clone.fitness = copy.deepcopy(self.fitness)
         clone.steps = copy.deepcopy(self.steps)
         clone.scores = copy.deepcopy(self.scores)
+        clone.learn_counter = copy.deepcopy(self.learn_counter)
 
         return clone
 
@@ -1099,6 +1102,7 @@ class MATD3:
                 "scores": self.scores,
                 "fitness": self.fitness,
                 "steps": self.steps,
+                "learn_counter": self.learn_counter,
             },
             path,
             pickle_module=dill,
@@ -1281,6 +1285,7 @@ class MATD3:
         self.scores = checkpoint["scores"]
         self.fitness = checkpoint["fitness"]
         self.steps = checkpoint["steps"]
+        self.learn_counter = checkpoint["learn_counter"]
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -1517,5 +1522,6 @@ class MATD3:
         agent.scores = checkpoint["scores"]
         agent.fitness = checkpoint["fitness"]
         agent.steps = checkpoint["steps"]
+        agent.learn_counter = checkpoint["learn_counter"]
 
         return agent

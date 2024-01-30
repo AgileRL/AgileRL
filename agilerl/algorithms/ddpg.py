@@ -148,6 +148,7 @@ class DDPG:
         self.scores = []
         self.fitness = []
         self.steps = [0]
+        self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_network is not None:
             self.actor = actor_network
@@ -213,7 +214,7 @@ class DDPG:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation="Tanh",
+                    mlp_activation="ReLU",
                     mlp_output_activation=output_activation,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -226,7 +227,7 @@ class DDPG:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation="Tanh",
+                    mlp_activation="ReLU",
                     mlp_output_activation=None,
                     critic=True,
                     device=self.device,
@@ -374,8 +375,9 @@ class DDPG:
             critic_loss.backward()
         self.critic_optimizer.step()
 
-        # update actor and targets every policy_freq episodes
-        if len(self.scores) % self.policy_freq == 0:
+        # update actor and targets every policy_freq learn steps
+        self.learn_counter += 1
+        if self.learn_counter % self.policy_freq == 0:
             policy_actions = self.actor.forward(states)
             policy_actions = torch.where(
                 policy_actions > 0,

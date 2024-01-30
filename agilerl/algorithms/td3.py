@@ -167,6 +167,7 @@ class TD3:
         self.scores = []
         self.fitness = []
         self.steps = [0]
+        self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_networks is not None:
             self.actor = actor_network
@@ -443,8 +444,9 @@ class TD3:
         self.critic_1_optimizer.step()
         self.critic_2_optimizer.step()
 
-        # update actor and targets every policy_freq episodes
-        if len(self.scores) % self.policy_freq == 0:
+        # update actor and targets every policy_freq learn steps
+        self.learn_counter += 1
+        if self.learn_counter % self.policy_freq == 0:
             policy_actions = self.actor.forward(states)
             policy_actions = torch.where(
                 policy_actions > 0,
