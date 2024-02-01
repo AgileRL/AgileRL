@@ -380,9 +380,11 @@ def train_multi_agent(
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
 
             wandb_dict = {
-                "global_step": total_steps * accelerator.state.num_processes
-                if accelerator is not None and accelerator.is_main_process
-                else total_steps,
+                "global_step": (
+                    total_steps * accelerator.state.num_processes
+                    if accelerator is not None and accelerator.is_main_process
+                    else total_steps
+                ),
                 "train/mean_score": np.mean(mean_scores),
                 "train/best_score": np.max([agent.scores[-1] for agent in pop]),
                 "eval/mean_fitness": np.mean(fitnesses),
