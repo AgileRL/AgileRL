@@ -404,31 +404,33 @@ class TD3:
             q_value_1 = self.critic_1(states, actions)
             q_value_2 = self.critic_2(states, actions)
 
-        next_actions = self.actor_target(next_states)
-        # Scale actions
-        next_actions = torch.where(
-            next_actions > 0,
-            next_actions * self.max_action,
-            next_actions * -self.min_action,
-        )
-        noise = actions.data.normal_(0, policy_noise)
-        if self.accelerator is not None:
-            noise = noise.to(self.accelerator.device)
-        else:
-            noise = noise.to(self.device)
-        noise = noise.clamp(-noise_clip, noise_clip)
-        next_actions = next_actions + noise
+        with torch.no_grad():
+            next_actions = self.actor_target(next_states)
+            # Scale actions
+            next_actions = torch.where(
+                next_actions > 0,
+                next_actions * self.max_action,
+                next_actions * -self.min_action,
+            )
+            noise = actions.data.normal_(0, policy_noise)
+            if self.accelerator is not None:
+                noise = noise.to(self.accelerator.device)
+            else:
+                noise = noise.to(self.device)
+            noise = noise.clamp(-noise_clip, noise_clip)
+            next_actions = next_actions + noise
 
-        # Compute the target, y_j, making use of twin critic networks
-        if self.arch == "mlp":
-            next_input_combined = torch.cat([next_states, next_actions], 1)
-            q_value_next_state_1 = self.critic_target_1(next_input_combined)
-            q_value_next_state_2 = self.critic_target_2(next_input_combined)
-        elif self.arch == "cnn":
-            q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
-            q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
-        q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
-        y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state).detach()
+            # Compute the target, y_j, making use of twin critic networks
+            if self.arch == "mlp":
+                next_input_combined = torch.cat([next_states, next_actions], 1)
+                q_value_next_state_1 = self.critic_target_1(next_input_combined)
+                q_value_next_state_2 = self.critic_target_2(next_input_combined)
+            elif self.arch == "cnn":
+                q_value_next_state_1 = self.critic_target_1(next_states, next_actions)
+                q_value_next_state_2 = self.critic_target_2(next_states, next_actions)
+            q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
+
+        y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
 
         # Loss equation needs to be updated to account for two q_values from two critics
         critic_loss = self.criterion(q_value_1, y_j) + self.criterion(q_value_2, y_j)
