@@ -17,6 +17,8 @@ SHARED_INIT_HP = {
     "DOUBLE": True,
     "BATCH_SIZE": 128,
     "LR": 1e-3,
+    "LR_ACTOR": 1e-4,
+    "LR_CRITIC": 1e-3,
     "GAMMA": 0.99,
     "LEARN_STEP": 1,
     "TAU": 1e-3,
