@@ -457,11 +457,13 @@ class ILQL(nn.Module):
             "vs": vs,
             "target_vs": vs,
             "qs": (
-                qs,
-                qs2,
-            )
-            if self.double_q
-            else qs,
+                (
+                    qs,
+                    qs2,
+                )
+                if self.double_q
+                else qs
+            ),
             "target_qs": self.clip_values(
                 torch.minimum(target_qs, target_qs2) if self.double_q else target_qs
             ),
@@ -1136,12 +1138,12 @@ class ILQL(nn.Module):
                 "target_q_state_dict": self.target_q.state_dict(),
                 "q2_init_dict": self.q2.init_dict if self.double_q else None,
                 "q2_state_dict": self.q.state_dict() if self.double_q else None,
-                "target_q2_init_dict": self.target_q2.init_dict
-                if self.double_q
-                else None,
-                "target_q2_state_dict": self.target_q2.state_dict()
-                if self.double_q
-                else None,
+                "target_q2_init_dict": (
+                    self.target_q2.init_dict if self.double_q else None
+                ),
+                "target_q2_state_dict": (
+                    self.target_q2.state_dict() if self.double_q else None
+                ),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "dataset": self.dataset,
                 "net_config": self.net_config,

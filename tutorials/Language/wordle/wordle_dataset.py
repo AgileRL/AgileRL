@@ -62,9 +62,11 @@ class WordleListDataset(List_RL_Dataset):
             for item in tqdm(d["state_actions"])
         ]
         meta = [
-            {**item["meta"], "self": wordle_items[i]}
-            if "meta" in item
-            else {"self": wordle_items[i]}
+            (
+                {**item["meta"], "self": wordle_items[i]}
+                if "meta" in item
+                else {"self": wordle_items[i]}
+            )
             for i, item in enumerate(d["state_actions"])
         ]
         return WordleListDataset(list(zip(wordle_items, meta)), max_len, token_reward)
