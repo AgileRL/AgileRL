@@ -856,11 +856,11 @@ def test_matd3_learns_from_experiences_mlp(
 
     for _ in range(4 * policy_freq):
         matd3.scores.append(0)
-        actor_loss, critic_loss = matd3.learn(experiences)
+        loss = matd3.learn(experiences)
 
-    assert isinstance(actor_loss, float)
-    assert isinstance(critic_loss, float)
-    assert critic_loss >= 0.0
+    assert isinstance(loss, dict)
+    for agent_id in matd3.agent_ids:
+        assert loss["critics"][agent_id] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -975,11 +975,11 @@ def test_matd3_learns_from_experiences_mlp_distributed(
 
     for _ in range(4 * policy_freq):
         matd3.scores.append(0)
-        actor_loss, critic_loss = matd3.learn(accelerated_experiences)
+        loss = matd3.learn(accelerated_experiences)
 
-    assert isinstance(actor_loss, float)
-    assert isinstance(critic_loss, float)
-    assert critic_loss >= 0.0
+    assert isinstance(loss, dict)
+    for agent_id in matd3.agent_ids:
+        assert loss["critics"][agent_id] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -1068,11 +1068,11 @@ def test_matd3_learns_from_experiences_cnn(
 
     for _ in range(100 * policy_freq):
         matd3.scores.append(0)
-        actor_loss, critic_loss = matd3.learn(experiences)
+        loss = matd3.learn(experiences)
 
-    assert isinstance(actor_loss, float)
-    assert isinstance(critic_loss, float)
-    assert critic_loss >= 0.0
+    assert isinstance(loss, dict)
+    for agent_id in matd3.agent_ids:
+        assert loss["critics"][agent_id] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -1186,11 +1186,11 @@ def test_matd3_learns_from_experiences_cnn_distributed(
 
     for _ in range(4):
         matd3.scores.append(0)
-        actor_loss, critic_loss = matd3.learn(accelerated_experiences)
+        loss = matd3.learn(accelerated_experiences)
 
-    assert isinstance(actor_loss, float)
-    assert isinstance(critic_loss, float)
-    assert critic_loss >= 0.0
+    assert isinstance(loss, dict)
+    for agent_id in matd3.agent_ids:
+        assert loss["critics"][agent_id] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
