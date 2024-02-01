@@ -139,7 +139,8 @@ def test_initialize_ddpg_with_minimum_parameters():
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config == {"arch": "mlp", "h_size": [64, 64]}
     assert ddpg.batch_size == 64
-    assert ddpg.lr == 0.0001
+    assert ddpg.lr_actor == 0.0001
+    assert ddpg.lr_critic == 0.001
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
     assert ddpg.tau == 0.001
@@ -178,7 +179,8 @@ def test_initialize_ddpg_with_cnn_accelerator():
         "normalize": False,
     }
     batch_size = 64
-    lr = 1e-4
+    lr_actor = 1e-4
+    lr_critic = 1e-3
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
@@ -194,7 +196,8 @@ def test_initialize_ddpg_with_cnn_accelerator():
         index=index,
         net_config=net_config_cnn,
         batch_size=batch_size,
-        lr=lr,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
@@ -209,7 +212,7 @@ def test_initialize_ddpg_with_cnn_accelerator():
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config == net_config_cnn
     assert ddpg.batch_size == batch_size
-    assert ddpg.lr == lr
+    assert ddpg.lr_actor == lr_actor
     assert ddpg.learn_step == learn_step
     assert ddpg.gamma == gamma
     assert ddpg.tau == tau
@@ -262,7 +265,8 @@ def test_initialize_ddpg_with_actor_network(
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config is None
     assert ddpg.batch_size == 64
-    assert ddpg.lr == 0.0001
+    assert ddpg.lr_actor == 0.0001
+    assert ddpg.lr_critic == 0.001
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
     assert ddpg.tau == 0.001
@@ -313,7 +317,8 @@ def test_initialize_ddpg_with_actor_network_no_critic(
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config is not None
     assert ddpg.batch_size == 64
-    assert ddpg.lr == 0.0001
+    assert ddpg.lr_actor == 0.0001
+    assert ddpg.lr_critic == 0.001
     assert ddpg.learn_step == 5
     assert ddpg.gamma == 0.99
     assert ddpg.tau == 0.001
@@ -486,7 +491,8 @@ def test_soft_update():
     one_hot = False
     net_config = {"arch": "mlp", "h_size": [64, 64]}
     batch_size = 64
-    lr = 1e-4
+    lr_actor = 1e-4
+    lr_critic = 1e-3
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
@@ -502,7 +508,8 @@ def test_soft_update():
         one_hot,
         net_config=net_config,
         batch_size=batch_size,
-        lr=lr,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
@@ -640,7 +647,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr == ddpg.lr
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
     assert clone_agent.learn_step == ddpg.learn_step
     assert clone_agent.gamma == ddpg.gamma
     assert clone_agent.tau == ddpg.tau
@@ -677,7 +685,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr == ddpg.lr
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
     assert clone_agent.learn_step == ddpg.learn_step
     assert clone_agent.gamma == ddpg.gamma
     assert clone_agent.tau == ddpg.tau
@@ -713,7 +722,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
-    assert clone_agent.lr == ddpg.lr
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
     assert clone_agent.learn_step == ddpg.learn_step
     assert clone_agent.gamma == ddpg.gamma
     assert clone_agent.tau == ddpg.tau
@@ -774,7 +784,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "critic_optimizer_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -798,7 +809,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(ddpg.actor_target, EvolvableMLP)
     assert isinstance(ddpg.critic, EvolvableMLP)
     assert isinstance(ddpg.critic_target, EvolvableMLP)
-    assert ddpg.lr == 1e-4
+    assert ddpg.lr_actor == 1e-4
+    assert ddpg.lr_critic == 1e-3
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
@@ -847,7 +859,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "critic_optimizer_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -874,7 +887,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(ddpg.actor_target, EvolvableCNN)
     assert isinstance(ddpg.critic, EvolvableCNN)
     assert isinstance(ddpg.critic_target, EvolvableCNN)
-    assert ddpg.lr == 1e-4
+    assert ddpg.lr_actor == 1e-4
+    assert ddpg.lr_critic == 1e-3
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
@@ -940,7 +954,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "critic_optimizer_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -964,7 +979,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(ddpg.actor_target, nn.Module)
     assert isinstance(ddpg.critic, nn.Module)
     assert isinstance(ddpg.critic_target, nn.Module)
-    assert ddpg.lr == 1e-4
+    assert ddpg.lr_actor == 1e-4
+    assert ddpg.lr_critic == 1e-3
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
     assert str(ddpg.critic.state_dict()) == str(ddpg.critic_target.state_dict())
     assert ddpg.batch_size == 64
@@ -1036,7 +1052,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert isinstance(new_ddpg.actor_target, EvolvableMLP)
     assert isinstance(new_ddpg.critic, EvolvableMLP)
     assert isinstance(new_ddpg.critic_target, EvolvableMLP)
-    assert new_ddpg.lr == ddpg.lr
+    assert new_ddpg.lr_actor == ddpg.lr_actor
+    assert new_ddpg.lr_critic == ddpg.lr_critic
     assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
     assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
         ddpg.actor_target.state_dict()
@@ -1099,7 +1116,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert isinstance(new_ddpg.actor_target, EvolvableCNN)
     assert isinstance(new_ddpg.critic, EvolvableCNN)
     assert isinstance(new_ddpg.critic_target, EvolvableCNN)
-    assert new_ddpg.lr == ddpg.lr
+    assert new_ddpg.lr_actor == ddpg.lr_actor
+    assert new_ddpg.lr_critic == ddpg.lr_critic
     assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
     assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
         ddpg.actor_target.state_dict()
@@ -1163,7 +1181,8 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_ddpg.actor_target, nn.Module)
     assert isinstance(new_ddpg.critic, nn.Module)
     assert isinstance(new_ddpg.critic_target, nn.Module)
-    assert new_ddpg.lr == ddpg.lr
+    assert new_ddpg.lr_actor == ddpg.lr_actor
+    assert new_ddpg.lr_critic == ddpg.lr_critic
     assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
     assert str(new_ddpg.actor_target.to("cpu").state_dict()) == str(
         ddpg.actor_target.state_dict()

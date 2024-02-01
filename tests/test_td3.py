@@ -141,7 +141,8 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.max_action == max_action
     assert td3.net_config == {"arch": "mlp", "h_size": [64, 64]}
     assert td3.batch_size == 64
-    assert td3.lr == 0.0001
+    assert td3.lr_actor == 0.0001
+    assert td3.lr_critic == 0.001
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
     assert td3.tau == 0.005
@@ -185,7 +186,8 @@ def test_initialize_td3_with_cnn_accelerator():
         "normalize": False,
     }
     batch_size = 64
-    lr = 1e-4
+    lr_actor = 1e-4
+    lr_critic = 1e-3
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
@@ -202,7 +204,8 @@ def test_initialize_td3_with_cnn_accelerator():
         index=index,
         net_config=net_config_cnn,
         batch_size=batch_size,
-        lr=lr,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
@@ -218,7 +221,8 @@ def test_initialize_td3_with_cnn_accelerator():
     assert td3.max_action == max_action
     assert td3.net_config == net_config_cnn
     assert td3.batch_size == batch_size
-    assert td3.lr == lr
+    assert td3.lr_actor == lr_actor
+    assert td3.lr_critic == lr_critic
     assert td3.learn_step == learn_step
     assert td3.gamma == gamma
     assert td3.tau == tau
@@ -293,7 +297,8 @@ def test_initialize_td3_with_actor_network(
     assert td3.max_action == max_action
     assert td3.net_config is None
     assert td3.batch_size == 64
-    assert td3.lr == 0.0001
+    assert td3.lr_actor == 0.0001
+    assert td3.lr_critic == 0.001
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
     assert td3.tau == 0.005
@@ -363,7 +368,8 @@ def test_initialize_td3_with_actor_network_no_critics(
     assert td3.max_action == max_action
     assert td3.net_config is not None
     assert td3.batch_size == 64
-    assert td3.lr == 0.0001
+    assert td3.lr_actor == 0.0001
+    assert td3.lr_critic == 0.001
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
     assert td3.tau == 0.005
@@ -430,7 +436,8 @@ def test_initialize_td3_with_actor_network_cnn(
     assert td3.max_action == max_action
     assert td3.net_config is None
     assert td3.batch_size == 64
-    assert td3.lr == 0.0001
+    assert td3.lr_actor == 0.0001
+    assert td3.lr_critic == 0.001
     assert td3.learn_step == 5
     assert td3.gamma == 0.99
     assert td3.tau == 0.005
@@ -623,7 +630,8 @@ def test_soft_update():
     max_action = 1
     net_config = {"arch": "mlp", "h_size": [64, 64]}
     batch_size = 64
-    lr = 1e-4
+    lr_actor = 1e-4
+    lr_critic = 1e-3
     learn_step = 5
     gamma = 0.99
     tau = 1e-3
@@ -640,7 +648,8 @@ def test_soft_update():
         max_action,
         net_config=net_config,
         batch_size=batch_size,
-        lr=lr,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
         learn_step=learn_step,
         gamma=gamma,
         tau=tau,
@@ -796,7 +805,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.actor_network == td3.actor_network
     assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
-    assert clone_agent.lr == td3.lr
+    assert clone_agent.lr_actor == td3.lr_actor
+    assert clone_agent.lr_critic == td3.lr_critic
     assert clone_agent.learn_step == td3.learn_step
     assert clone_agent.gamma == td3.gamma
     assert clone_agent.tau == td3.tau
@@ -842,7 +852,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.actor_network == td3.actor_network
     assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
-    assert clone_agent.lr == td3.lr
+    assert clone_agent.lr_actor == td3.lr_actor
+    assert clone_agent.lr_critic == td3.lr_critic
     assert clone_agent.learn_step == td3.learn_step
     assert clone_agent.gamma == td3.gamma
     assert clone_agent.tau == td3.tau
@@ -888,7 +899,8 @@ def test_clone_returns_identical_agent():
     assert clone_agent.actor_network == td3.actor_network
     assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
-    assert clone_agent.lr == td3.lr
+    assert clone_agent.lr_actor == td3.lr_actor
+    assert clone_agent.lr_critic == td3.lr_critic
     assert clone_agent.learn_step == td3.learn_step
     assert clone_agent.gamma == td3.gamma
     assert clone_agent.tau == td3.tau
@@ -970,7 +982,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "max_action" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -992,7 +1005,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(td3.critic_target_1, EvolvableMLP)
     assert isinstance(td3.critic_2, EvolvableMLP)
     assert isinstance(td3.critic_target_2, EvolvableMLP)
-    assert td3.lr == 1e-4
+    assert td3.lr_actor == 1e-4
+    assert td3.lr_critic == 1e-3
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
@@ -1053,7 +1067,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "max_action" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1075,7 +1090,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(td3.critic_target_1, EvolvableCNN)
     assert isinstance(td3.critic_2, EvolvableCNN)
     assert isinstance(td3.critic_target_2, EvolvableCNN)
-    assert td3.lr == 1e-4
+    assert td3.lr_actor == 1e-4
+    assert td3.lr_critic == 1e-3
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
@@ -1158,7 +1174,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "max_action" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1180,7 +1197,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(td3.critic_target_1, nn.Module)
     assert isinstance(td3.critic_2, nn.Module)
     assert isinstance(td3.critic_target_2, nn.Module)
-    assert td3.lr == 1e-4
+    assert td3.lr_actor == 1e-4
+    assert td3.lr_critic == 1e-3
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
     assert str(td3.critic_1.state_dict()) == str(td3.critic_target_1.state_dict())
     assert str(td3.critic_2.state_dict()) == str(td3.critic_target_2.state_dict())
@@ -1256,7 +1274,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert isinstance(new_td3.critic_target_1, EvolvableMLP)
     assert isinstance(new_td3.critic_2, EvolvableMLP)
     assert isinstance(new_td3.critic_target_2, EvolvableMLP)
-    assert new_td3.lr == td3.lr
+    assert new_td3.lr_actor == td3.lr_actor
+    assert new_td3.lr_critic == td3.lr_critic
     assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
     assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
         td3.actor_target.state_dict()
@@ -1329,7 +1348,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert isinstance(new_td3.critic_target_1, EvolvableCNN)
     assert isinstance(new_td3.critic_2, EvolvableCNN)
     assert isinstance(new_td3.critic_target_2, EvolvableCNN)
-    assert new_td3.lr == td3.lr
+    assert new_td3.lr_actor == td3.lr_actor
+    assert new_td3.lr_critic == td3.lr_critic
     assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
     assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
         td3.actor_target.state_dict()
@@ -1403,7 +1423,8 @@ def test_load_from_pretrained_networks(
     assert isinstance(new_td3.critic_target_1, nn.Module)
     assert isinstance(new_td3.critic_2, nn.Module)
     assert isinstance(new_td3.critic_target_2, nn.Module)
-    assert new_td3.lr == td3.lr
+    assert new_td3.lr_actor == td3.lr_actor
+    assert new_td3.lr_critic == td3.lr_critic
     assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
     assert str(new_td3.actor_target.to("cpu").state_dict()) == str(
         td3.actor_target.state_dict()
