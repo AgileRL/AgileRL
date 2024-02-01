@@ -308,7 +308,14 @@ class EvolvableCNN(nn.Module):
             if features_dim is None:
                 features_dim = self.hidden_size[0]
             net_dict[f"{name}_flatten"] = nn.Flatten()
-            sample_input = torch.zeros((1, *self.input_shape))
+            if self.multi:
+                sample_input = (
+                    torch.zeros(1, *self.input_shape)
+                    .unsqueeze(2)
+                    .repeat(1, 1, self.n_agents, 1, 1)
+                )
+            else:
+                sample_input = torch.zeros((1, *self.input_shape))
             with torch.no_grad():
                 flattened_size = nn.Sequential(net_dict)(sample_input).shape[1]
             net_dict[f"{name}_linear_output"] = nn.Linear(flattened_size, features_dim)
