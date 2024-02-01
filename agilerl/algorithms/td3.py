@@ -35,8 +35,10 @@ class TD3:
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
-    :type lr: float, optional
+    :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
+    :type lr_actor: float, optional
+    :param lr_critic: Learning rate for critic optimizer, defaults to 1e-3
+    :type lr_critic: float, optional
     :param learn_step: Learning frequency, defaults to 5
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
@@ -70,7 +72,8 @@ class TD3:
         index=0,
         net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
-        lr=1e-4,
+        lr_actor=1e-4,
+        lr_critic=1e-3,
         learn_step=5,
         gamma=0.99,
         tau=0.005,
@@ -109,8 +112,10 @@ class TD3:
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr, float), "Learning rate must be a float."
-        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(lr_actor, float), "Actor learning rate must be a float."
+        assert lr_actor > 0, "Actor learning rate must be greater than zero."
+        assert isinstance(lr_critic, float), "Critic learning rate must be a float."
+        assert lr_critic > 0, "Critic learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, (float, int)), "Gamma must be a float."
@@ -150,7 +155,8 @@ class TD3:
         self.min_action = min_action
         self.net_config = net_config
         self.batch_size = batch_size
-        self.lr = lr
+        self.lr_actor = lr_actor
+        self.lr_critic = lr_critic
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
@@ -280,12 +286,14 @@ class TD3:
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-        self.actor_optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.actor_optimizer_type = optim.Adam(
+            self.actor.parameters(), lr=self.lr_actor
+        )
         self.critic_1_optimizer_type = optim.Adam(
-            self.critic_1.parameters(), lr=self.lr
+            self.critic_1.parameters(), lr=self.lr_critic
         )
         self.critic_2_optimizer_type = optim.Adam(
-            self.critic_2.parameters(), lr=self.lr
+            self.critic_2.parameters(), lr=self.lr_critic
         )
 
         self.arch = (
@@ -545,9 +553,9 @@ class TD3:
         critic_2 = self.critic_2.clone()
         critic_target_2 = self.critic_target_2.clone()
 
-        actor_optimizer = optim.Adam(clone.actor.parameters(), lr=clone.lr)
-        critic_1_optimizer = optim.Adam(clone.critic_1.parameters(), lr=clone.lr)
-        critic_2_optimizer = optim.Adam(clone.critic_2.parameters(), lr=clone.lr)
+        actor_optimizer = optim.Adam(clone.actor.parameters(), lr=clone.lr_actor)
+        critic_1_optimizer = optim.Adam(clone.critic_1.parameters(), lr=clone.lr_critic)
+        critic_2_optimizer = optim.Adam(clone.critic_2.parameters(), lr=clone.lr_critic)
 
         clone.actor_optimizer_type = actor_optimizer
         clone.critic_1_optimizer_type = critic_1_optimizer
@@ -712,7 +720,7 @@ class TD3:
         """
         attribute_dict = self.inspect_attributes()
 
-        network_info = network_info = {
+        network_info = {
             "actor_init_dict": self.actor.init_dict,
             "actor_state_dict": self.actor.state_dict(),
             "actor_target_init_dict": self.actor_target.init_dict,
@@ -761,7 +769,8 @@ class TD3:
             "critic_2_init_dict",
             "critic_target_2_init_dict",
             "net_config",
-            "lr",
+            "lr_actor",
+            "lr_critic",
         ]
 
         checkpoint = torch.load(path, pickle_module=dill)
@@ -782,10 +791,15 @@ class TD3:
         self.critic_2 = network_class(**checkpoint["critic_2_init_dict"])
         self.critic_target_2 = network_class(**checkpoint["critic_target_2_init_dict"])
 
-        self.lr = checkpoint["lr"]
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_1_optimizer = optim.Adam(self.critic_1.parameters(), lr=self.lr)
-        self.critic_2_optimizer = optim.Adam(self.critic_2.parameters(), lr=self.lr)
+        self.lr_actor = checkpoint["lr_actor"]
+        self.lr_critic = checkpoint["lr_critic"]
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.critic_1_optimizer = optim.Adam(
+            self.critic_1.parameters(), lr=self.lr_critic
+        )
+        self.critic_2_optimizer = optim.Adam(
+            self.critic_2.parameters(), lr=self.lr_critic
+        )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.critic_1.load_state_dict(checkpoint["critic_1_state_dict"])
@@ -876,17 +890,21 @@ class TD3:
             agent.critic_target_1 = MakeEvolvable(**critic_target_1_init_dict)
             agent.critic_target_2 = MakeEvolvable(**critic_target_2_init_dict)
 
-        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr_actor)
         agent.actor.load_state_dict(actor_state_dict)
         agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.actor_optimizer.load_state_dict(actor_optimizer_state_dict)
 
-        agent.critic_1_optimizer = optim.Adam(agent.critic_1.parameters(), lr=agent.lr)
+        agent.critic_1_optimizer = optim.Adam(
+            agent.critic_1.parameters(), lr=agent.lr_critic
+        )
         agent.critic_1.load_state_dict(critic_1_state_dict)
         agent.critic_target_1.load_state_dict(critic_target_1_state_dict)
         agent.critic_1_optimizer.load_state_dict(critic_1_optimizer_state_dict)
 
-        agent.critic_2_optimizer = optim.Adam(agent.critic_2.parameters(), lr=agent.lr)
+        agent.critic_2_optimizer = optim.Adam(
+            agent.critic_2.parameters(), lr=agent.lr_critic
+        )
         agent.critic_2.load_state_dict(critic_2_state_dict)
         agent.critic_target_2.load_state_dict(critic_target_2_state_dict)
         agent.critic_2_optimizer.load_state_dict(critic_2_optimizer_state_dict)
