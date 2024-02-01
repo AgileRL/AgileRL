@@ -156,7 +156,6 @@ class TD3:
         self.tau = tau
         self.mut = mut
         self.policy_freq = policy_freq
-        self.max_action = max_action
         self.expl_noise = expl_noise
         self.actor_network = actor_network
         self.critic_networks = critic_networks
