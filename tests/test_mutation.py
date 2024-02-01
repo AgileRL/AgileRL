@@ -675,6 +675,7 @@ def test_mutation_applies_activation_mutations_no_skip():
 
             for individual in population:
                 individual.algo = None
+                individual.lr = 1e-3
             new_population = copy.deepcopy(population)
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
