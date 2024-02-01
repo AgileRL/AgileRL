@@ -619,11 +619,7 @@ def test_calculates_n_step_reward():
     result = replay_buffer._get_n_step_info(n_step_buffer, gamma)
 
     expected_reward = (
-        1.0
-        + gamma * (2.0)
-        + gamma**2 * (3.0)
-        + gamma**3 * (4.0)
-        + gamma**4 * (5.0)
+        1.0 + gamma * (2.0) + gamma**2 * (3.0) + gamma**3 * (4.0) + gamma**4 * (5.0)
     )
     assert np.array_equal(result[2], np.array([expected_reward]))
 

@@ -621,9 +621,11 @@ class EvolvableCNN(nn.Module):
                 kernel_size_value = np.random.choice([3, 4, 5, 7])
                 if self.critic:
                     self.kernel_size[hidden_layer] = tuple(
-                        min(kernel_size_value, self.n_agents - 1)
-                        if idx == 0
-                        else kernel_size_value
+                        (
+                            min(kernel_size_value, self.n_agents - 1)
+                            if idx == 0
+                            else kernel_size_value
+                        )
                         for idx in range(3)
                     )
                 else:
