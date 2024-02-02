@@ -27,14 +27,18 @@ class DDPG:
     :type max_action: float, optional
     :param min_action: Lower bound of the action space, defaults to -1
     :type min_action: float, optional
+    :param expl_noise: Standard deviation for Gaussian exploration noise
+    :param expl_noise: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
-    :type lr: float, optional
+    :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
+    :type lr_actor: float, optional
+    :param lr_critic: Learning rate for critic optimizer, defaults to 1e-3
+    :type lr_critic: float, optional
     :param learn_step: Learning frequency, defaults to 5
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
@@ -64,10 +68,12 @@ class DDPG:
         one_hot,
         max_action=1,
         min_action=-1,
+        expl_noise=0.1,
         index=0,
         net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
-        lr=1e-4,
+        lr_actor=1e-4,
+        lr_critic=1e-3,
         learn_step=5,
         gamma=0.99,
         tau=1e-3,
@@ -97,11 +103,19 @@ class DDPG:
         assert max_action > min_action, "Max action must be greater than min action."
         assert max_action > 0, "Max action must be greater than zero."
         assert min_action <= 0, "Min action must be less than or equal to zero."
+        assert isinstance(
+            expl_noise, (float, int)
+        ), "Exploration noise rate must be a float."
+        assert (
+            expl_noise >= 0
+        ), "Exploration noise must be greater than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr, float), "Learning rate must be a float."
-        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(lr_actor, float), "Actor learning rate must be a float."
+        assert lr_actor > 0, "Actor learning rate must be greater than zero."
+        assert isinstance(lr_critic, float), "Critic learning rate must be a float."
+        assert lr_critic > 0, "Critic learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, (float, int)), "Gamma must be a float."
@@ -133,12 +147,14 @@ class DDPG:
         self.min_action = min_action
         self.net_config = net_config
         self.batch_size = batch_size
-        self.lr = lr
+        self.lr_actor = lr_actor
+        self.lr_critic = lr_critic
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mut
         self.policy_freq = policy_freq
+        self.expl_noise = expl_noise
         self.actor_network = actor_network
         self.critic_network = critic_network
         self.device = device
@@ -148,6 +164,7 @@ class DDPG:
         self.scores = []
         self.fitness = []
         self.steps = [0]
+        self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_network is not None:
             self.actor = actor_network
@@ -213,7 +230,7 @@ class DDPG:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation="Tanh",
+                    mlp_activation="ReLU",
                     mlp_output_activation=output_activation,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -226,7 +243,7 @@ class DDPG:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
-                    mlp_activation="Tanh",
+                    mlp_activation="ReLU",
                     mlp_output_activation=None,
                     critic=True,
                     device=self.device,
@@ -237,8 +254,12 @@ class DDPG:
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor_optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_optimizer_type = optim.Adam(self.critic.parameters(), lr=self.lr)
+        self.actor_optimizer_type = optim.Adam(
+            self.actor.parameters(), lr=self.lr_actor
+        )
+        self.critic_optimizer_type = optim.Adam(
+            self.critic.parameters(), lr=self.lr_critic
+        )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
@@ -306,7 +327,12 @@ class DDPG:
             self.actor.train()
 
             action = self.scale_to_action_space(action_values.cpu().data.numpy())
-
+            action = (
+                action
+                + np.random.normal(0, self.expl_noise, size=self.action_dim).astype(
+                    np.float32
+                )
+            ).clip(self.min_action, self.max_action)
         return action
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
@@ -345,24 +371,25 @@ class DDPG:
         elif self.arch == "cnn":
             q_value = self.critic(states, actions)
 
-        next_actions = self.actor_target(next_states)
-        # Scale actions
-        next_actions = torch.where(
-            next_actions > 0,
-            next_actions * self.max_action,
-            next_actions * -self.min_action,
-        )
-        noise = actions.data.normal_(0, policy_noise)
-        noise = noise.clamp(-noise_clip, noise_clip)
-        next_actions = next_actions + noise
+        with torch.no_grad():
+            next_actions = self.actor_target(next_states)
+            # Scale actions
+            next_actions = torch.where(
+                next_actions > 0,
+                next_actions * self.max_action,
+                next_actions * -self.min_action,
+            )
+            noise = actions.data.normal_(0, policy_noise)
+            noise = noise.clamp(-noise_clip, noise_clip)
+            next_actions = next_actions + noise
 
-        if self.arch == "mlp":
-            next_input_combined = torch.cat([next_states, next_actions], 1)
-            q_value_next_state = self.critic_target(next_input_combined)
-        elif self.arch == "cnn":
-            q_value_next_state = self.critic_target(next_states, next_actions)
+            if self.arch == "mlp":
+                next_input_combined = torch.cat([next_states, next_actions], 1)
+                q_value_next_state = self.critic_target(next_input_combined)
+            elif self.arch == "cnn":
+                q_value_next_state = self.critic_target(next_states, next_actions)
 
-        y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state).detach()
+        y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
 
         critic_loss = self.criterion(q_value, y_j)
 
@@ -374,8 +401,9 @@ class DDPG:
             critic_loss.backward()
         self.critic_optimizer.step()
 
-        # update actor and targets every policy_freq episodes
-        if len(self.scores) % self.policy_freq == 0:
+        # update actor and targets every policy_freq learn steps
+        self.learn_counter += 1
+        if self.learn_counter % self.policy_freq == 0:
             policy_actions = self.actor.forward(states)
             policy_actions = torch.where(
                 policy_actions > 0,
@@ -468,8 +496,8 @@ class DDPG:
         actor_target = self.actor_target.clone()
         critic = self.critic.clone()
         critic_target = self.critic_target.clone()
-        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr)
+        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr_actor)
+        critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr_critic)
         clone.actor_optimizer_type = actor_optimizer
         clone.critic_optimizer_type = critic_optimizer
 
@@ -640,7 +668,8 @@ class DDPG:
             "critic_init_dict",
             "critic_target_init_dict",
             "net_config",
-            "lr",
+            "lr_actor",
+            "lr_critic",
         ]
 
         checkpoint = torch.load(path, pickle_module=dill)
@@ -659,9 +688,10 @@ class DDPG:
         self.critic = network_class(**checkpoint["critic_init_dict"])
         self.critic_target = network_class(**checkpoint["critic_target_init_dict"])
 
-        self.lr = checkpoint["lr"]
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr)
+        self.lr_actor = checkpoint["lr_actor"]
+        self.lr_critic = checkpoint["lr_critic"]
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr_critic)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.critic.load_state_dict(checkpoint["critic_state_dict"])
@@ -729,12 +759,14 @@ class DDPG:
             agent.actor_target = MakeEvolvable(**actor_target_init_dict)
             agent.critic_target = MakeEvolvable(**critic_target_init_dict)
 
-        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr_actor)
         agent.actor.load_state_dict(actor_state_dict)
         agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.actor_optimizer.load_state_dict(actor_optimizer_state_dict)
 
-        agent.critic_optimizer = optim.Adam(agent.critic.parameters(), lr=agent.lr)
+        agent.critic_optimizer = optim.Adam(
+            agent.critic.parameters(), lr=agent.lr_critic
+        )
         agent.critic.load_state_dict(critic_state_dict)
         agent.critic_target.load_state_dict(critic_target_state_dict)
         agent.critic_optimizer.load_state_dict(critic_optimizer_state_dict)

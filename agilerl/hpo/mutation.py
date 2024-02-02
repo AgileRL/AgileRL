@@ -403,11 +403,18 @@ class Mutations:
                 net_params = getattr(
                     individual, self.algo["actor"]["eval"]
                 ).parameters()
-                setattr(
-                    individual,
-                    self.algo["actor"]["optimizer"].replace("_type", ""),
-                    type(actor_opt)(net_params, lr=individual.lr),
-                )
+                if individual.algo in ["DDPG", "TD3"]:
+                    setattr(
+                        individual,
+                        self.algo["actor"]["optimizer"].replace("_type", ""),
+                        type(actor_opt)(net_params, lr=individual.lr_actor),
+                    )
+                else:
+                    setattr(
+                        individual,
+                        self.algo["actor"]["optimizer"].replace("_type", ""),
+                        type(actor_opt)(net_params, lr=individual.lr),
+                    )
 
                 # If algorithm has critics, reinitialise their optimizers too
                 for critic in self.algo["critics"]:
@@ -416,7 +423,7 @@ class Mutations:
                     setattr(
                         individual,
                         critic["optimizer"].replace("_type", ""),
-                        type(critic_opt)(net_params, lr=individual.lr),
+                        type(critic_opt)(net_params, lr=individual.lr_critic),
                     )
 
     def rl_hyperparam_mutation(self, individual):
@@ -445,9 +452,22 @@ class Mutations:
             lr_multiplication_options = [1.2, 0.8]  # Grow or shrink
             lr_probs = [0.5, 0.5]  # Equal probability
             lr_mult = self.rng.choice(lr_multiplication_options, size=1, p=lr_probs)[0]
-            individual.lr = min(self.max_lr, max(self.min_lr, individual.lr * lr_mult))
+            if individual.algo in ["DDPG", "TD3"]:
+                lr_choice = self.rng.choice(
+                    ["lr_actor", "lr_critic"], size=1, p=lr_probs
+                )[0]
+            else:
+                lr_choice = "lr"
+            setattr(
+                individual,
+                lr_choice,
+                min(
+                    self.max_lr,
+                    max(self.min_lr, getattr(individual, lr_choice) * lr_mult),
+                ),
+            )
             self.reinit_opt(individual)  # Reinitialise optimizer if new learning rate
-            individual.mut = "lr"
+            individual.mut = lr_choice
 
         elif mutate_param == "learn_step":
             if individual.algo in ["PPO"]:  # Needs to stay constant for on-policy

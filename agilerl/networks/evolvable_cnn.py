@@ -27,7 +27,7 @@ class EvolvableCNN(nn.Module):
     :type num_actions: int
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
     :type num_atoms: int, optional
-    :param mlp_output_activation: MLP output activation layer, defaults to 'softmax'
+    :param mlp_output_activation: MLP output activation layer, defaults to None
     :type mlp_output_activation: str, optional
     :param mlp_activation: MLP activation layer, defaults to 'relu'
     :type mlp_activation: str, optional
@@ -78,7 +78,7 @@ class EvolvableCNN(nn.Module):
         hidden_size: List[int],
         num_actions: int,
         num_atoms=51,
-        mlp_output_activation="Softmax",
+        mlp_output_activation=None,
         mlp_activation="ReLU",
         cnn_activation="ReLU",
         min_hidden_layers=1,
@@ -239,7 +239,15 @@ class EvolvableCNN(nn.Module):
         net = nn.Sequential(net_dict)
         return net
 
-    def create_cnn(self, input_size, channel_size, kernel_size, stride_size, name):
+    def create_cnn(
+        self,
+        input_size,
+        channel_size,
+        kernel_size,
+        stride_size,
+        name,
+        features_dim=None,
+    ):
         """Creates and returns convolutional neural network."""
         if self.multi:
             net_dict = OrderedDict()
@@ -247,9 +255,7 @@ class EvolvableCNN(nn.Module):
                 in_channels=input_size,
                 out_channels=channel_size[0],
                 kernel_size=kernel_size[0],
-                stride=stride_size[
-                    0
-                ],  ## Maybe include the ability to have 3 dim kernel and stride
+                stride=stride_size[0],
             )
             if self.layer_norm:
                 net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm3d(channel_size[0])
@@ -297,6 +303,25 @@ class EvolvableCNN(nn.Module):
                     net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
                         self.cnn_activation
                     )
+
+        if self.critic:
+            if features_dim is None:
+                features_dim = self.hidden_size[0]
+            net_dict[f"{name}_flatten"] = nn.Flatten()
+            if self.multi:
+                sample_input = (
+                    torch.zeros(1, *self.input_shape)
+                    .unsqueeze(2)
+                    .repeat(1, 1, self.n_agents, 1, 1)
+                )
+            else:
+                sample_input = torch.zeros((1, *self.input_shape))
+            with torch.no_grad():
+                flattened_size = nn.Sequential(net_dict)(sample_input).shape[1]
+            net_dict[f"{name}_linear_output"] = nn.Linear(flattened_size, features_dim)
+            net_dict[f"{name}_output_activation"] = self.get_activation(
+                self.cnn_activation
+            )
 
         return nn.Sequential(net_dict)
 

@@ -297,9 +297,11 @@ def train_on_policy(
             mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
 
             wandb_dict = {
-                "global_step": total_steps * accelerator.state.num_processes
-                if accelerator is not None and accelerator.is_main_process
-                else total_steps,
+                "global_step": (
+                    total_steps * accelerator.state.num_processes
+                    if accelerator is not None and accelerator.is_main_process
+                    else total_steps
+                ),
                 "train/mean_score": np.mean(mean_scores),
                 "eval/mean_fitness": np.mean(fitnesses),
                 "eval/best_fitness": np.max(fitnesses),

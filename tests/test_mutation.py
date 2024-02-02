@@ -26,6 +26,8 @@ SHARED_INIT_HP = {
     "DOUBLE": True,
     "BATCH_SIZE": 128,
     "LR": 1e-3,
+    "LR_ACTOR": 1e-4,
+    "LR_CRITIC": 1e-3,
     "GAMMA": 0.99,
     "LEARN_STEP": 1,
     "TAU": 1e-3,
@@ -343,6 +345,8 @@ def test_mutation_applies_random_mutations():
                     "None",
                     "bs",
                     "lr",
+                    "lr_actor",
+                    "lr_critic",
                     "ls",
                     "act",
                     "param",
@@ -464,7 +468,14 @@ def test_mutation_applies_no_mutations_pre_training_mut():
 
             assert len(mutated_population) == len(population)
             for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "bs", "lr", "ls"]
+                assert individual.mut in [
+                    "None",
+                    "bs",
+                    "lr",
+                    "lr_actor",
+                    "lr_critic",
+                    "ls",
+                ]
                 assert old.index == individual.index
                 assert old.actor != individual.actor
                 assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
@@ -527,7 +538,14 @@ def test_mutation_applies_rl_hp_mutations():
 
                 assert len(mutated_population) == len(population)
                 for old, individual in zip(population, mutated_population):
-                    assert individual.mut in ["None", "bs", "lr", "ls"]
+                    assert individual.mut in [
+                        "None",
+                        "bs",
+                        "lr",
+                        "lr_actor",
+                        "lr_critic",
+                        "ls",
+                    ]
                     if individual.mut == "bs":
                         assert (
                             mutations.min_batch_size
@@ -536,6 +554,14 @@ def test_mutation_applies_rl_hp_mutations():
                         )
                     if individual.mut == "lr":
                         assert mutations.min_lr <= individual.lr <= mutations.max_lr
+                    if individual.mut == "lr_actor":
+                        assert (
+                            mutations.min_lr <= individual.lr_actor <= mutations.max_lr
+                        )
+                    if individual.mut == "lr_critic":
+                        assert (
+                            mutations.min_lr <= individual.lr_critic <= mutations.max_lr
+                        )
                     if individual.mut == "ls":
                         assert (
                             mutations.min_learn_step
@@ -649,6 +675,7 @@ def test_mutation_applies_activation_mutations_no_skip():
 
             for individual in population:
                 individual.algo = None
+                individual.lr = 1e-3
             new_population = copy.deepcopy(population)
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
@@ -1122,6 +1149,8 @@ def test_mutation_applies_random_mutations_multi_agent():
                     "None",
                     "bs",
                     "lr",
+                    "lr_actor",
+                    "lr_critic",
                     "ls",
                     "act",
                     "param",
@@ -1227,7 +1256,14 @@ def test_mutation_applies_rl_hp_mutations_multi_agent():
 
             assert len(mutated_population) == len(population)
             for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "bs", "lr", "ls"]
+                assert individual.mut in [
+                    "None",
+                    "bs",
+                    "lr",
+                    "lr_actor",
+                    "lr_critic",
+                    "ls",
+                ]
                 if individual.mut == "bs":
                     assert (
                         mutations.min_batch_size
@@ -1236,6 +1272,10 @@ def test_mutation_applies_rl_hp_mutations_multi_agent():
                     )
                 if individual.mut == "lr":
                     assert mutations.min_lr <= individual.lr <= mutations.max_lr
+                if individual.mut == "lr_actor":
+                    assert mutations.min_lr <= individual.lr_actor <= mutations.max_lr
+                if individual.mut == "lr_critic":
+                    assert mutations.min_lr <= individual.lr_critic <= mutations.max_lr
                 if individual.mut == "ls":
                     assert (
                         mutations.min_learn_step

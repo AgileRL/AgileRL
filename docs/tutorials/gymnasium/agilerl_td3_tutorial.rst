@@ -78,7 +78,8 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "ALGO": "TD3",
         "POP_SIZE": 4,  # Population size
         "BATCH_SIZE": 128,  # Batch size
-        "LR": 0.001,  # Learning rate
+        "LR_ACTOR": 0.0001,  # Actor learning rate
+        "LR_CRITIC": 0.001,  # Critic learning rate
         "GAMMA": 0.99,  # Discount factor
         "MEMORY_SIZE": 100_000,  # Max memory buffer size
         "POLICY_FREQ": 2,  # Policy network update frequency
