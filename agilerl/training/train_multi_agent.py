@@ -426,7 +426,8 @@ def train_multi_agent(
                     wandb.log(
                         {
                             f"learn_step_agent_{idx}": agent.learn_step,
-                            f"learning_rate_agent_{idx}": agent.lr,
+                            f"learning_rate_actor_agent_{idx}": agent.lr_actor,
+                            f"learning_rate_critic_agent_{idx}": agent.lr_critic,
                             f"batch_size_agent_{idx}": agent.batch_size,
                             f"indi_fitness_agent_{idx}": agent.fitness[-1],
                         }
