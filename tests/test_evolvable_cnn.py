@@ -329,7 +329,12 @@ def test_forward_multi_critic(
         critic=True,
         device=device,
     )
-    input_tensor = torch.randn(1, *input_shape).unsqueeze(2).to(device)
+    input_tensor = (
+        torch.randn(1, *input_shape)
+        .unsqueeze(2)
+        .to(device)
+        .repeat(1, 1, n_agents, 1, 1)
+    )
     secondary_tensor = torch.randn(secondary_tensor).to(device)
     with torch.no_grad():
         output = evolvable_cnn.forward(input_tensor, secondary_tensor)
