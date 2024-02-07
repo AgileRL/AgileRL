@@ -149,7 +149,8 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def __init__(self, batch_size, env, *args):
         super().__init__(batch_size, env, *args)
         self.agents = ["agent_0", "agent_1"]
-        self.lr = 0.1
+        self.lr_actor = 0.001
+        self.lr_critic = 0.01
         self.discrete_actions = False
 
     def getAction(self, *args):
@@ -2103,7 +2104,8 @@ def test_train_multi_wandb_init_log(
 ):
     INIT_HP = {
         "BATCH_SIZE": 128,
-        "LR": 1e-3,
+        "LR_ACTOR": 1e-4,
+        "LR_CRITIC": 1e-3,
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
@@ -2174,7 +2176,8 @@ def test_multi_agent_early_stop(
 ):
     INIT_HP = {
         "BATCH_SIZE": 128,
-        "LR": 1e-3,
+        "LR_ACTOR": 1e-4,
+        "LR_CRITIC": 1e-3,
         "GAMMA": 0.99,
         "LEARN_STEP": 1,
         "TAU": 1e-3,
