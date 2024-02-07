@@ -31,9 +31,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         self.agents = self.env.agents
         return res, info
 
-    def step(
-        self, actions: dict[AgentID, ActionType]
-    ) -> tuple[
+    def step(self, actions: dict[AgentID, ActionType]) -> tuple[
         dict[AgentID, ObsType],
         dict[AgentID, float],
         dict[AgentID, bool],

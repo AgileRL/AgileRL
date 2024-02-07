@@ -32,9 +32,11 @@ class SpecifiedTokenReward(TokenReward):
 
     def get_token_reward(self, tokens: List[int]) -> List[float]:
         return [
-            (self.token_data[tok] * self.scale + self.shift)
-            if tok in self.token_data
-            else (0.0 * self.scale + self.shift)
+            (
+                (self.token_data[tok] * self.scale + self.shift)
+                if tok in self.token_data
+                else (0.0 * self.scale + self.shift)
+            )
             for tok in tokens[1:]
         ]
 

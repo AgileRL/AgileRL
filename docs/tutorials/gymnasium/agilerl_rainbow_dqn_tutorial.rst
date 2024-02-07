@@ -292,7 +292,7 @@ function and is an example of how we might choose to train an AgileRL agent.
                 experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
                 n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
                 experiences += n_step_experiences
-                idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
+                loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
                 memory.update_priorities(idxs, priorities)
 
             terminations.append(done)
