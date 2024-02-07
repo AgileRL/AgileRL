@@ -173,7 +173,7 @@ def accelerated_experiences(batch_size, state_dims, action_dims, agent_ids, one_
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float()
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
             for agent in agent_ids
         }
     else:
@@ -201,7 +201,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float().to(device)
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
             for agent in agent_ids
         }
     else:
@@ -1366,7 +1366,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     index = 0
     net_config = {"arch": "mlp", "h_size": [64, 64]}
     batch_size = 64
-    lr = 0.01
+    lr_actor = 0.001
+    lr_critic = 0.01
     learn_step = 5
     gamma = 0.95
     tau = 0.01
@@ -1394,7 +1395,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
         policy_freq,
         net_config,
         batch_size,
-        lr,
+        lr_actor,
+        lr_critic,
         learn_step,
         gamma,
         tau,
@@ -1421,7 +1423,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.index == matd3.index
     assert clone_agent.net_config == matd3.net_config
     assert clone_agent.batch_size == matd3.batch_size
-    assert clone_agent.lr == matd3.lr
+    assert clone_agent.lr_actor == matd3.lr_actor
+    assert clone_agent.lr_critic == matd3.lr_critic
     assert clone_agent.learn_step == matd3.learn_step
     assert clone_agent.gamma == matd3.gamma
     assert clone_agent.tau == matd3.tau
@@ -1501,7 +1504,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "policy_freq" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1549,7 +1553,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
         isinstance(critic_target_2, EvolvableMLP)
         for critic_target_2 in loaded_matd3.critic_targets_2
     )
-    assert matd3.lr == 0.01
+    assert matd3.lr_actor == 0.001
+    assert matd3.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1625,7 +1630,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "critic_2_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1670,7 +1676,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         isinstance(critic_target_2, EvolvableCNN)
         for critic_target_2 in loaded_matd3.critic_targets_2
     )
-    assert matd3.lr == 0.01
+    assert matd3.lr_actor == 0.001
+    assert matd3.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1764,7 +1771,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     assert "critic_2_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1808,7 +1816,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         isinstance(critic_target_2, MakeEvolvable)
         for critic_target_2 in loaded_matd3.critic_targets_2
     )
-    assert matd3.lr == 0.01
+    assert matd3.lr_actor == 0.001
+    assert matd3.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1948,7 +1957,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
-    assert new_matd3.lr == matd3.lr
+    assert new_matd3.lr_actor == matd3.lr_actor
+    assert new_matd3.lr_critic == matd3.lr_critic
     for (
         new_actor,
         new_actor_target,
@@ -2050,7 +2060,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
-    assert new_matd3.lr == matd3.lr
+    assert new_matd3.lr_actor == matd3.lr_actor
+    assert new_matd3.lr_critic == matd3.lr_critic
     for (
         new_actor,
         new_actor_target,
@@ -2186,7 +2197,8 @@ def test_load_from_pretrained_networks(
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
-    assert new_matd3.lr == matd3.lr
+    assert new_matd3.lr_actor == matd3.lr_actor
+    assert new_matd3.lr_critic == matd3.lr_critic
     for (
         new_actor,
         new_actor_target,

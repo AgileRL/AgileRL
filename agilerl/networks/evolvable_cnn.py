@@ -251,10 +251,15 @@ class EvolvableCNN(nn.Module):
         """Creates and returns convolutional neural network."""
         if self.multi:
             net_dict = OrderedDict()
+            k_size = (
+                (self.n_agents, kernel_size[0][1], kernel_size[0][2])
+                if self.critic
+                else kernel_size[0]
+            )
             net_dict[f"{name}_conv_layer_0"] = nn.Conv3d(
                 in_channels=input_size,
                 out_channels=channel_size[0],
-                kernel_size=kernel_size[0],
+                kernel_size=k_size,
                 stride=stride_size[0],
             )
             if self.layer_norm:

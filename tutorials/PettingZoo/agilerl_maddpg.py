@@ -37,7 +37,8 @@ if __name__ == "__main__":
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": True,
         "BATCH_SIZE": 8,  # Batch size
-        "LR": 0.01,  # Learning rate
+        "LR_ACTOR": 0.0001,  # Learning rate
+        "LR_CRITIC": 0.001,  # Learning rate
         "GAMMA": 0.95,  # Discount factor
         "MEMORY_SIZE": 10000,  # Max memory buffer size
         "LEARN_STEP": 5,  # Learning frequency
@@ -128,7 +129,7 @@ if __name__ == "__main__":
         ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
         # Define search space for each hyperparameter
-        min_lr=0.0001,
+        min_lr=0.00001,
         max_lr=0.01,
         min_learn_step=1,
         max_learn_step=120,

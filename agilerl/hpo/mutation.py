@@ -349,7 +349,7 @@ class Mutations:
             ]
 
             offspring_actor_opts = [
-                type(actor_opt)(net_param, lr=individual.lr)
+                type(actor_opt)(net_param, lr=individual.lr_actor)
                 for actor_opt, net_param in zip(actor_opts, net_params)
             ]
 
@@ -368,7 +368,7 @@ class Mutations:
                 ]
 
                 offspring_critic_opts = [
-                    type(critic_opt)(net_param, lr=individual.lr)
+                    type(critic_opt)(net_param, lr=individual.lr_critic)
                     for critic_opt, net_param in zip(critic_opts, net_params)
                 ]
 
@@ -452,7 +452,7 @@ class Mutations:
             lr_multiplication_options = [1.2, 0.8]  # Grow or shrink
             lr_probs = [0.5, 0.5]  # Equal probability
             lr_mult = self.rng.choice(lr_multiplication_options, size=1, p=lr_probs)[0]
-            if individual.algo in ["DDPG", "TD3"]:
+            if individual.algo in ["DDPG", "TD3", "MADDPG", "MATD3"]:
                 lr_choice = self.rng.choice(
                     ["lr_actor", "lr_critic"], size=1, p=lr_probs
                 )[0]

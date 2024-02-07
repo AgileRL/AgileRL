@@ -246,7 +246,7 @@ class RainbowDQN:
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
-        :type state: float or numpy.ndarray[float]
+        :type state: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """

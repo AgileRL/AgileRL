@@ -334,7 +334,7 @@ class PPO:
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
-        :type state: float or list[float]
+        :type state: numpy.ndarray[float]
         :param action: Action in environment to evaluate, defaults to None
         :type action: torch.Tensor(), optional
         :param grad: Calculate gradients on actions, defaults to False
