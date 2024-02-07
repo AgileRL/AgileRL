@@ -173,7 +173,7 @@ def accelerated_experiences(batch_size, state_dims, action_dims, agent_ids, one_
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float()
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
             for agent in agent_ids
         }
     else:
@@ -201,7 +201,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float().to(device)
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
             for agent in agent_ids
         }
     else:
