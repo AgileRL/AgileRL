@@ -486,7 +486,7 @@ class MATD3:
                 if self.one_hot:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
-                    discrete_action_dict[agent] = action.argmax().item()
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
         else:
             discrete_action_dict = None
 
@@ -784,6 +784,9 @@ class MATD3:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
+        is_vectorised = (
+            True if isinstance(env, PettingZooVectorizationParallelWrapper) else False
+        )
         with torch.no_grad():
             rewards = []
             for i in range(loop):
@@ -792,10 +795,16 @@ class MATD3:
                 score = 0
                 for _ in range(max_steps):
                     if swap_channels:
-                        state = {
-                            agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
-                            for agent_id, s in state.items()
-                        }
+                        if is_vectorised:
+                            state = {
+                                agent_id: np.moveaxis(s, [-1], [-3])
+                                for agent_id, s in state.items()
+                            }
+                        else:
+                            state = {
+                                agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                                for agent_id, s in state.items()
+                            }
                     agent_mask = (
                         info["agent_mask"] if "agent_mask" in info.keys() else None
                     )

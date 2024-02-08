@@ -12,6 +12,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
         self.env = env
         self.metadata = env.metadata
+        self.agents = env.agents
         self.possible_agents = env.possible_agents
 
         # Not every environment has the .state_space attribute implemented
@@ -67,5 +68,6 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
 class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType], n_envs: int):
         super().__init__(env=env)
+        self.num_envs = n_envs
         self.env = SubprocVecEnv([lambda: self.env for _ in range(n_envs)])
         return

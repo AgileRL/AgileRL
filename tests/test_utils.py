@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import gymnasium as gym
 import numpy as np
+from pettingzoo.sisl import pursuit_v4
 
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
@@ -15,12 +16,14 @@ from agilerl.algorithms.td3 import TD3
 from agilerl.utils.utils import (
     calculate_vectorized_scores,
     initialPopulation,
+    makeMultiAgentVectEnvs,
     makeSkillVectEnvs,
     makeVectEnvs,
     plotPopulationScore,
     printHyperparams,
 )
 from agilerl.wrappers.learning import Skill
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -68,6 +71,16 @@ def test_returns_asyncvectorenv_object():
     env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
     assert isinstance(env, gym.vector.AsyncVectorEnv)
     assert env.num_envs == num_envs
+
+
+# Returns an AsyncVectorEnv object when given a valid environment name and number of environments
+def test_returns_asyncvectorenv_object_multiagent():
+    num_envs = 3
+    env = pursuit_v4.parallel_env()
+    env = makeMultiAgentVectEnvs(env, num_envs=num_envs)
+    assert isinstance(env, PettingZooVectorizationParallelWrapper)
+    assert env.num_envs == num_envs
+    env.close()
 
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
