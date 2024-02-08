@@ -12,7 +12,6 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
     def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
         self.env = env
         self.metadata = env.metadata
-        self.agents = env.agents
         self.possible_agents = env.possible_agents
 
         # Not every environment has the .state_space attribute implemented

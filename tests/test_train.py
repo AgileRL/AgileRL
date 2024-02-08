@@ -2047,6 +2047,7 @@ def test_train_multi_agent_rgb_vectorized(
     multi_env, population_multi_agent, multi_memory, tournament, mutations
 ):
     env = makeMultiAgentVectEnvs(multi_env)
+    env.reset()
     pop, pop_fitnesses = train_multi_agent(
         env,
         "env_name",
