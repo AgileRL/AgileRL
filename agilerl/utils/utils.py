@@ -10,6 +10,7 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 def makeVectEnvs(env_name, num_envs=1):
@@ -23,6 +24,17 @@ def makeVectEnvs(env_name, num_envs=1):
     return gym.vector.AsyncVectorEnv(
         [lambda: gym.make(env_name) for i in range(num_envs)]
     )
+
+
+def makeMultiAgentVectEnvs(env, num_envs=1):
+    """Returns async-vectorized PettingZoo parallel environments.
+
+    :param env: PettingZoo parallel environment object
+    :type env: pettingzoo.utils.env.ParallelEnv
+    :param num_envs: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
+    """
+    return PettingZooVectorizationParallelWrapper(env, num_envs)
 
 
 def makeSkillVectEnvs(env_name, skill, num_envs=1):

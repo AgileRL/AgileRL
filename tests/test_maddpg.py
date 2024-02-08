@@ -14,6 +14,7 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.utils import makeMultiAgentVectEnvs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -22,8 +23,12 @@ class DummyMultiEnv:
         self.state_dims = state_dims
         self.action_dims = action_dims
         self.agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.metadata = None
+        self.observation_space = None
+        self.action_space = None
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
             "info_string": None,
             "agent_mask": {"agent_0": False, "agent_1": True},
@@ -36,7 +41,7 @@ class DummyMultiEnv:
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
-            {"info_string": None},
+            {agent: "info_string" for agent in self.agents},
         )
 
 
@@ -1225,6 +1230,37 @@ def test_maddpg_algorithm_test_loop_cnn(device):
     action_dims = [2, 2]
     accelerator = None
     env = DummyMultiEnv(env_state_dims[0], action_dims)
+    maddpg = MADDPG(
+        agent_state_dims,
+        action_dims,
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        net_config=net_config,
+        discrete_actions=False,
+        accelerator=accelerator,
+        device=device,
+    )
+    mean_score = maddpg.test(env, max_steps=10, swap_channels=True)
+    assert isinstance(mean_score, float)
+
+
+def test_maddpg_algorithm_test_loop_cnn_vectorized(device):
+    env_state_dims = [(32, 32, 3), (32, 32, 3)]
+    agent_state_dims = [(3, 32, 32), (3, 32, 32)]
+    net_config = {
+        "arch": "cnn",
+        "h_size": [8],
+        "c_size": [16],
+        "k_size": [(1, 3, 3)],
+        "s_size": [1],
+        "normalize": False,
+    }
+    action_dims = [2, 2]
+    accelerator = None
+    env = makeMultiAgentVectEnvs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
     maddpg = MADDPG(
         agent_state_dims,
         action_dims,

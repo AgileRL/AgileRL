@@ -15,12 +15,14 @@ from agilerl.algorithms.td3 import TD3
 from agilerl.utils.utils import (
     calculate_vectorized_scores,
     initialPopulation,
+    makeMultiAgentVectEnvs,
     makeSkillVectEnvs,
     makeVectEnvs,
     plotPopulationScore,
     printHyperparams,
 )
 from agilerl.wrappers.learning import Skill
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -62,12 +64,49 @@ SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
 SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
 
 
+class DummyMultiEnv:
+    def __init__(self, state_dims, action_dims):
+        self.state_dims = state_dims
+        self.action_dims = action_dims
+        self.agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.metadata = None
+        self.observation_space = None
+        self.action_space = None
+
+    def reset(self, seed=None, options=None):
+        return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
+            "info_string": None,
+            "agent_mask": {"agent_0": False, "agent_1": True},
+            "env_defined_actions": {"agent_0": np.array([0, 1]), "agent_1": None},
+        }
+
+    def step(self, action):
+        return (
+            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
+            {agent: np.random.randint(0, 5) for agent in self.agents},
+            {agent: np.random.randint(0, 2) for agent in self.agents},
+            {agent: np.random.randint(0, 2) for agent in self.agents},
+            {agent: "info_string" for agent in self.agents},
+        )
+
+
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
 def test_returns_asyncvectorenv_object():
     num_envs = 3
     env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
     assert isinstance(env, gym.vector.AsyncVectorEnv)
     assert env.num_envs == num_envs
+
+
+# Returns an AsyncVectorEnv object when given a valid environment name and number of environments
+def test_returns_asyncvectorenv_object_multiagent():
+    num_envs = 3
+    env = DummyMultiEnv(4, 4)
+    env = makeMultiAgentVectEnvs(env, num_envs=num_envs)
+    assert isinstance(env, PettingZooVectorizationParallelWrapper)
+    assert env.num_envs == num_envs
+    env.close()
 
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments

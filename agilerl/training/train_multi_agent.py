@@ -269,10 +269,16 @@ def train_multi_agent(
                 terminations = {agent: [] for agent in env.agents}
 
             if swap_channels:
-                state = {
-                    agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
-                    for agent_id, s in state.items()
-                }
+                if is_vectorised:
+                    state = {
+                        agent_id: np.moveaxis(s, [-1], [-3])
+                        for agent_id, s in state.items()
+                    }
+                else:
+                    state = {
+                        agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                        for agent_id, s in state.items()
+                    }
 
             for _ in range(max_steps):
                 # Get next action from agent
@@ -294,9 +300,12 @@ def train_multi_agent(
                 )  # Act in environment
                 # Save experience to replay buffer
                 if swap_channels:
-                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                    if not is_vectorised:
+                        state = {
+                            agent_id: np.squeeze(s) for agent_id, s in state.items()
+                        }
                     next_state = {
-                        agent_id: np.moveaxis(ns, [2], [0])
+                        agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_state.items()
                     }
 
@@ -323,7 +332,7 @@ def train_multi_agent(
                     loss = agent.learn(experiences)
 
                 # Update the state
-                if swap_channels:
+                if swap_channels and not is_vectorised:
                     next_state = {
                         agent_id: np.expand_dims(ns, 0)
                         for agent_id, ns in next_state.items()

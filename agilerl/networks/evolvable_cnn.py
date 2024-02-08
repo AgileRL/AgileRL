@@ -449,7 +449,8 @@ class EvolvableCNN(nn.Module):
         batch_size = x.size(0)
 
         if self.normalize:
-            x = x / 255.0
+            # x = x / 255.0
+            x = x / 30.0
 
         x = self.feature_net(x)
         x = x.reshape(batch_size, -1)
