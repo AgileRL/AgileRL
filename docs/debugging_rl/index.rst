@@ -104,8 +104,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
     See function docs: :ref:`agilerl.utils.probe_envs.check_policy_q_learning_with_probe_env<single_check_policy_q_learning_with_probe_env>`
 
-.. collapse:: Single-agent - Check Policy and Value (On-Policy) 
-    
+.. collapse:: Single-agent - Check Policy and Value (On-Policy)
+
     .. code-block:: python
 
           import torch

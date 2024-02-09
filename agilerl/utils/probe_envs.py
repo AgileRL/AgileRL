@@ -667,25 +667,24 @@ def check_policy_on_policy_with_probe_env(
         )
         agent.learn(experiences)
 
-    for sample_obs, v_values in zip(
-        env.sample_obs, env.v_values
-    ):
+    for sample_obs, v_values in zip(env.sample_obs, env.v_values):
         state = torch.tensor(sample_obs).float().to(device)
         if v_values is not None:
             predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
-            #print("---")
-            #print("v", v_values, predicted_v_values)
+            # print("---")
+            # print("v", v_values, predicted_v_values)
             assert np.allclose(v_values, predicted_v_values, atol=0.1)
 
     if hasattr(env, "sample_actions"):
-        for sample_action, policy_values in zip(
-            env.sample_actions, env.policy_values
-        ):
+        for sample_action, policy_values in zip(env.sample_actions, env.policy_values):
             action = torch.tensor(sample_action).float().to(device)
             if policy_values is not None:
-                predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
-                #print("pol", policy_values, predicted_policy_values)
+                predicted_policy_values = (
+                    agent.actor(sample_obs).detach().cpu().numpy()[0]
+                )
+                # print("pol", policy_values, predicted_policy_values)
                 assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
+
 
 # if __name__ == "__main__":
 #     from agilerl.algorithms.ddpg import DDPG

@@ -28,9 +28,9 @@ from agilerl.utils.probe_envs import (
     PolicyContActionsImageEnvSimple,
     PolicyEnv,
     PolicyImageEnv,
+    check_policy_on_policy_with_probe_env,
     check_policy_q_learning_with_probe_env,
     check_q_learning_with_probe_env,
-    check_policy_on_policy_with_probe_env
 )
 
 
@@ -366,11 +366,10 @@ def test_policy_on_policy_with_probe_env():
         "action_dim": env.action_space.shape[0],
         "one_hot": True if env.observation_space.n > 1 else False,
         "lr": 0.01,
-        "discrete_actions": False
+        "discrete_actions": False,
     }
-    check_policy_on_policy_with_probe_env(
-        env, PPO, algo_args, learn_steps, device
-    )
+    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
+
 
 def test_policy_on_policy_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -389,8 +388,6 @@ def test_policy_on_policy_with_probe_env_cnn():
             "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
         "discrete_actions": False,
-        "lr": 0.01
+        "lr": 0.01,
     }
-    check_policy_on_policy_with_probe_env(
-        env, PPO, algo_args, learn_steps, device
-    )
+    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
