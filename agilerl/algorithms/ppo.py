@@ -405,28 +405,31 @@ class PPO:
             next_state = self.prepare_state(next_state)
             next_value = self.critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
-            last_gae_lambda = 0
-            for t in reversed(range(num_steps)):
-                if t == num_steps - 1:
-                    nextnonterminal = 1.0 - dones[-1]
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - dones[t + 1]
-                    nextvalues = values[t + 1]
-                delta = (
-                    rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
-                )
-                advantages[t] = last_gae_lambda = (
-                    delta
-                    + self.gamma * self.gae_lambda * nextnonterminal * last_gae_lambda
-                )
+            for t in range(num_steps):
+                discount = 1
+                a_t = 0
+                for k in range(t, num_steps):
+                    if k != num_steps - 1:
+                        nextvalue = values[k+1]
+                    else:
+                        nextvalue = next_value.squeeze()
+
+                    a_t += discount*(rewards[k] + self.gamma*nextvalue*(1.0-dones[k]) - values[k])
+                    discount *= self.gamma*self.gae_lambda*(1.0-dones[k])
+
+                advantages[t] = a_t
             returns = advantages + values
 
-        states = states.reshape((-1,) + self.state_dim)
+        if self.one_hot:
+            states = states.reshape(-1)
+        else:
+            states = states.reshape((-1,) + self.state_dim)
+            
         if self.discrete_actions:
             actions = actions.reshape(-1)
         else:
             actions = actions.reshape((-1, self.action_dim))
+        
         log_probs = log_probs.reshape(-1)
         advantages = advantages.reshape(-1)
         returns = returns.reshape(-1)
@@ -449,9 +452,8 @@ class PPO:
             returns = returns.to(self.accelerator.device)
             values = values.to(self.accelerator.device)
 
-        num_samples = returns.size(0)
+        num_samples = returns.size(0) 
         batch_idxs = np.arange(num_samples)
-
         clipfracs = []
 
         mean_loss = 0
@@ -459,7 +461,6 @@ class PPO:
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
-
                 _, log_prob, entropy, value = self.getAction(
                     state=states[minibatch_idxs],
                     action=actions[minibatch_idxs],
@@ -496,11 +497,10 @@ class PPO:
                 v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                 v_loss = 0.5 * v_loss_max.mean()
-
                 entropy_loss = entropy.mean()
                 loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-
-                # actor loss backprop
+            
+                # actor + critic loss backprop
                 self.optimizer.zero_grad()
                 if self.accelerator is not None:
                     self.accelerator.backward(loss)
@@ -695,7 +695,7 @@ class PPO:
             "critic_state_dict",
             "optimizer_state_dict",
             "actor_init_dict",
-            "xritic_init_dict",
+            "critic_init_dict",
             "net_config",
             "lr",
         ]
