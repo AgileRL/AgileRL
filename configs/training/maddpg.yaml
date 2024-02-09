@@ -8,7 +8,8 @@ INIT_HP:
     MAX_ACTION: 1              # Maximum action
     MIN_ACTION: -1             # Minimum action
     BATCH_SIZE: 1024           # Batch size
-    LR: 0.01                   # Learning rate
+    LR_ACTOR: 0.001            # Actor learning rate
+    LR_CRITIC: 0.01            # Critic earning rate
     EPISODES: 6000             # Max no. episodes
     TARGET_SCORE: 100          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.95                # Discount factor

@@ -10,6 +10,7 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 def makeVectEnvs(env_name, num_envs=1):
@@ -23,6 +24,17 @@ def makeVectEnvs(env_name, num_envs=1):
     return gym.vector.AsyncVectorEnv(
         [lambda: gym.make(env_name) for i in range(num_envs)]
     )
+
+
+def makeMultiAgentVectEnvs(env, num_envs=1):
+    """Returns async-vectorized PettingZoo parallel environments.
+
+    :param env: PettingZoo parallel environment object
+    :type env: pettingzoo.utils.env.ParallelEnv
+    :param num_envs: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
+    """
+    return PettingZooVectorizationParallelWrapper(env, num_envs)
 
 
 def makeSkillVectEnvs(env_name, skill, num_envs=1):
@@ -230,7 +242,8 @@ def initialPopulation(
                 min_action=INIT_HP["MIN_ACTION"],
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
-                lr=INIT_HP["LR"],
+                lr_actor=INIT_HP["LR_ACTOR"],
+                lr_critic=INIT_HP["LR_CRITIC"],
                 learn_step=INIT_HP["LEARN_STEP"],
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
@@ -255,7 +268,8 @@ def initialPopulation(
                 min_action=INIT_HP["MIN_ACTION"],
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
-                lr=INIT_HP["LR"],
+                lr_actor=INIT_HP["LR_ACTOR"],
+                lr_critic=INIT_HP["LR_CRITIC"],
                 policy_freq=INIT_HP["POLICY_FREQ"],
                 learn_step=INIT_HP["LEARN_STEP"],
                 gamma=INIT_HP["GAMMA"],

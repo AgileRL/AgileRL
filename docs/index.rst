@@ -56,6 +56,7 @@ Contents
    multi_agent_training/index
    distributed_training/index
    custom_architecture/index
+   debugging_rl/index
 
 .. toctree::
    :maxdepth: 1
@@ -73,9 +74,9 @@ Contents
    api/components/index
    api/hpo/index
    api/networks/index
-   api/wrappers/index
    api/train
-   api/utils
+   api/utils/index
+   api/wrappers/index
 
 .. toctree::
    :caption: Development

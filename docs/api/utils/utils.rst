@@ -1,7 +1,11 @@
-Utils
-======
+General Utils
+=============
 
 .. autofunction:: agilerl.utils.utils.makeVectEnvs
+
+.. autofunction:: agilerl.utils.utils.makeMultiAgentVectEnvs
+
+.. autofunction:: agilerl.utils.utils.makeSkillVectEnvs
 
 .. autofunction:: agilerl.utils.utils.initialPopulation
 

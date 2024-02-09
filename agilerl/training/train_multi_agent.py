@@ -154,7 +154,8 @@ def train_multi_agent(
                         "env": env_name,
                         "net_config": net_config,
                         "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                        "lr": INIT_HP["LR"] if INIT_HP else None,
+                        "lr_actor": INIT_HP["LR_ACTOR"] if INIT_HP else None,
+                        "lr_critic": INIT_HP["LR_CRITIC"] if INIT_HP else None,
                         "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
                         "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
                         "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
@@ -181,7 +182,8 @@ def train_multi_agent(
                     "env": env_name,
                     "net_config": net_config,
                     "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                    "lr": INIT_HP["LR"] if INIT_HP else None,
+                    "lr_actor": INIT_HP["LR_ACTOR"] if INIT_HP else None,
+                    "lr_critic": INIT_HP["LR_CRITIC"] if INIT_HP else None,
                     "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
                     "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
                     "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
@@ -267,10 +269,16 @@ def train_multi_agent(
                 terminations = {agent: [] for agent in env.agents}
 
             if swap_channels:
-                state = {
-                    agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
-                    for agent_id, s in state.items()
-                }
+                if is_vectorised:
+                    state = {
+                        agent_id: np.moveaxis(s, [-1], [-3])
+                        for agent_id, s in state.items()
+                    }
+                else:
+                    state = {
+                        agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                        for agent_id, s in state.items()
+                    }
 
             for _ in range(max_steps):
                 # Get next action from agent
@@ -292,9 +300,12 @@ def train_multi_agent(
                 )  # Act in environment
                 # Save experience to replay buffer
                 if swap_channels:
-                    state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
+                    if not is_vectorised:
+                        state = {
+                            agent_id: np.squeeze(s) for agent_id, s in state.items()
+                        }
                     next_state = {
-                        agent_id: np.moveaxis(ns, [2], [0])
+                        agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_state.items()
                     }
 
@@ -321,7 +332,7 @@ def train_multi_agent(
                     loss = agent.learn(experiences)
 
                 # Update the state
-                if swap_channels:
+                if swap_channels and not is_vectorised:
                     next_state = {
                         agent_id: np.expand_dims(ns, 0)
                         for agent_id, ns in next_state.items()
@@ -424,7 +435,8 @@ def train_multi_agent(
                     wandb.log(
                         {
                             f"learn_step_agent_{idx}": agent.learn_step,
-                            f"learning_rate_agent_{idx}": agent.lr,
+                            f"learning_rate_actor_agent_{idx}": agent.lr_actor,
+                            f"learning_rate_critic_agent_{idx}": agent.lr_critic,
                             f"batch_size_agent_{idx}": agent.batch_size,
                             f"indi_fitness_agent_{idx}": agent.fitness[-1],
                         }

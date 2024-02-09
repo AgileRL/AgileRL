@@ -14,6 +14,7 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.utils import makeMultiAgentVectEnvs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -22,8 +23,12 @@ class DummyMultiEnv:
         self.state_dims = state_dims
         self.action_dims = action_dims
         self.agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.metadata = None
+        self.observation_space = None
+        self.action_space = None
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
             "info_string": None,
             "agent_mask": {"agent_0": False, "agent_1": True},
@@ -36,7 +41,7 @@ class DummyMultiEnv:
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
-            {"info_string": None},
+            {agent: "info_string" for agent in self.agents},
         )
 
 
@@ -69,7 +74,7 @@ class MultiAgentCNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
         )
         self.conv2 = nn.Conv3d(
             in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
@@ -173,7 +178,7 @@ def accelerated_experiences(batch_size, state_dims, action_dims, agent_ids, one_
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float()
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
             for agent in agent_ids
         }
     else:
@@ -201,7 +206,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float().to(device)
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
             for agent in agent_ids
         }
     else:
@@ -240,7 +245,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "arch": "cnn",
                 "h_size": [8],
                 "c_size": [3],
-                "k_size": [(1, 3, 3)],
+                "k_size": [3],
                 "s_size": [1],
                 "normalize": False,
             },
@@ -252,7 +257,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "arch": "cnn",
                 "h_size": [8],
                 "c_size": [3],
-                "k_size": [(1, 3, 3)],
+                "k_size": [3],
                 "s_size": [1],
                 "normalize": False,
             },
@@ -676,7 +681,7 @@ def test_matd3_getAction_epsilon_greedy_cnn(
         "arch": "cnn",
         "h_size": [64, 64],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1035,7 +1040,7 @@ def test_matd3_learns_from_experiences_cnn(
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1129,7 +1134,7 @@ def test_matd3_learns_from_experiences_cnn_distributed(
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1325,7 +1330,7 @@ def test_matd3_algorithm_test_loop_cnn(device):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1349,6 +1354,37 @@ def test_matd3_algorithm_test_loop_cnn(device):
     assert isinstance(mean_score, float)
 
 
+def test_matd3_algorithm_test_loop_cnn_vectorized(device):
+    env_state_dims = [(32, 32, 3), (32, 32, 3)]
+    agent_state_dims = [(3, 32, 32), (3, 32, 32)]
+    net_config = {
+        "arch": "cnn",
+        "h_size": [8],
+        "c_size": [16],
+        "k_size": [3],
+        "s_size": [1],
+        "normalize": False,
+    }
+    action_dims = [2, 2]
+    accelerator = None
+    env = makeMultiAgentVectEnvs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
+    maddpg = MATD3(
+        agent_state_dims,
+        action_dims,
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        net_config=net_config,
+        discrete_actions=False,
+        accelerator=accelerator,
+        device=device,
+    )
+    mean_score = maddpg.test(env, max_steps=10, swap_channels=True)
+    assert isinstance(mean_score, float)
+
+
 @pytest.mark.parametrize(
     "accelerator_flag, wrap", [(False, True), (True, True), (True, False)]
 )
@@ -1366,7 +1402,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     index = 0
     net_config = {"arch": "mlp", "h_size": [64, 64]}
     batch_size = 64
-    lr = 0.01
+    lr_actor = 0.001
+    lr_critic = 0.01
     learn_step = 5
     gamma = 0.95
     tau = 0.01
@@ -1394,7 +1431,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
         policy_freq,
         net_config,
         batch_size,
-        lr,
+        lr_actor,
+        lr_critic,
         learn_step,
         gamma,
         tau,
@@ -1421,7 +1459,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.index == matd3.index
     assert clone_agent.net_config == matd3.net_config
     assert clone_agent.batch_size == matd3.batch_size
-    assert clone_agent.lr == matd3.lr
+    assert clone_agent.lr_actor == matd3.lr_actor
+    assert clone_agent.lr_critic == matd3.lr_critic
     assert clone_agent.learn_step == matd3.learn_step
     assert clone_agent.gamma == matd3.gamma
     assert clone_agent.tau == matd3.tau
@@ -1501,7 +1540,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "policy_freq" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1549,7 +1589,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
         isinstance(critic_target_2, EvolvableMLP)
         for critic_target_2 in loaded_matd3.critic_targets_2
     )
-    assert matd3.lr == 0.01
+    assert matd3.lr_actor == 0.001
+    assert matd3.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1581,7 +1622,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1625,7 +1666,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "critic_2_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1670,7 +1712,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         isinstance(critic_target_2, EvolvableCNN)
         for critic_target_2 in loaded_matd3.critic_targets_2
     )
-    assert matd3.lr == 0.01
+    assert matd3.lr_actor == 0.001
+    assert matd3.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1764,7 +1807,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     assert "critic_2_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1808,7 +1852,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         isinstance(critic_target_2, MakeEvolvable)
         for critic_target_2 in loaded_matd3.critic_targets_2
     )
-    assert matd3.lr == 0.01
+    assert matd3.lr_actor == 0.001
+    assert matd3.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_matd3.actors, loaded_matd3.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1948,7 +1993,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
-    assert new_matd3.lr == matd3.lr
+    assert new_matd3.lr_actor == matd3.lr_actor
+    assert new_matd3.lr_critic == matd3.lr_critic
     for (
         new_actor,
         new_actor_target,
@@ -2028,7 +2074,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "arch": "cnn",
             "h_size": [8],
             "c_size": [3],
-            "k_size": [(1, 3, 3)],
+            "k_size": [3],
             "s_size": [1],
             "normalize": False,
         },
@@ -2050,7 +2096,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
-    assert new_matd3.lr == matd3.lr
+    assert new_matd3.lr_actor == matd3.lr_actor
+    assert new_matd3.lr_critic == matd3.lr_critic
     for (
         new_actor,
         new_actor_target,
@@ -2186,7 +2233,8 @@ def test_load_from_pretrained_networks(
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
-    assert new_matd3.lr == matd3.lr
+    assert new_matd3.lr_actor == matd3.lr_actor
+    assert new_matd3.lr_critic == matd3.lr_critic
     for (
         new_actor,
         new_actor_target,

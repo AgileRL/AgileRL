@@ -24,8 +24,8 @@ if __name__ == "__main__":
     NET_CONFIG = {
         "arch": "cnn",  # Network architecture
         "h_size": [32, 32],  # Network hidden size
-        "c_size": [3, 32],  # CNN channel size
-        "k_size": [(1, 3, 3), (1, 3, 3)],  # CNN kernel size
+        "c_size": [32, 32],  # CNN channel size
+        "k_size": [3, 3],  # CNN kernel size
         "s_size": [2, 2],  # CNN stride size
         "normalize": True,  # Normalize image from range [0,255] to [0,1]
     }
@@ -37,7 +37,8 @@ if __name__ == "__main__":
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": True,
         "BATCH_SIZE": 8,  # Batch size
-        "LR": 0.01,  # Learning rate
+        "LR_ACTOR": 0.0001,  # Learning rate
+        "LR_CRITIC": 0.001,  # Learning rate
         "GAMMA": 0.95,  # Discount factor
         "MEMORY_SIZE": 10000,  # Max memory buffer size
         "LEARN_STEP": 5,  # Learning frequency
@@ -128,7 +129,7 @@ if __name__ == "__main__":
         ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
         # Define search space for each hyperparameter
-        min_lr=0.0001,
+        min_lr=0.00001,
         max_lr=0.01,
         min_learn_step=1,
         max_learn_step=120,

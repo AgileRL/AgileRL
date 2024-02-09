@@ -14,6 +14,7 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.utils import makeMultiAgentVectEnvs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -22,8 +23,12 @@ class DummyMultiEnv:
         self.state_dims = state_dims
         self.action_dims = action_dims
         self.agents = ["agent_0", "agent_1"]
+        self.possible_agents = ["agent_0", "agent_1"]
+        self.metadata = None
+        self.observation_space = None
+        self.action_space = None
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
             "info_string": None,
             "agent_mask": {"agent_0": False, "agent_1": True},
@@ -36,7 +41,7 @@ class DummyMultiEnv:
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
-            {"info_string": None},
+            {agent: "info_string" for agent in self.agents},
         )
 
 
@@ -69,7 +74,7 @@ class MultiAgentCNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
         )
         self.conv2 = nn.Conv3d(
             in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
@@ -173,7 +178,7 @@ def accelerated_experiences(batch_size, state_dims, action_dims, agent_ids, one_
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float()
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
             for agent in agent_ids
         }
     else:
@@ -201,7 +206,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
     action_size = action_dims[0]
     if one_hot:
         states = {
-            agent: torch.randint(0, state_size[0], (1, batch_size)).float().to(device)
+            agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
             for agent in agent_ids
         }
     else:
@@ -240,7 +245,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "arch": "cnn",
                 "h_size": [8],
                 "c_size": [3],
-                "k_size": [(1, 3, 3)],
+                "k_size": [3],
                 "s_size": [1],
                 "normalize": False,
             },
@@ -252,7 +257,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "arch": "cnn",
                 "h_size": [8],
                 "c_size": [3],
-                "k_size": [(1, 3, 3)],
+                "k_size": [3],
                 "s_size": [1],
                 "normalize": False,
             },
@@ -619,7 +624,7 @@ def test_maddpg_getAction_epsilon_greedy_cnn(
         "arch": "cnn",
         "h_size": [64, 64],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -729,7 +734,7 @@ def test_maddpg_getAction_epsilon_greedy_distributed_cnn(
         "arch": "cnn",
         "h_size": [64, 64],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1002,7 +1007,7 @@ def test_maddpg_learns_from_experiences_cnn(
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1079,7 +1084,7 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1218,13 +1223,44 @@ def test_maddpg_algorithm_test_loop_cnn(device):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
     action_dims = [2, 2]
     accelerator = None
     env = DummyMultiEnv(env_state_dims[0], action_dims)
+    maddpg = MADDPG(
+        agent_state_dims,
+        action_dims,
+        one_hot=False,
+        n_agents=2,
+        agent_ids=["agent_0", "agent_1"],
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        net_config=net_config,
+        discrete_actions=False,
+        accelerator=accelerator,
+        device=device,
+    )
+    mean_score = maddpg.test(env, max_steps=10, swap_channels=True)
+    assert isinstance(mean_score, float)
+
+
+def test_maddpg_algorithm_test_loop_cnn_vectorized(device):
+    env_state_dims = [(32, 32, 3), (32, 32, 3)]
+    agent_state_dims = [(3, 32, 32), (3, 32, 32)]
+    net_config = {
+        "arch": "cnn",
+        "h_size": [8],
+        "c_size": [16],
+        "k_size": [3],
+        "s_size": [1],
+        "normalize": False,
+    }
+    action_dims = [2, 2]
+    accelerator = None
+    env = makeMultiAgentVectEnvs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
     maddpg = MADDPG(
         agent_state_dims,
         action_dims,
@@ -1259,7 +1295,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
     index = 0
     net_config = {"arch": "mlp", "h_size": [64, 64]}
     batch_size = 64
-    lr = 0.01
+    lr_actor = 0.001
+    lr_critic = 0.01
     learn_step = 5
     gamma = 0.95
     tau = 0.01
@@ -1285,7 +1322,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
         index,
         net_config,
         batch_size,
-        lr,
+        lr_actor,
+        lr_critic,
         learn_step,
         gamma,
         tau,
@@ -1312,7 +1350,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.index == maddpg.index
     assert clone_agent.net_config == maddpg.net_config
     assert clone_agent.batch_size == maddpg.batch_size
-    assert clone_agent.lr == maddpg.lr
+    assert clone_agent.lr_actor == maddpg.lr_actor
+    assert clone_agent.lr_critic == maddpg.lr_critic
     assert clone_agent.learn_step == maddpg.learn_step
     assert clone_agent.gamma == maddpg.gamma
     assert clone_agent.tau == maddpg.tau
@@ -1373,7 +1412,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "critic_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1412,7 +1452,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         isinstance(critic_target, EvolvableMLP)
         for critic_target in loaded_maddpg.critic_targets
     )
-    assert maddpg.lr == 0.01
+    assert maddpg.lr_actor == 0.001
+    assert maddpg.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_maddpg.actors, loaded_maddpg.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1438,7 +1479,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1476,7 +1517,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "critic_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1511,7 +1553,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         isinstance(critic_target, EvolvableCNN)
         for critic_target in loaded_maddpg.critic_targets
     )
-    assert maddpg.lr == 0.01
+    assert maddpg.lr_actor == 0.001
+    assert maddpg.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_maddpg.actors, loaded_maddpg.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1585,7 +1628,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     assert "critic_optimizers_state_dict" in checkpoint
     assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
-    assert "lr" in checkpoint
+    assert "lr_actor" in checkpoint
+    assert "lr_critic" in checkpoint
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
@@ -1619,7 +1663,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
         isinstance(critic_target, MakeEvolvable)
         for critic_target in loaded_maddpg.critic_targets
     )
-    assert maddpg.lr == 0.01
+    assert maddpg.lr_actor == 0.001
+    assert maddpg.lr_critic == 0.01
 
     for actor, actor_target in zip(loaded_maddpg.actors, loaded_maddpg.actor_targets):
         assert str(actor.state_dict()) == str(actor_target.state_dict())
@@ -1739,7 +1784,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_maddpg.min_action == maddpg.min_action
     assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.net_config == maddpg.net_config
-    assert new_maddpg.lr == maddpg.lr
+    assert new_maddpg.lr_actor == maddpg.lr_actor
+    assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
         new_actor,
         new_actor_target,
@@ -1805,7 +1851,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "arch": "cnn",
             "h_size": [8],
             "c_size": [3],
-            "k_size": [(1, 3, 3)],
+            "k_size": [3],
             "s_size": [1],
             "normalize": False,
         },
@@ -1827,7 +1873,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_maddpg.min_action == maddpg.min_action
     assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.net_config == maddpg.net_config
-    assert new_maddpg.lr == maddpg.lr
+    assert new_maddpg.lr_actor == maddpg.lr_actor
+    assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
         new_actor,
         new_actor_target,
@@ -1946,7 +1993,8 @@ def test_load_from_pretrained_networks(
     assert new_maddpg.min_action == maddpg.min_action
     assert new_maddpg.max_action == maddpg.max_action
     assert new_maddpg.net_config == maddpg.net_config
-    assert new_maddpg.lr == maddpg.lr
+    assert new_maddpg.lr_actor == maddpg.lr_actor
+    assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
         new_actor,
         new_actor_target,

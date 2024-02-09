@@ -44,8 +44,10 @@ class MATD3:
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 0.01
-    :type lr: float, optional
+    :param lr_actor: Learning rate for actor optimizer, defaults to 0.001
+    :type lr_actor: float, optional
+    :param lr_critic: Learning rate for critic optimizer, defaults to 0.01
+    :type lr_critic: float, optional
     :param learn_step: Learning frequency, defaults to 5
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.95
@@ -81,7 +83,8 @@ class MATD3:
         policy_freq=2,
         net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
-        lr=0.01,
+        lr_actor=0.001,
+        lr_critic=0.01,
         learn_step=5,
         gamma=0.95,
         tau=0.01,
@@ -122,8 +125,10 @@ class MATD3:
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
-        assert isinstance(lr, float), "Learning rate must be a float."
-        assert lr > 0, "Learning rate must be greater than zero."
+        assert isinstance(lr_actor, float), "Actor learning rate must be a float."
+        assert lr_actor > 0, "Actor learning rate must be greater than zero."
+        assert isinstance(lr_critic, float), "Critic learning rate must be a float."
+        assert lr_critic > 0, "Critic learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, float), "Gamma must be a float."
@@ -160,7 +165,8 @@ class MATD3:
         self.agent_ids = agent_ids
         self.net_config = net_config
         self.batch_size = batch_size
-        self.lr = lr
+        self.lr_actor = lr_actor
+        self.lr_critic = lr_critic
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
@@ -321,13 +327,15 @@ class MATD3:
             critic_target_2.load_state_dict(critic_2.state_dict())
 
         self.actor_optimizers_type = [
-            optim.Adam(actor.parameters(), lr=self.lr) for actor in self.actors
+            optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
         ]
         self.critic_1_optimizers_type = [
-            optim.Adam(critic.parameters(), lr=self.lr) for critic in self.critics_1
+            optim.Adam(critic.parameters(), lr=self.lr_critic)
+            for critic in self.critics_1
         ]
         self.critic_2_optimizers_type = [
-            optim.Adam(critic.parameters(), lr=self.lr) for critic in self.critics_2
+            optim.Adam(critic.parameters(), lr=self.lr_critic)
+            for critic in self.critics_2
         ]
 
         if self.accelerator is not None:
@@ -419,7 +427,7 @@ class MATD3:
             states = [
                 nn.functional.one_hot(state.long(), num_classes=state_dim[0])
                 .float()
-                .squeeze()
+                .squeeze(1)
                 for state, state_dim in zip(states, state_dims)
             ]
 
@@ -476,9 +484,9 @@ class MATD3:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
                 if self.one_hot:
-                    discrete_action_dict[agent] = action.argmax(axis=1)
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
-                    discrete_action_dict[agent] = action.argmax().item()
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
         else:
             discrete_action_dict = None
 
@@ -546,7 +554,7 @@ class MATD3:
                         state.long(), num_classes=state_dim[0]
                     )
                     .float()
-                    .squeeze()
+                    .squeeze(1)
                     for (agent_id, state), state_dim in zip(
                         states.items(), self.state_dims
                     )
@@ -556,7 +564,7 @@ class MATD3:
                         next_state.long(), num_classes=state_dim[0]
                     )
                     .float()
-                    .squeeze()
+                    .squeeze(1)
                     for (agent_id, next_state), state_dim in zip(
                         next_states.items(), self.state_dims
                     )
@@ -776,6 +784,9 @@ class MATD3:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
+        is_vectorised = (
+            True if isinstance(env, PettingZooVectorizationParallelWrapper) else False
+        )
         with torch.no_grad():
             rewards = []
             for i in range(loop):
@@ -784,10 +795,16 @@ class MATD3:
                 score = 0
                 for _ in range(max_steps):
                     if swap_channels:
-                        state = {
-                            agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1])
-                            for agent_id, s in state.items()
-                        }
+                        if is_vectorised:
+                            state = {
+                                agent_id: np.moveaxis(s, [-1], [-3])
+                                for agent_id, s in state.items()
+                            }
+                        else:
+                            state = {
+                                agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                                for agent_id, s in state.items()
+                            }
                     agent_mask = (
                         info["agent_mask"] if "agent_mask" in info.keys() else None
                     )
@@ -845,7 +862,8 @@ class MATD3:
             net_config=self.net_config,
             batch_size=self.batch_size,
             policy_freq=self.policy_freq,
-            lr=self.lr,
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic,
             learn_step=self.learn_step,
             gamma=self.gamma,
             tau=self.tau,
@@ -870,13 +888,13 @@ class MATD3:
             critic_target.clone() for critic_target in self.critic_targets_2
         ]
         actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=clone.lr) for actor in actors
+            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in actors
         ]
         critic_1_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr) for critic in critics_1
+            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_1
         ]
         critic_2_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr) for critic in critics_2
+            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_2
         ]
         clone.actor_optimizers_type = actor_optimizers
         clone.critic_1_optimizers_type = critic_1_optimizers
@@ -1099,7 +1117,8 @@ class MATD3:
                 "expl_noise": self.expl_noise,
                 "net_config": self.net_config,
                 "batch_size": self.batch_size,
-                "lr": self.lr,
+                "lr_actor": self.lr_actor,
+                "lr_critic": self.lr_critic,
                 "learn_step": self.learn_step,
                 "policy_freq": self.policy_freq,
                 "gamma": self.gamma,
@@ -1200,15 +1219,18 @@ class MATD3:
                 MakeEvolvable(**checkpoint["critic_targets_2_init_dict"][idx])
                 for idx, _ in enumerate(self.agent_ids)
             ]
-        self.lr = checkpoint["lr"]
+        self.lr_actor = checkpoint["lr_actor"]
+        self.lr_critic = checkpoint["lr_critic"]
         self.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=self.lr) for actor in self.actors
+            optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
         ]
         self.critic_1_optimizers = [
-            optim.Adam(critic_1.parameters(), lr=self.lr) for critic_1 in self.critics_1
+            optim.Adam(critic_1.parameters(), lr=self.lr_critic)
+            for critic_1 in self.critics_1
         ]
         self.critic_2_optimizers = [
-            optim.Adam(critic_2.parameters(), lr=self.lr) for critic_2 in self.critics_2
+            optim.Adam(critic_2.parameters(), lr=self.lr_critic)
+            for critic_2 in self.critics_2
         ]
         actor_list = []
         critic_1_list = []
@@ -1329,7 +1351,8 @@ class MATD3:
                 net_config=checkpoint["net_config"],
                 policy_freq=checkpoint["policy_freq"],
                 batch_size=checkpoint["batch_size"],
-                lr=checkpoint["lr"],
+                lr_actor=checkpoint["lr_actor"],
+                lr_critic=checkpoint["lr_critic"],
                 learn_step=checkpoint["learn_step"],
                 gamma=checkpoint["gamma"],
                 tau=checkpoint["tau"],
@@ -1403,7 +1426,8 @@ class MATD3:
                 net_config=checkpoint["net_config"],
                 policy_freq=checkpoint["policy_freq"],
                 batch_size=checkpoint["batch_size"],
-                lr=checkpoint["lr"],
+                lr_actor=checkpoint["lr_actor"],
+                lr_critic=checkpoint["lr_critic"],
                 learn_step=checkpoint["learn_step"],
                 gamma=checkpoint["gamma"],
                 tau=checkpoint["tau"],
@@ -1441,14 +1465,14 @@ class MATD3:
             ]
 
         agent.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=agent.lr) for actor in agent.actors
+            optim.Adam(actor.parameters(), lr=agent.lr_actor) for actor in agent.actors
         ]
         agent.critic_1_optimizers = [
-            optim.Adam(critic_1.parameters(), lr=agent.lr)
+            optim.Adam(critic_1.parameters(), lr=agent.lr_critic)
             for critic_1 in agent.critics_1
         ]
         agent.critic_2_optimizers = [
-            optim.Adam(critic_2.parameters(), lr=agent.lr)
+            optim.Adam(critic_2.parameters(), lr=agent.lr_critic)
             for critic_2 in agent.critics_2
         ]
         actor_list = []

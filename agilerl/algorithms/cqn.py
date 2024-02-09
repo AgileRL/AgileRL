@@ -201,7 +201,7 @@ class CQN:
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
-        :type state: float or numpy.ndarray[float]
+        :type state: numpy.ndarray[float]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
