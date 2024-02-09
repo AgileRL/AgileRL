@@ -179,7 +179,7 @@ how to define actor and critic networks for a two agent system with state tensor
 
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
         )
         self.conv2 = nn.Conv3d(
             in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2

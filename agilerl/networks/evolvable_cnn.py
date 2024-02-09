@@ -252,9 +252,9 @@ class EvolvableCNN(nn.Module):
         if self.multi:
             net_dict = OrderedDict()
             k_size = (
-                (self.n_agents, kernel_size[0][1], kernel_size[0][2])
+                (self.n_agents, kernel_size[0], kernel_size[0])
                 if self.critic
-                else kernel_size[0]
+                else (1, kernel_size[0], kernel_size[0])
             )
             net_dict[f"{name}_conv_layer_0"] = nn.Conv3d(
                 in_channels=input_size,
@@ -268,10 +268,11 @@ class EvolvableCNN(nn.Module):
 
             if len(channel_size) > 1:
                 for l_no in range(1, len(channel_size)):
+                    k_size = (1, kernel_size[l_no], kernel_size[l_no])
                     net_dict[f"{name}_conv_layer_{str(l_no)}"] = nn.Conv3d(
                         in_channels=channel_size[l_no - 1],
                         out_channels=channel_size[l_no],
-                        kernel_size=kernel_size[l_no],
+                        kernel_size=k_size,
                         stride=stride_size[l_no],
                     )
                     if self.layer_norm:
@@ -449,8 +450,7 @@ class EvolvableCNN(nn.Module):
         batch_size = x.size(0)
 
         if self.normalize:
-            # x = x / 255.0
-            x = x / 30.0
+            x = x / 255.0
 
         x = self.feature_net(x)
         x = x.reshape(batch_size, -1)
@@ -581,10 +581,7 @@ class EvolvableCNN(nn.Module):
         """Adds a hidden layer to convolutional neural network."""
         if len(self.channel_size) < self.max_cnn_hidden_layers:  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            if self.multi:
-                self.kernel_size += [(1, 3, 3)]
-            else:
-                self.kernel_size += [(3, 3)]
+            self.kernel_size += [3]
             stride_size_list = [
                 [4],
                 [4, 2],
@@ -618,39 +615,13 @@ class EvolvableCNN(nn.Module):
 
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
+        if len(self.channel_size) > 1:
+            hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+            self.kernel_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
 
-        if self.multi:
-            if len(self.channel_size) > 1:
-                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[
-                    0
-                ]
-                kernel_size_value = np.random.choice([3, 4, 5, 7])
-                if self.critic:
-                    self.kernel_size[hidden_layer] = tuple(
-                        (
-                            min(kernel_size_value, self.n_agents - 1)
-                            if idx == 0
-                            else kernel_size_value
-                        )
-                        for idx in range(3)
-                    )
-                else:
-                    self.kernel_size[hidden_layer] = tuple(
-                        1 if idx == 0 else kernel_size_value for idx in range(3)
-                    )
-                self.recreate_nets()
-            else:
-                self.add_cnn_layer()
+            self.recreate_nets()
         else:
-            if len(self.channel_size) > 1:
-                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[
-                    0
-                ]
-                self.kernel_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
-
-                self.recreate_nets()
-            else:
-                self.add_cnn_layer()
+            self.add_cnn_layer()
 
     def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
         """Adds channel to hidden layer of convolutional neural network.

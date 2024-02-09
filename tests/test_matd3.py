@@ -74,7 +74,7 @@ class MultiAgentCNNCritic(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
         )
         self.conv2 = nn.Conv3d(
             in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
@@ -245,7 +245,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "arch": "cnn",
                 "h_size": [8],
                 "c_size": [3],
-                "k_size": [(1, 3, 3)],
+                "k_size": [3],
                 "s_size": [1],
                 "normalize": False,
             },
@@ -257,7 +257,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "arch": "cnn",
                 "h_size": [8],
                 "c_size": [3],
-                "k_size": [(1, 3, 3)],
+                "k_size": [3],
                 "s_size": [1],
                 "normalize": False,
             },
@@ -681,7 +681,7 @@ def test_matd3_getAction_epsilon_greedy_cnn(
         "arch": "cnn",
         "h_size": [64, 64],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1040,7 +1040,7 @@ def test_matd3_learns_from_experiences_cnn(
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1134,7 +1134,7 @@ def test_matd3_learns_from_experiences_cnn_distributed(
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1330,7 +1330,7 @@ def test_matd3_algorithm_test_loop_cnn(device):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1361,7 +1361,7 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -1622,7 +1622,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "arch": "cnn",
         "h_size": [8],
         "c_size": [16],
-        "k_size": [(1, 3, 3)],
+        "k_size": [3],
         "s_size": [1],
         "normalize": False,
     }
@@ -2074,7 +2074,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "arch": "cnn",
             "h_size": [8],
             "c_size": [3],
-            "k_size": [(1, 3, 3)],
+            "k_size": [3],
             "s_size": [1],
             "normalize": False,
         },

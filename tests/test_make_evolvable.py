@@ -14,7 +14,7 @@ class TwoArgCNN(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
         )  # W: 160, H: 210
         self.conv2 = nn.Conv3d(
             in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
@@ -865,11 +865,11 @@ def test_change_kernel_multi_two_arg(two_arg_cnn, device):
         device=device,
         extra_critic_dims=2,
     )
-    while evolvable_cnn.kernel_size == [(1, 3, 3), (1, 3, 3)]:
+    while evolvable_cnn.kernel_size == [(2, 3, 3), (1, 3, 3)]:
         evolvable_cnn.change_cnn_kernel()
 
     assert evolvable_cnn.kernel_size != [
-        (1, 3, 3),
+        (2, 3, 3),
         (1, 3, 3),
     ], evolvable_cnn.kernel_size
 
