@@ -244,7 +244,7 @@ class MultiCNNCritic(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(1, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
         )  # W: 160, H: 210
         self.conv2 = nn.Conv3d(
             in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
