@@ -90,7 +90,7 @@ def test_incorrect_instantiation(
 
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, n_agents",
-    [([1, 16, 16], [3, 32], [(1, 3, 3), (1, 3, 3)], [2, 2], [32, 32], 10, 2)],
+    [([1, 16, 16], [3, 32], [3, 3], [2, 2], [32, 32], 10, 2)],
 )
 def test_instantiation_for_multi_agents(
     input_shape,
@@ -123,14 +123,14 @@ def test_instantiation_for_multi_agents(
         (
             [1, 16, 16],
             [3, 32],
-            [(1, 3, 3), (1, 3, 3)],
+            [3, 3],
             [2, 2],
             [32, 32],
             10,
             True,
             None,
         ),
-        ([1, 16, 16], [3, 32], [(1, 3, 3), (1, 3, 3)], [2, 2], [32, 32], 10, False, 2),
+        ([1, 16, 16], [3, 32], [3, 3], [2, 2], [32, 32], 10, False, 2),
     ],
 )
 def test_incorrect_instantiation_for_multi_agents(
@@ -257,7 +257,7 @@ def test_forward(
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, \
         hidden_size, num_actions, n_agents, output_shape",
-    [([1, 16, 16], [3, 32], [(1, 3, 3), (1, 3, 3)], [2, 2], [32, 32], 10, 2, (1, 10))],
+    [([1, 16, 16], [3, 32], [3, 3], [2, 2], [32, 32], 10, 2, (1, 10))],
 )
 def test_forward_multi(
     input_shape,
@@ -295,7 +295,7 @@ def test_forward_multi(
         (
             [1, 16, 16],
             [3, 32],
-            [(1, 3, 3), (1, 3, 3)],
+            [3, 3],
             [2, 2],
             [32, 32],
             2,
@@ -386,7 +386,7 @@ def test_create_mlp_create_cnn_multi(noisy, device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 64, 64],
         channel_size=[32, 32],
-        kernel_size=[(1, 3, 3), (1, 3, 3)],
+        kernel_size=[3, 3],
         stride_size=[1, 1],
         hidden_size=[64, 64],
         num_actions=10,
@@ -398,9 +398,7 @@ def test_create_mlp_create_cnn_multi(noisy, device):
     value_net = evolvable_cnn.create_mlp(
         10, 4, [64, 64], output_activation=None, noisy=noisy, name="value"
     )
-    feature_net = evolvable_cnn.create_cnn(
-        1, [32, 32], [(1, 3, 3), (1, 3, 3)], [1, 1], "feature"
-    )
+    feature_net = evolvable_cnn.create_cnn(1, [32, 32], [3, 3], [1, 1], "feature")
     assert isinstance(value_net, nn.Module)
     assert isinstance(feature_net, nn.Module)
 
@@ -849,9 +847,9 @@ def test_change_cnn_kernel(device):
 def test_change_cnn_kernel_else_statement(device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
-        channel_size=[32],
-        kernel_size=[(3, 3)],
-        stride_size=[1],
+        channel_size=[32, 32],
+        kernel_size=[3, 3],
+        stride_size=[1, 1],
         hidden_size=[32, 32],
         num_actions=4,
         device=device,
@@ -861,10 +859,7 @@ def test_change_cnn_kernel_else_statement(device):
     evolvable_cnn.change_cnn_kernel()
 
     # Check if kernel size has changed
-    assert evolvable_cnn.kernel_size == [
-        (3, 3),
-        (3, 3),
-    ], evolvable_cnn.kernel_size
+    assert evolvable_cnn.kernel_size != [3, 3]
 
 
 @pytest.mark.parametrize("critic", [(True), (False)])
@@ -872,7 +867,7 @@ def test_change_cnn_kernel_multi(critic, device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
         channel_size=[32, 32],
-        kernel_size=[(1, 3, 3), (1, 3, 3)],
+        kernel_size=[3, 3],
         stride_size=[1, 1],
         hidden_size=[32, 32],
         multi=True,
@@ -885,13 +880,13 @@ def test_change_cnn_kernel_multi(critic, device):
     # Change kernel size
     evolvable_cnn.change_cnn_kernel()
 
-    while evolvable_cnn.kernel_size == [(1, 3, 3), (1, 3, 3)]:
+    while evolvable_cnn.kernel_size == [3, 3]:
         evolvable_cnn.change_cnn_kernel()
 
     # Check if kernel size has changed
     assert evolvable_cnn.kernel_size != [
-        (1, 3, 3),
-        (1, 3, 3),
+        3,
+        3,
     ], evolvable_cnn.kernel_size
 
 
@@ -899,7 +894,7 @@ def test_change_cnn_kernel_multi_else_statement(device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
         channel_size=[32],
-        kernel_size=[(1, 3, 3)],
+        kernel_size=[3],
         stride_size=[1],
         hidden_size=[32, 32],
         multi=True,
@@ -913,8 +908,8 @@ def test_change_cnn_kernel_multi_else_statement(device):
 
     # Check if kernel size has changed
     assert evolvable_cnn.kernel_size == [
-        (1, 3, 3),
-        (1, 3, 3),
+        3,
+        3,
     ], evolvable_cnn.kernel_size
 
 
