@@ -904,7 +904,8 @@ def test_change_cnn_kernel_multi_else_statement(device):
     )
 
     # Change kernel size
-    evolvable_cnn.change_cnn_kernel()
+    while evolvable_cnn.kernel_size == [3]:
+        evolvable_cnn.change_cnn_kernel()
 
     # Check if kernel size has changed
     assert evolvable_cnn.kernel_size == [
