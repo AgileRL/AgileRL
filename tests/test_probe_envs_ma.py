@@ -649,7 +649,7 @@ def test_policy_q_learning_with_probe_env_cnn():
             "arch": "cnn",  # Network architecture
             "h_size": [32],  # Network hidden size
             "c_size": [32, 32],  # CNN channel size
-            "k_size": [(1, 4, 4), (1, 3, 3)],  # CNN kernel size
+            "k_size": [4, 3],  # CNN kernel size
             "s_size": [4, 2],  # CNN stride size
             "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
