@@ -12,7 +12,7 @@ You can also join the AgileRL `Discord server <https://discord.com/invite/eB8HyT
 Probe environments
 ------------------
 
-Probe environments can be used to localise errors and confirm that algorithms are learning correctly. We provide vaarious single- and multi-agent probe environments, for vector and image
+Probe environments can be used to localise errors and confirm that algorithms are learning correctly. We provide various single- and multi-agent probe environments, for vector and image
 observation spaces, and discrete and continuous action spaces, that can be used to debug reinforcement learning implementations. These are detailed in the tables below.
 
 How to use Probe Environments
@@ -103,6 +103,38 @@ correctly functioning agent should be able to learn, and can be used to diagnose
             )
 
     See function docs: :ref:`agilerl.utils.probe_envs.check_policy_q_learning_with_probe_env<single_check_policy_q_learning_with_probe_env>`
+
+.. collapse:: Single-agent - Check Policy and Value (On-Policy)
+
+    .. code-block:: python
+
+          import torch
+          from agilerl.algorithms.ppo import PPO
+          from agilerl.utils.probe_envs import check_policy_on_policy_with_probe_env
+
+          device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+          cont_vector_envs = [
+              (ConstantRewardContActionsEnv(), 1000),
+              (ObsDependentRewardContActionsEnv(), 1000),
+              (DiscountedRewardContActionsEnv(), 5000),
+              (FixedObsPolicyContActionsEnv(), 3000),
+              (PolicyContActionsEnv(), 3000),
+          ]
+
+          for env, learn_steps in cont_vector_envs:
+              algo_args = {
+                  "state_dim": (env.observation_space.n,),
+                  "action_dim": env.action_space.shape[0],
+                  "one_hot": True if env.observation_space.n > 1 else False,
+                  "discrete_actions": False,
+                  "lr": 0.001
+              }
+
+              check_policy_on_policy_with_probe_env(
+                  env, PPO, algo_args, memory, learn_steps, device
+        )
+    See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_probe_env<single_check_policy_on_policy_with_probe_env>`
+
 
 .. collapse:: Multi-agent - Check Policy and Q-learning
 

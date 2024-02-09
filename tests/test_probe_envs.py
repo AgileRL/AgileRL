@@ -4,6 +4,7 @@ import torch
 
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
+from agilerl.algorithms.ppo import PPO
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.probe_envs import (
     ConstantRewardContActionsEnv,
@@ -27,6 +28,7 @@ from agilerl.utils.probe_envs import (
     PolicyContActionsImageEnvSimple,
     PolicyEnv,
     PolicyImageEnv,
+    check_policy_on_policy_with_probe_env,
     check_policy_q_learning_with_probe_env,
     check_q_learning_with_probe_env,
 )
@@ -353,3 +355,39 @@ def test_policy_q_learning_with_probe_env_cnn():
     check_policy_q_learning_with_probe_env(
         env, DDPG, algo_args, memory, learn_steps, device
     )
+
+
+def test_policy_on_policy_with_probe_env():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = ConstantRewardContActionsEnv()
+    learn_steps = 100
+    algo_args = {
+        "state_dim": (env.observation_space.n,),
+        "action_dim": env.action_space.shape[0],
+        "one_hot": True if env.observation_space.n > 1 else False,
+        "lr": 0.01,
+        "discrete_actions": False,
+    }
+    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
+
+
+def test_policy_on_policy_with_probe_env_cnn():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = FixedObsPolicyContActionsImageEnv()
+    learn_steps = 100
+    algo_args = {
+        "state_dim": (env.observation_space.shape),
+        "action_dim": env.action_space.shape[0],
+        "one_hot": False,
+        "net_config": {
+            "arch": "cnn",  # Network architecture
+            "h_size": [64],  # Network hidden size
+            "c_size": [32, 32],  # CNN channel size
+            "k_size": [8, 4],  # CNN kernel size
+            "s_size": [4, 2],  # CNN stride size
+            "normalize": False,  # Normalize image from range [0,255] to [0,1]
+        },
+        "discrete_actions": False,
+        "lr": 0.01,
+    }
+    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)

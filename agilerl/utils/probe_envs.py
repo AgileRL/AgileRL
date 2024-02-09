@@ -13,6 +13,7 @@ class ConstantRewardEnv(gym.Env):
         self.action_space = spaces.Discrete(1)
         self.sample_obs = [np.zeros((1, 1))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = 0
@@ -34,6 +35,7 @@ class ConstantRewardImageEnv(gym.Env):
         self.action_space = spaces.Discrete(1)
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = np.zeros((3, 32, 32))
@@ -56,6 +58,7 @@ class ConstantRewardContActionsEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 1))]
         self.sample_actions = [[[1.0]]]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -79,6 +82,7 @@ class ConstantRewardContActionsImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.sample_actions = [[[1.0]]]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[1.0]]  # Correct V value to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -102,6 +106,7 @@ class ObsDependentRewardEnv(gym.Env):
         self.last_obs = 1
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -124,6 +129,7 @@ class ObsDependentRewardImageEnv(gym.Env):
         self.last_obs = np.ones((3, 32, 32))
         self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -150,6 +156,7 @@ class ObsDependentRewardContActionsEnv(gym.Env):
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
         self.policy_values = [None]  # Correct policy to learn
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -173,6 +180,7 @@ class ObsDependentRewardContActionsImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -198,6 +206,7 @@ class DiscountedRewardEnv(gym.Env):
         self.last_obs = 0
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = 1
@@ -221,6 +230,7 @@ class DiscountedRewardImageEnv(gym.Env):
         self.last_obs = np.zeros((3, 32, 32))
         self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = np.ones((3, 32, 32))
@@ -245,6 +255,7 @@ class DiscountedRewardContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -270,6 +281,7 @@ class DiscountedRewardContActionsImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -293,10 +305,13 @@ class FixedObsPolicyEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         self.sample_obs = [np.array([[0]])]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
+        if isinstance(action, (np.ndarray, list)):
+            action = action[0]
         observation = 0
-        reward = [-1, 1][action[0]]  # Reward depends on action
+        reward = [-1, 1][action]  # Reward depends on action
         terminated = True
         truncated = False
         info = {}
@@ -314,10 +329,13 @@ class FixedObsPolicyImageEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = np.zeros((3, 32, 32))
-        reward = [-1, 1][action[0]]  # Reward depends on action
+        if isinstance(action, (np.ndarray, list)):
+            action = action[0]
+        reward = [-1, 1][action]  # Reward depends on action
         terminated = True
         truncated = False
         info = {}
@@ -336,6 +354,7 @@ class FixedObsPolicyContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[0]])]
         self.sample_actions = [np.array([[1.0]])]
         self.q_values = np.array([[0.0]])  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0]]  # Correct policy to learn
 
     def step(self, action):
@@ -359,6 +378,7 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.sample_actions = [np.array([[1.0]])]
         self.q_values = np.array([[0.0]])  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0]]  # Correct policy to learn
 
     def step(self, action):
@@ -385,6 +405,7 @@ class PolicyEnv(gym.Env):
             [1.0, -1.0],
             [-1.0, 1.0],
         ]  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -412,6 +433,7 @@ class PolicyImageEnv(gym.Env):
             [1.0, -1.0],
             [-1.0, 1.0],
         ]  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -437,6 +459,7 @@ class PolicyContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.sample_actions = [np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]])]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
+        self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
 
     def step(self, action):
@@ -475,6 +498,7 @@ class PolicyContActionsImageEnvSimple(gym.Env):
         ]
         self.q_values = [[0.0], [-1.0], [-1.0], [0.0]]  # Correct Q values to learn
         self.policy_values = [[0.0], [0.0], [1.0], [1.0]]  # Correct policy to learn
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -507,6 +531,7 @@ class PolicyContActionsImageEnv(gym.Env):
         self.sample_actions = [np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]])]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
         self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -593,6 +618,72 @@ def check_policy_q_learning_with_probe_env(
 
             # print("pol", policy_values, predicted_policy_values)
             assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
+
+
+def check_policy_on_policy_with_probe_env(
+    env, algo_class, algo_args, learn_steps=5000, device="cpu"
+):
+    print(f"Probe environment: {type(env).__name__}")
+
+    agent = algo_class(**algo_args, device=device)
+
+    for _ in trange(learn_steps):
+        state, _ = env.reset()
+        states = []
+        actions = []
+        log_probs = []
+        rewards = []
+        dones = []
+        values = []
+        truncs = []
+
+        for _ in range(100):
+            action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
+            action = action[0]
+            log_prob = log_prob[0]
+            value = value[0]
+            next_state, reward, done, trunc, _ = env.step(action)
+
+            states.append(state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            dones.append(done)
+            values.append(value)
+            truncs.append(trunc)
+
+            state = next_state
+            if done:
+                state, _ = env.reset()
+
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_state,
+        )
+        agent.learn(experiences)
+
+    for sample_obs, v_values in zip(env.sample_obs, env.v_values):
+        state = torch.tensor(sample_obs).float().to(device)
+        if v_values is not None:
+            predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
+            # print("---")
+            # print("v", v_values, predicted_v_values)
+            assert np.allclose(v_values, predicted_v_values, atol=0.1)
+
+    if hasattr(env, "sample_actions"):
+        for sample_action, policy_values in zip(env.sample_actions, env.policy_values):
+            action = torch.tensor(sample_action).float().to(device)
+            if policy_values is not None:
+                predicted_policy_values = (
+                    agent.actor(sample_obs).detach().cpu().numpy()[0]
+                )
+                # print("pol", policy_values, predicted_policy_values)
+                assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
 
 
 # if __name__ == "__main__":
