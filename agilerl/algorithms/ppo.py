@@ -410,12 +410,16 @@ class PPO:
                 a_t = 0
                 for k in range(t, num_steps):
                     if k != num_steps - 1:
-                        nextvalue = values[k+1]
+                        nextvalue = values[k + 1]
                     else:
                         nextvalue = next_value.squeeze()
 
-                    a_t += discount*(rewards[k] + self.gamma*nextvalue*(1.0-dones[k]) - values[k])
-                    discount *= self.gamma*self.gae_lambda*(1.0-dones[k])
+                    a_t += discount * (
+                        rewards[k]
+                        + self.gamma * nextvalue * (1.0 - dones[k])
+                        - values[k]
+                    )
+                    discount *= self.gamma * self.gae_lambda * (1.0 - dones[k])
 
                 advantages[t] = a_t
             returns = advantages + values
@@ -424,12 +428,12 @@ class PPO:
             states = states.reshape(-1)
         else:
             states = states.reshape((-1,) + self.state_dim)
-            
+
         if self.discrete_actions:
             actions = actions.reshape(-1)
         else:
             actions = actions.reshape((-1, self.action_dim))
-        
+
         log_probs = log_probs.reshape(-1)
         advantages = advantages.reshape(-1)
         returns = returns.reshape(-1)
@@ -452,7 +456,7 @@ class PPO:
             returns = returns.to(self.accelerator.device)
             values = values.to(self.accelerator.device)
 
-        num_samples = returns.size(0) 
+        num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
         clipfracs = []
 
@@ -499,7 +503,7 @@ class PPO:
                 v_loss = 0.5 * v_loss_max.mean()
                 entropy_loss = entropy.mean()
                 loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
-            
+
                 # actor + critic loss backprop
                 self.optimizer.zero_grad()
                 if self.accelerator is not None:

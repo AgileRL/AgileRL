@@ -13,7 +13,7 @@ class ConstantRewardEnv(gym.Env):
         self.action_space = spaces.Discrete(1)
         self.sample_obs = [np.zeros((1, 1))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [[1.0]] # Correct V values to learn, s table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = 0
@@ -35,7 +35,7 @@ class ConstantRewardImageEnv(gym.Env):
         self.action_space = spaces.Discrete(1)
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [[1.0]] # Correct V values to learn, s table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = np.zeros((3, 32, 32))
@@ -50,6 +50,7 @@ class ConstantRewardImageEnv(gym.Env):
         info = {}
         return observation, info
 
+
 class ConstantRewardContActionsEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Discrete(1)
@@ -57,7 +58,7 @@ class ConstantRewardContActionsEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 1))]
         self.sample_actions = [[[1.0]]]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [[1.0]] # Correct V values to learn, s table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -73,6 +74,7 @@ class ConstantRewardContActionsEnv(gym.Env):
         info = {}
         return observation, info
 
+
 class ConstantRewardContActionsImageEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Box(0.0, 0.0, (3, 32, 32))
@@ -80,7 +82,7 @@ class ConstantRewardContActionsImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.sample_actions = [[[1.0]]]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [[1.0]] # Correct V value to learn, s table
+        self.v_values = [[1.0]]  # Correct V value to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -153,7 +155,7 @@ class ObsDependentRewardContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [[-1.0], [1.0]] # Correct V values to learn, s table
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -196,6 +198,7 @@ class ObsDependentRewardContActionsImageEnv(gym.Env):
         info = {}
         return self.last_obs, info
 
+
 class DiscountedRewardEnv(gym.Env):
     def __init__(self):
         self.observation_space = spaces.Discrete(2)
@@ -203,7 +206,7 @@ class DiscountedRewardEnv(gym.Env):
         self.last_obs = 0
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [[0.99], [1.0]] # Correct V values to learn, s table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = 1
@@ -252,7 +255,7 @@ class DiscountedRewardContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table#
-        self.v_values = [[0.99], [1.0]] # Correct V values to learn, s table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
@@ -302,7 +305,7 @@ class FixedObsPolicyEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         self.sample_obs = [np.array([[0]])]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = 0
@@ -316,6 +319,7 @@ class FixedObsPolicyEnv(gym.Env):
         observation = 0
         info = {}
         return observation, info
+
 
 class FixedObsPolicyImageEnv(gym.Env):
     def __init__(self):
@@ -323,7 +327,7 @@ class FixedObsPolicyImageEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = np.zeros((3, 32, 32))
@@ -337,6 +341,7 @@ class FixedObsPolicyImageEnv(gym.Env):
         observation = np.zeros((3, 32, 32))
         info = {}
         return observation, info
+
 
 class FixedObsPolicyContActionsEnv(gym.Env):
     def __init__(self):
@@ -345,7 +350,7 @@ class FixedObsPolicyContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[0]])]
         self.sample_actions = [np.array([[1.0]])]
         self.q_values = np.array([[0.0]])  # Correct Q values to learn, s x a table
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0]]  # Correct policy to learn
 
     def step(self, action):
@@ -369,7 +374,7 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
         self.sample_obs = [np.zeros((1, 3, 32, 32))]
         self.sample_actions = [np.array([[1.0]])]
         self.q_values = np.array([[0.0]])  # Correct Q values to learn, s x a table
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0]]  # Correct policy to learn
 
     def step(self, action):
@@ -396,7 +401,7 @@ class PolicyEnv(gym.Env):
             [1.0, -1.0],
             [-1.0, 1.0],
         ]  # Correct Q values to learn, s x a table
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -424,7 +429,7 @@ class PolicyImageEnv(gym.Env):
             [1.0, -1.0],
             [-1.0, 1.0],
         ]  # Correct Q values to learn, s x a table
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -450,7 +455,7 @@ class PolicyContActionsEnv(gym.Env):
         self.sample_obs = [np.array([[1, 0]]), np.array([[0, 1]])]
         self.sample_actions = [np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]])]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
 
     def step(self, action):
@@ -489,7 +494,7 @@ class PolicyContActionsImageEnvSimple(gym.Env):
         ]
         self.q_values = [[0.0], [-1.0], [-1.0], [0.0]]  # Correct Q values to learn
         self.policy_values = [[0.0], [0.0], [1.0], [1.0]]  # Correct policy to learn
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -522,7 +527,7 @@ class PolicyContActionsImageEnv(gym.Env):
         self.sample_actions = [np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]])]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
         self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
-        self.v_values = [None] # Correct V values to learn, s table
+        self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
         observation = self.last_obs
@@ -630,126 +635,126 @@ def check_policy_q_learning_with_probe_env(
 def check_value_with_probe_env_on_policy(
     env, algo_class, algo_args, learn_steps=5000, device="cpu"
 ):
-        print(f"Probe environment: {type(env).__name__}")
+    print(f"Probe environment: {type(env).__name__}")
 
-        agent = algo_class(**algo_args, device=device)
+    agent = algo_class(**algo_args, device=device)
 
-        for _ in trange(learn_steps):
-            state, _ = env.reset()
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
-            truncs = [] 
+    for _ in trange(learn_steps):
+        state, _ = env.reset()
+        states = []
+        actions = []
+        log_probs = []
+        rewards = []
+        dones = []
+        values = []
+        truncs = []
 
-            for _ in range(100):
-                action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
-                next_state, reward, done, trunc, _ = env.step(action)
+        for _ in range(100):
+            action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
+            next_state, reward, done, trunc, _ = env.step(action)
 
-                action = action[0]
-                log_prob = log_prob[0]
-                value = value[0]
+            action = action[0]
+            log_prob = log_prob[0]
+            value = value[0]
 
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
-                truncs.append(trunc)
+            states.append(state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            dones.append(done)
+            values.append(value)
+            truncs.append(trunc)
 
-                state = next_state
-                if done:
-                    state, _ = env.reset()
+            state = next_state
+            if done:
+                state, _ = env.reset()
 
-            experiences = (
-                states,
-                actions,
-                log_probs,
-                rewards,
-                dones,
-                values,
-                next_state,
-            )
-            agent.learn(experiences)
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_state,
+        )
+        agent.learn(experiences)
 
-        for sample_obs, v_values in zip(env.sample_obs, env.v_values):
-            if v_values is not None:
-                predicted_v_values = agent.critic(sample_obs).detach().cpu().numpy()
-                print("Actual value: ",v_values, "Predicted value: ", predicted_v_values)
-                assert np.allclose(v_values, predicted_v_values, atol=0.1)
+    for sample_obs, v_values in zip(env.sample_obs, env.v_values):
+        if v_values is not None:
+            predicted_v_values = agent.critic(sample_obs).detach().cpu().numpy()
+            print("Actual value: ", v_values, "Predicted value: ", predicted_v_values)
+            assert np.allclose(v_values, predicted_v_values, atol=0.1)
+
 
 def check_policy_with_probe_env_on_policy(
     env, algo_class, algo_args, learn_steps=5000, device="cpu"
 ):
-        print(f"Probe environment: {type(env).__name__}")
+    print(f"Probe environment: {type(env).__name__}")
 
-        agent = algo_class(**algo_args, device=device)
+    agent = algo_class(**algo_args, device=device)
 
-        for _ in trange(learn_steps):
-            state, _ = env.reset()
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
-            truncs = [] 
+    for _ in trange(learn_steps):
+        state, _ = env.reset()
+        states = []
+        actions = []
+        log_probs = []
+        rewards = []
+        dones = []
+        values = []
+        truncs = []
 
-            for _ in range(100):
-                action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
-                next_state, reward, done, trunc, _ = env.step(action[0])
+        for _ in range(100):
+            action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
+            next_state, reward, done, trunc, _ = env.step(action[0])
 
-                action = action[0]
-                log_prob = log_prob[0]
-                value = value[0]
+            action = action[0]
+            log_prob = log_prob[0]
+            value = value[0]
 
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
-                truncs.append(trunc)
+            states.append(state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            dones.append(done)
+            values.append(value)
+            truncs.append(trunc)
 
-                state = next_state
-                if done:
-                    state, _ = env.reset()
+            state = next_state
+            if done:
+                state, _ = env.reset()
 
-            experiences = (
-                states,
-                actions,
-                log_probs,
-                rewards,
-                dones,
-                values,
-                next_state,
-            )
-            agent.learn(experiences)
+        experiences = (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_state,
+        )
+        agent.learn(experiences)
 
-        for sample_obs, sample_action, v_values, policy_values in zip(
+    for sample_obs, sample_action, v_values, policy_values in zip(
         env.sample_obs, env.sample_actions, env.v_values, env.policy_values
-        ):
-            state = torch.tensor(sample_obs).float().to(device)
-            action = torch.tensor(sample_action).float().to(device)
-            if v_values is not None:
-                predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
-                print("---")
-                print("v", v_values, predicted_v_values)
-                assert np.allclose(v_values, predicted_v_values, atol=0.1)
+    ):
+        state = torch.tensor(sample_obs).float().to(device)
+        action = torch.tensor(sample_action).float().to(device)
+        if v_values is not None:
+            predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
+            print("---")
+            print("v", v_values, predicted_v_values)
+            assert np.allclose(v_values, predicted_v_values, atol=0.1)
 
-            if policy_values is not None:
-                predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
-                print("pol", policy_values, predicted_policy_values)
-                assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
+        if policy_values is not None:
+            predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
+            print("pol", policy_values, predicted_policy_values)
+            assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
 
 
 if __name__ == "__main__":
     from agilerl.algorithms.ddpg import DDPG
     from agilerl.algorithms.dqn import DQN
-    from agilerl.algorithms.ppo import PPO
     from agilerl.components.replay_buffer import ReplayBuffer
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -771,7 +776,7 @@ if __name__ == "__main__":
         }
 
         check_q_learning_with_probe_env(env, DQN, algo_args, learn_steps, device)
-        #check_value_with_probe_env_on_policy(env, PPO, algo_args, learn_steps, device)
+        # check_value_with_probe_env_on_policy(env, PPO, algo_args, learn_steps, device)
 
     image_envs = [
         (ConstantRewardImageEnv(), 1000),
@@ -798,7 +803,7 @@ if __name__ == "__main__":
         }
 
         check_q_learning_with_probe_env(env, DQN, algo_args, learn_steps, device)
-        #check_value_with_probe_env_on_policy(env, PPO, algo_args, learn_steps, device)
+        # check_value_with_probe_env_on_policy(env, PPO, algo_args, learn_steps, device)
 
     cont_vector_envs = [
         (ConstantRewardContActionsEnv(), 1000),
