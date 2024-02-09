@@ -190,6 +190,14 @@ Single-agent probe environments
     :language: python
     :pyobject: check_policy_q_learning_with_probe_env
 
+.. _single_check_policy_on_policy_with_probe_env:
+
+.. autofunction:: agilerl.utils.probe_envs.check_policy_on_policy_with_probe_env
+
+.. literalinclude:: ../../../agilerl/utils/probe_envs.py
+    :language: python
+    :pyobject: check_policy_on_policy_with_probe_env
+
 Multi-agent probe environments
 ------------------------------
 

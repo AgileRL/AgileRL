@@ -308,7 +308,7 @@ class FixedObsPolicyEnv(gym.Env):
         self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
-        if isinstance(action, np.ndarray):
+        if isinstance(action, (np.ndarray,list)):
             action = action[0]
         observation = 0
         reward = [-1, 1][action]  # Reward depends on action
@@ -333,7 +333,7 @@ class FixedObsPolicyImageEnv(gym.Env):
 
     def step(self, action):
         observation = np.zeros((3, 32, 32))
-        if isinstance(action, np.ndarray):
+        if isinstance(action, (np.ndarray, list)):
             action = action[0]
         reward = [-1, 1][action]  # Reward depends on action
         terminated = True
