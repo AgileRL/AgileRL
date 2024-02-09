@@ -627,7 +627,7 @@ def check_policy_q_learning_with_probe_env(
             assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
 
 
-def check_value_with_probe_env_ppo(
+def check_value_with_probe_env_on_policy(
     env, algo_class, algo_args, learn_steps=5000, device="cpu"
 ):
         print(f"Probe environment: {type(env).__name__}")
@@ -679,9 +679,9 @@ def check_value_with_probe_env_ppo(
             if v_values is not None:
                 predicted_v_values = agent.critic(sample_obs).detach().cpu().numpy()
                 print("Actual value: ",v_values, "Predicted value: ", predicted_v_values)
-                #assert np.allclose(v_values, predicted_v_values, atol=0.1)
+                assert np.allclose(v_values, predicted_v_values, atol=0.1)
 
-def check_policy_with_probe_env_ppo(
+def check_policy_with_probe_env_on_policy(
     env, algo_class, algo_args, learn_steps=5000, device="cpu"
 ):
         print(f"Probe environment: {type(env).__name__}")
@@ -700,7 +700,6 @@ def check_policy_with_probe_env_ppo(
 
             for _ in range(100):
                 action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
-                #print("action",action)
                 next_state, reward, done, trunc, _ = env.step(action[0])
 
                 action = action[0]
@@ -739,13 +738,12 @@ def check_policy_with_probe_env_ppo(
                 predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
                 print("---")
                 print("v", v_values, predicted_v_values)
-                #assert np.allclose(v_values, predicted_v_values, atol=0.1)
+                assert np.allclose(v_values, predicted_v_values, atol=0.1)
 
             if policy_values is not None:
                 predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
                 print("pol", policy_values, predicted_policy_values)
-                #assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
-            
+                assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
 
 
 if __name__ == "__main__":
@@ -756,61 +754,58 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # vector_envs = [
-    #     (ConstantRewardEnv(), 10),
-    #     (ObsDependentRewardEnv(), 10),
-    #     (DiscountedRewardEnv(), 10),
-    #     (FixedObsPolicyEnv(), 30),  # Not relevant for ppo
-    #     (PolicyEnv(), 10), # Not relevant for ppo
-    # ]
+    vector_envs = [
+        (ConstantRewardEnv(), 1000),
+        (ObsDependentRewardEnv(), 1000),
+        (DiscountedRewardEnv(), 3000),
+        (FixedObsPolicyEnv(), 1000),
+        (PolicyEnv(), 1000),
+    ]
 
-    # for env, learn_steps in vector_envs:
-    #     algo_args = {
-    #         "state_dim": (env.observation_space.n,),
-    #         "action_dim": env.action_space.n,
-    #         "one_hot": True if env.observation_space.n > 1 else False,
-    #         "lr": 0.01,
-    #         "discrete_actions": True,
-    #     }
+    for env, learn_steps in vector_envs:
+        algo_args = {
+            "state_dim": (env.observation_space.n,),
+            "action_dim": env.action_space.n,
+            "one_hot": True if env.observation_space.n > 1 else False,
+            "lr": 1e-2,
+        }
 
-    #     check_value_with_probe_env_ppo(env, PPO, algo_args, learn_steps, device)
-    #     #check_q_learning_with_probe_env(env, DQN, algo_args, learn_steps, device)
+        check_q_learning_with_probe_env(env, DQN, algo_args, learn_steps, device)
+        #check_value_with_probe_env_on_policy(env, PPO, algo_args, learn_steps, device)
 
+    image_envs = [
+        (ConstantRewardImageEnv(), 1000),
+        (ObsDependentRewardImageEnv(), 1000),
+        (DiscountedRewardImageEnv(), 5000),
+        (FixedObsPolicyImageEnv(), 1000),
+        (PolicyImageEnv(), 1000),
+    ]
 
-    # image_envs = [
-    #     (ConstantRewardImageEnv(), 10),
-    #     (ObsDependentRewardImageEnv(), 10),
-    #     (DiscountedRewardImageEnv(), 10),
-    #     (FixedObsPolicyImageEnv(), 10),    # Not relevant for ppo
-    #     (PolicyImageEnv(), 10),
-    # ]
+    for env, learn_steps in image_envs:
+        algo_args = {
+            "state_dim": (env.observation_space.shape),
+            "action_dim": env.action_space.n,
+            "one_hot": False,
+            "net_config": {
+                "arch": "cnn",  # Network architecture
+                "h_size": [32],  # Network hidden size
+                "c_size": [32, 32],  # CNN channel size
+                "k_size": [8, 4],  # CNN kernel size
+                "s_size": [4, 2],  # CNN stride size
+                "normalize": False,  # Normalize image from range [0,255] to [0,1]
+            },
+            "lr": 1e-2,
+        }
 
-    # for env, learn_steps in image_envs:
-    #     algo_args = {
-    #         "state_dim": (env.observation_space.shape),
-    #         "action_dim": env.action_space.n,
-    #         "one_hot": False,
-    #         "net_config": {
-    #             "arch": "cnn",  # Network architecture
-    #             "h_size": [32],  # Network hidden size
-    #             "c_size": [32, 32],  # CNN channel size
-    #             "k_size": [8, 4],  # CNN kernel size
-    #             "s_size": [4, 2],  # CNN stride size
-    #             "normalize": False,  # Normalize image from range [0,255] to [0,1]
-    #         },
-    #         "lr": 0.001,
-    #         "discrete_actions":True
-    #     }
-
-    #     #check_q_learning_with_probe_env(env, PPO, algo_args, learn_steps, device)
-    #     check_value_with_probe_env_ppo(env, PPO, algo_args, learn_steps, device)
+        check_q_learning_with_probe_env(env, DQN, algo_args, learn_steps, device)
+        #check_value_with_probe_env_on_policy(env, PPO, algo_args, learn_steps, device)
 
     cont_vector_envs = [
-        (ConstantRewardContActionsEnv(), 10),
-        (ObsDependentRewardContActionsEnv(), 10),
-        (DiscountedRewardContActionsEnv(), 10),
-        (FixedObsPolicyContActionsEnv(), 10), #ignore q / introduce a v
-        (PolicyContActionsEnv(), 10), #ignore q / introduce a v
+        (ConstantRewardContActionsEnv(), 1000),
+        (ObsDependentRewardContActionsEnv(), 1000),
+        (DiscountedRewardContActionsEnv(), 5000),
+        (FixedObsPolicyContActionsEnv(), 3000),
+        (PolicyContActionsEnv(), 3000),
     ]
 
     for env, learn_steps in cont_vector_envs:
@@ -818,26 +813,24 @@ if __name__ == "__main__":
             "state_dim": (env.observation_space.n,),
             "action_dim": env.action_space.shape[0],
             "one_hot": True if env.observation_space.n > 1 else False,
-            "discrete_actions": False,
-            "lr": 0.001
-            # "max_action": 1.0,
-            # "min_action": 0.0,
-            # "lr_actor": 1e-2,
-            # "lr_critic": 1e-2,
+            "max_action": 1.0,
+            "min_action": 0.0,
+            "lr_actor": 1e-2,
+            "lr_critic": 1e-2,
         }
 
-        # check_policy_q_learning_with_probe_env(
-        #     env, DDPG, algo_args, learn_steps, device
-        # )
-        check_policy_with_probe_env_ppo(env, PPO, algo_args, learn_steps)
+        check_policy_q_learning_with_probe_env(
+            env, DDPG, algo_args, learn_steps, device
+        )
+        # check_policy_with_probe_env_on_policy(env, PPO, algo_args, learn_steps)
 
     image_envs = [
-        (ConstantRewardContActionsImageEnv(), 10), 
-        (ObsDependentRewardContActionsImageEnv(), 10),
-        (DiscountedRewardContActionsImageEnv(), 10),
-        (FixedObsPolicyContActionsImageEnv(), 10), # ignore q / introduce a v
-        (PolicyContActionsImageEnvSimple(), 10),
-        (PolicyContActionsImageEnv(), 10),
+        (ConstantRewardContActionsImageEnv(), 1000),
+        (ObsDependentRewardContActionsImageEnv(), 3000),
+        (DiscountedRewardContActionsImageEnv(), 7000),
+        (FixedObsPolicyContActionsImageEnv(), 3000),
+        (PolicyContActionsImageEnvSimple(), 4000),
+        (PolicyContActionsImageEnv(), 5000),
     ]
 
     for env, learn_steps in image_envs:
@@ -853,13 +846,12 @@ if __name__ == "__main__":
                 "s_size": [4, 2],  # CNN stride size
                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
             },
-            'discrete_actions': False
-            # "max_action": 1.0,
-            # "min_action": 0.0,
-            # "policy_freq": 2,
+            "max_action": 1.0,
+            "min_action": 0.0,
+            "policy_freq": 2,
         }
 
-        # check_policy_q_learning_with_probe_env(
-        #     env, DDPG, algo_args, learn_steps, device
-        # )
-        check_policy_with_probe_env_ppo(env, PPO, algo_args, learn_steps)
+        check_policy_q_learning_with_probe_env(
+            env, DDPG, algo_args, learn_steps, device
+        )
+        # check_policy_with_probe_env_on_policy(env, PPO, algo_args, learn_steps)
