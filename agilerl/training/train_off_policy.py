@@ -86,9 +86,9 @@ def train_off_policy(
     :type per: bool, optional
     :param noisy: Using noisy network exploration, defaults to False
     :type noisy: bool, optional
-    :param memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
+    :param n_step_memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
         ERB, defaults to None
-    :type memory: object, optional
+    :type n_step_memory: object, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
