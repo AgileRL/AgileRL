@@ -38,4 +38,4 @@ MUTATION_PARAMS:
 
 NET_CONFIG:
     arch: mlp
-    h_size: [128, 128]
+    h_size: [128]

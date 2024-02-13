@@ -24,7 +24,7 @@ def train_bandits(
     max_steps=100,
     evo_epochs=5,
     evo_loop=1,
-    target=100.0,
+    target=96.0,
     tournament=None,
     mutation=None,
     checkpoint=None,
@@ -64,7 +64,7 @@ def train_bandits(
     :type evo_epochs: int, optional
     :param evo_loop: Number of evaluation episodes, defaults to 1
     :type evo_loop: int, optional
-    :param target: Target score for early stopping, defaults to 100.
+    :param target: Target score for early stopping, defaults to 96.
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
@@ -259,11 +259,12 @@ def train_bandits(
                     memory.counter % agent.learn_step == 0
                     and len(memory) >= agent.batch_size
                 ):
-                    # Sample replay buffer
-                    # Learn according to agent's RL algorithm
-                    experiences = sampler.sample(agent.batch_size)
-                    loss = agent.learn(experiences)
-                    losses.append(loss)
+                    for _ in range(2):
+                        # Sample replay buffer
+                        # Learn according to agent's RL algorithm
+                        experiences = sampler.sample(agent.batch_size)
+                        loss = agent.learn(experiences)
+                        losses.append(loss)
 
                 if is_vectorised:
                     rewards.append(reward)

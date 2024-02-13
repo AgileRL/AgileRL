@@ -73,12 +73,11 @@ if __name__ == "__main__":
 
     NET_CONFIG = {
         "arch": "mlp",  # Network architecture
-        "h_size": [32, 32],  # Actor hidden size
+        "h_size": [128],  # Actor hidden size
     }
 
     INIT_HP = {
-        "POPULATION_SIZE": 4,  # Population size
-        "DOUBLE": True,  # Use double Q-learning
+        "POPULATION_SIZE": 1,  # Population size
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 0.99,  # Discount factor
@@ -103,7 +102,7 @@ if __name__ == "__main__":
     #     device=device,
     # )
 
-    pop = [NeuralUCB(context_dim, action_dim, batch_size=256, device=device)]
+    pop = [NeuralUCB(context_dim, action_dim, batch_size=64, device=device)]
 
     field_names = ["context", "reward"]
     memory = ReplayBuffer(
@@ -112,15 +111,6 @@ if __name__ == "__main__":
         field_names=field_names,  # Field names to store in memory
         device=device,
     )
-
-    # Fill replay buffer with random experiences
-    print("Filling replay buffer...")
-    context = env.reset()  # Reset environment at start of episode
-    while len(memory) < memory.memory_size:
-        # Get next action from agent
-        action = random.randint(0, action_dim - 1)
-        next_context, reward = env.step(action)  # Act in environment
-        memory.save2memory(context[action], reward)
 
     # tournament = TournamentSelection(
     #     tournament_size=2,  # Tournament selection size
@@ -184,13 +174,13 @@ if __name__ == "__main__":
                     memory.counter % agent.learn_step == 0
                     and len(memory) >= agent.batch_size
                 ):
-                    # for _ in range(2):
-                    experiences = memory.sample(
-                        agent.batch_size
-                    )  # Sample replay buffer
-                    # Learn according to agent's RL algorithm
-                    loss = agent.learn(experiences)
-                    losses.append(loss)
+                    for _ in range(2):
+                        experiences = memory.sample(
+                            agent.batch_size
+                        )  # Sample replay buffer
+                        # Learn according to agent's RL algorithm
+                        loss = agent.learn(experiences)
+                        losses.append(loss)
 
                 context = next_context
                 score += reward
