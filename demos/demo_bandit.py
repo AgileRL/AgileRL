@@ -7,7 +7,7 @@ import torch
 import wandb
 from tqdm import trange
 
-from agilerl.algorithms.neural_ucb import NeuralUCB
+from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -103,15 +103,24 @@ if __name__ == "__main__":
     #     device=device,
     # )
 
-    pop = [NeuralUCB(context_dim, action_dim, device=device)]
+    pop = [NeuralUCB(context_dim, action_dim, batch_size=256, device=device)]
 
-    field_names = ["context", "action", "reward"]
+    field_names = ["context", "reward"]
     memory = ReplayBuffer(
         action_dim=action_dim,  # Number of agent actions
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=device,
     )
+
+    # Fill replay buffer with random experiences
+    print("Filling replay buffer...")
+    context = env.reset()  # Reset environment at start of episode
+    while len(memory) < memory.memory_size:
+        # Get next action from agent
+        action = random.randint(0, action_dim - 1)
+        next_context, reward = env.step(action)  # Act in environment
+        memory.save2memory(context[action], reward)
 
     # tournament = TournamentSelection(
     #     tournament_size=2,  # Tournament selection size
@@ -137,7 +146,7 @@ if __name__ == "__main__":
 
     tournament = mutation = None
 
-    max_episodes = 1000  # Max training episodes
+    max_episodes = 100  # Max training episodes
     max_steps = 100  # Max steps per episode
 
     evo_epochs = 5  # Evolution frequency
@@ -161,24 +170,27 @@ if __name__ == "__main__":
     for idx_epi in trange(max_episodes):
         for i, agent in enumerate(pop):  # Loop through population
             score = 0
+            losses = []
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(max_steps):
                 # Get next action from agent
                 action = agent.getAction(context)
                 next_context, reward = env.step(action)  # Act in environment
 
-                memory.save2memory(context[action], action, reward)
+                memory.save2memory(context[action], reward)
 
                 # Learn according to learning frequency
                 if (
                     memory.counter % agent.learn_step == 0
                     and len(memory) >= agent.batch_size
                 ):
+                    # for _ in range(2):
                     experiences = memory.sample(
                         agent.batch_size
                     )  # Sample replay buffer
                     # Learn according to agent's RL algorithm
                     loss = agent.learn(experiences)
+                    losses.append(loss)
 
                 context = next_context
                 score += reward
@@ -188,6 +200,7 @@ if __name__ == "__main__":
 
             wandb_dict = {
                 "global_step": total_steps,
+                "train/loss": np.mean(losses),
                 "train/score": score,
                 "train/regret": regret[0][-1],
             }

@@ -15,7 +15,7 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 class NeuralUCB:
     """The NeuralUCB algorithm class. NeuralUCB paper: https://arxiv.org/abs/1911.04462
 
-    :param state_dim: State observation dimension
+    :param state_dim: State observation (context) dimension
     :type state_dim: list[int]
     :param action_dim: Action dimension
     :type action_dim: int
@@ -23,20 +23,20 @@ class NeuralUCB:
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
+    :param gamma: Positive scaling factor, defaults to 1.0
+    :type gamma: float, optional
+    :param lamb: Regularization parameter lambda, defaults to 1.0
+    :type lamb: float, optional
+    :param reg: Loss regularization parameter, defaults to 0.000625
+    :type reg: float, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 5
+    :param learn_step: Learning frequency, defaults to 1
     :type learn_step: int, optional
-    :param gamma: Discount factor, defaults to 0.99
-    :type gamma: float, optional
-    :param tau: For soft update of target network parameters, defaults to 1e-3
-    :type tau: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
-    :param double: Use double Q-learning, defaults to False
-    :type double: bool, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -53,12 +53,12 @@ class NeuralUCB:
         action_dim,
         index=0,
         net_config={"arch": "mlp", "h_size": [64, 64]},
-        beta=1,
-        lamb=1,
+        gamma=1.0,
+        lamb=1.0,
         reg=0.000625,
         batch_size=64,
         lr=1e-4,
-        learn_step=5,
+        learn_step=1,
         mut=None,
         actor_network=None,
         device="cpu",
@@ -72,6 +72,16 @@ class NeuralUCB:
             action_dim, (int, np.integer)
         ), "Action dimension must be an integer."
         assert isinstance(index, int), "Agent index must be an integer."
+        assert isinstance(
+            gamma, (float, int)
+        ), "Scaling factor must be a float or integer."
+        assert gamma > 0, "Scaling factor must be positive."
+        assert isinstance(
+            lamb, (float, int)
+        ), "Regularization parameter lambda must be a float or integer."
+        assert lamb > 0, "Regularization parameter lambda must be greater than zero."
+        assert isinstance(reg, float), "Loss regularization parameter must be a float."
+        assert reg > 0, "Loss regularization parameter must be greater than zero."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
@@ -89,7 +99,7 @@ class NeuralUCB:
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.net_config = net_config
-        self.beta = beta
+        self.gamma = gamma
         self.lamb = lamb
         self.reg = reg
         self.batch_size = batch_size
@@ -183,8 +193,6 @@ class NeuralUCB:
 
     def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
-        Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
         :type state: numpy.ndarray[float]
@@ -217,16 +225,8 @@ class NeuralUCB:
                 .numpy()
             )
 
-        # ALTERNATIVE IMPL
-        # g = np.zeros((self.action_dim, self.numel))
-        # for k, c in enumerate(state):
-        #     fx = self.actor(c)
-        #     self.optimizer.zero_grad()
-        #     fx.backward()
-        #     g[k] = torch.cat([w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1]) for w in self.actor.parameters() if w.requires_grad]).cpu().numpy()
-
         with torch.no_grad():
-            action_values = self.actor(state).cpu().numpy() + self.beta * np.sqrt(
+            action_values = self.actor(state).cpu().numpy() + self.gamma * np.sqrt(
                 np.matmul(np.matmul(g[:, None, :], self.sigma_inv), g[:, :, None])[
                     :, 0, :
                 ]
@@ -239,39 +239,24 @@ class NeuralUCB:
             masked_action_values = np.ma.array(action_values, mask=inv_mask)
             action = np.argmax(masked_action_values)
 
+        # Sherman-Morrison-Woodbury Update
+        v = np.expand_dims(g[action], -1)
+        self.sigma_inv -= (self.sigma_inv @ v @ v.T @ self.sigma_inv) / (
+            1 + v.T @ self.sigma_inv @ v
+        )
+
         return action
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 
-        :param experiences: List of batched states, actions, rewards in that order.
+        :param experiences: Batched states, rewards in that order.
         :type state: list[torch.Tensor[float]]
         """
-        states, actions, rewards = experiences
+        states, rewards = experiences
         if self.accelerator is not None:
             states = states.to(self.accelerator.device)
-            actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)
-
-        # Sherman-Morrison-Woodbury Update
-        mu = torch.mean(self.actor(states))
-        self.optimizer.zero_grad()
-        mu.backward()
-        v = (
-            torch.cat(
-                [
-                    w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1])
-                    for w in self.actor.parameters()
-                    if w.requires_grad
-                ]
-            )
-            .unsqueeze(-1)
-            .cpu()
-            .numpy()
-        )
-        self.sigma_inv -= (self.sigma_inv @ v @ v.T @ self.sigma_inv) / (
-            1 + v.T @ self.sigma_inv @ v
-        )
 
         pred_rewards = self.actor(states)
 
