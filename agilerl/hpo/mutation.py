@@ -1082,5 +1082,10 @@ class Mutations:
                     },
                 ],
             }
+        elif algo in ["NeuralUCB", "NeuralTS"]:
+            nets = {
+                "actor": {"eval": "actor", "optimizer": "optimizer_type"},
+                "critics": [],
+            }
 
         return nets

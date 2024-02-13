@@ -110,6 +110,7 @@ class NeuralTS:
         self.accelerator = accelerator
         self.index = index
         self.scores = []
+        self.regret = [0]
         self.fitness = []
         self.steps = [0]
         self.actor_network = actor_network

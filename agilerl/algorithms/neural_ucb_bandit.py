@@ -52,7 +52,7 @@ class NeuralUCB:
         state_dim,
         action_dim,
         index=0,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "h_size": [128]},
         gamma=1.0,
         lamb=1.0,
         reg=0.000625,
@@ -110,6 +110,7 @@ class NeuralUCB:
         self.accelerator = accelerator
         self.index = index
         self.scores = []
+        self.regret = [0]
         self.fitness = []
         self.steps = [0]
         self.actor_network = actor_network
