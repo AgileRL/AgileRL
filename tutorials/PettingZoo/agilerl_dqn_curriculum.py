@@ -67,9 +67,7 @@ class CurriculumEnv:
             while not (done or truncation):
                 # Player 0's turn
                 p0_action_mask = observation["action_mask"]
-                p0_state = np.moveaxis(observation["observation"], [-1], [-3])
-                p0_state_flipped = np.expand_dims(np.flip(p0_state, 2), 0)
-                p0_state = np.expand_dims(p0_state, 0)
+                p0_state, p0_state_flipped = transform_and_flip(observation, player = 0)
                 if opponent_first:
                     p0_action = self.env.action_space("player_0").sample(p0_action_mask)
                 else:
@@ -81,9 +79,7 @@ class CurriculumEnv:
                         p0_action = opponent.getAction(player=0)
                 self.step(p0_action)  # Act in environment
                 observation, env_reward, done, truncation, _ = self.last()
-                p0_next_state = np.moveaxis(observation["observation"], [-1], [-3])
-                p0_next_state_flipped = np.expand_dims(np.flip(p0_next_state, 2), 0)
-                p0_next_state = np.expand_dims(p0_next_state, 0)
+                p0_next_state, p0_next_state_flipped = transform_and_flip(observation, player = 0)
 
                 if done or truncation:
                     reward = self.reward(done=True, player=0)
@@ -121,10 +117,7 @@ class CurriculumEnv:
 
                     # Player 1's turn
                     p1_action_mask = observation["action_mask"]
-                    p1_state = np.moveaxis(observation["observation"], [-1], [-3])
-                    p1_state[[0, 1], :, :] = p1_state[[0, 1], :, :]
-                    p1_state_flipped = np.expand_dims(np.flip(p1_state, 2), 0)
-                    p1_state = np.expand_dims(p1_state, 0)
+                    p1_state, p1_state_flipped = transform_and_flip(observation, player = 1)
                     if not opponent_first:
                         p1_action = self.env.action_space("player_1").sample(
                             p1_action_mask
@@ -138,10 +131,7 @@ class CurriculumEnv:
                             p1_action = opponent.getAction(player=1)
                     self.step(p1_action)  # Act in environment
                     observation, env_reward, done, truncation, _ = self.last()
-                    p1_next_state = np.moveaxis(observation["observation"], [-1], [-3])
-                    p1_next_state[[0, 1], :, :] = p1_next_state[[0, 1], :, :]
-                    p1_next_state_flipped = np.expand_dims(np.flip(p1_next_state, 2), 0)
-                    p1_next_state = np.expand_dims(p1_next_state, 0)
+                    p1_next_state, p1_next_state_flipped = transform_and_flip(observation, player = 1)
 
                     if done or truncation:
                         reward = self.reward(done=True, player=1)
