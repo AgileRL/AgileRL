@@ -682,7 +682,7 @@ if __name__ == "__main__":
             for agent in pop:  # Loop through population
                 for episode in range(episodes_per_epoch):
                     env.reset()  # Reset environment at start of episode
-                    observation, env_reward, done, truncation, _ = env.last()
+                    observation, cumulative_reward, done, truncation, _ = env.last()
 
                     (
                         p1_state,
@@ -735,7 +735,7 @@ if __name__ == "__main__":
                             train_actions_hist[p0_action] += 1
 
                         env.step(p0_action)  # Act in environment
-                        observation, env_reward, done, truncation, _ = env.last()
+                        observation, cumulative_reward, done, truncation, _ = env.last()
                         p0_next_state = np.moveaxis(
                             observation["observation"], [-1], [-3]
                         )
@@ -745,7 +745,7 @@ if __name__ == "__main__":
                         p0_next_state = np.expand_dims(p0_next_state, 0)
 
                         if not opponent_first:
-                            score += env_reward
+                            score = cumulative_reward
                         turns += 1
 
                         # Check if game is over (Player 0 win)
@@ -822,7 +822,7 @@ if __name__ == "__main__":
                                 train_actions_hist[p1_action] += 1
 
                             env.step(p1_action)  # Act in environment
-                            observation, env_reward, done, truncation, _ = env.last()
+                            observation, cumulative_reward, done, truncation, _ = env.last()
                             p1_next_state = np.moveaxis(
                                 observation["observation"], [-1], [-3]
                             )
@@ -833,7 +833,7 @@ if __name__ == "__main__":
                             p1_next_state = np.expand_dims(p1_next_state, 0)
 
                             if opponent_first:
-                                score += env_reward
+                                score = cumulative_reward
                             turns += 1
 
                             # Check if game is over (Player 1 win)
@@ -928,7 +928,7 @@ if __name__ == "__main__":
                         rewards = []
                         for i in range(evo_loop):
                             env.reset()  # Reset environment at start of episode
-                            observation, reward, done, truncation, _ = env.last()
+                            observation, cumulative_reward, done, truncation, _ = env.last()
 
                             player = -1  # Tracker for which player"s turn it is
 
@@ -978,12 +978,12 @@ if __name__ == "__main__":
                                         eval_actions_hist[action] += 1
 
                                 env.step(action)  # Act in environment
-                                observation, reward, done, truncation, _ = env.last()
+                                observation, cumulative_reward, done, truncation, _ = env.last()
 
                                 if (player > 0 and opponent_first) or (
                                     player < 0 and not opponent_first
                                 ):
-                                    score += reward
+                                    score = cumulative_reward
 
                                 eval_turns += 1
 
