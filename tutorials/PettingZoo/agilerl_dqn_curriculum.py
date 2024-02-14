@@ -483,6 +483,22 @@ class Opponent:
         return (True, reward, ended) + ((lengths,) if return_length else ())
 
 
+def transform_and_flip(observation, player):
+    """Transforms and flips observation for input to agent's neural network.
+
+    :param observation: Observation to preprocess
+    :type observation: dict[str, np.ndarray]
+    """
+    state = observation["observation"]
+    # Pre-process dimensions for PyTorch (N, C, H, W)
+    state = np.moveaxis(state, [-1], [-3])
+    if player == 1:
+        # Swap pieces so that the agent always sees the board from the same perspective
+        state[[0, 1], :, :] = state[[1, 0], :, :]
+    state_flipped = np.expand_dims(np.flip(state, 2), 0)
+    state = np.expand_dims(state, 0)
+    return state, state_flipped
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("===== AgileRL Curriculum Learning Demo =====")
@@ -711,9 +727,7 @@ if __name__ == "__main__":
                     for idx_step in range(max_steps):
                         # Player 0"s turn
                         p0_action_mask = observation["action_mask"]
-                        p0_state = np.moveaxis(observation["observation"], [-1], [-3])
-                        p0_state_flipped = np.expand_dims(np.flip(p0_state, 2), 0)
-                        p0_state = np.expand_dims(p0_state, 0)
+                        p0_state, p0_state_flipped = transform_and_flip(observation, player = 0)
 
                         if opponent_first:
                             if LESSON["opponent"] == "self":
@@ -736,14 +750,9 @@ if __name__ == "__main__":
 
                         env.step(p0_action)  # Act in environment
                         observation, cumulative_reward, done, truncation, _ = env.last()
-                        p0_next_state = np.moveaxis(
-                            observation["observation"], [-1], [-3]
+                        p0_next_state, p0_next_state_flipped = transform_and_flip(
+                            observation, player = 0
                         )
-                        p0_next_state_flipped = np.expand_dims(
-                            np.flip(p0_next_state, 2), 0
-                        )
-                        p0_next_state = np.expand_dims(p0_next_state, 0)
-
                         if not opponent_first:
                             score = cumulative_reward
                         turns += 1
@@ -792,13 +801,7 @@ if __name__ == "__main__":
 
                             # Player 1"s turn
                             p1_action_mask = observation["action_mask"]
-                            p1_state = np.moveaxis(
-                                observation["observation"], [-1], [-3]
-                            )
-                            # Swap pieces so that the agent always sees the board from the same perspective
-                            p1_state[[0, 1], :, :] = p1_state[[0, 1], :, :]
-                            p1_state_flipped = np.expand_dims(np.flip(p1_state, 2), 0)
-                            p1_state = np.expand_dims(p1_state, 0)
+                            p1_state, p1_state_flipped = transform_and_flip(observation, player = 1)
 
                             if not opponent_first:
                                 if LESSON["opponent"] == "self":
@@ -823,14 +826,9 @@ if __name__ == "__main__":
 
                             env.step(p1_action)  # Act in environment
                             observation, cumulative_reward, done, truncation, _ = env.last()
-                            p1_next_state = np.moveaxis(
-                                observation["observation"], [-1], [-3]
+                            p1_next_state, p1_next_state_flipped = transform_and_flip(
+                                observation, player = 1
                             )
-                            p1_next_state[[0, 1], :, :] = p1_next_state[[0, 1], :, :]
-                            p1_next_state_flipped = np.expand_dims(
-                                np.flip(p1_next_state, 2), 0
-                            )
-                            p1_next_state = np.expand_dims(p1_next_state, 0)
 
                             if opponent_first:
                                 score = cumulative_reward
@@ -970,7 +968,7 @@ if __name__ == "__main__":
                                         state = np.moveaxis(
                                             observation["observation"], [-1], [-3]
                                         )
-                                        state[[0, 1], :, :] = state[[0, 1], :, :]
+                                        state[[0, 1], :, :] = state[[1, 0], :, :]
                                         state = np.expand_dims(state, 0)
                                         action = agent.getAction(state, 0, action_mask)[
                                             0
