@@ -7,8 +7,8 @@ import torch
 import wandb
 from tqdm import trange
 
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.utils.utils import initialPopulation
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -78,11 +78,12 @@ if __name__ == "__main__":
 
     INIT_HP = {
         "POPULATION_SIZE": 1,  # Population size
-        "BATCH_SIZE": 128,  # Batch size
-        "LR": 1e-3,  # Learning rate
-        "GAMMA": 0.99,  # Discount factor
+        "BATCH_SIZE": 64,  # Batch size
+        "LR": 1e-4,  # Learning rate
+        "GAMMA": 1.0,  # Scaling factor
+        "LAMBDA": 1.0,  # Regularization factor
+        "REG": 1.0,  # Loss regularization factor
         "LEARN_STEP": 1,  # Learning frequency
-        "TAU": 1e-3,  # For soft update of target network parameters
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
     }
@@ -91,18 +92,18 @@ if __name__ == "__main__":
     context_dim = env.dim
     action_dim = env.arm
 
-    # pop = initialPopulation(
-    #     algo="DQN",  # Algorithm
-    #     state_dim=state_dim,  # State dimension
-    #     action_dim=action_dim,  # Action dimension
-    #     one_hot=None,  # One-hot encoding
-    #     net_config=NET_CONFIG,  # Network configuration
-    #     INIT_HP=INIT_HP,  # Initial hyperparameters
-    #     population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-    #     device=device,
-    # )
+    pop = initialPopulation(
+        algo="NeuralUCB",  # Algorithm
+        state_dim=context_dim,  # State dimension
+        action_dim=action_dim,  # Action dimension
+        one_hot=None,  # One-hot encoding
+        net_config=NET_CONFIG,  # Network configuration
+        INIT_HP=INIT_HP,  # Initial hyperparameters
+        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        device=device,
+    )
 
-    pop = [NeuralUCB(context_dim, action_dim, batch_size=64, device=device)]
+    # pop = [NeuralUCB(context_dim, action_dim, batch_size=INIT_HP["BATCH_SIZE"], lr=INIT_HP["LR"], device=device)]
 
     field_names = ["context", "reward"]
     memory = ReplayBuffer(
@@ -167,6 +168,7 @@ if __name__ == "__main__":
                 action = agent.getAction(context)
                 next_context, reward = env.step(action)  # Act in environment
 
+                # Save experience to replay buffer
                 memory.save2memory(context[action], reward)
 
                 # Learn according to learning frequency

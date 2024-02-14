@@ -207,7 +207,7 @@ def train_bandits(
             distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
         )
     else:
-        sampler = Sampler(distributed=False, per=False, memory=memory)
+        sampler = Sampler(memory=memory)
 
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
@@ -243,7 +243,7 @@ def train_bandits(
             score = 0
             losses = []
             rewards = []
-            state = env.reset()[0]  # Reset environment at start of episode
+            state = env.reset()  # Reset environment at start of episode
             for idx_step in range(max_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [-1], [-3])
@@ -252,7 +252,7 @@ def train_bandits(
                 next_state, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(state, reward, is_vectorised=is_vectorised)
+                memory.save2memory(state[action], reward, is_vectorised=is_vectorised)
 
                 # Learn according to learning frequency
                 if (

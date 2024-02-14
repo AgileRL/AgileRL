@@ -69,7 +69,7 @@ class IRIS:
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("===== AgileRL Bandit Demo =====")
+    print("===== AgileRL Bandit Benchmarking =====")
     print(f"DEVICE: {device}")
 
     env = IRIS()  # Create environment
@@ -103,6 +103,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
+    # tournament = mutations = None
 
     agent_pop = initialPopulation(
         algo=INIT_HP["ALGO"],

@@ -282,7 +282,7 @@ class NeuralUCB:
 
         return loss.item()
 
-    def test(self, env, swap_channels=False, max_steps=500, loop=3):
+    def test(self, env, swap_channels=False, max_steps=100, loop=1):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -302,7 +302,8 @@ class NeuralUCB:
                 for idx_step in range(max_steps):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state)
+                    action = np.argmax(self.actor(state).cpu().numpy(), -1)
+                    # action = self.getAction(state)
                     state, reward = env.step(action)
                     score += reward
                 rewards.append(score)
@@ -348,6 +349,9 @@ class NeuralUCB:
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
+                        setattr(clone, attribute, torch.clone(getattr(self, attribute)))
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
@@ -358,6 +362,13 @@ class NeuralUCB:
                         )
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+
+        clone.numel = sum(
+            w.numel() for w in clone.actor.parameters() if w.requires_grad
+        )
+        clone.theta_0 = torch.cat(
+            [w.flatten() for w in clone.actor.parameters() if w.requires_grad]
+        )
 
         return clone
 
