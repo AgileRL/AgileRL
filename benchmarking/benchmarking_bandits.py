@@ -103,7 +103,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
-    # tournament = mutations = None
 
     agent_pop = initialPopulation(
         algo=INIT_HP["ALGO"],

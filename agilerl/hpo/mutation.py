@@ -848,6 +848,7 @@ class Mutations:
 
         else:
             if individual.algo in ["NeuralUCB", "NeuralTS"]:
+                self.new_layer_prob = 0
                 old_params = dict(
                     getattr(individual, self.algo["actor"]["eval"]).named_parameters()
                 )

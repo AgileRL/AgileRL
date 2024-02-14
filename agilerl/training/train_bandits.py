@@ -209,6 +209,11 @@ def train_bandits(
     else:
         sampler = Sampler(memory=memory)
 
+    # Pre-training mutation
+    if accelerator is None:
+        if mutation is not None:
+            pop = mutation.mutation(pop, pre_training_mut=True)
+
     if accelerator is not None:
         print(f"\nDistributed training on {accelerator.device}...")
     else:
@@ -229,11 +234,6 @@ def train_bandits(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
-
-    # Pre-training mutation
-    if accelerator is None:
-        if mutation is not None:
-            pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
     for idx_epi in pbar:
@@ -303,6 +303,7 @@ def train_bandits(
                         if accelerator is not None and accelerator.is_main_process
                         else total_steps
                     ),
+                    "steps_per_agent": total_steps / len(pop),
                     "train/mean_score": np.mean(mean_scores),
                     "train/mean_regret": np.mean(regrets),
                     "train/best_regret": np.min(regrets),
@@ -372,7 +373,7 @@ def train_bandits(
 
             if verbose:
                 regret = ["%.2f" % regret for regret in regrets]
-                avg_regret = "%.2f" % np.mean([agent.regret[-1] for agent in pop])
+                avg_regret = "%.2f" % np.mean(np.array(regrets))
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
                 avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
                 avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
@@ -385,7 +386,7 @@ def train_bandits(
                     f"""
                     --- Epoch {idx_epi + 1} ---
                     Regret:\t\t{regret}
-                    Mean regret:\t\t{avg_regret}
+                    Mean regret:\t{avg_regret}
                     Fitness:\t\t{fitness}
                     100 fitness avgs:\t{avg_fitness}
                     100 score avgs:\t{avg_score}

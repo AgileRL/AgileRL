@@ -8,6 +8,8 @@ import wandb
 from tqdm import trange
 
 from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import initialPopulation
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -103,8 +105,6 @@ if __name__ == "__main__":
         device=device,
     )
 
-    # pop = [NeuralUCB(context_dim, action_dim, batch_size=INIT_HP["BATCH_SIZE"], lr=INIT_HP["LR"], device=device)]
-
     field_names = ["context", "reward"]
     memory = ReplayBuffer(
         action_dim=action_dim,  # Number of agent actions
@@ -113,34 +113,32 @@ if __name__ == "__main__":
         device=device,
     )
 
-    # tournament = TournamentSelection(
-    #     tournament_size=2,  # Tournament selection size
-    #     elitism=True,  # Elitism in tournament selection
-    #     population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-    #     evo_step=1,
-    # )  # Evaluate using last N fitness scores
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        evo_step=1,
+    )  # Evaluate using last N fitness scores
 
-    # mutations = Mutations(
-    #     algo="DQN",  # Algorithm
-    #     no_mutation=0.4,  # No mutation
-    #     architecture=0.2,  # Architecture mutation
-    #     new_layer_prob=0.2,  # New layer mutation
-    #     parameters=0.2,  # Network parameters mutation
-    #     activation=0,  # Activation layer mutation
-    #     rl_hp=0.2,  # Learning HP mutation
-    #     rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
-    #     mutation_sd=0.1,  # Mutation strength
-    #     arch=NET_CONFIG["arch"],  # Network architecture
-    #     rand_seed=1,  # Random seed
-    #     device=device,
-    # )
+    mutations = Mutations(
+        algo="NeuralUCB",  # Algorithm
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.0,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
+        mutation_sd=0.1,  # Mutation strength
+        arch=NET_CONFIG["arch"],  # Network architecture
+        rand_seed=1,  # Random seed
+        device=device,
+    )
 
-    tournament = mutation = None
-
-    max_episodes = 100  # Max training episodes
+    max_episodes = 50  # Max training episodes
     max_steps = 100  # Max steps per episode
 
-    evo_epochs = 5  # Evolution frequency
+    evo_epochs = 2  # Evolution frequency
     evo_loop = 1  # Number of evaluation episodes
 
     print("Training...")
@@ -198,25 +196,22 @@ if __name__ == "__main__":
             }
             wandb.log(wandb_dict)
 
-        # # Now evolve population if necessary
-        # if (idx_epi + 1) % evo_epochs == 0:
-        #     # Evaluate population
-        #     fitnesses = [
-        #         agent.test(
-        #             env,
-        #             swap_channels=INIT_HP["CHANNELS_LAST"],
-        #             max_steps=max_steps,
-        #             loop=evo_loop,
-        #         )
-        #         for agent in pop
-        #     ]
+        # Now evolve population if necessary
+        if (idx_epi + 1) % evo_epochs == 0:
+            # Evaluate population
+            fitnesses = [
+                agent.test(
+                    env,
+                    swap_channels=INIT_HP["CHANNELS_LAST"],
+                    max_steps=max_steps,
+                    loop=evo_loop,
+                )
+                for agent in pop
+            ]
 
-        #     print(f"Episode {idx_epi+1}/{max_episodes}")
-        #     print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-        #     print(
-        #         f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
-        #     )
+            print(f"Episode {idx_epi+1}/{max_episodes}")
+            print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
 
-        #     # # Tournament selection and population mutation
-        #     # elite, pop = tournament.select(pop)
-        #     # pop = mutations.mutation(pop)
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
