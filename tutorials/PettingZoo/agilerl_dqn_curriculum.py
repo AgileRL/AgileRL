@@ -67,7 +67,7 @@ class CurriculumEnv:
             while not (done or truncation):
                 # Player 0's turn
                 p0_action_mask = observation["action_mask"]
-                p0_state, p0_state_flipped = transform_and_flip(observation, player = 0)
+                p0_state, p0_state_flipped = transform_and_flip(observation, player=0)
                 if opponent_first:
                     p0_action = self.env.action_space("player_0").sample(p0_action_mask)
                 else:
@@ -79,7 +79,9 @@ class CurriculumEnv:
                         p0_action = opponent.getAction(player=0)
                 self.step(p0_action)  # Act in environment
                 observation, env_reward, done, truncation, _ = self.last()
-                p0_next_state, p0_next_state_flipped = transform_and_flip(observation, player = 0)
+                p0_next_state, p0_next_state_flipped = transform_and_flip(
+                    observation, player=0
+                )
 
                 if done or truncation:
                     reward = self.reward(done=True, player=0)
@@ -117,7 +119,9 @@ class CurriculumEnv:
 
                     # Player 1's turn
                     p1_action_mask = observation["action_mask"]
-                    p1_state, p1_state_flipped = transform_and_flip(observation, player = 1)
+                    p1_state, p1_state_flipped = transform_and_flip(
+                        observation, player=1
+                    )
                     if not opponent_first:
                         p1_action = self.env.action_space("player_1").sample(
                             p1_action_mask
@@ -131,7 +135,9 @@ class CurriculumEnv:
                             p1_action = opponent.getAction(player=1)
                     self.step(p1_action)  # Act in environment
                     observation, env_reward, done, truncation, _ = self.last()
-                    p1_next_state, p1_next_state_flipped = transform_and_flip(observation, player = 1)
+                    p1_next_state, p1_next_state_flipped = transform_and_flip(
+                        observation, player=1
+                    )
 
                     if done or truncation:
                         reward = self.reward(done=True, player=1)
@@ -478,6 +484,8 @@ def transform_and_flip(observation, player):
 
     :param observation: Observation to preprocess
     :type observation: dict[str, np.ndarray]
+    :param player: Player, 0 or 1
+    :type player: int
     """
     state = observation["observation"]
     # Pre-process dimensions for PyTorch (N, C, H, W)
@@ -488,6 +496,7 @@ def transform_and_flip(observation, player):
     state_flipped = np.expand_dims(np.flip(state, 2), 0)
     state = np.expand_dims(state, 0)
     return state, state_flipped
+
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -717,7 +726,9 @@ if __name__ == "__main__":
                     for idx_step in range(max_steps):
                         # Player 0"s turn
                         p0_action_mask = observation["action_mask"]
-                        p0_state, p0_state_flipped = transform_and_flip(observation, player = 0)
+                        p0_state, p0_state_flipped = transform_and_flip(
+                            observation, player=0
+                        )
 
                         if opponent_first:
                             if LESSON["opponent"] == "self":
@@ -741,7 +752,7 @@ if __name__ == "__main__":
                         env.step(p0_action)  # Act in environment
                         observation, cumulative_reward, done, truncation, _ = env.last()
                         p0_next_state, p0_next_state_flipped = transform_and_flip(
-                            observation, player = 0
+                            observation, player=0
                         )
                         if not opponent_first:
                             score = cumulative_reward
@@ -791,7 +802,9 @@ if __name__ == "__main__":
 
                             # Player 1"s turn
                             p1_action_mask = observation["action_mask"]
-                            p1_state, p1_state_flipped = transform_and_flip(observation, player = 1)
+                            p1_state, p1_state_flipped = transform_and_flip(
+                                observation, player=1
+                            )
 
                             if not opponent_first:
                                 if LESSON["opponent"] == "self":
@@ -815,9 +828,11 @@ if __name__ == "__main__":
                                 train_actions_hist[p1_action] += 1
 
                             env.step(p1_action)  # Act in environment
-                            observation, cumulative_reward, done, truncation, _ = env.last()
+                            observation, cumulative_reward, done, truncation, _ = (
+                                env.last()
+                            )
                             p1_next_state, p1_next_state_flipped = transform_and_flip(
-                                observation, player = 1
+                                observation, player=1
                             )
 
                             if opponent_first:
@@ -916,7 +931,9 @@ if __name__ == "__main__":
                         rewards = []
                         for i in range(evo_loop):
                             env.reset()  # Reset environment at start of episode
-                            observation, cumulative_reward, done, truncation, _ = env.last()
+                            observation, cumulative_reward, done, truncation, _ = (
+                                env.last()
+                            )
 
                             player = -1  # Tracker for which player"s turn it is
 
@@ -966,7 +983,9 @@ if __name__ == "__main__":
                                         eval_actions_hist[action] += 1
 
                                 env.step(action)  # Act in environment
-                                observation, cumulative_reward, done, truncation, _ = env.last()
+                                observation, cumulative_reward, done, truncation, _ = (
+                                    env.last()
+                                )
 
                                 if (player > 0 and opponent_first) or (
                                     player < 0 and not opponent_first
