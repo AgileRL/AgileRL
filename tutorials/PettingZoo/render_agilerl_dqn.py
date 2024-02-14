@@ -47,6 +47,25 @@ def resize_frames(frames, fraction):
     return resized_frames
 
 
+def transform_and_flip(observation, player):
+    """Transforms and flips observation for input to agent's neural network.
+
+    :param observation: Observation to preprocess
+    :type observation: dict[str, np.ndarray]
+    :param player: Player, 0 or 1
+    :type player: int
+    """
+    state = observation["observation"]
+    # Pre-process dimensions for PyTorch (N, C, H, W)
+    state = np.moveaxis(state, [-1], [-3])
+    if player == 1:
+        # Swap pieces so that the agent always sees the board from the same perspective
+        state[[0, 1], :, :] = state[[1, 0], :, :]
+    state_flipped = np.expand_dims(np.flip(state, 2), 0)
+    state = np.expand_dims(state, 0)
+    return state, state_flipped
+
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -120,8 +139,7 @@ if __name__ == "__main__":
             for idx_step in range(max_steps):
                 action_mask = observation["action_mask"]
                 if player < 0:
-                    state = np.moveaxis(observation["observation"], [-1], [-3])
-                    state = np.expand_dims(state, 0)
+                    state, _ = transform_and_flip(observation, player=0)
                     if opponent_first:
                         if opponent_difficulty == "self":
                             action = opponent.getAction(
@@ -138,9 +156,7 @@ if __name__ == "__main__":
                             0
                         ]  # Get next action from agent
                 if player > 0:
-                    state = np.moveaxis(observation["observation"], [-1], [-3])
-                    state[[0, 1], :, :] = state[[0, 1], :, :]
-                    state = np.expand_dims(state, 0)
+                    state, _ = transform_and_flip(observation, player=1)
                     if not opponent_first:
                         if opponent_difficulty == "self":
                             action = opponent.getAction(
