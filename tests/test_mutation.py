@@ -11,6 +11,8 @@ from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.algorithms.ilql import ILQL
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
+from agilerl.algorithms.neural_ts_bandit import NeuralTS
+from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.mutation import Mutations
@@ -51,6 +53,8 @@ SHARED_INIT_HP = {
     "MIN_ACTION": -1,
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
+    "LAMBDA": 1.0,
+    "REG": 0.000625,
     "CHANNELS_LAST": False,
 }
 
@@ -303,6 +307,8 @@ def test_mutation_applies_random_mutations():
         "TD3": TD3,
         "PPO": PPO,
         "CQN": CQN,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -373,6 +379,8 @@ def test_mutation_applies_no_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -433,6 +441,8 @@ def test_mutation_applies_no_mutations_pre_training_mut():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -500,6 +510,8 @@ def test_mutation_applies_rl_hp_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -590,6 +602,8 @@ def test_mutation_applies_activation_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -714,6 +728,8 @@ def test_mutation_applies_cnn_activation_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -776,6 +792,8 @@ def test_mutation_applies_parameter_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -843,6 +861,8 @@ def test_mutation_applies_cnn_parameter_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -903,6 +923,8 @@ def test_mutation_applies_architecture_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -982,6 +1004,8 @@ def test_mutation_applies_cnn_architecture_mutations():
         "PPO": PPO,
         "CQN": CQN,
         "ILQL": ILQL,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for distributed in [False, True]:
@@ -1809,6 +1833,8 @@ def test_reinit_opt():
         "TD3": TD3,
         "PPO": PPO,
         "CQN": CQN,
+        "NeuralUCB": NeuralUCB,
+        "NeuralTS": NeuralTS,
     }
 
     for algo in algo_classes.keys():

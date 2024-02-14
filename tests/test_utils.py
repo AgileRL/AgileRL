@@ -55,6 +55,8 @@ SHARED_INIT_HP = {
     "MIN_ACTION": -1,
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
+    "LAMBDA": 1.0,
+    "REG": 0.000625,
     "CHANNELS_LAST": False,
 }
 
