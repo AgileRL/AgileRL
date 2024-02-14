@@ -3,7 +3,7 @@ import os
 import imageio
 import numpy as np
 import torch
-from agilerl_dqn_curriculum import Opponent
+from agilerl_dqn_curriculum import Opponent, transform_and_flip
 from pettingzoo.classic import connect_four_v3
 from PIL import Image, ImageDraw, ImageFont
 
@@ -45,25 +45,6 @@ def resize_frames(frames, fraction):
         resized_frames.append(np.array(img_resized))
 
     return resized_frames
-
-
-def transform_and_flip(observation, player):
-    """Transforms and flips observation for input to agent's neural network.
-
-    :param observation: Observation to preprocess
-    :type observation: dict[str, np.ndarray]
-    :param player: Player, 0 or 1
-    :type player: int
-    """
-    state = observation["observation"]
-    # Pre-process dimensions for PyTorch (N, C, H, W)
-    state = np.moveaxis(state, [-1], [-3])
-    if player == 1:
-        # Swap pieces so that the agent always sees the board from the same perspective
-        state[[0, 1], :, :] = state[[1, 0], :, :]
-    state_flipped = np.expand_dims(np.flip(state, 2), 0)
-    state = np.expand_dims(state, 0)
-    return state, state_flipped
 
 
 if __name__ == "__main__":
