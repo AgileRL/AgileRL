@@ -1,5 +1,6 @@
 import fastrand
 import numpy as np
+import torch
 
 
 class Mutations:
@@ -846,6 +847,11 @@ class Mutations:
                 setattr(individual, critics["eval"], offspring_critics)
 
         else:
+            if individual.algo in ["NeuralUCB", "NeuralTS"]:
+                old_params = dict(
+                    getattr(individual, self.algo["actor"]["eval"]).named_parameters()
+                )
+
             offspring_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
             offspring_critics = [
                 getattr(individual, critic["eval"]).clone()
@@ -957,6 +963,28 @@ class Mutations:
                     setattr(
                         individual, critic["eval"], offspring_critic.to(self.device)
                     )
+
+            if individual.algo in ["NeuralUCB", "NeuralTS"]:
+                individual.numel = sum(
+                    w.numel() for w in offspring_actor.parameters() if w.requires_grad
+                )
+                new_sigma_inv = individual.lamb * np.eye(individual.numel)
+                individual.theta_0 = torch.cat(
+                    [
+                        w.flatten()
+                        for w in offspring_actor.parameters()
+                        if w.requires_grad
+                    ]
+                )
+                old_keys_list = list(old_params.keys())
+                i = 0
+                for key, param in offspring_actor.named_parameters():
+                    if param.requires_grad:
+                        if key in old_params.keys():
+                            old_idx = old_keys_list.index(key)
+                            new_sigma_inv[i, i] = individual.sigma_inv[old_idx, old_idx]
+                        i += 1
+                individual.sigma_inv = new_sigma_inv
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "arch"
