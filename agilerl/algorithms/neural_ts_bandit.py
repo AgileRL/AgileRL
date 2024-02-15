@@ -286,7 +286,7 @@ class NeuralTS:
 
         return loss.item()
 
-    def test(self, env, swap_channels=False, max_steps=500, loop=3):
+    def test(self, env, swap_channels=False, max_steps=100, loop=1):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -305,7 +305,7 @@ class NeuralTS:
             for idx_step in range(max_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [-1], [-3])
-                action = self.getAction(state)
+                action = np.argmax(self.actor(state).cpu().numpy())
                 state, reward = env.step(action)
                 score += reward
             rewards.append(score)

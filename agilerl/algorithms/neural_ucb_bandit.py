@@ -302,7 +302,7 @@ class NeuralUCB:
                 for idx_step in range(max_steps):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = np.argmax(self.actor(state).cpu().numpy(), -1)
+                    action = np.argmax(self.actor(state).cpu().numpy())
                     # action = self.getAction(state)
                     state, reward = env.step(action)
                     score += reward

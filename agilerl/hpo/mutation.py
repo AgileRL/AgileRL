@@ -1,3 +1,5 @@
+import copy
+
 import fastrand
 import numpy as np
 import torch
@@ -849,9 +851,7 @@ class Mutations:
         else:
             if individual.algo in ["NeuralUCB", "NeuralTS"]:
                 self.new_layer_prob = 0
-                old_params = dict(
-                    getattr(individual, self.algo["actor"]["eval"]).named_parameters()
-                )
+                old_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
 
             offspring_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
             offspring_critics = [
@@ -977,14 +977,60 @@ class Mutations:
                         if w.requires_grad
                     ]
                 )
-                old_keys_list = list(old_params.keys())
+
+                # create matrix that is copy of sigma inv
+                # first go through old params, figure out which to remove, then remove any difference
+                # then go through new params, figure out where to add, then add zeros/lambda
+                new_sigma_inv = copy.deepcopy(individual.sigma_inv)
+                old_params = dict(old_actor.named_parameters())
+                new_params = dict(offspring_actor.named_parameters())
+
+                to_remove = []
+                i = 0
+                for key, param in old_actor.named_parameters():
+                    if param.requires_grad:
+                        old_size = param.numel()
+                        if key not in new_params.keys():
+                            to_remove += list(range(i, i + old_size))
+                        else:
+                            new_size = new_params[key].numel()
+                            if new_size < old_size:
+                                to_remove += list(range(i + new_size, i + old_size))
+                        i += old_size
+
+                to_add = []
                 i = 0
                 for key, param in offspring_actor.named_parameters():
                     if param.requires_grad:
+                        new_size = param.numel()
                         if key in old_params.keys():
-                            old_idx = old_keys_list.index(key)
-                            new_sigma_inv[i, i] = individual.sigma_inv[old_idx, old_idx]
-                        i += 1
+                            old_size = old_params[key].numel()
+                            if new_size > old_size:
+                                to_add += list(range(i + old_size, i + new_size))
+                        else:
+                            to_add += list(range(i, i + new_size))
+                        i += new_size
+
+                # Adjust indixes to add after deletion
+                to_remove = np.array(to_remove)
+                to_add = np.array(to_add)
+                to_add -= np.sum(to_add[:, np.newaxis] > to_remove, axis=1)
+                to_add -= np.arange(len(to_add))
+
+                # Remove elements corresponding to old params
+                if len(to_remove) > 0:
+                    new_sigma_inv = np.delete(
+                        np.delete(new_sigma_inv, to_remove, 0), to_remove, 1
+                    )
+
+                # Add new zeros corresponding to new params, make lambda down identity diagonal
+                if len(to_add) > 0:
+                    new_sigma_inv = np.insert(
+                        np.insert(new_sigma_inv, to_add, 0, 0), to_add, 0, 1
+                    )
+                    for i in to_add:
+                        new_sigma_inv[i, i] = individual.lamb
+
                 individual.sigma_inv = new_sigma_inv
 
         self.reinit_opt(individual)  # Reinitialise optimizer
