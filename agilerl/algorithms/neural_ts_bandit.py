@@ -298,17 +298,18 @@ class NeuralTS:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
         :type loop: int, optional
         """
-        rewards = []
-        for i in range(loop):
-            state = env.reset()
-            score = 0
-            for idx_step in range(max_steps):
-                if swap_channels:
-                    state = np.moveaxis(state, [-1], [-3])
-                action = np.argmax(self.actor(state).cpu().numpy())
-                state, reward = env.step(action)
-                score += reward
-            rewards.append(score)
+        with torch.no_grad():
+            rewards = []
+            for i in range(loop):
+                state = env.reset()
+                score = 0
+                for idx_step in range(max_steps):
+                    if swap_channels:
+                        state = np.moveaxis(state, [-1], [-3])
+                    action = np.argmax(self.actor(state).cpu().numpy())
+                    state, reward = env.step(action)
+                    score += reward
+                rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
