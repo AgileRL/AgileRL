@@ -143,7 +143,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/neural_ts.yaml") as file:
+    with open("../configs/training/neural_ucb.yaml") as file:
         bandit_config = yaml.safe_load(file)
     INIT_HP = bandit_config["INIT_HP"]
     MUTATION_PARAMS = bandit_config["MUTATION_PARAMS"]
