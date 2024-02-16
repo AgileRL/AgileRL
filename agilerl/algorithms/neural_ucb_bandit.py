@@ -170,12 +170,6 @@ class NeuralUCB:
                     accelerator=self.accelerator,
                 )
 
-        self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
-        self.sigma_inv = lamb * np.eye(self.numel)
-        self.theta_0 = torch.cat(
-            [w.flatten() for w in self.actor.parameters() if w.requires_grad]
-        )
-
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         self.arch = (
@@ -189,6 +183,12 @@ class NeuralUCB:
         else:
             self.actor = self.actor.to(self.device)
             self.optimizer = self.optimizer_type
+
+        self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
+        self.sigma_inv = lamb * np.eye(self.numel, dtype=np.float32)
+        self.theta_0 = torch.cat(
+            [w.flatten() for w in self.actor.parameters() if w.requires_grad]
+        )
 
         self.criterion = nn.MSELoss()
 
