@@ -57,7 +57,7 @@ class NeuralTS:
         lamb=1.0,
         reg=0.000625,
         batch_size=64,
-        lr=1e-4,
+        lr=3e-4,
         learn_step=1,
         mut=None,
         actor_network=None,
