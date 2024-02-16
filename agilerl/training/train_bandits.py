@@ -39,7 +39,7 @@ def train_bandits(
     """The general bandit training function. Returns trained population of agents
     and their fitnesses.
 
-    :param env: The environment to train in. Can be vectorized.
+    :param env: The environment to train in.
     :type env: Gym-style environment
     :param env_name: Environment name
     :type env_name: str
@@ -184,12 +184,6 @@ def train_bandits(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
-    # Detect if environment is vectorised
-    if hasattr(env, "num_envs"):
-        is_vectorised = True
-    else:
-        is_vectorised = False
-
     save_path = (
         checkpoint_path.split(".pt")[0]
         if checkpoint_path is not None
@@ -242,7 +236,6 @@ def train_bandits(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             score = 0
             losses = []
-            rewards = []
             state = env.reset()  # Reset environment at start of episode
             for idx_step in range(max_steps):
                 if swap_channels:
@@ -252,7 +245,7 @@ def train_bandits(
                 next_state, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(state[action], reward, is_vectorised=is_vectorised)
+                memory.save2memory(state[action], reward, is_vectorised=False)
 
                 # Learn according to learning frequency
                 if (
@@ -266,16 +259,10 @@ def train_bandits(
                         loss = agent.learn(experiences)
                         losses.append(loss)
 
-                if is_vectorised:
-                    rewards.append(reward)
-                else:
-                    score += reward
+                score += reward
                 agent.regret.append(agent.regret[-1] + 1 - reward)
 
                 state = next_state
-
-            if is_vectorised:
-                score = np.mean(rewards)
 
             agent.scores.append(score)
             pop_loss[agent_idx].append(np.mean(losses))
