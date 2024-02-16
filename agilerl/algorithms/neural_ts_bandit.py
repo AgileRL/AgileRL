@@ -17,7 +17,7 @@ class NeuralTS:
 
     :param state_dim: State observation (context) dimension
     :type state_dim: list[int]
-    :param action_dim: Action dimension
+    :param action_dim: Action dimension (number of arms)
     :type action_dim: int
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
