@@ -52,7 +52,7 @@ class NeuralTS:
         state_dim,
         action_dim,
         index=0,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "h_size": [128]},
         gamma=1.0,
         lamb=1.0,
         reg=0.000625,
@@ -352,6 +352,9 @@ class NeuralTS:
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
+                        setattr(clone, attribute, torch.clone(getattr(self, attribute)))
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
@@ -362,6 +365,13 @@ class NeuralTS:
                         )
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+
+        clone.numel = sum(
+            w.numel() for w in clone.actor.parameters() if w.requires_grad
+        )
+        clone.theta_0 = torch.cat(
+            [w.flatten() for w in clone.actor.parameters() if w.requires_grad]
+        )
 
         return clone
 
@@ -458,6 +468,11 @@ class NeuralTS:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
+        self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
+        self.theta_0 = torch.cat(
+            [w.flatten() for w in self.actor.parameters() if w.requires_grad]
+        )
+
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
         """Creates agent with properties and network weights loaded from path.
@@ -504,5 +519,12 @@ class NeuralTS:
 
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
+
+        agent.numel = sum(
+            w.numel() for w in agent.actor.parameters() if w.requires_grad
+        )
+        agent.theta_0 = torch.cat(
+            [w.flatten() for w in agent.actor.parameters() if w.requires_grad]
+        )
 
         return agent

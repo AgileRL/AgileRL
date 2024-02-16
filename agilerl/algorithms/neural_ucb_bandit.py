@@ -303,7 +303,6 @@ class NeuralUCB:
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
                     action = np.argmax(self.actor(state).cpu().numpy())
-                    # action = self.getAction(state)
                     state, reward = env.step(action)
                     score += reward
                 rewards.append(score)
@@ -465,6 +464,11 @@ class NeuralUCB:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
+        self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
+        self.theta_0 = torch.cat(
+            [w.flatten() for w in self.actor.parameters() if w.requires_grad]
+        )
+
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
         """Creates agent with properties and network weights loaded from path.
@@ -511,5 +515,12 @@ class NeuralUCB:
 
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
+
+        agent.numel = sum(
+            w.numel() for w in agent.actor.parameters() if w.requires_grad
+        )
+        agent.theta_0 = torch.cat(
+            [w.flatten() for w in agent.actor.parameters() if w.requires_grad]
+        )
 
         return agent
