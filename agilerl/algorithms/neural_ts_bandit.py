@@ -57,7 +57,7 @@ class NeuralTS:
         lamb=1.0,
         reg=0.000625,
         batch_size=64,
-        lr=3e-4,
+        lr=3e-3,
         learn_step=1,
         mut=None,
         actor_network=None,
@@ -185,7 +185,9 @@ class NeuralTS:
             self.optimizer = self.optimizer_type
 
         self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
-        self.sigma_inv = lamb * np.eye(self.numel, dtype=np.float32)
+        self.sigma_inv = lamb * torch.eye(self.numel).to(
+            self.device if self.accelerator is None else self.accelerator.device
+        )
         self.theta_0 = torch.cat(
             [w.flatten() for w in self.actor.parameters() if w.requires_grad]
         )
@@ -201,42 +203,40 @@ class NeuralTS:
         :type action_mask: numpy.ndarray, optional
         """
         state = torch.from_numpy(state).float()
-        if self.accelerator is None:
-            state = state.to(self.device)
-        else:
-            state = state.to(self.accelerator.device)
+        state = state.to(
+            self.device if self.accelerator is None else self.accelerator.device
+        )
 
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
         mu = self.actor(state)
-        g = np.zeros((self.action_dim, self.numel))
+        g = torch.zeros((self.action_dim, self.numel)).to(
+            self.device if self.accelerator is None else self.accelerator.device
+        )
         for k, fx in enumerate(mu):
             self.optimizer.zero_grad()
             fx.backward(retain_graph=True)
-            g[k] = (
-                torch.cat(
-                    [
-                        w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1])
-                        for w in self.actor.parameters()
-                        if w.requires_grad
-                    ]
-                )
-                .cpu()
-                .numpy()
+            g[k] = torch.cat(
+                [
+                    w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1])
+                    for w in self.actor.parameters()
+                    if w.requires_grad
+                ]
             )
 
         with torch.no_grad():
-            action_values = np.random.normal(
-                loc=self.actor(state).cpu().numpy(),
-                scale=self.gamma
-                * np.sqrt(
-                    np.matmul(np.matmul(g[:, None, :], self.sigma_inv), g[:, :, None])[
-                        :, 0, :
-                    ]
+            action_values = torch.normal(
+                mean=self.actor(state),
+                std=self.gamma
+                * torch.sqrt(
+                    torch.matmul(
+                        torch.matmul(g[:, None, :], self.sigma_inv), g[:, :, None]
+                    )[:, 0, :]
                 ),
             )
 
+        action_values = action_values.cpu().numpy()
         if action_mask is None:
             action = np.argmax(action_values)
         else:
@@ -245,7 +245,7 @@ class NeuralTS:
             action = np.argmax(masked_action_values)
 
         # Sherman-Morrison-Woodbury Update
-        v = np.expand_dims(g[action], -1)
+        v = g[action].unsqueeze(-1)
         self.sigma_inv -= (self.sigma_inv @ v @ v.T @ self.sigma_inv) / (
             1 + v.T @ self.sigma_inv @ v
         )
@@ -306,6 +306,12 @@ class NeuralTS:
                 for idx_step in range(max_steps):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
+                    state = torch.from_numpy(state)
+                    state = state.to(
+                        self.device
+                        if self.accelerator is None
+                        else self.accelerator.device
+                    )
                     action = np.argmax(self.actor(state).cpu().numpy())
                     state, reward = env.step(action)
                     score += reward
@@ -371,6 +377,9 @@ class NeuralTS:
         )
         clone.theta_0 = torch.cat(
             [w.flatten() for w in clone.actor.parameters() if w.requires_grad]
+        )
+        clone.sigma_inv = clone.sigma_inv.to(
+            self.device if self.accelerator is None else self.accelerator.device
         )
 
         return clone
@@ -472,6 +481,9 @@ class NeuralTS:
         self.theta_0 = torch.cat(
             [w.flatten() for w in self.actor.parameters() if w.requires_grad]
         )
+        self.sigma_inv = self.sigma_inv.to(
+            self.device if self.accelerator is None else self.accelerator.device
+        )
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -525,6 +537,9 @@ class NeuralTS:
         )
         agent.theta_0 = torch.cat(
             [w.flatten() for w in agent.actor.parameters() if w.requires_grad]
+        )
+        agent.sigma_inv = agent.sigma_inv.to(
+            device if accelerator is None else accelerator.device
         )
 
         return agent
