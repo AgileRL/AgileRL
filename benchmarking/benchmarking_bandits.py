@@ -71,6 +71,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("===== AgileRL Bandit Benchmarking =====")
     print(f"DEVICE: {device}")
+    print(INIT_HP)
+    print(MUTATION_PARAMS)
+    print(NET_CONFIG)
 
     env = IRIS()  # Create environment
     context_dim = env.dim
@@ -103,7 +106,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
-    # tournament = mutations = None
 
     agent_pop = initialPopulation(
         algo=INIT_HP["ALGO"],
@@ -144,8 +146,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == "__main__":
     with open("../configs/training/neural_ts.yaml") as file:
-        dqn_config = yaml.safe_load(file)
-    INIT_HP = dqn_config["INIT_HP"]
-    MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = dqn_config["NET_CONFIG"]
+        bandit_config = yaml.safe_load(file)
+    INIT_HP = bandit_config["INIT_HP"]
+    MUTATION_PARAMS = bandit_config["MUTATION_PARAMS"]
+    NET_CONFIG = bandit_config["NET_CONFIG"]
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
