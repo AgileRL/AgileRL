@@ -119,6 +119,11 @@ class NeuralUCB:
         if self.actor_network is not None:
             self.actor = actor_network
             self.net_config = None
+            layers = [module for module in self.actor.value_net.children()]
+            if self.actor.arch == "cnn":
+                layers = [
+                    module for module in self.actor.feature_net.children()
+                ] + layers
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -172,6 +177,9 @@ class NeuralUCB:
                     device=self.device,
                     accelerator=self.accelerator,
                 )
+            layers = [module for module in self.actor.feature_net.children()]
+            if self.actor.arch == "cnn":
+                layers += [module for module in self.actor.value_net.children()]
 
         self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
@@ -188,22 +196,18 @@ class NeuralUCB:
             self.optimizer = self.optimizer_type
 
         # Initialize network layers
-        layers = [module for module in self.actor.feature_net.children()]
-        if isinstance(self.actor, EvolvableCNN):
-            layers += [module for module in self.actor.value_net.children()]
-
         l_no = 0
         for i, layer in enumerate(layers):
             if i < len(layers) - 1:
                 if isinstance(layer, (nn.Linear, nn.Conv2d)):
-                    if isinstance(self.actor, EvolvableMLP):
+                    if self.actor.arch == "mlp":
                         hidden_size = self.actor.hidden_size[l_no]
                     else:
                         hidden_size = (
                             self.actor.channel_size[l_no]
                             if i <= len(self.actor.channel_size)
                             else self.actor.hidden_size[
-                                l_no + len(self.actor.channel_size)
+                                l_no - len(self.actor.channel_size)
                             ]
                         )
                     self._init_weights_gaussian(layer, mean=0, std=4 / hidden_size)
@@ -408,7 +412,7 @@ class NeuralUCB:
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
-        if isinstance(clone.actor, EvolvableMLP):
+        if clone.actor.arch == "mlp":
             clone.exp_layer = clone.actor.feature_net.linear_layer_output
         else:
             clone.exp_layer = clone.actor.value_net.value_linear_layer_output
@@ -518,7 +522,7 @@ class NeuralUCB:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
-        if isinstance(self.actor, EvolvableMLP):
+        if self.actor.arch == "mlp":
             self.exp_layer = self.actor.feature_net.linear_layer_output
         else:
             self.exp_layer = self.actor.value_net.value_linear_layer_output
@@ -580,7 +584,7 @@ class NeuralUCB:
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
 
-        if isinstance(agent.actor, EvolvableMLP):
+        if agent.actor.arch == "mlp":
             agent.exp_layer = agent.actor.feature_net.linear_layer_output
         else:
             agent.exp_layer = agent.actor.value_net.value_linear_layer_output
