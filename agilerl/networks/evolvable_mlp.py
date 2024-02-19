@@ -92,6 +92,7 @@ class EvolvableMLP(nn.Module):
             min_mlp_nodes < max_mlp_nodes
         ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
 
+        self.arch = "mlp"
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation
