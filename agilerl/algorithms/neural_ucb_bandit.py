@@ -5,6 +5,7 @@ import dill
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.init as init
 import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
@@ -138,6 +139,7 @@ class NeuralUCB:
                     num_inputs=state_dim[0],
                     num_outputs=1,
                     hidden_size=self.net_config["h_size"],
+                    layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -166,6 +168,7 @@ class NeuralUCB:
                     stride_size=self.net_config["s_size"],
                     hidden_size=self.net_config["h_size"],
                     normalize=self.net_config["normalize"],
+                    layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -184,15 +187,48 @@ class NeuralUCB:
             self.actor = self.actor.to(self.device)
             self.optimizer = self.optimizer_type
 
-        self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
+        # Initialize network layers
+        layers = [module for module in self.actor.feature_net.children()]
+        if isinstance(self.actor, EvolvableCNN):
+            layers += [module for module in self.actor.value_net.children()]
+
+        l_no = 0
+        for i, layer in enumerate(layers):
+            if i < len(layers) - 1:
+                if isinstance(layer, (nn.Linear, nn.Conv2d)):
+                    if isinstance(self.actor, EvolvableMLP):
+                        hidden_size = self.actor.hidden_size[l_no]
+                    else:
+                        hidden_size = (
+                            self.actor.channel_size[l_no]
+                            if i <= len(self.actor.channel_size)
+                            else self.actor.hidden_size[
+                                l_no + len(self.actor.channel_size)
+                            ]
+                        )
+                    self._init_weights_gaussian(layer, mean=0, std=4 / hidden_size)
+                    l_no += 1
+            else:
+                self._init_weights_gaussian(layer, mean=0, std=2 / hidden_size)
+                self.exp_layer = layer
+
+        self.numel = sum(
+            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
+        )
         self.sigma_inv = lamb * torch.eye(self.numel).to(
             self.device if self.accelerator is None else self.accelerator.device
         )
         self.theta_0 = torch.cat(
-            [w.flatten() for w in self.actor.parameters() if w.requires_grad]
+            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
         )
 
         self.criterion = nn.MSELoss()
+
+    def _init_weights_gaussian(self, m, mean, std):
+        if type(m) == nn.Linear:
+            init.normal_(m.weight, mean=mean, std=std)
+            if m.bias is not None:
+                init.constant_(m.bias, 0)
 
     def getAction(self, state, action_mask=None):
         """Returns the next action to take in the environment.
@@ -220,7 +256,7 @@ class NeuralUCB:
             g[k] = torch.cat(
                 [
                     w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1])
-                    for w in self.actor.parameters()
+                    for w in self.exp_layer.parameters()
                     if w.requires_grad
                 ]
             )
@@ -267,7 +303,11 @@ class NeuralUCB:
             self.reg
             * torch.norm(
                 torch.cat(
-                    [w.flatten() for w in self.actor.parameters() if w.requires_grad]
+                    [
+                        w.flatten()
+                        for w in self.exp_layer.parameters()
+                        if w.requires_grad
+                    ]
                 )
                 - self.theta_0
             )
@@ -368,11 +408,16 @@ class NeuralUCB:
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
+        if isinstance(clone.actor, EvolvableMLP):
+            clone.exp_layer = clone.actor.feature_net.linear_layer_output
+        else:
+            clone.exp_layer = clone.actor.value_net.value_linear_layer_output
+
         clone.numel = sum(
-            w.numel() for w in clone.actor.parameters() if w.requires_grad
+            w.numel() for w in clone.exp_layer.parameters() if w.requires_grad
         )
         clone.theta_0 = torch.cat(
-            [w.flatten() for w in clone.actor.parameters() if w.requires_grad]
+            [w.flatten() for w in clone.exp_layer.parameters() if w.requires_grad]
         )
         clone.sigma_inv = clone.sigma_inv.to(
             self.device if self.accelerator is None else self.accelerator.device
@@ -473,9 +518,16 @@ class NeuralUCB:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
-        self.numel = sum(w.numel() for w in self.actor.parameters() if w.requires_grad)
+        if isinstance(self.actor, EvolvableMLP):
+            self.exp_layer = self.actor.feature_net.linear_layer_output
+        else:
+            self.exp_layer = self.actor.value_net.value_linear_layer_output
+
+        self.numel = sum(
+            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
+        )
         self.theta_0 = torch.cat(
-            [w.flatten() for w in self.actor.parameters() if w.requires_grad]
+            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
         )
         self.sigma_inv = self.sigma_inv.to(
             self.device if self.accelerator is None else self.accelerator.device
@@ -528,11 +580,16 @@ class NeuralUCB:
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
 
+        if isinstance(agent.actor, EvolvableMLP):
+            agent.exp_layer = agent.actor.feature_net.linear_layer_output
+        else:
+            agent.exp_layer = agent.actor.value_net.value_linear_layer_output
+
         agent.numel = sum(
-            w.numel() for w in agent.actor.parameters() if w.requires_grad
+            w.numel() for w in agent.exp_layer.parameters() if w.requires_grad
         )
         agent.theta_0 = torch.cat(
-            [w.flatten() for w in agent.actor.parameters() if w.requires_grad]
+            [w.flatten() for w in agent.exp_layer.parameters() if w.requires_grad]
         )
         agent.sigma_inv = agent.sigma_inv.to(
             device if accelerator is None else accelerator.device
