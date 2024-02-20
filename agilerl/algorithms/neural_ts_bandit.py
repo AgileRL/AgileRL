@@ -416,7 +416,7 @@ class NeuralTS:
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
-        if clone.actor.arch == "mlp":
+        if clone.actor.arch == "mlp" and isinstance(clone.actor, EvolvableMLP):
             clone.exp_layer = clone.actor.feature_net.linear_layer_output
         else:
             clone.exp_layer = clone.actor.value_net.value_linear_layer_output
@@ -526,7 +526,7 @@ class NeuralTS:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
-        if self.actor.arch == "mlp":
+        if self.actor.arch == "mlp" and isinstance(self.actor, EvolvableMLP):
             self.exp_layer = self.actor.feature_net.linear_layer_output
         else:
             self.exp_layer = self.actor.value_net.value_linear_layer_output
@@ -588,7 +588,7 @@ class NeuralTS:
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
 
-        if agent.actor.arch == "mlp":
+        if agent.actor.arch == "mlp" and isinstance(agent.actor, EvolvableMLP):
             agent.exp_layer = agent.actor.feature_net.linear_layer_output
         else:
             agent.exp_layer = agent.actor.value_net.value_linear_layer_output
