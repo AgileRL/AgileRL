@@ -280,7 +280,7 @@ def test_mutation_no_options():
         "DQN", 0, 0, 0, 0, 0, 0, ["batch_size", "lr", "learn_step"], 0.1, device=device
     )
 
-    new_population = copy.deepcopy(population)
+    new_population = [agent.clone() for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -365,7 +365,7 @@ def test_mutation_applies_no_mutations():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
+    net_config = {"arch": "mlp", "h_size": [4]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
     population_size = 1
@@ -411,7 +411,7 @@ def test_mutation_applies_no_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -427,7 +427,7 @@ def test_mutation_applies_no_mutations_pre_training_mut():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
+    net_config = {"arch": "mlp", "h_size": [4]}
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     accelerator = Accelerator()
     population_size = 1
@@ -473,8 +473,10 @@ def test_mutation_applies_no_mutations_pre_training_mut():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+            print(population, mutated_population)
 
             assert len(mutated_population) == len(population)
             for old, individual in zip(population, mutated_population):
@@ -543,7 +545,7 @@ def test_mutation_applies_rl_hp_mutations():
                     accelerator=accelerator if distributed else None,
                 )
 
-                new_population = copy.deepcopy(population)
+                new_population = [agent.clone() for agent in population]
                 mutated_population = mutations.mutation(
                     new_population, pre_training_mut
                 )
@@ -634,7 +636,7 @@ def test_mutation_applies_activation_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -690,7 +692,7 @@ def test_mutation_applies_activation_mutations_no_skip():
             for individual in population:
                 individual.algo = None
                 individual.lr = 1e-3
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -761,7 +763,7 @@ def test_mutation_applies_cnn_activation_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -824,7 +826,7 @@ def test_mutation_applies_parameter_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -894,7 +896,7 @@ def test_mutation_applies_cnn_parameter_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -965,7 +967,7 @@ def test_mutation_applies_architecture_mutations():
 
                 mutations.rng = DummyRNG()
 
-                new_population = copy.deepcopy(population)
+                new_population = [agent.clone() for agent in population]
                 mutated_population = [
                     mutations.architecture_mutate(agent) for agent in new_population
                 ]
@@ -1037,7 +1039,7 @@ def test_mutation_applies_cnn_architecture_mutations():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1109,7 +1111,7 @@ def test_mutation_applies_bert_architecture_mutations():
                     individual.critic = EvolvableBERT([12], [12])
                     individual.critic_target = copy.deepcopy(individual.critic)
 
-                new_population = copy.deepcopy(population)
+                new_population = [agent.clone() for agent in population]
                 mutated_population = [
                     mutations.architecture_mutate(agent) for agent in new_population
                 ]
@@ -1275,7 +1277,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1351,7 +1353,7 @@ def test_mutation_applies_activation_mutations_multi_agent():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1412,7 +1414,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip():
 
             for individual in population:
                 individual.algo = None
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1479,7 +1481,7 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1537,7 +1539,7 @@ def test_mutation_applies_parameter_mutations_multi_agent():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1598,7 +1600,7 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1660,7 +1662,7 @@ def test_mutation_applies_architecture_mutations_multi_agent():
 
                 mutations.rng = DummyRNG()
 
-                new_population = copy.deepcopy(population)
+                new_population = [agent.clone() for agent in population]
                 mutated_population = [
                     mutations.architecture_mutate(agent) for agent in new_population
                 ]
@@ -1723,7 +1725,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent():
                 accelerator=accelerator if distributed else None,
             )
 
-            new_population = copy.deepcopy(population)
+            new_population = [agent.clone() for agent in population]
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
             assert len(mutated_population) == len(population)
@@ -1806,7 +1808,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent():
                             individual.critics_2
                         )
 
-                new_population = copy.deepcopy(population)
+                new_population = [agent.clone() for agent in population]
                 mutated_population = [
                     mutations.architecture_mutate(agent) for agent in new_population
                 ]
@@ -1860,7 +1862,7 @@ def test_reinit_opt():
             0.5,
         )
 
-        new_population = copy.deepcopy(population)
+        new_population = [agent.clone() for agent in population]
         mutations.reinit_opt(new_population[0])
 
         new_opt = getattr(
