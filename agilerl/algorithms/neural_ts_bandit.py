@@ -14,7 +14,7 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class NeuralTS:
-    """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/1911.04462
+    """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827
 
     :param state_dim: State observation (context) dimension
     :type state_dim: list[int]
