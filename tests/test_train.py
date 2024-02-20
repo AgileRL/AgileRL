@@ -8,6 +8,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 
+import agilerl.training.train_bandits
 import agilerl.training.train_multi_agent
 import agilerl.training.train_off_policy
 import agilerl.training.train_offline
@@ -18,8 +19,11 @@ from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
+from agilerl.algorithms.neural_ts_bandit import NeuralTS
+from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
+from agilerl.training.train_bandits import train_bandits
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
@@ -49,6 +53,23 @@ class DummyEnv:
             np.random.randint(0, 2, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
             "info_string",
+        )
+
+
+class DummyBanditEnv:
+    def __init__(self, state_size, arms):
+        self.arms = arms
+        self.state_size = (arms,) + state_size
+        self.action_size = 1
+        self.n_envs = 1
+
+    def reset(self):
+        return np.random.rand(*self.state_size)
+
+    def step(self, action):
+        return (
+            np.random.rand(*self.state_size),
+            np.random.rand(1),
         )
 
 
@@ -112,6 +133,47 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
 
     def saveCheckpoint(self, path):
         return super().saveCheckpoint(path)
+
+    def loadCheckpoint(self, *args):
+        return
+
+    def wrap_models(self, *args):
+        return
+
+    def unwrap_models(self, *args):
+        return
+
+
+class DummyBandit:
+    def __init__(self, batch_size, bandit_env, beta=None):
+        self.state_size = bandit_env.state_size
+        self.action_size = bandit_env.action_size
+        self.action_dim = bandit_env.action_size
+        self.batch_size = batch_size
+        self.beta = beta
+        self.learn_step = 1
+        self.scores = []
+        self.steps = [0]
+        self.regret = [0]
+        self.fitness = []
+        self.mut = "mutation"
+        self.index = 1
+
+    def getAction(self, *args):
+        return np.random.randint(self.action_size)
+
+    def learn(self, experiences):
+        return random.random()
+
+    def test(self, env, swap_channels, max_steps, loop):
+        rand_int = np.random.uniform(0, 400)
+        self.fitness.append(rand_int)
+        return rand_int
+
+    def saveCheckpoint(self, path):
+        empty_dic = {}
+        torch.save(empty_dic, path, pickle_module=dill)
+        return True
 
     def loadCheckpoint(self, *args):
         return
@@ -311,6 +373,40 @@ class DummyNStepMemory(DummyMemory):
         return super().sample(*args)
 
 
+class DummyBanditMemory:
+    def __init__(self):
+        self.counter = 0
+        self.state_size = None
+        self.action_size = 1
+
+    def save2memoryVectEnvs(self, states, rewards):
+        if self.state_size is None:
+            self.state_size, *_ = (state.shape for state in states)
+            self.counter += 1
+
+    def save2memory(self, state, reward, is_vectorised=False):
+        if is_vectorised:
+            self.save2memoryVectEnvs(state, reward)
+        else:
+            self.state_size = state.shape
+            self.counter += 1
+
+    def __len__(self):
+        return 1000
+
+    def sample(self, batch_size, *args):
+        if batch_size == 1:
+            states = np.random.randn(*self.state_size)
+            rewards = np.random.uniform(0, 400)
+        else:
+            states = np.array(
+                [np.random.randn(*self.state_size) for _ in range(batch_size)]
+            )
+            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
+
+        return states, rewards
+
+
 class DummyMultiMemory(DummyMemory):
     def __init__(self):
         super().__init__()
@@ -361,6 +457,11 @@ def env(state_size, action_size, vect):
 
 
 @pytest.fixture
+def bandit_env(state_size, action_size):
+    return DummyBanditEnv(state_size, action_size)
+
+
+@pytest.fixture
 def multi_env(state_size, action_size):
     return DummyMultiEnv(state_size, action_size)
 
@@ -373,6 +474,11 @@ def population_off_policy(env):
 @pytest.fixture
 def population_on_policy(env):
     return [DummyAgentOnPolicy(5, env) for _ in range(6)]
+
+
+@pytest.fixture
+def population_bandit(bandit_env):
+    return [DummyBandit(5, bandit_env) for _ in range(6)]
 
 
 @pytest.fixture
@@ -398,6 +504,11 @@ def memory():
 @pytest.fixture
 def n_step_memory():
     return DummyNStepMemory()
+
+
+@pytest.fixture
+def bandit_memory():
+    return DummyBanditMemory()
 
 
 @pytest.fixture
@@ -445,6 +556,34 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.index = 1
     mock_agent.getAction.side_effect = lambda state: tuple(
         np.random.randn(env.action_size) for _ in range(4)
+    )
+    mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
+    mock_agent.learn.side_effect = lambda experiences: random.random()
+    mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
+    mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
+
+    return mock_agent
+
+
+@pytest.fixture
+def mocked_bandit(bandit_env, algo):
+    mock_agent = MagicMock(spec=algo)
+    mock_agent.learn_step = 1
+    mock_agent.batch_size = 5
+    mock_agent.state_size = bandit_env.state_size
+    mock_agent.action_size = 2
+    mock_agent.action_dim = 2
+    mock_agent.beta = 0.4
+    mock_agent.scores = []
+    mock_agent.steps = [0]
+    mock_agent.regret = [0]
+    mock_agent.fitness = []
+    mock_agent.mut = "mutation"
+    mock_agent.index = 1
+    mock_agent.getAction.side_effect = lambda state: np.random.randint(
+        bandit_env.action_size
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
@@ -664,6 +803,48 @@ def mocked_n_step_memory():
 
 
 @pytest.fixture
+def mocked_bandit_memory():
+    mock_memory = MagicMock()
+    mock_memory.counter = 0
+    mock_memory.state_size = None
+    mock_memory.__len__.return_value = 10
+
+    def save2memoryVectEnvs(states, rewards):
+        if mock_memory.state_size is None:
+            mock_memory.state_size, *_ = (state.shape for state in states)
+            mock_memory.counter += 1
+
+    mock_memory.save2memoryVectEnvs.side_effect = save2memoryVectEnvs
+
+    def save2memory(state, reward, is_vectorised=False):
+        if is_vectorised:
+            mock_memory.save2memoryVectEnvs(state, reward)
+        else:
+            mock_memory.state_size = state.shape
+            mock_memory.counter += 1
+
+    # Assigning the save2memory function to the MagicMock
+    mock_memory.save2memory.side_effect = save2memory
+
+    def sample(batch_size, *args):
+        if batch_size == 1:
+            states = np.random.randn(*mock_memory.state_size)
+            rewards = np.random.uniform(0, 400)
+        else:
+            states = np.array(
+                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)]
+            )
+            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
+
+        return states, rewards
+
+    # Assigning the sample function to the MagicMock
+    mock_memory.sample.side_effect = sample
+
+    return mock_memory
+
+
+@pytest.fixture
 def mocked_multi_memory():
     mock_memory = MagicMock()
     mock_memory.counter = 0
@@ -747,6 +928,29 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
             np.random.randint(0, 2, mock_env.n_envs),
             np.random.randint(0, 2, mock_env.n_envs),
             "info_string",
+        )
+
+    mock_env.step.side_effect = step
+
+    return mock_env
+
+
+@pytest.fixture
+def mocked_bandit_env(state_size, action_size):
+    mock_env = MagicMock()
+    mock_env.state_size = (action_size,) + state_size
+    mock_env.action_size = 1
+    mock_env.n_envs = 1
+
+    def reset():
+        return np.random.rand(*mock_env.state_size)
+
+    mock_env.reset.side_effect = reset
+
+    def step(action):
+        return (
+            np.random.rand(*mock_env.state_size),
+            np.random.rand(mock_env.n_envs),
         )
 
     mock_env.step.side_effect = step
@@ -2944,6 +3148,638 @@ def test_train_offline_save_checkpoint(
         accelerator=accelerator,
         checkpoint=10,
         checkpoint_path=checkpoint_path,
+    )
+    for i in range(6):  # iterate through the population indices
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size",
+    [
+        ((6,), 2),
+    ],
+)
+def test_train_bandit(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+
+    assert len(pop) == len(population_bandit)
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, algo",
+    [
+        ((6,), 2, NeuralTS),
+        ((6,), 2, NeuralUCB),
+    ],
+)
+def test_train_bandit_agent_calls_made(
+    bandit_env,
+    mocked_bandit,
+    tournament,
+    mutations,
+    bandit_memory,
+):
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+        mock_population = [mocked_bandit for _ in range(6)]
+        print(mocked_bandit)
+        print(mock_population)
+
+        pop, pop_fitnesses = train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            mock_population,
+            bandit_memory,
+            INIT_HP=None,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            accelerator=accelerator,
+            save_elite=True,
+        )
+
+        mocked_bandit.getAction.assert_called()
+        mocked_bandit.learn.assert_called()
+        mocked_bandit.test.assert_called()
+        if accelerator is not None:
+            mocked_bandit.wrap_models.assert_called()
+            mocked_bandit.unwrap_models.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_bandit_save_elite_warning(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
+                      be saved unless 'save_elite' is set to True."
+    with pytest.warns(match=warning_string):
+        pop, pop_fitnesses = train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            INIT_HP=None,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            save_elite=False,
+            elite_path="path",
+        )
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_bandit_checkpoint_warning(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
+                      be saved unless 'checkpoint' is defined."
+    with pytest.warns(match=warning_string):
+        pop, pop_fitnesses = train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            INIT_HP=None,
+            MUT_P=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            checkpoint=None,
+            checkpoint_path="path",
+        )
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_bandit_actions_histogram(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "DQN",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+
+    assert len(pop) == len(population_bandit)
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_bandit_replay_buffer_calls(
+    mocked_bandit_memory, bandit_env, population_bandit, tournament, mutations
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        mocked_bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+    mocked_bandit_memory.save2memory.assert_called()
+    mocked_bandit_memory.sample.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size",
+    [
+        ((6,), 2),
+    ],
+)
+def test_train_bandit_bandit_env_calls(
+    mocked_bandit_env, bandit_memory, population_bandit, tournament, mutations
+):
+    pop, pop_fitnesses = train_bandits(
+        mocked_bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+    mocked_bandit_env.step.assert_called()
+    mocked_bandit_env.reset.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size",
+    [
+        ((6,), 2),
+    ],
+)
+def test_train_bandit_tourn_mut_calls(
+    bandit_env, bandit_memory, population_bandit, mocked_tournament, mocked_mutations
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=mocked_tournament,
+        mutation=mocked_mutations,
+        wb=False,
+    )
+    mocked_mutations.mutation.assert_called()
+    mocked_tournament.select.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
+def test_train_bandit_rgb_input(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=True,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+
+    assert len(pop) == len(population_bandit)
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size",
+    [((6,), 2)],
+)
+def test_train_bandit_using_alternate_buffers(
+    bandit_env,
+    bandit_memory,
+    population_bandit,
+    tournament,
+    mutations,
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        memory=bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+
+    assert len(pop) == len(population_bandit)
+
+
+@pytest.mark.parametrize("state_size, action_size", [((3, 64, 64), 2)])
+def test_train_bandit_using_alternate_buffers_rgb(
+    bandit_env, bandit_memory, population_bandit, tournament, mutations
+):
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        memory=bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=True,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+    )
+
+    assert len(pop) == len(population_bandit)
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_bandit_distributed(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    accelerator = Accelerator()
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        accelerator=accelerator,
+    )
+
+    assert len(pop) == len(population_bandit)
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_bandit_wandb_init_log(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    INIT_HP = {
+        "BATCH_SIZE": 128,
+        "LR": 1e-3,
+        "GAMMA": 1,
+        "LAMBDA": 1,
+        "REG": 0.000625,
+        "LEARN_STEP": 1,
+        "CHANNELS_LAST": False,
+        "POP_SIZE": 6,
+        "MEMORY_SIZE": 20000,
+    }
+    MUT_P = {
+        "NO_MUT": 0.4,
+        "ARCH_MUT": 0.2,
+        "PARAMS_MUT": 0.2,
+        "ACT_MUT": 0.2,
+        "RL_HP_MUT": 0.2,
+    }
+    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
+        "agilerl.training.train_bandits.wandb.init"
+    ) as mock_wandb_init, patch(
+        "agilerl.training.train_bandits.wandb.log"
+    ) as mock_wandb_log, patch(
+        "agilerl.training.train_bandits.wandb.finish"
+    ) as mock_wandb_finish:
+        # Call the function that should trigger wandb.init
+        agilerl.training.train_bandits.train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            INIT_HP=INIT_HP,
+            MUT_P=MUT_P,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=True,
+            wandb_api_key="testing",
+        )
+
+        # Assert that wandb.init was called with expected arguments
+        mock_wandb_init.assert_called_once_with(
+            project=ANY,
+            name=ANY,
+            config=ANY,
+        )
+        # Assert that wandb.log was called with expected log parameters
+        mock_wandb_log.assert_called_with(
+            {
+                "global_step": ANY,
+                "steps_per_agent": ANY,
+                "train/mean_score": ANY,
+                "train/mean_regret": ANY,
+                "train/best_regret": ANY,
+                "train/mean_loss": ANY,
+                "eval/mean_fitness": ANY,
+                "eval/best_fitness": ANY,
+            }
+        )
+        # Assert that wandb.finish was called
+        mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, accelerator",
+    [
+        ((6,), 2, True),
+        ((6,), 2, False),
+    ],
+)
+def test_bandit_wandb_init_log_distributed(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory, accelerator
+):
+    if accelerator:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    INIT_HP = {
+        "BATCH_SIZE": 128,
+        "LR": 1e-3,
+        "GAMMA": 1,
+        "LAMBDA": 1,
+        "REG": 0.000625,
+        "LEARN_STEP": 1,
+        "CHANNELS_LAST": False,
+        "POP_SIZE": 6,
+        "MEMORY_SIZE": 20000,
+    }
+    MUT_P = {
+        "NO_MUT": 0.4,
+        "ARCH_MUT": 0.2,
+        "PARAMS_MUT": 0.2,
+        "ACT_MUT": 0.2,
+        "RL_HP_MUT": 0.2,
+    }
+    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
+        "agilerl.training.train_bandits.wandb.init"
+    ) as mock_wandb_init, patch(
+        "agilerl.training.train_bandits.wandb.log"
+    ) as mock_wandb_log, patch(
+        "agilerl.training.train_bandits.wandb.finish"
+    ) as mock_wandb_finish:
+        # Call the function that should trigger wandb.init
+        agilerl.training.train_bandits.train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            INIT_HP=INIT_HP,
+            MUT_P=MUT_P,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=True,
+            accelerator=accelerator,
+            wandb_api_key="testing",
+        )
+
+        # Assert that wandb.init was called with expected arguments
+        mock_wandb_init.assert_called_once_with(
+            project=ANY,
+            name=ANY,
+            config=ANY,
+        )
+        # Assert that wandb.log was called with expected log parameters
+        mock_wandb_log.assert_called_with(
+            {
+                "global_step": ANY,
+                "steps_per_agent": ANY,
+                "train/mean_score": ANY,
+                "train/mean_regret": ANY,
+                "train/best_regret": ANY,
+                "train/mean_loss": ANY,
+                "eval/mean_fitness": ANY,
+                "eval/best_fitness": ANY,
+            }
+        )
+        # Assert that wandb.finish was called
+        mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_bandit_early_stop_wandb(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    INIT_HP = {
+        "BATCH_SIZE": 128,
+        "LR": 1e-3,
+        "GAMMA": 1,
+        "LAMBDA": 1,
+        "REG": 0.000625,
+        "LEARN_STEP": 1,
+        "CHANNELS_LAST": False,
+        "POP_SIZE": 6,
+        "MEMORY_SIZE": 20000,
+    }
+    MUT_P = {
+        "NO_MUT": 0.4,
+        "ARCH_MUT": 0.2,
+        "PARAMS_MUT": 0.2,
+        "ACT_MUT": 0.2,
+        "RL_HP_MUT": 0.2,
+    }
+    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
+        "agilerl.training.train_bandits.wandb.init"
+    ) as _, patch("agilerl.training.train_bandits.wandb.log") as _, patch(
+        "agilerl.training.train_bandits.wandb.finish"
+    ) as mock_wandb_finish:
+        # Call the function that should trigger wandb.init
+        agilerl.training.train_bandits.train_bandits(
+            bandit_env,
+            "bandit_env_name",
+            "algo",
+            population_bandit,
+            bandit_memory,
+            INIT_HP=INIT_HP,
+            MUT_P=MUT_P,
+            target=-10000,
+            swap_channels=False,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=True,
+            wandb_api_key="testing",
+        )
+        # Assert that wandb.finish was called
+        mock_wandb_finish.assert_called()
+
+
+@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+def test_train_bandit_save_elite(
+    bandit_env, population_bandit, tournament, mutations, bandit_memory
+):
+    elite_path = "checkpoint.pt"
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        save_elite=True,
+        elite_path=elite_path,
+    )
+    assert os.path.isfile(elite_path)
+    os.remove(elite_path)
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, accelerator_flag",
+    [((6,), 2, True), ((6,), 2, False)],
+)
+def test_bandit_train_save_checkpoint(
+    bandit_env,
+    population_bandit,
+    tournament,
+    mutations,
+    bandit_memory,
+    accelerator_flag,
+):
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    checkpoint_path = "checkpoint"
+    pop, pop_fitnesses = train_bandits(
+        bandit_env,
+        "bandit_env_name",
+        "algo",
+        population_bandit,
+        bandit_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        checkpoint=10,
+        checkpoint_path=checkpoint_path,
+        accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
