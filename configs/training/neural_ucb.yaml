@@ -2,6 +2,7 @@
 # Define initial hyperparameters
 INIT_HP:
     ENV_NAME: IRIS   # Environment name
+    UCI_REPO_ID: 53  # Uci repo id  https://archive.ics.uci.edu/
     ALGO: NeuralUCB        # Algorithm
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false

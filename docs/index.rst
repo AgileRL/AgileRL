@@ -54,6 +54,7 @@ Contents
    on_policy/index
    offline_training/index
    multi_agent_training/index
+   bandits/index
    distributed_training/index
    custom_architecture/index
    debugging_rl/index

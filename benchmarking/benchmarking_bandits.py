@@ -1,70 +1,19 @@
-import random
-
-import numpy as np
-import pandas as pd
 import torch
 import yaml
+from ucimlrepo import fetch_ucirepo
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_bandits import train_bandits
 from agilerl.utils.utils import initialPopulation, printHyperparams
+from agilerl.wrappers.learning import BanditEnv
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
 # import sys
 # sys.path.append('../')
-
-
-class IRIS:
-    def __init__(self):
-        self.arm = 3
-        self.dim = (12,)
-        self.data = pd.read_csv("../data/iris/iris.csv")
-        self.prev_reward = np.zeros(self.arm)
-
-    def _new_state_and_target_action(self):
-        r = random.randint(0, 149)
-        if 0 <= r <= 49:
-            target = 0
-        elif 50 <= r <= 99:
-            target = 1
-        else:
-            target = 2
-        rand = self.data.loc[r]
-        x = np.zeros(4)
-        for i in range(1, 5):
-            x[i - 1] = rand[i]
-        X_n = []
-        for i in range(3):
-            front = np.zeros(4 * i)
-            back = np.zeros(4 * (2 - i))
-            new_d = np.concatenate((front, x, back), axis=0)
-            X_n.append(new_d)
-        X_n = np.array(X_n)
-        return X_n, target
-
-    def step(self, k):
-        # Calculate reward from action in previous state
-        reward = self.prev_reward[k]
-
-        # Now decide on next state
-        next_state, target = self._new_state_and_target_action()
-
-        # Save reward for next call to step()
-        next_reward = np.zeros(self.arm)
-        next_reward[target] = 1
-        self.prev_reward = next_reward
-        return next_state, reward
-
-    def reset(self):
-        next_state, target = self._new_state_and_target_action()
-        next_reward = np.zeros(self.arm)
-        next_reward[target] = 1
-        self.prev_reward = next_reward
-        return next_state
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
@@ -75,9 +24,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print(MUTATION_PARAMS)
     print(NET_CONFIG)
 
-    env = IRIS()  # Create environment
-    context_dim = env.dim
-    action_dim = env.arm
+    # Fetch data
+    dataset = fetch_ucirepo(id=INIT_HP["UCI_REPO_ID"])
+    features = dataset.data.features
+    targets = dataset.data.targets
+
+    env = BanditEnv(features, targets)  # Create environment
+    context_dim = env.context_dim
+    action_dim = env.arms
 
     if INIT_HP["CHANNELS_LAST"]:
         context_dim = (context_dim[2], context_dim[0], context_dim[1])
