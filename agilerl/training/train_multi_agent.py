@@ -1,7 +1,6 @@
 import os
 import warnings
 from datetime import datetime
-
 import numpy as np
 import wandb
 from torch.utils.data import DataLoader
@@ -251,6 +250,7 @@ def train_multi_agent(
     pop_fitnesses = []
     total_steps = 0
     loss = None
+    agent_ids = env.agents
 
     # Pre-training mutation
     if accelerator is None:
@@ -264,6 +264,8 @@ def train_multi_agent(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in env.agents}
+            losses = {agent: []  for agent in env.agents}
+
             if is_vectorised:
                 rewards = {agent: [] for agent in env.agents}
                 terminations = {agent: [] for agent in env.agents}
@@ -330,6 +332,11 @@ def train_multi_agent(
                     experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     loss = agent.learn(experiences)
+                    for agent_id in env.agents:
+                        losses[agent_id].append(loss[agent_id])
+
+                # if losses['speaker_0']:
+                #     print(losses)
 
                 # Update the state
                 if swap_channels and not is_vectorised:
@@ -345,7 +352,9 @@ def train_multi_agent(
                 else:
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r
+                        
 
+                
                 state = next_state
 
             if is_vectorised:
@@ -364,12 +373,12 @@ def train_multi_agent(
 
             agent.scores.append(score)
 
-            if loss is not None:
-                for agent_id in env.agents:
-                    pop_actor_loss[agent_idx][agent_id].append(loss["actors"][agent_id])
-                    pop_critic_loss[agent_idx][agent_id].append(
-                        loss["critics"][agent_id]
-                    )
+            if any([losses[a_id] for a_id in agent_ids]):
+                for agent_id in agent_ids:
+                    actor_losses, critic_losses = list(zip(*losses[agent_id]))
+                    actor_losses = [loss for loss in actor_losses if loss != None]
+                    pop_actor_loss[agent_idx][agent_id].append(np.mean(actor_losses))
+                    pop_critic_loss[agent_idx][agent_id].append(np.mean(critic_losses))
 
             agent.steps[-1] += max_steps
             total_steps += max_steps
@@ -402,6 +411,9 @@ def train_multi_agent(
                 "eval/best_fitness": np.max(fitnesses),
             }
 
+            actor_loss_dict = {}
+            critic_loss_dict = {}
+
             for agent_idx, agent in enumerate(pop):
                 for agent_id, actor_loss, critic_loss in zip(
                     pop_actor_loss[agent_idx].keys(),
@@ -409,18 +421,18 @@ def train_multi_agent(
                     pop_critic_loss[agent_idx].values(),
                 ):
                     if actor_loss:
-                        actor_loss_dict = {
-                            f"train/agent_{agent_idx}_{agent_id}_actor_loss": actor_loss[
-                                -1
-                            ]
-                        }
-                        critic_loss_dict = {
-                            f"train/agent_{agent_idx}_{agent_id}_critic_loss": critic_loss[
-                                -1
-                            ]
-                        }
+                    
+                        actor_loss_dict[
+                            f"train/agent_{agent_idx}_{agent_id}_actor_loss"
+                            ] = np.mean(actor_loss[-evo_epochs:])
+                        
+                        critic_loss_dict[
+                            f"train/agent_{agent_idx}_{agent_id}_critic_loss"] = np.mean(critic_loss[
+                                -evo_epochs:
+                            ])
                         wandb_dict.update(actor_loss_dict)
                         wandb_dict.update(critic_loss_dict)
+
 
             if wb:
                 if accelerator is not None:

@@ -261,6 +261,7 @@ def train_off_policy(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
+    loss = None
 
     # Pre-training mutation
     if accelerator is None:
@@ -273,7 +274,7 @@ def train_off_policy(
             accelerator.wait_for_everyone()
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
-            rewards, terminations, truncs = [], [], []
+            rewards, terminations, truncs, losses = [], [], [], []
             score = 0
 
             if algo in ["DQN", "Rainbow DQN"]:
@@ -381,6 +382,8 @@ def train_off_policy(
                     truncs.append(trunc)
                 else:
                     score += reward
+                if loss is not None:
+                    losses.append(loss)
                 state = next_state
 
             if is_vectorised:
@@ -391,7 +394,12 @@ def train_off_policy(
                 score = np.mean(scores)
 
             agent.scores.append(score)
-            pop_loss[agent_idx].append(loss)
+            if isinstance(losses[-1], tuple):
+                actor_losses, critic_losses = list(zip(*losses))
+                mean_loss = np.mean([loss for loss in actor_losses if loss != None]), np.mean(critic_losses)
+            else:
+                mean_loss = np.mean(losses)
+            pop_loss[agent_idx].append(mean_loss)
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
@@ -424,18 +432,18 @@ def train_off_policy(
             # Create the loss dictionaries
             if algo in ["RainbowDQN", "DQN"]:
                 actor_loss_dict = {
-                    f"train/agent_{index}_actor_loss": loss[-1]
+                    f"train/agent_{index}_actor_loss": np.mean(loss[-evo_epochs:])
                     for index, loss in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
             elif algo in ["TD3", "DDPG"]:
                 actor_loss_dict = {
-                    f"train/agent_{index}_actor_loss": actor_loss[-1]
-                    for index, (actor_loss, _) in enumerate(pop_loss)
+                    f"train/agent_{index}_actor_loss": np.mean(list(zip(*loss_list))[0][-evo_epochs:])
+                    for index, loss_list in enumerate(pop_loss)
                 }
                 critic_loss_dict = {
-                    f"train/agent_{index}_critic_loss": critic_loss[-1]
-                    for index, (_, critic_loss) in enumerate(pop_loss)
+                    f"train/agent_{index}_critic_loss": np.mean(list(zip(*loss_list))[-1][-evo_epochs:])
+                    for index, loss_list in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
                 wandb_dict.update(critic_loss_dict)

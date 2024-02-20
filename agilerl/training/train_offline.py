@@ -272,6 +272,7 @@ def train_offline(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
+    loss = None
 
     # Pre-training mutation
     if accelerator is None:
@@ -283,12 +284,15 @@ def train_offline(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent_idx, agent in enumerate(pop):  # Loop through population
+            losses = []
             for idx_step in range(max_steps):
                 experiences = sampler.sample(agent.batch_size)  # Sample replay buffer
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
+                losses.append(loss)
 
-            pop_loss[agent_idx].append(loss)
+            mean_loss = np.mean(losses)
+            pop_loss[agent_idx].append(mean_loss)
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
@@ -314,7 +318,7 @@ def train_offline(
             }
 
             agent_loss_dict = {
-                f"train/agent_{index}_loss": loss[-1]
+                f"train/agent_{index}_loss": np.mean(loss[-evo_epochs:])
                 for index, loss in enumerate(pop_loss)
             }
 

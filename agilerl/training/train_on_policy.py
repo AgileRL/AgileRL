@@ -210,6 +210,7 @@ def train_on_policy(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
+    loss = None
 
     # Pre-training mutation
     if accelerator is not None:
@@ -231,6 +232,7 @@ def train_on_policy(
             dones = []
             values = []
             truncs = []
+            losses = []
 
             for idx_step in range(max_steps):
                 if swap_channels:
@@ -308,7 +310,7 @@ def train_on_policy(
             }
 
             agent_loss_dict = {
-                f"train/agent_{index}_loss": loss[-1]
+                f"train/agent_{index}_loss": np.mean(loss[-evo_epochs:])
                 for index, loss in enumerate(pop_loss)
             }
             wandb_dict.update(agent_loss_dict)

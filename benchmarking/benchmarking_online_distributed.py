@@ -1,5 +1,8 @@
 from accelerate import Accelerator
 
+
+import sys
+sys.path.append('../')
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -97,13 +100,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 if __name__ == "__main__":
     INIT_HP = {
-        "ENV_NAME": "LunarLander-v2",  # Gym environment name
-        "ALGO": "DQN",  # Algorithm
-        "DOUBLE": True,  # Use double Q-learning
+        "ENV_NAME": "LunarLanderContinuous-v2",  # Gym environment name
+        "ALGO": "DDPG",  # Algorithm
+        #"DOUBLE": True,  # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
         "BATCH_SIZE": 256,  # Batch size
-        "LR": 1e-3,  # Learning rate
+        "LR_ACTOR": 0.0001,           # Actor learning rate
+        "LR_CRITIC": 0.001,       
         "EPISODES": 2000,  # Max no. episodes
         "TARGET_SCORE": 200.0,  # Early training stop at avg score of last 100 episodes
         "GAMMA": 0.99,  # Discount factor
@@ -112,10 +116,12 @@ if __name__ == "__main__":
         "TAU": 1e-3,  # For soft update of target parameters
         "TOURN_SIZE": 2,  # Tournament size
         "ELITISM": True,  # Elitism in tournament selection
-        "POP_SIZE": 6,  # Population size
-        "EVO_EPOCHS": 20,  # Evolution frequency
+        "POP_SIZE": 1,  # Population size
+        "EVO_EPOCHS": 1,  # Evolution frequency
         "POLICY_FREQ": 2,  # Policy network update frequency
         "WANDB": False,  # Log with Weights and Biases
+        'MAX_ACTION': 1,
+        'MIN_ACTION': -1
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
@@ -123,7 +129,7 @@ if __name__ == "__main__":
         "ARCH_MUT": 0.2,  # Architecture mutation
         "NEW_LAYER": 0.2,  # New layer mutation
         "PARAMS_MUT": 0.2,  # Network parameters mutation
-        "ACT_MUT": 0,  # Activation layer mutation
+        "ACT_MUT": 0.2,  # Activation layer mutation
         "RL_HP_MUT": 0.2,  # Learning HP mutation
         # Learning HPs to choose from
         "RL_HP_SELECTION": ["lr", "batch_size"],
