@@ -37,7 +37,7 @@ class BanditEnv:
     """
 
     def __init__(self, features, targets):
-        self.arms = int(targets.nunique())
+        self.arms = int(targets.nunique()[0])
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 
         self.features = features

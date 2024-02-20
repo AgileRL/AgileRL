@@ -19,7 +19,7 @@ def test_create_environment():
     assert isinstance(env, BanditEnv)
     assert isinstance(action_dim, int)
     assert isinstance(context_dim, tuple)
-    assert action_dim == int(targets.nunique())
+    assert action_dim == int(targets.nunique()[0])
     assert context_dim == (len(np.array(features.loc[0])) * int(targets.nunique()),)
 
 
