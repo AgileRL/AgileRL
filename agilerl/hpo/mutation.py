@@ -4,6 +4,8 @@ import fastrand
 import numpy as np
 import torch
 
+from agilerl.networks.evolvable_mlp import EvolvableMLP
+
 
 class Mutations:
     """The Mutations class for evolutionary hyperparameter optimization.
@@ -554,7 +556,7 @@ class Mutations:
                     )
 
             if individual.algo in ["NeuralUCB", "NeuralTS"]:
-                if self.arch == "mlp":
+                if self.arch == "mlp" and isinstance(individual.actor, EvolvableMLP):
                     individual.exp_layer = (
                         individual.actor.feature_net.linear_layer_output
                     )
@@ -861,7 +863,7 @@ class Mutations:
         else:
             if individual.algo in ["NeuralUCB", "NeuralTS"]:
                 old_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
-                if self.arch == "mlp":
+                if self.arch == "mlp" and isinstance(old_actor, EvolvableMLP):
                     old_exp_layer = old_actor.feature_net.linear_layer_output
                 else:
                     old_exp_layer = old_actor.value_net.value_linear_layer_output
@@ -986,7 +988,7 @@ class Mutations:
         return individual
 
     def _reinit_bandit_grads(self, individual, offspring_actor, old_exp_layer):
-        if self.arch == "mlp":
+        if self.arch == "mlp" and isinstance(offspring_actor, EvolvableMLP):
             exp_layer = offspring_actor.feature_net.linear_layer_output
         else:
             exp_layer = offspring_actor.value_net.value_linear_layer_output
