@@ -66,6 +66,7 @@ Contents
    tutorials/gymnasium/index
    tutorials/pettingzoo/index
    tutorials/skills/index
+   tutorials/bandits/index
 
 .. toctree::
    :maxdepth: 1

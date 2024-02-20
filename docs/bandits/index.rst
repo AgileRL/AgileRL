@@ -1,4 +1,4 @@
-.. _bandits::
+.. _bandits:
 
 Contextual Multi-Armed Bandits
 ==============================
