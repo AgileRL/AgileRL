@@ -9,12 +9,19 @@ a bandit environment. We will also use evolutionary hyperparameter optimization 
 To complete the PenDigits environment, the agent must learn to select the best arm, or action, to take
 in a given context, or state.
 
-.. figure:: ../bandits/NeuralTS-PenDigits.png
-  :width: 400
-  :alt: regret-graph
-  :align: center
+.. list-table::
 
-  Figure 1: Cumulative regret from training on the PenDigits dataset
+    * - .. figure:: ../bandits/NeuralTS-PenDigits-regret.png
+
+          Figure 1: Cumulative regret from training on the PenDigits dataset
+
+      - .. figure:: ../bandits/NeuralTS-PenDigits-reward.png
+
+          Figure 2: Reward from training on the PenDigits dataset
+
+    *  -
+
+       -
 
 NeuralTS (:ref:`Neural Contextual Bandits with Thompson Sampling<neural_ts>`) adapts deep neural networks for both
 exploration and exploitation by using a posterior distribution of the reward with a neural network

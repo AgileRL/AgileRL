@@ -1,4 +1,4 @@
-"""This tutorial shows how to train an NeuralTS agent on the PenDigits dataset.
+"""This tutorial shows how to train an NeuralTS agent on the PenDigits dataset with evolutionary HPO.
 
 Authors: Nick (https://github.com/nicku-a)
 """
@@ -6,6 +6,7 @@ Authors: Nick (https://github.com/nicku-a)
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from scipy.ndimage import gaussian_filter1d
 from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
@@ -74,12 +75,13 @@ if __name__ == "__main__":
         algo="NeuralTS",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
-        new_layer_prob=0.5,  # New layer mutation
+        new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0.2,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength
+        mutate_elite=False,  # Mutate best agent in population
         arch=NET_CONFIG["arch"],  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
@@ -94,13 +96,12 @@ if __name__ == "__main__":
     print("Training...")
 
     regret = [[0] for _ in pop]
-
+    score = [[0] for _ in pop]
     total_steps = 0
 
     # TRAINING LOOP
     for idx_epi in trange(max_episodes):
         for i, agent in enumerate(pop):  # Loop through population
-            score = 0
             losses = []
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(max_steps):
@@ -125,7 +126,7 @@ if __name__ == "__main__":
                         losses.append(loss)
 
                 context = next_context
-                score += reward
+                score[i].append(reward)
                 regret[i].append(regret[i][-1] + 1 - reward)
 
             total_steps += max_steps
@@ -151,13 +152,27 @@ if __name__ == "__main__":
             pop = mutations.mutation(pop)
 
     # Plot the results
+    plt.figure()
     for i, agent_regret in enumerate(regret):
         plt.plot(
             np.linspace(0, total_steps, len(agent_regret)),
             agent_regret,
             label=f"NeuralTS: Agent {i}",
         )
-        plt.xlabel("Training Step")
-        plt.ylabel("Regret")
-        plt.legend()
-        plt.savefig("NeuralTS-PenDigits.png")
+    plt.xlabel("Training Step")
+    plt.ylabel("Regret")
+    plt.legend()
+    plt.savefig("NeuralTS-PenDigits-regret.png")
+
+    plt.figure()
+    for i, agent_score in enumerate(score):
+        smoothed_score = gaussian_filter1d(agent_score, sigma=80)
+        plt.plot(
+            np.linspace(0, total_steps, len(smoothed_score)),
+            smoothed_score,
+            label=f"NeuralTS: Agent {i}",
+        )
+    plt.xlabel("Training Step")
+    plt.ylabel("Reward")
+    plt.legend()
+    plt.savefig("NeuralTS-PenDigits-reward.png")
