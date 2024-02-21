@@ -341,21 +341,29 @@ class Mutations:
     def reinit_opt(self, individual):
         if self.multi_agent:
             # Reinitialise optimizer
-            actor_opts = getattr(individual, self.algo["actor"]["optimizer"])               # Assign actor optimizer to actor opts
+            actor_opts = getattr(
+                individual, self.algo["actor"]["optimizer"]
+            )  # Assign actor optimizer to actor opts
 
             net_params = [
                 actor.parameters()
-                for actor in getattr(individual, self.algo["actor"]["eval"])                # obtain actor net params
+                for actor in getattr(
+                    individual, self.algo["actor"]["eval"]
+                )  # obtain actor net params
             ]
 
             offspring_actor_opts = [
                 type(actor_opt)(net_param, lr=individual.lr_actor)
-                for actor_opt, net_param in zip(actor_opts, net_params)                     # create new optimizer objects for actors
+                for actor_opt, net_param in zip(
+                    actor_opts, net_params
+                )  # create new optimizer objects for actors
             ]
 
             setattr(
                 individual,
-                self.algo["actor"]["optimizer"].replace("_type", ""),                       # set actor_optimizer to the new actor optimizers
+                self.algo["actor"]["optimizer"].replace(
+                    "_type", ""
+                ),  # set actor_optimizer to the new actor optimizers
                 offspring_actor_opts,
             )
 

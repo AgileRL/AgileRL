@@ -1,8 +1,8 @@
+import sys
+
 from accelerate import Accelerator
 
-
-import sys
-sys.path.append('../')
+sys.path.append("../")
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -60,8 +60,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         accelerator=accelerator,
-        min_lr = 0.000000000000001,
-        max_lr = 1000.0
+        min_lr=0.000000000000001,
+        max_lr=1000.0,
     )
 
     agent_pop = initialPopulation(
@@ -104,12 +104,12 @@ if __name__ == "__main__":
     INIT_HP = {
         "ENV_NAME": "LunarLanderContinuous-v2",  # Gym environment name
         "ALGO": "DDPG",  # Algorithm
-        #"DOUBLE": True,  # Use double Q-learning
+        # "DOUBLE": True,  # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
         "BATCH_SIZE": 128,  # Batch size
-        "LR_ACTOR": 0.0001,           # Actor learning rate
-        "LR_CRITIC": 0.001,       
+        "LR_ACTOR": 0.0001,  # Actor learning rate
+        "LR_CRITIC": 0.001,
         "EPISODES": 1000,  # Max no. episodes
         "TARGET_SCORE": 200.0,  # Early training stop at avg score of last 100 episodes
         "GAMMA": 0.99,  # Discount factor
@@ -122,8 +122,8 @@ if __name__ == "__main__":
         "EVO_EPOCHS": 2,  # Evolution frequency
         "POLICY_FREQ": 2,  # Policy network update frequency
         "WANDB": False,  # Log with Weights and Biases
-        'MAX_ACTION': 1,
-        'MIN_ACTION': -1
+        "MAX_ACTION": 1,
+        "MIN_ACTION": -1,
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
@@ -140,7 +140,7 @@ if __name__ == "__main__":
         "MIN_LR": 0.0001,  # Define max and min limits for mutating RL hyperparams
         "MAX_LR": 0.01,
         "MIN_BATCH_SIZE": 8,
-        "MAX_BATCH_SIZE": 1024
+        "MAX_BATCH_SIZE": 1024,
     }
 
     NET_CONFIG = {

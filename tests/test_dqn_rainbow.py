@@ -111,6 +111,7 @@ def test_initialize_dqn_with_minimum_parameters():
     assert isinstance(dqn.optimizer, optim.Adam)
     assert dqn.arch == "mlp"
 
+
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_dqn_with_cnn_accelerator():
     state_dim = [3, 32, 32]
@@ -212,6 +213,7 @@ def test_initialize_dqn_with_actor_network(
     assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer, optim.Adam)
     assert dqn.arch == actor_network.arch
+
 
 @pytest.mark.parametrize(
     "accelerator",

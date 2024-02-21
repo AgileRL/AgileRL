@@ -222,6 +222,7 @@ def test_initialize_dqn_with_actor_network(
     assert dqn.arch == actor_network.arch
     assert isinstance(dqn.criterion, nn.MSELoss)
 
+
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action_epsilon_greedy():
     state_dim = [4]

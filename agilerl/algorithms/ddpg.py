@@ -254,12 +254,8 @@ class DDPG:
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor_optimizer = optim.Adam(
-            self.actor.parameters(), lr=self.lr_actor
-        )
-        self.critic_optimizer = optim.Adam(
-            self.critic.parameters(), lr=self.lr_critic
-        )
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr_critic)
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
@@ -345,7 +341,7 @@ class DDPG:
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        #print(self.learn_counter)
+        # print(self.learn_counter)
         states, actions, rewards, next_states, dones = experiences
         if self.accelerator is not None:
             states = states.to(self.accelerator.device)
@@ -433,7 +429,7 @@ class DDPG:
 
         else:
             actor_loss = None
-            critic_loss =  critic_loss.item()
+            critic_loss = critic_loss.item()
 
         return actor_loss, critic_loss
 
@@ -578,8 +574,8 @@ class DDPG:
             "critic_target",
             "actor_optimizer",
             "critic_optimizer",
-           # "actor_optimizer_type",
-           # "critic_optimizer_type",
+            # "actor_optimizer_type",
+            # "critic_optimizer_type",
         ]
 
         # Exclude private and built-in attributes

@@ -191,7 +191,7 @@ class CQN:
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
-            #self.optimizer = self.optimizer_type
+            # self.optimizer = self.optimizer_type
 
         self.criterion = nn.MSELoss()
 
@@ -366,7 +366,7 @@ class CQN:
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-       #clone.optimizer_type = optimizer
+        # clone.optimizer_type = optimizer
         if self.accelerator is not None:
             if wrap:
                 (
