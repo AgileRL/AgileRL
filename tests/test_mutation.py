@@ -65,7 +65,7 @@ def test_constructor_initializes_attributes():
         "actor": {
             "eval": "actor",
             "target": "actor_target",
-            "optimizer": "optimizer_type",
+            "optimizer": "optimizer",
         },
         "critics": [],
     }
@@ -145,18 +145,18 @@ def test_constructor_initializes_attributes_multi_agent():
         "actor": {
             "eval": "actors",
             "target": "actor_targets",
-            "optimizer": "actor_optimizers_type",
+            "optimizer": "actor_optimizers",
         },
         "critics": [
             {
                 "eval": "critics_1",
                 "target": "critic_targets_1",
-                "optimizer": "critic_1_optimizers_type",
+                "optimizer": "critic_1_optimizers",
             },
             {
                 "eval": "critics_2",
                 "target": "critic_targets_2",
-                "optimizer": "critic_2_optimizers_type",
+                "optimizer": "critic_2_optimizers",
             },
         ],
     }
@@ -463,6 +463,7 @@ def test_mutation_applies_no_mutations_pre_training_mut():
                 accelerator=accelerator if distributed else None,
             )
 
+            
             new_population = copy.deepcopy(population)
             mutated_population = mutations.mutation(new_population, pre_training_mut)
 
@@ -1838,10 +1839,10 @@ def test_reinit_opt():
         mutations.reinit_opt(new_population[0])
 
         new_opt = getattr(
-            new_population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+            new_population[0], mutations.algo["actor"]["optimizer"]
         )
         old_opt = getattr(
-            population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+            population[0], mutations.algo["actor"]["optimizer"]
         )
 
         assert str(new_opt.state_dict()) == str(old_opt.state_dict())

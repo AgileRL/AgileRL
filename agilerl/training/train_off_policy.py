@@ -150,6 +150,12 @@ def train_off_policy(
             else:
                 warnings.warn("Must login to wandb with API key.")
 
+        config_dict = {}
+        if INIT_HP is not None:
+            config_dict.update(INIT_HP)
+        if MUT_P is not None:
+            config_dict.update(MUT_P)
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -160,22 +166,7 @@ def train_off_policy(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
-                    config={
-                        "algo": f"Evo HPO {algo}",
-                        "env": env_name,
-                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                        "lr": INIT_HP["LR"] if INIT_HP else None,
-                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
-                        "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
-                        "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
-                        "tau": INIT_HP["TAU"] if INIT_HP else None,
-                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
-                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
-                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
-                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
-                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
-                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
-                    },
+                    config=config_dict,
                 )
             accelerator.wait_for_everyone()
         else:
@@ -186,22 +177,7 @@ def train_off_policy(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata
-                config={
-                    "algo": f"Evo HPO {algo}",
-                    "env": env_name,
-                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                    "lr": INIT_HP["LR"] if INIT_HP else None,
-                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
-                    "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
-                    "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
-                    "tau": INIT_HP["TAU"] if INIT_HP else None,
-                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
-                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
-                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
-                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
-                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
-                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
-                },
+                config=config_dict,
             )
 
     if accelerator is not None:
@@ -276,6 +252,8 @@ def train_off_policy(
             state = env.reset()[0]  # Reset environment at start of episode
             rewards, terminations, truncs, losses = [], [], [], []
             score = 0
+
+            print("actor optimizer", agent.actor_optimizer)
 
             if algo in ["DQN", "Rainbow DQN"]:
                 train_actions_hist = [0] * agent.action_dim

@@ -355,7 +355,7 @@ class Mutations:
 
             setattr(
                 individual,
-                self.algo["actor"]["optimizer"].replace("_type", ""),                       # set actor_optimizer to the new actor optimizers
+                self.algo["actor"]["optimizer"],                       # set actor_optimizer to the new actor optimizers
                 offspring_actor_opts,
             )
 
@@ -374,7 +374,7 @@ class Mutations:
 
                 setattr(
                     individual,
-                    critic_list["optimizer"].replace("_type", ""),
+                    critic_list["optimizer"],
                     offspring_critic_opts,
                 )
         else:

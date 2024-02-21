@@ -60,6 +60,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         accelerator=accelerator,
+        min_lr = 0.000000000000001,
+        max_lr = 1000.0
     )
 
     agent_pop = initialPopulation(
@@ -105,19 +107,19 @@ if __name__ == "__main__":
         #"DOUBLE": True,  # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
-        "BATCH_SIZE": 256,  # Batch size
+        "BATCH_SIZE": 128,  # Batch size
         "LR_ACTOR": 0.0001,           # Actor learning rate
         "LR_CRITIC": 0.001,       
-        "EPISODES": 2000,  # Max no. episodes
+        "EPISODES": 1000,  # Max no. episodes
         "TARGET_SCORE": 200.0,  # Early training stop at avg score of last 100 episodes
         "GAMMA": 0.99,  # Discount factor
-        "MEMORY_SIZE": 10000,  # Max memory buffer size
+        "MEMORY_SIZE": 100000,  # Max memory buffer size
         "LEARN_STEP": 1,  # Learning frequency
-        "TAU": 1e-3,  # For soft update of target parameters
+        "TAU": 0.005,  # For soft update of target parameters
         "TOURN_SIZE": 2,  # Tournament size
         "ELITISM": True,  # Elitism in tournament selection
-        "POP_SIZE": 1,  # Population size
-        "EVO_EPOCHS": 1,  # Evolution frequency
+        "POP_SIZE": 2,  # Population size
+        "EVO_EPOCHS": 2,  # Evolution frequency
         "POLICY_FREQ": 2,  # Policy network update frequency
         "WANDB": False,  # Log with Weights and Biases
         'MAX_ACTION': 1,
@@ -125,21 +127,25 @@ if __name__ == "__main__":
     }
 
     MUTATION_PARAMS = {  # Relative probabilities
-        "NO_MUT": 0.4,  # No mutation
-        "ARCH_MUT": 0.2,  # Architecture mutation
+        "NO_MUT": 0,  # No mutation
+        "ARCH_MUT": 0,  # Architecture mutation
         "NEW_LAYER": 0.2,  # New layer mutation
-        "PARAMS_MUT": 0.2,  # Network parameters mutation
-        "ACT_MUT": 0.2,  # Activation layer mutation
+        "PARAMS_MUT": 0,  # Network parameters mutation
+        "ACT_MUT": 0,  # Activation layer mutation
         "RL_HP_MUT": 0.2,  # Learning HP mutation
         # Learning HPs to choose from
-        "RL_HP_SELECTION": ["lr", "batch_size"],
+        "RL_HP_SELECTION": ["lr"],
         "MUT_SD": 0.1,  # Mutation strength
-        "RAND_SEED": 1,  # Random seed
+        "RAND_SEED": 42,  # Random seed
+        "MIN_LR": 0.0001,  # Define max and min limits for mutating RL hyperparams
+        "MAX_LR": 0.01,
+        "MIN_BATCH_SIZE": 8,
+        "MAX_BATCH_SIZE": 1024
     }
 
     NET_CONFIG = {
         "arch": "mlp",  # Network architecture
-        "h_size": [32, 32],  # Actor hidden size
+        "h_size": [64, 64],  # Actor hidden size
     }
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

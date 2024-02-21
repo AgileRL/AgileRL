@@ -141,8 +141,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         evo_loop=1,
         max_steps=25,
         target=INIT_HP["TARGET_SCORE"],
-        tournament=tournament,
-        mutation=mutations,
+        tournament=None,
+        mutation=None,
         wb=INIT_HP["WANDB"],
         accelerator=accelerator,
     )
