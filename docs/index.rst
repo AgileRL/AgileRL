@@ -141,6 +141,6 @@ or to demo distributed training:
 Tutorials
 ---------
 
-We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent tasks, such as training DQN to
-play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. Check them out in our docs :ref:`here <PettingZoo_tutorials>`.
+We have created tutorials on how to use AgileRL and train agents on a variety of tasks. Currently, we have tutorials for single-agent :ref:`Gymnasium tasks<Gymnasium_tutorials>`,
+multi-agent :ref:`PettingZoo environments<PettingZoo_tutorials>`, learning :ref:`hierarchical skills<skills_tutorials>` and using :ref:`contextual multi-armed bandits<bandit_tutorials>`.
 Our demo files also provide examples on how to train agents using AgileRL, and there are various algorithm-level examples throughout the documentation.
