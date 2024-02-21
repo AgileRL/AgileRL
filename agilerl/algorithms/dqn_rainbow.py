@@ -234,7 +234,7 @@ class RainbowDQN:
         )
 
         if self.accelerator is not None:
-            # self.optimizer = self.optimizer_type
+            #self.optimizer = self.optimizer_type
             if wrap:
                 self.wrap_models()
         else:
@@ -538,7 +538,7 @@ class RainbowDQN:
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        # clone.optimizer_type = optimizer
+        #clone.optimizer_type = optimizer
         if self.accelerator is not None:
             if wrap:
                 (

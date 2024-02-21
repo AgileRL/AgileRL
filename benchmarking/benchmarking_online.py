@@ -1,9 +1,8 @@
-import sys
-
 import torch
 import yaml
 
-sys.path.append("../")
+import sys
+sys.path.append('../')
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations

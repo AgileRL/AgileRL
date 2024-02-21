@@ -286,7 +286,9 @@ class TD3:
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.actor_optimizer = optim.Adam(
+            self.actor.parameters(), lr=self.lr_actor
+        )
         self.critic_1_optimizer = optim.Adam(
             self.critic_1.parameters(), lr=self.lr_critic
         )

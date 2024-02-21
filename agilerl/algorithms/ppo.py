@@ -293,13 +293,13 @@ class PPO:
         )
 
         if self.accelerator is not None:
-            # self.optimizer = self.optimizer_type
+            #self.optimizer = self.optimizer_type
             if wrap:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.critic = self.critic.to(self.device)
-            # self.optimizer = self.optimizer_type
+            #self.optimizer = self.optimizer_type
 
     def prepare_state(self, state):
         """Prepares state for forward pass through neural network.
@@ -584,7 +584,7 @@ class PPO:
                 {"params": critic.parameters(), "lr": self.lr},
             ]
         )
-        # clone.optimizer_type = optimizer
+        #clone.optimizer_type = optimizer
 
         if self.accelerator is not None:
             if wrap:

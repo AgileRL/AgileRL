@@ -1,7 +1,6 @@
 import os
 import warnings
 from datetime import datetime
-
 import numpy as np
 import wandb
 from torch.utils.data import DataLoader
@@ -238,7 +237,7 @@ def train_multi_agent(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             agent_reward = {agent_id: 0 for agent_id in agent_ids}
-            losses = {agent_id: [] for agent_id in agent_ids}
+            losses = {agent_id: []  for agent_id in agent_ids}
 
             if is_vectorised:
                 rewards = {agent_id: [] for agent_id in agent_ids}
@@ -323,7 +322,9 @@ def train_multi_agent(
                 else:
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r
+                        
 
+                
                 state = next_state
 
             if is_vectorised:
@@ -347,9 +348,7 @@ def train_multi_agent(
                     actor_losses, critic_losses = list(zip(*losses[agent_id]))
                     actor_losses = [loss for loss in actor_losses if loss != None]
                     if actor_losses:
-                        pop_actor_loss[agent_idx][agent_id].append(
-                            np.mean(actor_losses)
-                        )
+                        pop_actor_loss[agent_idx][agent_id].append(np.mean(actor_losses))
                     pop_critic_loss[agent_idx][agent_id].append(np.mean(critic_losses))
 
             agent.steps[-1] += max_steps
@@ -393,14 +392,15 @@ def train_multi_agent(
                     pop_critic_loss[agent_idx].values(),
                 ):
                     if actor_loss:
-
+                    
                         actor_loss_dict[
                             f"train/agent_{agent_idx}_{agent_id}_actor_loss"
-                        ] = np.mean(actor_loss[-evo_epochs:])
-
+                            ] = np.mean(actor_loss[-evo_epochs:])
+                        
                         critic_loss_dict[
-                            f"train/agent_{agent_idx}_{agent_id}_critic_loss"
-                        ] = np.mean(critic_loss[-evo_epochs:])
+                            f"train/agent_{agent_idx}_{agent_id}_critic_loss"] = np.mean(critic_loss[
+                                -evo_epochs:
+                            ])
                         wandb_dict.update(actor_loss_dict)
                         wandb_dict.update(critic_loss_dict)
 

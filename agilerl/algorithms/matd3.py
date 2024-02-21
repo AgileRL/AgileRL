@@ -1,6 +1,7 @@
 import copy
 import random
 import warnings
+from collections import defaultdict
 
 import dill
 import numpy as np

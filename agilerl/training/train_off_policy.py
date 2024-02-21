@@ -374,9 +374,7 @@ def train_off_policy(
             agent.scores.append(score)
             if isinstance(losses[-1], tuple):
                 actor_losses, critic_losses = list(zip(*losses))
-                mean_loss = np.mean(
-                    [loss for loss in actor_losses if loss != None]
-                ), np.mean(critic_losses)
+                mean_loss = np.mean([loss for loss in actor_losses if loss != None]), np.mean(critic_losses)
             else:
                 mean_loss = np.mean(losses)
             pop_loss[agent_idx].append(mean_loss)
@@ -418,15 +416,11 @@ def train_off_policy(
                 wandb_dict.update(actor_loss_dict)
             elif algo in ["TD3", "DDPG"]:
                 actor_loss_dict = {
-                    f"train/agent_{index}_actor_loss": np.mean(
-                        list(zip(*loss_list))[0][-evo_epochs:]
-                    )
+                    f"train/agent_{index}_actor_loss": np.mean(list(zip(*loss_list))[0][-evo_epochs:])
                     for index, loss_list in enumerate(pop_loss)
                 }
                 critic_loss_dict = {
-                    f"train/agent_{index}_critic_loss": np.mean(
-                        list(zip(*loss_list))[-1][-evo_epochs:]
-                    )
+                    f"train/agent_{index}_critic_loss": np.mean(list(zip(*loss_list))[-1][-evo_epochs:])
                     for index, loss_list in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
