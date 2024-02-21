@@ -16,7 +16,7 @@ Probe environments can be used to localise errors and confirm that algorithms ar
 observation spaces, and discrete and continuous action spaces, that can be used to debug reinforcement learning implementations. These are detailed in the tables below.
 
 How to use Probe Environments
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We provide functions that can be used directly or edited to quickly check your algorithm's ability to solve a probe environment. Each environment also contains inputs and corresponding outputs that a
 correctly functioning agent should be able to learn, and can be used to diagnose issues.
@@ -133,7 +133,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
               check_policy_on_policy_with_probe_env(
                   env, PPO, algo_args, memory, learn_steps, device
         )
-    See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_probe_env<single_check_policy_on_policy_with_probe_env>`
+
+See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_probe_env<single_check_policy_on_policy_with_probe_env>`
 
 
 .. collapse:: Multi-agent - Check Policy and Q-learning

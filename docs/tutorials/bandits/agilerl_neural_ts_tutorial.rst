@@ -16,11 +16,7 @@ in a given context, or state.
 
   Figure 1: Cumulative regret from training on the PenDigits dataset
 
-
-NeuralTS Overview
------------------
-
-NeuralTS (Neural Contextual Bandits with Thompson Sampling) adapts deep neural networks for both
+NeuralTS (:ref:`Neural Contextual Bandits with Thompson Sampling<neural_ts>`) adapts deep neural networks for both
 exploration and exploitation by using a posterior distribution of the reward with a neural network
 approximator as its mean, and neural tangent features as its variance.
 

@@ -16,11 +16,7 @@ in a given context, or state.
 
   Figure 1: Cumulative regret from training on the Iris dataset
 
-
-NeuralUCB Overview
-------------------
-
-NeuralUCB (Neural Contextual Bandits with UCB-based Exploration) utilizes the representational capabilities
+NeuralUCB (:ref:`Neural Contextual Bandits with UCB-based Exploration<neural_ucb>`) utilizes the representational capabilities
 of deep neural networks and employs a neural network-based random feature mapping to create an upper
 confidence bound (UCB) for reward, enabling efficient exploration.
 

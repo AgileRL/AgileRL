@@ -95,11 +95,11 @@ contextual multi-armed :ref:`bandit algorithms<bandits>`.
 
    <div class="tiles article">
       <a href="../bandits/agilerl_neural_ucb_tutorial.html" class="tile">
-         <img src="../../_images/iris-thumbnail.png" alt="Iris image" class="thumbnail-image">
+         <img src="../../_static/thumbnails/iris-thumbnail.png" alt="Iris image" class="thumbnail-image">
          <h2>NeuralUCB - Iris</h2>
       </a>
-      <a href="../gymnasium/agilerl_neural_ts_tutorial.html" class="tile">
-      <img src="../../_images/pendigits-thumbnail.png" alt="Pen digits image" class="thumbnail-image">
+      <a href="../bandits/agilerl_neural_ts_tutorial.html" class="tile">
+      <img src="../../_static/thumbnails/pendigits-thumbnail.png" alt="Pen digits image" class="thumbnail-image">
          <h2>NeuralTS - PenDigits</h2>
       </a>
 
