@@ -12,6 +12,7 @@ omegaconf==2.3.0
 pettingzoo==1.23.1
 pre-commit==3.4.0
 redis==4.4.4
+scipy==1.11.1
 SuperSuit==3.9.0
 termcolor==1.1.0
 torch==2.0.1
