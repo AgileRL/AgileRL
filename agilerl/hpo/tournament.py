@@ -1,5 +1,3 @@
-import copy
-
 import numpy as np
 
 
@@ -41,7 +39,7 @@ class TournamentSelection:
         max_id = max([ind.index for ind in population])
 
         model = population[np.argsort(rank)[-1]]
-        elite = copy.deepcopy(model)
+        elite = model.clone()
         return elite, rank, max_id
 
     def select(self, population):

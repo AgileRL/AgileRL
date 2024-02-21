@@ -1,18 +1,10 @@
 import copy
 
 import numpy as np
+import pytest
 import torch
 from accelerate import Accelerator
 
-from agilerl.algorithms.cqn import CQN
-from agilerl.algorithms.ddpg import DDPG
-from agilerl.algorithms.dqn import DQN
-from agilerl.algorithms.dqn_rainbow import RainbowDQN
-from agilerl.algorithms.ilql import ILQL
-from agilerl.algorithms.maddpg import MADDPG
-from agilerl.algorithms.matd3 import MATD3
-from agilerl.algorithms.ppo import PPO
-from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.mutation import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
 from agilerl.utils.utils import initialPopulation
@@ -51,12 +43,70 @@ SHARED_INIT_HP = {
     "MIN_ACTION": -1,
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
+    "LAMBDA": 1.0,
+    "REG": 0.000625,
     "CHANNELS_LAST": False,
 }
 
-SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
-SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
-SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
+SHARED_INIT_HP_MA = {
+    "POPULATION_SIZE": 4,
+    "DOUBLE": True,
+    "BATCH_SIZE": 128,
+    "LR": 1e-3,
+    "LR_ACTOR": 1e-4,
+    "LR_CRITIC": 1e-3,
+    "GAMMA": 0.99,
+    "LEARN_STEP": 1,
+    "TAU": 1e-3,
+    "BETA": 0.4,
+    "PRIOR_EPS": 0.000001,
+    "NUM_ATOMS": 51,
+    "V_MIN": 0,
+    "V_MAX": 200,
+    "N_STEP": 3,
+    "POLICY_FREQ": 10,
+    "DISCRETE_ACTIONS": True,
+    "GAE_LAMBDA": 0.95,
+    "ACTION_STD_INIT": 0.6,
+    "CLIP_COEF": 0.2,
+    "ENT_COEF": 0.01,
+    "VF_COEF": 0.5,
+    "MAX_GRAD_NORM": 0.5,
+    "TARGET_KL": None,
+    "UPDATE_EPOCHS": 4,
+    "MAX_ACTION": [(1,), (1,)],
+    "MIN_ACTION": [(-1,), (-1,)],
+    "N_AGENTS": 2,
+    "AGENT_IDS": ["agent1", "agent2"],
+    "LAMBDA": 1.0,
+    "REG": 0.000625,
+    "CHANNELS_LAST": False,
+}
+
+
+@pytest.fixture
+def init_pop(
+    algo,
+    state_dim,
+    action_dim,
+    one_hot,
+    net_config,
+    INIT_HP,
+    population_size,
+    device,
+    accelerator,
+):
+    return initialPopulation(
+        algo=algo,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        one_hot=one_hot,
+        net_config=net_config,
+        INIT_HP=INIT_HP,
+        population_size=population_size,
+        device=device,
+        accelerator=accelerator,
+    )
 
 
 # The constructor initializes all the attributes of the Mutations class correctly.
@@ -252,31 +302,43 @@ def test_returns_regularize_weight():
 
 
 # Checks no mutations if all probabilities set to zero
-def test_mutation_no_options():
-    state_dim = [4]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        )
+    ],
+)
+def test_mutation_no_options(
+    algo,
+    state_dim,
+    action_dim,
+    one_hot,
+    net_config,
+    INIT_HP,
+    population_size,
+    device,
+    accelerator,
+    init_pop,
+):
     pre_training_mut = True
 
-    population = initialPopulation(
-        algo="DQN",
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
-        net_config=net_config,
-        INIT_HP=SHARED_INIT_HP,
-        population_size=population_size,
-        device=device,
-    )
+    population = init_pop
 
     mutations = Mutations(
-        "DQN", 0, 0, 0, 0, 0, 0, ["batch_size", "lr", "learn_step"], 0.1, device=device
+        algo, 0, 0, 0, 0, 0, 0, ["batch_size", "lr", "learn_step"], 0.1, device=device
     )
 
-    new_population = copy.deepcopy(population)
+    new_population = [agent.clone() for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -286,1562 +348,4349 @@ def test_mutation_no_options():
 
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
-def test_mutation_applies_random_mutations():
-    state_dim = [4]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_random_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = True
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        mutate_elite=False,
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0.1,
-                0.1,
-                0.1,
-                0.1,
-                0.1,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                mutate_elite=False,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutated_population = mutations.mutation(population, pre_training_mut)
 
-            mutated_population = mutations.mutation(population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            assert (
-                mutated_population[0].mut == "None"
-            )  # Satisfies mutate_elite=False condition
-            for individual in mutated_population:
-                assert individual.mut in [
-                    "None",
-                    "bs",
-                    "lr",
-                    "lr_actor",
-                    "lr_critic",
-                    "ls",
-                    "act",
-                    "param",
-                    "arch",
-                ]
+    assert len(mutated_population) == len(population)
+    assert mutated_population[0].mut == "None"  # Satisfies mutate_elite=False condition
+    for individual in mutated_population:
+        assert individual.mut in [
+            "None",
+            "bs",
+            "lr",
+            "lr_actor",
+            "lr_critic",
+            "ls",
+            "act",
+            "param",
+            "arch",
+        ]
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-def test_mutation_applies_no_mutations():
-    state_dim = [4]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_no_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                1,
-                0,
-                0,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None"]
-                assert old.index == individual.index
-                assert old.actor != individual.actor
-                assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None"]
+        assert old.index == individual.index
+        assert old.actor != individual.actor
+        assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-def test_mutation_applies_no_mutations_pre_training_mut():
-    state_dim = [4]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_no_mutations_pre_training_mut(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = True
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                1,
-                0,
-                0,
-                0,
-                0,
-                1,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
+    print(population, mutated_population)
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in [
-                    "None",
-                    "bs",
-                    "lr",
-                    "lr_actor",
-                    "lr_critic",
-                    "ls",
-                ]
-                assert old.index == individual.index
-                assert old.actor != individual.actor
-                assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in [
+            "None",
+            "bs",
+            "lr",
+            "lr_actor",
+            "lr_critic",
+            "ls",
+        ]
+        assert old.index == individual.index
+        assert old.actor != individual.actor
+        assert str(old.actor.state_dict()) == str(individual.actor.state_dict())
 
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
-def test_mutation_applies_rl_hp_mutations():
-    state_dim = [4]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_rl_hp_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    for rl_hp_mut in ["batch_size", "lr", "learn_step"]:
+        mutations = Mutations(
+            algo,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            [rl_hp_mut],
+            0.1,
+            device=device if not distributed else None,
+            accelerator=accelerator if distributed else None,
+        )
 
-            for rl_hp_mut in ["batch_size", "lr", "learn_step"]:
-                mutations = Mutations(
-                    algo,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    1,
-                    [rl_hp_mut],
-                    0.1,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
+        new_population = [agent.clone() for agent in population]
+        mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            assert individual.mut in [
+                "None",
+                "bs",
+                "lr",
+                "lr_actor",
+                "lr_critic",
+                "ls",
+            ]
+            if individual.mut == "bs":
+                assert (
+                    mutations.min_batch_size
+                    <= individual.batch_size
+                    <= mutations.max_batch_size
                 )
-
-                new_population = copy.deepcopy(population)
-                mutated_population = mutations.mutation(
-                    new_population, pre_training_mut
+            if individual.mut == "lr":
+                assert mutations.min_lr <= individual.lr <= mutations.max_lr
+            if individual.mut == "lr_actor":
+                assert mutations.min_lr <= individual.lr_actor <= mutations.max_lr
+            if individual.mut == "lr_critic":
+                assert mutations.min_lr <= individual.lr_critic <= mutations.max_lr
+            if individual.mut == "ls":
+                assert (
+                    mutations.min_learn_step
+                    <= individual.learn_step
+                    <= mutations.max_learn_step
                 )
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut in [
-                        "None",
-                        "bs",
-                        "lr",
-                        "lr_actor",
-                        "lr_critic",
-                        "ls",
-                    ]
-                    if individual.mut == "bs":
-                        assert (
-                            mutations.min_batch_size
-                            <= individual.batch_size
-                            <= mutations.max_batch_size
-                        )
-                    if individual.mut == "lr":
-                        assert mutations.min_lr <= individual.lr <= mutations.max_lr
-                    if individual.mut == "lr_actor":
-                        assert (
-                            mutations.min_lr <= individual.lr_actor <= mutations.max_lr
-                        )
-                    if individual.mut == "lr_critic":
-                        assert (
-                            mutations.min_lr <= individual.lr_critic <= mutations.max_lr
-                        )
-                    if individual.mut == "ls":
-                        assert (
-                            mutations.min_learn_step
-                            <= individual.learn_step
-                            <= mutations.max_learn_step
-                        )
-                    assert old.index == individual.index
+            assert old.index == individual.index
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-def test_mutation_applies_activation_mutations():
-    state_dim = [3]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_activation_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "act"]
-                if individual.mut == "act":
-                    assert old.actor.mlp_activation != individual.actor.mlp_activation
-                    assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None", "act"]
+        if individual.mut == "act":
+            assert old.actor.mlp_activation != individual.actor.mlp_activation
+            assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
+        assert old.index == individual.index
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-def test_mutation_applies_activation_mutations_no_skip():
-    state_dim = [3]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_activation_mutations_no_skip(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"DDPG": DDPG}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    for individual in population:
+        individual.algo = None
+        individual.lr = 1e-3
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            for individual in population:
-                individual.algo = None
-                individual.lr = 1e-3
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "act"]
-                if individual.mut == "act":
-                    assert old.actor.mlp_activation != individual.actor.mlp_activation
-                    assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None", "act"]
+        if individual.mut == "act":
+            assert old.actor.mlp_activation != individual.actor.mlp_activation
+            assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
+        assert old.index == individual.index
 
 
 # The mutation method applies CNN activation mutations to the population and returns the mutated population.
-def test_mutation_applies_cnn_activation_mutations():
-    state_dim = [3, 32, 32]
-    action_dim = 2
-    one_hot = False
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_cnn_activation_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        arch="cnn",
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "act"]
-                if individual.mut == "act":
-                    assert old.actor.mlp_activation != individual.actor.mlp_activation
-                    assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None", "act"]
+        if individual.mut == "act":
+            assert old.actor.mlp_activation != individual.actor.mlp_activation
+            assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
+        assert old.index == individual.index
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
-def test_mutation_applies_parameter_mutations():
-    state_dim = [3]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_parameter_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                1,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "param"
-                # Due to randomness, sometimes parameters are not different
-                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut == "param"
+        # Due to randomness, sometimes parameters are not different
+        # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+        assert old.index == individual.index
 
 
 # The mutation method applies CNN parameter mutations to the population and returns the mutated population.
-def test_mutation_applies_cnn_parameter_mutations():
-    state_dim = [3, 32, 32]
-    action_dim = 2
-    one_hot = False
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_cnn_parameter_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+        arch="cnn",
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                1,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "param"
-                # Due to randomness, sometimes parameters are not different
-                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut == "param"
+        # Due to randomness, sometimes parameters are not different
+        # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+        assert old.index == individual.index
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
-def test_mutation_applies_architecture_mutations():
-    state_dim = [3]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [32, 32]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_architecture_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
+    for mut_method in [
+        ["add_mlp_layer", "remove_mlp_layer"],
+        ["add_mlp_node", "remove_mlp_node"],
+    ]:
+        population = init_pop
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+        mutations = Mutations(
+            algo,
+            0,
+            1,
+            0.5,
+            0,
+            0,
+            0,
+            ["batch_size", "lr", "learn_step"],
+            0.5,
+            device=device if not distributed else None,
+            accelerator=accelerator if distributed else None,
+        )
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            for mut_method in [
-                ["add_mlp_layer", "remove_mlp_layer"],
-                ["add_mlp_node", "remove_mlp_node"],
-            ]:
-                population = initialPopulation(
-                    algo=algo,
-                    state_dim=state_dim,
-                    action_dim=action_dim,
-                    one_hot=one_hot,
-                    net_config=net_config,
-                    INIT_HP=SHARED_INIT_HP,
-                    population_size=population_size,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [np.random.choice(mut_method)]
 
-                mutations = Mutations(
-                    algo,
-                    0,
-                    1,
-                    0.5,
-                    0,
-                    0,
-                    0,
-                    ["batch_size", "lr", "learn_step"],
-                    0.5,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+        mutations.rng = DummyRNG()
 
-                class DummyRNG:
-                    def choice(self, a, size=None, replace=True, p=None):
-                        return [np.random.choice(mut_method)]
+        new_population = [agent.clone() for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
 
-                mutations.rng = DummyRNG()
-
-                new_population = copy.deepcopy(population)
-                mutated_population = [
-                    mutations.architecture_mutate(agent) for agent in new_population
-                ]
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut == "arch"
-                    # Due to randomness and constraints on size, sometimes architectures are not different
-                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                    assert old.index == individual.index
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            assert individual.mut == "arch"
+            # Due to randomness and constraints on size, sometimes architectures are not different
+            # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+            assert old.index == individual.index
 
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
-def test_mutation_applies_cnn_architecture_mutations():
-    state_dim = [3, 32, 32]
-    action_dim = 2
-    one_hot = False
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "Rainbow DQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "DDPG",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "TD3",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "PPO",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "CQN",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "ILQL",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "ILQL",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralUCB",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "NeuralTS",
+            False,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            True,
+            [3, 32, 32],
+            2,
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_cnn_architecture_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = True
 
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-        "ILQL": ILQL,
-    }
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        1,
+        0.5,
+        0,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+        arch="cnn",
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                1,
-                0.5,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "arch"
-                # Due to randomness and constraints on size, sometimes architectures are not different
-                # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut == "arch"
+        # Due to randomness and constraints on size, sometimes architectures are not different
+        # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+        assert old.index == individual.index
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
-def test_mutation_applies_bert_architecture_mutations():
-    state_dim = [3]
-    action_dim = 2
-    one_hot = False
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DDPG",
+            False,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            True,
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_bert_architecture_mutations(
+    algo, distributed, device, accelerator, init_pop
+):
+    for mut_method in [
+        [
+            "add_encoder_layer",
+            "remove_encoder_layer",
+            "add_decoder_layer",
+            "remove_decoder_layer",
+        ],
+        ["add_node", "remove_node"],
+    ]:
+        population = init_pop
 
-    algo_classes = {"DDPG": DDPG}
+        mutations = Mutations(
+            algo,
+            0,
+            1,
+            0.5,
+            0,
+            0,
+            0,
+            ["batch_size", "lr", "learn_step"],
+            0.5,
+            arch="bert",
+            device=device if not distributed else None,
+            accelerator=accelerator if distributed else None,
+        )
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            for mut_method in [
-                [
-                    "add_encoder_layer",
-                    "remove_encoder_layer",
-                    "add_decoder_layer",
-                    "remove_decoder_layer",
-                ],
-                ["add_node", "remove_node"],
-            ]:
-                population = initialPopulation(
-                    algo=algo,
-                    state_dim=state_dim,
-                    action_dim=action_dim,
-                    one_hot=one_hot,
-                    INIT_HP=SHARED_INIT_HP,
-                    net_config={"arch": "mlp", "h_size": [32, 32]},
-                    population_size=population_size,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [np.random.choice(mut_method)]
 
-                mutations = Mutations(
-                    algo,
-                    0,
-                    1,
-                    0.5,
-                    0,
-                    0,
-                    0,
-                    ["batch_size", "lr", "learn_step"],
-                    0.5,
-                    arch="bert",
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
+        mutations.rng = DummyRNG()
 
-                class DummyRNG:
-                    def choice(self, a, size=None, replace=True, p=None):
-                        return [np.random.choice(mut_method)]
+        for individual in population:
+            individual.actor = EvolvableBERT([12], [12])
+            individual.actor_target = copy.deepcopy(individual.actor)
+            individual.critic = EvolvableBERT([12], [12])
+            individual.critic_target = copy.deepcopy(individual.critic)
 
-                mutations.rng = DummyRNG()
+        new_population = [agent.clone() for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
 
-                for individual in population:
-                    individual.actor = EvolvableBERT([12], [12])
-                    individual.actor_target = copy.deepcopy(individual.actor)
-                    individual.critic = EvolvableBERT([12], [12])
-                    individual.critic_target = copy.deepcopy(individual.critic)
-
-                new_population = copy.deepcopy(population)
-                mutated_population = [
-                    mutations.architecture_mutate(agent) for agent in new_population
-                ]
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut == "arch"
-                    # Due to randomness and constraints on size, sometimes architectures are not different
-                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                    assert old.index == individual.index
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            assert individual.mut == "arch"
+            # Due to randomness and constraints on size, sometimes architectures are not different
+            # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+            assert old.index == individual.index
 
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
-def test_mutation_applies_random_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_random_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        0.1,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0.1,
-                0.1,
-                0.1,
-                0.1,
-                0.1,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutated_population = mutations.mutation(population, pre_training_mut)
 
-            mutated_population = mutations.mutation(population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for individual in mutated_population:
-                assert individual.mut in [
-                    "None",
-                    "bs",
-                    "lr",
-                    "lr_actor",
-                    "lr_critic",
-                    "ls",
-                    "act",
-                    "param",
-                    "arch",
-                ]
+    assert len(mutated_population) == len(population)
+    for individual in mutated_population:
+        assert individual.mut in [
+            "None",
+            "bs",
+            "lr",
+            "lr_actor",
+            "lr_critic",
+            "ls",
+            "act",
+            "param",
+            "arch",
+        ]
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-def test_mutation_applies_no_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_no_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                1,
-                0,
-                0,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutated_population = mutations.mutation(population, pre_training_mut)
 
-            mutated_population = mutations.mutation(population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None"]
-                assert old.index == individual.index
-                assert old.actors == individual.actors
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None"]
+        assert old.index == individual.index
+        assert old.actors == individual.actors
 
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
-def test_mutation_applies_rl_hp_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_rl_hp_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
+
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in [
+            "None",
+            "bs",
+            "lr",
+            "lr_actor",
+            "lr_critic",
+            "ls",
+        ]
+        if individual.mut == "bs":
+            assert (
+                mutations.min_batch_size
+                <= individual.batch_size
+                <= mutations.max_batch_size
             )
-
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                0,
-                1,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
+        if individual.mut == "lr":
+            assert mutations.min_lr <= individual.lr <= mutations.max_lr
+        if individual.mut == "lr_actor":
+            assert mutations.min_lr <= individual.lr_actor <= mutations.max_lr
+        if individual.mut == "lr_critic":
+            assert mutations.min_lr <= individual.lr_critic <= mutations.max_lr
+        if individual.mut == "ls":
+            assert (
+                mutations.min_learn_step
+                <= individual.learn_step
+                <= mutations.max_learn_step
             )
+        assert old.index == individual.index
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in [
-                    "None",
-                    "bs",
-                    "lr",
-                    "lr_actor",
-                    "lr_critic",
-                    "ls",
+# The mutation method applies activation mutations to the population and returns the mutated population.
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_activation_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
+    pre_training_mut = False
+
+    population = init_pop
+
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
+
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None", "act"]
+        if individual.mut == "act":
+            for old_actor, actor in zip(old.actors, individual.actors):
+                assert old_actor.mlp_activation != actor.mlp_activation
+                assert individual.actors[0].mlp_activation in [
+                    "ReLU",
+                    "ELU",
+                    "GELU",
                 ]
-                if individual.mut == "bs":
-                    assert (
-                        mutations.min_batch_size
-                        <= individual.batch_size
-                        <= mutations.max_batch_size
-                    )
-                if individual.mut == "lr":
-                    assert mutations.min_lr <= individual.lr <= mutations.max_lr
-                if individual.mut == "lr_actor":
-                    assert mutations.min_lr <= individual.lr_actor <= mutations.max_lr
-                if individual.mut == "lr_critic":
-                    assert mutations.min_lr <= individual.lr_critic <= mutations.max_lr
-                if individual.mut == "ls":
-                    assert (
-                        mutations.min_learn_step
-                        <= individual.learn_step
-                        <= mutations.max_learn_step
-                    )
-                assert old.index == individual.index
+        assert old.index == individual.index
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-def test_mutation_applies_activation_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_activation_mutations_multi_agent_no_skip(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    for individual in population:
+        individual.algo = None
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "act"]
-                if individual.mut == "act":
-                    for old_actor, actor in zip(old.actors, individual.actors):
-                        assert old_actor.mlp_activation != actor.mlp_activation
-                        assert individual.actors[0].mlp_activation in [
-                            "ReLU",
-                            "ELU",
-                            "GELU",
-                        ]
-                assert old.index == individual.index
-
-
-# The mutation method applies activation mutations to the population and returns the mutated population.
-def test_mutation_applies_activation_mutations_multi_agent_no_skip():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
-    pre_training_mut = False
-
-    algo_classes = {"MADDPG": MADDPG}
-
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
-
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
-
-            for individual in population:
-                individual.algo = None
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "act"]
-                if individual.mut == "act":
-                    for old_actor, actor in zip(old.actors, individual.actors):
-                        assert old_actor.mlp_activation != actor.mlp_activation
-                        assert individual.actors[0].mlp_activation in [
-                            "ReLU",
-                            "ELU",
-                            "GELU",
-                        ]
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None", "act"]
+        if individual.mut == "act":
+            for old_actor, actor in zip(old.actors, individual.actors):
+                assert old_actor.mlp_activation != actor.mlp_activation
+                assert individual.actors[0].mlp_activation in [
+                    "ReLU",
+                    "ELU",
+                    "GELU",
+                ]
+        assert old.index == individual.index
 
 
 # The mutation method applies CNN activation mutations to the population and returns the mutated population.
-def test_mutation_applies_cnn_activation_mutations_multi_agent():
-    state_dim = [[3, 32, 32], [3, 32, 32]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_cnn_activation_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.1,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        arch="cnn",
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                0,
-                1,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.1,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut in ["None", "act"]
-                if individual.mut == "act":
-                    assert old.actor.mlp_activation != individual.actor.mlp_activation
-                    assert individual.actors[0].mlp_activation in [
-                        "ReLU",
-                        "ELU",
-                        "GELU",
-                    ]
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut in ["None", "act"]
+        if individual.mut == "act":
+            assert old.actor.mlp_activation != individual.actor.mlp_activation
+            assert individual.actors[0].mlp_activation in [
+                "ReLU",
+                "ELU",
+                "GELU",
+            ]
+        assert old.index == individual.index
 
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
-def test_mutation_applies_parameter_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_parameter_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                1,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "param"
-                # Due to randomness, sometimes parameters are not different
-                # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut == "param"
+        # Due to randomness, sometimes parameters are not different
+        # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
+        assert old.index == individual.index
 
 
 # The mutation method applies CNN parameter mutations to the population and returns the mutated population.
-def test_mutation_applies_cnn_parameter_mutations_multi_agent():
-    state_dim = [[3, 32, 32], [3, 32, 32]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_cnn_parameter_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
     pre_training_mut = False
 
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
+    population = init_pop
 
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    mutations = Mutations(
+        algo,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        arch="cnn",
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
 
-            mutations = Mutations(
-                algo,
-                0,
-                0,
-                0,
-                1,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
 
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "param"
-                # Due to randomness, sometimes parameters are not different
-                # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-                assert old.index == individual.index
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut == "param"
+        # Due to randomness, sometimes parameters are not different
+        # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
+        assert old.index == individual.index
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
-def test_mutation_applies_architecture_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
-
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
-
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            for mut_method in [
-                ["add_mlp_layer", "remove_mlp_layer"],
-                ["add_mlp_node", "remove_mlp_node"],
-            ]:
-                population = initialPopulation(
-                    algo=algo,
-                    state_dim=state_dim,
-                    action_dim=action_dim,
-                    one_hot=one_hot,
-                    net_config=net_config,
-                    INIT_HP=SHARED_INIT_HP_MA,
-                    population_size=population_size,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
-
-                mutations = Mutations(
-                    algo,
-                    0,
-                    1,
-                    0.5,
-                    0,
-                    0,
-                    0,
-                    ["batch_size", "lr", "learn_step"],
-                    0.5,
-                    agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
-
-                class DummyRNG:
-                    def choice(self, a, size=None, replace=True, p=None):
-                        return [np.random.choice(mut_method)]
-
-                mutations.rng = DummyRNG()
-
-                new_population = copy.deepcopy(population)
-                mutated_population = [
-                    mutations.architecture_mutate(agent) for agent in new_population
-                ]
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut == "arch"
-                    # Due to randomness and constraints on size, sometimes architectures are not different
-                    # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-                    assert old.index == individual.index
-
-
-# The mutation method applies architecture mutations to the population and returns the mutated population.
-def test_mutation_applies_cnn_architecture_mutations_multi_agent():
-    state_dim = [[3, 32, 32], [3, 32, 32]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {
-        "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
-        "normalize": False,
-    }
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
-    pre_training_mut = False
-
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
-
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            population = initialPopulation(
-                algo=algo,
-                state_dim=state_dim,
-                action_dim=action_dim,
-                one_hot=one_hot,
-                net_config=net_config,
-                INIT_HP=SHARED_INIT_HP_MA,
-                population_size=population_size,
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
-
-            mutations = Mutations(
-                algo,
-                0,
-                1,
-                0.5,
-                0,
-                0,
-                0,
-                ["batch_size", "lr", "learn_step"],
-                0.5,
-                agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-                arch="cnn",
-                device=device if not distributed else None,
-                accelerator=accelerator if distributed else None,
-            )
-
-            new_population = copy.deepcopy(population)
-            mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-            assert len(mutated_population) == len(population)
-            for old, individual in zip(population, mutated_population):
-                assert individual.mut == "arch"
-                # Due to randomness and constraints on size, sometimes architectures are not different
-                # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-                assert old.index == individual.index
-
-
-# The mutation method applies BERT architecture mutations to the population and returns the mutated population.
-def test_mutation_applies_bert_architecture_mutations_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    accelerator = Accelerator()
-    population_size = 1
-
-    algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
-
-    for distributed in [False, True]:
-        for algo in algo_classes.keys():
-            for mut_method in [
-                [
-                    "add_encoder_layer",
-                    "remove_encoder_layer",
-                    "add_decoder_layer",
-                    "remove_decoder_layer",
-                ],
-                ["add_node", "remove_node"],
-            ]:
-                population = initialPopulation(
-                    algo=algo,
-                    state_dim=state_dim,
-                    action_dim=action_dim,
-                    one_hot=one_hot,
-                    net_config=net_config,
-                    INIT_HP=SHARED_INIT_HP_MA,
-                    population_size=population_size,
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
-
-                mutations = Mutations(
-                    algo,
-                    0,
-                    1,
-                    0.5,
-                    0,
-                    0,
-                    0,
-                    ["batch_size", "lr", "learn_step"],
-                    0.5,
-                    arch="bert",
-                    device=device if not distributed else None,
-                    accelerator=accelerator if distributed else None,
-                )
-
-                class DummyRNG:
-                    def choice(self, a, size=None, replace=True, p=None):
-                        return [np.random.choice(mut_method)]
-
-                mutations.rng = DummyRNG()
-
-                for individual in population:
-                    individual.actors = [EvolvableBERT([12], [12])]
-                    individual.actor_targets = copy.deepcopy(individual.actors)
-                    if algo == "MADDPG":
-                        individual.critics = [EvolvableBERT([12], [12])]
-                        individual.critic_targets = copy.deepcopy(individual.critics)
-                    else:
-                        individual.critics_1 = [EvolvableBERT([12], [12])]
-                        individual.critic_targets_1 = copy.deepcopy(
-                            individual.critics_1
-                        )
-                        individual.critics_2 = [EvolvableBERT([12], [12])]
-                        individual.critic_targets_2 = copy.deepcopy(
-                            individual.critics_2
-                        )
-
-                new_population = copy.deepcopy(population)
-                mutated_population = [
-                    mutations.architecture_mutate(agent) for agent in new_population
-                ]
-
-                assert len(mutated_population) == len(population)
-                for old, individual in zip(population, mutated_population):
-                    assert individual.mut == "arch"
-                    # Due to randomness and constraints on size, sometimes architectures are not different
-                    # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-                    assert old.index == individual.index
-
-
-def test_reinit_opt():
-    state_dim = [3]
-    action_dim = 2
-    one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
-    population_size = 1
-
-    algo_classes = {
-        "DQN": DQN,
-        "Rainbow DQN": RainbowDQN,
-        "DDPG": DDPG,
-        "TD3": TD3,
-        "PPO": PPO,
-        "CQN": CQN,
-    }
-
-    for algo in algo_classes.keys():
-        population = initialPopulation(
-            algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
-            one_hot=one_hot,
-            net_config=net_config,
-            INIT_HP=SHARED_INIT_HP,
-            population_size=population_size,
-        )
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_architecture_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
+    for mut_method in [
+        ["add_mlp_layer", "remove_mlp_layer"],
+        ["add_mlp_node", "remove_mlp_node"],
+    ]:
+        population = init_pop
 
         mutations = Mutations(
             algo,
+            0,
             1,
-            1,
-            1,
-            1,
-            1,
-            1,
+            0.5,
+            0,
+            0,
+            0,
             ["batch_size", "lr", "learn_step"],
             0.5,
+            agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+            device=device if not distributed else None,
+            accelerator=accelerator if distributed else None,
         )
 
-        new_population = copy.deepcopy(population)
-        mutations.reinit_opt(new_population[0])
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [np.random.choice(mut_method)]
 
-        new_opt = getattr(
-            new_population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
-        )
-        old_opt = getattr(
-            population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+        mutations.rng = DummyRNG()
+
+        new_population = [agent.clone() for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
+
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            assert individual.mut == "arch"
+            # Due to randomness and constraints on size, sometimes architectures are not different
+            # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
+            assert old.index == individual.index
+
+
+# The mutation method applies architecture mutations to the population and returns the mutated population.
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[3, 32, 32], [3, 32, 32]],
+            [2, 2],
+            False,
+            {
+                "arch": "cnn",
+                "h_size": [8],
+                "c_size": [3],
+                "k_size": [3],
+                "s_size": [1],
+                "normalize": False,
+            },
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_cnn_architecture_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
+    pre_training_mut = False
+
+    population = init_pop
+
+    mutations = Mutations(
+        algo,
+        0,
+        1,
+        0.5,
+        0,
+        0,
+        0,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
+        arch="cnn",
+        device=device if not distributed else None,
+        accelerator=accelerator if distributed else None,
+    )
+
+    new_population = [agent.clone() for agent in population]
+    mutated_population = mutations.mutation(new_population, pre_training_mut)
+
+    assert len(mutated_population) == len(population)
+    for old, individual in zip(population, mutated_population):
+        assert individual.mut == "arch"
+        # Due to randomness and constraints on size, sometimes architectures are not different
+        # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
+        assert old.index == individual.index
+
+
+# The mutation method applies BERT architecture mutations to the population and returns the mutated population.
+@pytest.mark.parametrize(
+    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "MADDPG",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MADDPG",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+        (
+            "MATD3",
+            False,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "MATD3",
+            True,
+            [[4], [4]],
+            [2, 2],
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP_MA,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            Accelerator(),
+        ),
+    ],
+)
+def test_mutation_applies_bert_architecture_mutations_multi_agent(
+    algo, distributed, device, accelerator, init_pop
+):
+    for mut_method in [
+        [
+            "add_encoder_layer",
+            "remove_encoder_layer",
+            "add_decoder_layer",
+            "remove_decoder_layer",
+        ],
+        ["add_node", "remove_node"],
+    ]:
+        population = init_pop
+
+        mutations = Mutations(
+            algo,
+            0,
+            1,
+            0.5,
+            0,
+            0,
+            0,
+            ["batch_size", "lr", "learn_step"],
+            0.5,
+            arch="bert",
+            device=device if not distributed else None,
+            accelerator=accelerator if distributed else None,
         )
 
-        assert str(new_opt.state_dict()) == str(old_opt.state_dict())
+        class DummyRNG:
+            def choice(self, a, size=None, replace=True, p=None):
+                return [np.random.choice(mut_method)]
+
+        mutations.rng = DummyRNG()
+
+        for individual in population:
+            individual.actors = [EvolvableBERT([12], [12])]
+            individual.actor_targets = copy.deepcopy(individual.actors)
+            if algo == "MADDPG":
+                individual.critics = [EvolvableBERT([12], [12])]
+                individual.critic_targets = copy.deepcopy(individual.critics)
+            else:
+                individual.critics_1 = [EvolvableBERT([12], [12])]
+                individual.critic_targets_1 = copy.deepcopy(individual.critics_1)
+                individual.critics_2 = [EvolvableBERT([12], [12])]
+                individual.critic_targets_2 = copy.deepcopy(individual.critics_2)
+
+        new_population = [agent.clone() for agent in population]
+        mutated_population = [
+            mutations.architecture_mutate(agent) for agent in new_population
+        ]
+
+        assert len(mutated_population) == len(population)
+        for old, individual in zip(population, mutated_population):
+            assert individual.mut == "arch"
+            # Due to randomness and constraints on size, sometimes architectures are not different
+            # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
+            assert old.index == individual.index
+
+
+@pytest.mark.parametrize(
+    "algo, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    [
+        (
+            "DQN",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "Rainbow DQN",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "DDPG",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "TD3",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "PPO",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "CQN",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralUCB",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+        (
+            "NeuralTS",
+            [4],
+            2,
+            False,
+            {"arch": "mlp", "h_size": [8]},
+            SHARED_INIT_HP,
+            1,
+            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            None,
+        ),
+    ],
+)
+def test_reinit_opt(algo, init_pop):
+    population = init_pop
+
+    mutations = Mutations(
+        algo,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        ["batch_size", "lr", "learn_step"],
+        0.5,
+    )
+
+    new_population = [agent.clone() for agent in population]
+    mutations.reinit_opt(new_population[0])
+
+    new_opt = getattr(
+        new_population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+    )
+    old_opt = getattr(
+        population[0], mutations.algo["actor"]["optimizer"].replace("_type", "")
+    )
+
+    assert str(new_opt.state_dict()) == str(old_opt.state_dict())

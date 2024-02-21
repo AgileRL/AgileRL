@@ -1,5 +1,5 @@
-Off-Policy Online Training
-=========================
+Off-Policy Training
+===================
 
 In online reinforcement learning, an agent is able to gather data by directly interacting with its environment. It can then use this experience to learn from and
 update its policy. To enable our agent to interact in this way, the agent needs to act either in the real world, or in a simulation.
@@ -29,7 +29,7 @@ often results in higher potential for reuse of previously gathered experiences a
      - :ref:`Lunar Lander<td3_tutorial>`
 
 
-.. _initpop_online:
+.. _initpop_off_policy:
 
 Population Creation
 -------------------
@@ -84,7 +84,7 @@ are more likely to remain present in the population. The sequence of evolution (
                                   device=torch.device("cuda"))
 
 
-.. _memory_online:
+.. _memory_off_policy:
 
 Experience Replay
 -----------------
@@ -109,7 +109,7 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
                           device=torch.device("cuda"))
 
 
-.. _tournament_online:
+.. _tournament_off_policy:
 
 Tournament Selection
 --------------------
@@ -131,7 +131,7 @@ of agents.
                                      evo_step=1)        # Evaluate using last N fitness scores
 
 
-.. _mutate_online:
+.. _mutate_off_policy:
 
 Mutation
 --------
@@ -170,7 +170,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
                           device=torch.device("cuda"))
 
 
-.. _trainloop_online:
+.. _trainloop_off_policy:
 
 Off-policy Training Loop
 ------------------------

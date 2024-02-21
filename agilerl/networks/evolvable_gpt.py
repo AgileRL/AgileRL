@@ -102,6 +102,7 @@ class EvolvableGPT(nn.Module):
 
         super().__init__()
 
+        self.arch = "gpt"
         self.n_layer = n_layer
         self.vocab_size = vocab_size
         self.n_embd = n_embd
