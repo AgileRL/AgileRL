@@ -108,8 +108,9 @@ def test_initialize_cqn_with_minimum_parameters():
     assert cqn.actor_network is None
     assert isinstance(cqn.actor, EvolvableMLP)
     assert isinstance(cqn.actor_target, EvolvableMLP)
-    assert isinstance(cqn.optimizer, optim.Adam)
+    assert isinstance(cqn.optimizer_type, optim.Adam)
     assert cqn.arch == "mlp"
+    assert cqn.optimizer == cqn.optimizer_type
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 
@@ -175,6 +176,7 @@ def test_initialize_cqn_with_cnn_accelerator():
     assert cqn.actor_network is None
     assert isinstance(cqn.actor, EvolvableCNN)
     assert isinstance(cqn.actor_target, EvolvableCNN)
+    assert isinstance(cqn.optimizer_type, optim.Adam)
     assert cqn.arch == "cnn"
     assert isinstance(cqn.optimizer, AcceleratedOptimizer)
     assert isinstance(cqn.criterion, nn.MSELoss)
@@ -217,8 +219,9 @@ def test_initialize_cqn_with_actor_network(
     assert cqn.double is False
     assert cqn.actor_network == actor_network
     assert cqn.actor == actor_network
-    assert isinstance(cqn.optimizer, optim.Adam)
+    assert isinstance(cqn.optimizer_type, optim.Adam)
     assert cqn.arch == actor_network.arch
+    assert cqn.optimizer == cqn.optimizer_type
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 

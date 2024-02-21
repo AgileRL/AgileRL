@@ -285,7 +285,7 @@ class PPO:
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        self.optimizer = optim.Adam(
+        self.optimizer_type = optim.Adam(
             [
                 {"params": self.actor.parameters(), "lr": self.lr},
                 {"params": self.critic.parameters(), "lr": self.lr},
@@ -293,13 +293,13 @@ class PPO:
         )
 
         if self.accelerator is not None:
-            #self.optimizer = self.optimizer_type
+            self.optimizer = self.optimizer_type
             if wrap:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.critic = self.critic.to(self.device)
-            #self.optimizer = self.optimizer_type
+            self.optimizer = self.optimizer_type
 
     def prepare_state(self, state):
         """Prepares state for forward pass through neural network.
@@ -584,7 +584,7 @@ class PPO:
                 {"params": critic.parameters(), "lr": self.lr},
             ]
         )
-        #clone.optimizer_type = optimizer
+        clone.optimizer_type = optimizer
 
         if self.accelerator is not None:
             if wrap:
@@ -631,7 +631,7 @@ class PPO:
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "critic", "optimizer"]
+        guarded_attributes = ["actor", "critic", "optimizer", "optimizer_type"]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -654,7 +654,7 @@ class PPO:
     def wrap_models(self):
         if self.accelerator is not None:
             self.actor, self.critic, self.optimizer = self.accelerator.prepare(
-                self.actor, self.critic, self.optimizer
+                self.actor, self.critic, self.optimizer_type
             )
 
     def unwrap_models(self):

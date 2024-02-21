@@ -119,13 +119,6 @@ def train_on_policy(
                 wandb.login(key=wandb_api_key)
             else:
                 warnings.warn("Must login to wandb with API key.")
-
-        config_dict = {}
-        if INIT_HP is not None:
-            config_dict.update(INIT_HP)
-        if MUT_P is not None:
-            config_dict.update(MUT_P)
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -136,7 +129,19 @@ def train_on_policy(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
-                    config=config_dict,
+                    config={
+                        "algo": f"Evo HPO {algo}",
+                        "env": env_name,
+                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                        "lr": INIT_HP["LR"] if INIT_HP else None,
+                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
+                    },
                 )
             accelerator.wait_for_everyone()
         else:
@@ -147,7 +152,19 @@ def train_on_policy(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata
-                config=config_dict,
+                config={
+                    "algo": f"Evo HPO {algo}",
+                    "env": env_name,
+                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                    "lr": INIT_HP["LR"] if INIT_HP else None,
+                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
+                },
             )
 
     if accelerator is not None:
@@ -193,7 +210,6 @@ def train_on_policy(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
-    loss = None
 
     # Pre-training mutation
     if accelerator is not None:
@@ -215,7 +231,6 @@ def train_on_policy(
             dones = []
             values = []
             truncs = []
-            losses = []
 
             for idx_step in range(max_steps):
                 if swap_channels:
@@ -293,7 +308,7 @@ def train_on_policy(
             }
 
             agent_loss_dict = {
-                f"train/agent_{index}_loss": np.mean(loss[-evo_epochs:])
+                f"train/agent_{index}_loss": loss[-1]
                 for index, loss in enumerate(pop_loss)
             }
             wandb_dict.update(agent_loss_dict)

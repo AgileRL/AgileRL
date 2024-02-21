@@ -128,12 +128,6 @@ def train_offline(
             else:
                 warnings.warn("Must login to wandb with API key.")
 
-        config_dict = {}
-        if INIT_HP is not None:
-            config_dict.update(INIT_HP)
-        if MUT_P is not None:
-            config_dict.update(MUT_P)
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -144,7 +138,22 @@ def train_offline(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
-                    config=config_dict,
+                    config={
+                        "algo": f"Evo HPO {algo}",
+                        "env": env_name,
+                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                        "lr": INIT_HP["LR"] if INIT_HP else None,
+                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                        "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
+                        "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
+                        "tau": INIT_HP["TAU"] if INIT_HP else None,
+                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
+                    },
                 )
             accelerator.wait_for_everyone()
         else:
@@ -155,7 +164,22 @@ def train_offline(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata
-                config=config_dict,
+                config={
+                    "algo": f"Evo HPO {algo}",
+                    "env": env_name,
+                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                    "lr": INIT_HP["LR"] if INIT_HP else None,
+                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                    "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
+                    "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
+                    "tau": INIT_HP["TAU"] if INIT_HP else None,
+                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
+                },
             )
 
     if accelerator is not None:
@@ -248,7 +272,6 @@ def train_offline(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
-    loss = None
 
     # Pre-training mutation
     if accelerator is None:
@@ -260,15 +283,12 @@ def train_offline(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            losses = []
             for idx_step in range(max_steps):
                 experiences = sampler.sample(agent.batch_size)  # Sample replay buffer
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
-                losses.append(loss)
 
-            mean_loss = np.mean(losses)
-            pop_loss[agent_idx].append(mean_loss)
+            pop_loss[agent_idx].append(loss)
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
@@ -294,7 +314,7 @@ def train_offline(
             }
 
             agent_loss_dict = {
-                f"train/agent_{index}_loss": np.mean(loss[-evo_epochs:])
+                f"train/agent_{index}_loss": loss[-1]
                 for index, loss in enumerate(pop_loss)
             }
 

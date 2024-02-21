@@ -178,7 +178,7 @@ class MATD3:
         self.scores = []
         self.fitness = []
         self.steps = [0]
-        self.learn_counter = {agent: 0 for agent in self.agent_ids}
+        self.learn_counter = 0
         self.max_action = max_action
         self.expl_noise = expl_noise
         self.min_action = min_action
@@ -326,22 +326,22 @@ class MATD3:
             critic_target_1.load_state_dict(critic_1.state_dict())
             critic_target_2.load_state_dict(critic_2.state_dict())
 
-        self.actor_optimizers = [
+        self.actor_optimizers_type = [
             optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
         ]
-        self.critic_1_optimizers = [
+        self.critic_1_optimizers_type = [
             optim.Adam(critic.parameters(), lr=self.lr_critic)
             for critic in self.critics_1
         ]
-        self.critic_2_optimizers = [
+        self.critic_2_optimizers_type = [
             optim.Adam(critic.parameters(), lr=self.lr_critic)
             for critic in self.critics_2
         ]
 
         if self.accelerator is not None:
-            # self.actor_optimizers = self.actor_optimizers_type
-            # self.critic_1_optimizers = self.critic_1_optimizers_type
-            # self.critic_2_optimizers = self.critic_2_optimizers_type
+            self.actor_optimizers = self.actor_optimizers_type
+            self.critic_1_optimizers = self.critic_1_optimizers_type
+            self.critic_2_optimizers = self.critic_2_optimizers_type
             if wrap:
                 self.wrap_models()
         else:
@@ -357,9 +357,9 @@ class MATD3:
             self.critic_targets_2 = [
                 critic_target.to(self.device) for critic_target in self.critic_targets_2
             ]
-            # self.actor_optimizers = self.actor_optimizers_type
-            # self.critic_1_optimizers = self.critic_1_optimizers_type
-            # self.critic_2_optimizers = self.critic_2_optimizers_type
+            self.actor_optimizers = self.actor_optimizers_type
+            self.critic_1_optimizers = self.critic_1_optimizers_type
+            self.critic_2_optimizers = self.critic_2_optimizers_type
 
         self.criterion = nn.MSELoss()
 
@@ -520,7 +520,7 @@ class MATD3:
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
-        loss_dict = {}
+        loss_dict = defaultdict(dict)
         for idx, (
             agent_id,
             actor,
@@ -677,8 +677,8 @@ class MATD3:
             actor_loss = None
 
             # update actor and targets every policy_freq learn steps
-            self.learn_counter[agent_id] += 1
-            if self.learn_counter[agent_id] % self.policy_freq == 0:
+            self.learn_counter += 1
+            if self.learn_counter % self.policy_freq == 0:
                 if self.arch == "mlp":
                     if self.accelerator is not None:
                         with actor.no_sync():
@@ -738,14 +738,12 @@ class MATD3:
                 actor_optimizer.step()
 
             if hasattr(actor_loss, "item"):
-                actor_loss = actor_loss.item()
+                loss_dict["actors"][f"{agent_id}"] = actor_loss.item()
             else:
-                actor_loss = None
-            critic_loss = critic_loss.item()
+                loss_dict["actors"][f"{agent_id}"] = None
+            loss_dict["critics"][f"{agent_id}"] = critic_loss.item()
 
-            loss_dict[f"{agent_id}"] = actor_loss, critic_loss
-
-        if self.learn_counter[agent_id] % self.policy_freq == 0:
+        if self.learn_counter % self.policy_freq == 0:
             for (
                 actor,
                 actor_target,
@@ -898,9 +896,9 @@ class MATD3:
         critic_2_optimizers = [
             optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_2
         ]
-        # clone.actor_optimizers_type = actor_optimizers
-        # clone.critic_1_optimizers_type = critic_1_optimizers
-        # clone.critic_2_optimizers_type = critic_2_optimizers
+        clone.actor_optimizers_type = actor_optimizers
+        clone.critic_1_optimizers_type = critic_1_optimizers
+        clone.critic_2_optimizers_type = critic_2_optimizers
 
         if self.accelerator is not None:
             if wrap:
@@ -1004,15 +1002,15 @@ class MATD3:
             ]
             self.actor_optimizers = [
                 self.accelerator.prepare(actor_optimizer)
-                for actor_optimizer in self.actor_optimizers
+                for actor_optimizer in self.actor_optimizers_type
             ]
             self.critic_1_optimizers = [
                 self.accelerator.prepare(critic_optimizer)
-                for critic_optimizer in self.critic_1_optimizers
+                for critic_optimizer in self.critic_1_optimizers_type
             ]
             self.critic_2_optimizers = [
                 self.accelerator.prepare(critic_optimizer)
-                for critic_optimizer in self.critic_2_optimizers
+                for critic_optimizer in self.critic_2_optimizers_type
             ]
 
     def unwrap_models(self):
