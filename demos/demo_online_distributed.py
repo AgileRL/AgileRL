@@ -33,9 +33,9 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "POPULATION_SIZE": 4,  # Population size
+        "POPULATION_SIZE": 1,  # Population size
         "DOUBLE": True,  # Use double Q-learning in DQN or CQN
-        "BATCH_SIZE": 128,  # Batch size
+        "BATCH_SIZE": 16,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
