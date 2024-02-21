@@ -12,7 +12,7 @@ INIT_HP:
     TARGET_SCORE: 96.         # Early training stop at avg score of last 100 episodes
     GAMMA: 1.0                # Scaling factor
     LAMBDA: 1.0               # Regularization parameter
-    REG: 0.000625             # Loss regularization parameter
+    REG: 0.00625             # Loss regularization parameter
     MEMORY_SIZE: 10000        # Max memory buffer size
     LEARN_STEP: 1             # Learning frequency
     TOURN_SIZE: 2             # Tournament size
@@ -24,7 +24,7 @@ INIT_HP:
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
     ARCH_MUT: 0.2                          # Architecture mutation
-    NEW_LAYER: 0.5                         # New layer mutation
+    NEW_LAYER: 0.2                         # New layer mutation
     PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
