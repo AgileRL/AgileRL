@@ -11,11 +11,11 @@ from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 import yaml
 from pettingzoo.classic import connect_four_v3
 from tqdm import tqdm, trange
 
+import wandb
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection

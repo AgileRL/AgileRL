@@ -1,10 +1,9 @@
 import pytest
-import torch 
+import torch
 import torch.nn as nn
+from accelerate import Accelerator
 
 from agilerl.utils.algo_utils import unwrap_optimizer
-
-from accelerate import Accelerator
 
 
 @pytest.mark.parametrize(

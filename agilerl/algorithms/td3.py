@@ -11,9 +11,8 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-
 from agilerl.utils.algo_utils import unwrap_optimizer
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class TD3:
@@ -288,9 +287,7 @@ class TD3:
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-        self.actor_optimizer = optim.Adam(
-            self.actor.parameters(), lr=self.lr_actor
-        )
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
         self.critic_1_optimizer = optim.Adam(
             self.critic_1.parameters(), lr=self.lr_critic
         )
@@ -693,7 +690,9 @@ class TD3:
             self.critic_target_1 = self.accelerator.unwrap_model(self.critic_target_1)
             self.critic_2 = self.accelerator.unwrap_model(self.critic_2)
             self.critic_target_2 = self.accelerator.unwrap_model(self.critic_target_2)
-            self.actor_optimizer = unwrap_optimizer(self.actor_optimizer, self.actor, self.lr_actor)
+            self.actor_optimizer = unwrap_optimizer(
+                self.actor_optimizer, self.actor, self.lr_actor
+            )
             self.critic_1_optimizer = unwrap_optimizer(
                 self.critic_1_optimizer, self.critic_1, self.lr_critic
             )

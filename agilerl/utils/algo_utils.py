@@ -1,5 +1,6 @@
 from accelerate.optimizer import AcceleratedOptimizer
 
+
 def unwrap_optimizer(optimizer, network, lr):
     if isinstance(optimizer, AcceleratedOptimizer):
         if isinstance(network, (list, tuple)):

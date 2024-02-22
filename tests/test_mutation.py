@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
@@ -570,7 +569,7 @@ def test_mutation_applies_random_mutations(
 
     for agent in population:
         if accelerator is not None:
-            agent.unwrap_models()   
+            agent.unwrap_models()
     mutated_population = mutations.mutation(population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -1086,7 +1085,7 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         accelerator=accelerator if distributed else None,
     )
 
-    new_population = [agent.clone(wrap=False) for agent in population]  
+    new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -3381,11 +3380,11 @@ def test_mutation_applies_cnn_architecture_mutations(
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             None,
             [
-            "add_encoder_layer",
-            "remove_encoder_layer",
-            "add_decoder_layer",
-            "remove_decoder_layer",
-            ]
+                "add_encoder_layer",
+                "remove_encoder_layer",
+                "add_decoder_layer",
+                "remove_decoder_layer",
+            ],
         ),
         (
             "DDPG",
@@ -3399,11 +3398,11 @@ def test_mutation_applies_cnn_architecture_mutations(
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             Accelerator(device_placement=True),
             [
-            "add_encoder_layer",
-            "remove_encoder_layer",
-            "add_decoder_layer",
-            "remove_decoder_layer",
-            ]
+                "add_encoder_layer",
+                "remove_encoder_layer",
+                "add_decoder_layer",
+                "remove_decoder_layer",
+            ],
         ),
         (
             "DDPG",
@@ -3416,7 +3415,7 @@ def test_mutation_applies_cnn_architecture_mutations(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             None,
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
         (
             "DDPG",
@@ -3429,7 +3428,7 @@ def test_mutation_applies_cnn_architecture_mutations(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             Accelerator(device_placement=True),
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
     ],
 )
@@ -3457,9 +3456,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         def choice(self, a, size=None, replace=True, p=None):
             return [np.random.choice(mut_method)]
 
-    mutations.rng = DummyRNG()        
-
-
+    mutations.rng = DummyRNG()
 
     for individual in population:
         if distributed:
@@ -3473,10 +3470,14 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         individual.actor_target = copy.deepcopy(individual.actor)
         individual.critic = EvolvableBERT([12], [12])
         individual.critic_target = copy.deepcopy(individual.critic)
-        individual.actor_optimizer = type(adam_actor)(individual.actor.parameters(), lr=individual.lr_actor)
-        individual.critic_optimizer = type(adam_critic)(individual.critic.parameters(), lr=individual.lr_critic)
+        individual.actor_optimizer = type(adam_actor)(
+            individual.actor.parameters(), lr=individual.lr_actor
+        )
+        individual.critic_optimizer = type(adam_critic)(
+            individual.critic.parameters(), lr=individual.lr_critic
+        )
 
-    new_population = [agent.clone(wrap=False) for agent in population]  
+    new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = [
         mutations.architecture_mutate(agent) for agent in new_population
     ]
@@ -3568,7 +3569,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 
     for agent in population:
         if accelerator is not None:
-            agent.unwrap_models()   
+            agent.unwrap_models()
     mutated_population = mutations.mutation(population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -3664,7 +3665,7 @@ def test_mutation_applies_no_mutations_multi_agent(
 
     for agent in population:
         if accelerator is not None:
-            agent.unwrap_models()   
+            agent.unwrap_models()
     mutated_population = mutations.mutation(population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -3750,7 +3751,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         accelerator=accelerator if distributed else None,
     )
 
-    new_population = [agent.clone(wrap=False) for agent in population] 
+    new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = mutations.mutation(new_population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -4380,7 +4381,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
         mutations.rng = DummyRNG()
 
-        new_population = [agent.clone(wrap=False) for agent in population] 
+        new_population = [agent.clone(wrap=False) for agent in population]
         mutated_population = [
             mutations.architecture_mutate(agent) for agent in new_population
         ]
@@ -4525,11 +4526,11 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             None,
             [
-            "add_encoder_layer",
-            "remove_encoder_layer",
-            "add_decoder_layer",
-            "remove_decoder_layer",
-            ]
+                "add_encoder_layer",
+                "remove_encoder_layer",
+                "add_decoder_layer",
+                "remove_decoder_layer",
+            ],
         ),
         (
             "MADDPG",
@@ -4543,11 +4544,11 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             Accelerator(device_placement=False),
             [
-            "add_encoder_layer",
-            "remove_encoder_layer",
-            "add_decoder_layer",
-            "remove_decoder_layer",
-            ]
+                "add_encoder_layer",
+                "remove_encoder_layer",
+                "add_decoder_layer",
+                "remove_decoder_layer",
+            ],
         ),
         (
             "MATD3",
@@ -4561,11 +4562,11 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             None,
             [
-            "add_encoder_layer",
-            "remove_encoder_layer",
-            "add_decoder_layer",
-            "remove_decoder_layer",
-            ]
+                "add_encoder_layer",
+                "remove_encoder_layer",
+                "add_decoder_layer",
+                "remove_decoder_layer",
+            ],
         ),
         (
             "MATD3",
@@ -4578,7 +4579,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             Accelerator(device_placement=False),
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
         (
             "MADDPG",
@@ -4591,7 +4592,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             None,
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
         (
             "MADDPG",
@@ -4604,7 +4605,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             Accelerator(device_placement=False),
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
         (
             "MATD3",
@@ -4617,7 +4618,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             None,
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
         (
             "MATD3",
@@ -4630,7 +4631,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
             Accelerator(device_placement=False),
-            ["add_node", "remove_node"]
+            ["add_node", "remove_node"],
         ),
     ],
 )
@@ -4663,40 +4664,77 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     for individual in population:
 
         if distributed:
-            adam_actors = [actor_optimizer.optimizer for actor_optimizer in individual.actor_optimizers]
+            adam_actors = [
+                actor_optimizer.optimizer
+                for actor_optimizer in individual.actor_optimizers
+            ]
             if algo == "MATD3":
-                adam_critics_1 = [critic_optimizer_1.optimizer for critic_optimizer_1 in individual.critic_1_optimizers]
-                adam_critics_2 = [critic_optimizer_2.optimizer for critic_optimizer_2 in individual.critic_2_optimizers]
+                adam_critics_1 = [
+                    critic_optimizer_1.optimizer
+                    for critic_optimizer_1 in individual.critic_1_optimizers
+                ]
+                adam_critics_2 = [
+                    critic_optimizer_2.optimizer
+                    for critic_optimizer_2 in individual.critic_2_optimizers
+                ]
             else:
-                adam_critics = [critic_optimizer.optimizer for critic_optimizer in individual.critic_optimizers]
+                adam_critics = [
+                    critic_optimizer.optimizer
+                    for critic_optimizer in individual.critic_optimizers
+                ]
         else:
-            adam_actors = [actor_optimizer for actor_optimizer in individual.actor_optimizers]
+            adam_actors = [
+                actor_optimizer for actor_optimizer in individual.actor_optimizers
+            ]
             if algo == "MATD3":
-                adam_critics_1 = [critic_optimizer_1 for critic_optimizer_1 in individual.critic_1_optimizers]
-                adam_critics_2 = [critic_optimizer_2 for critic_optimizer_2 in individual.critic_2_optimizers]
+                adam_critics_1 = [
+                    critic_optimizer_1
+                    for critic_optimizer_1 in individual.critic_1_optimizers
+                ]
+                adam_critics_2 = [
+                    critic_optimizer_2
+                    for critic_optimizer_2 in individual.critic_2_optimizers
+                ]
             else:
-                adam_critics = [critic_optimizer for critic_optimizer in individual.critic_optimizers]
+                adam_critics = [
+                    critic_optimizer
+                    for critic_optimizer in individual.critic_optimizers
+                ]
 
         if algo == "MADDPG":
             print(adam_critics)
-
 
         individual.actors = [EvolvableBERT([12], [12])]
         individual.actor_targets = copy.deepcopy(individual.actors)
         if algo == "MADDPG":
             individual.critics = [EvolvableBERT([12], [12])]
             individual.critic_targets = copy.deepcopy(individual.critics)
-            individual.actor_optimizers = [type(adam_actor)(actor.parameters(), lr=individual.lr_actor) for adam_actor, actor in zip(adam_actors, individual.actors)]
-            individual.critic_optimizers = [type(adam_critic)(critic.parameters(), lr=individual.lr_critic) for adam_critic, critic in zip(adam_critics, individual.critics)]
-            
+            individual.actor_optimizers = [
+                type(adam_actor)(actor.parameters(), lr=individual.lr_actor)
+                for adam_actor, actor in zip(adam_actors, individual.actors)
+            ]
+            individual.critic_optimizers = [
+                type(adam_critic)(critic.parameters(), lr=individual.lr_critic)
+                for adam_critic, critic in zip(adam_critics, individual.critics)
+            ]
+
         else:
             individual.critics_1 = [EvolvableBERT([12], [12])]
             individual.critic_targets_1 = copy.deepcopy(individual.critics_1)
             individual.critics_2 = [EvolvableBERT([12], [12])]
             individual.critic_targets_2 = copy.deepcopy(individual.critics_2)
-            individual.actor_optimizers = [type(adam_actor)(actor.parameters(), lr=individual.lr_actor) for adam_actor, actor in zip(adam_actors, individual.actors)]
-            individual.critic_1_optimizers = [type(adam_critic_1)(critic_1.parameters(), lr=individual.lr_critic) for adam_critic_1, critic_1 in zip(adam_critics_1, individual.critics_1)]
-            individual.critic_2_optimizers = [type(adam_critic_2)(critic_2.parameters(), lr=individual.lr_critic) for adam_critic_2, critic_2 in zip(adam_critics_2, individual.critics_2)]
+            individual.actor_optimizers = [
+                type(adam_actor)(actor.parameters(), lr=individual.lr_actor)
+                for adam_actor, actor in zip(adam_actors, individual.actors)
+            ]
+            individual.critic_1_optimizers = [
+                type(adam_critic_1)(critic_1.parameters(), lr=individual.lr_critic)
+                for adam_critic_1, critic_1 in zip(adam_critics_1, individual.critics_1)
+            ]
+            individual.critic_2_optimizers = [
+                type(adam_critic_2)(critic_2.parameters(), lr=individual.lr_critic)
+                for adam_critic_2, critic_2 in zip(adam_critics_2, individual.critics_2)
+            ]
 
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = [
@@ -4822,11 +4860,7 @@ def test_reinit_opt(algo, init_pop):
     new_population = [agent.clone() for agent in population]
     mutations.reinit_opt(new_population[0])
 
-    new_opt = getattr(
-        new_population[0], mutations.algo["actor"]["optimizer"]
-    )
-    old_opt = getattr(
-        population[0], mutations.algo["actor"]["optimizer"]
-    )
+    new_opt = getattr(new_population[0], mutations.algo["actor"]["optimizer"])
+    old_opt = getattr(population[0], mutations.algo["actor"]["optimizer"])
 
     assert str(new_opt.state_dict()) == str(old_opt.state_dict())

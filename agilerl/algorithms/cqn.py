@@ -11,9 +11,8 @@ from torch.nn.utils import clip_grad_norm_
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-
 from agilerl.utils.algo_utils import unwrap_optimizer
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
 class CQN:

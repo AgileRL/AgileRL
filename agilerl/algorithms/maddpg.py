@@ -1,7 +1,6 @@
 import copy
 import random
 import warnings
-from collections import defaultdict
 
 import dill
 import numpy as np
@@ -11,10 +10,10 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
-from agilerl.utils.algo_utils import unwrap_optimizer
 
 class MADDPG:
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
@@ -882,11 +881,13 @@ class MADDPG:
             ]
             self.actor_optimizers = [
                 unwrap_optimizer(actor_optimizer, actor, self.lr_actor)
-                for actor_optimizer, actor,  in zip(self.actor_optimizers, self.actors)
+                for actor_optimizer, actor, in zip(self.actor_optimizers, self.actors)
             ]
             self.critic_optimizers = [
                 unwrap_optimizer(critic_optimizer, critic, self.lr_critic)
-                for critic_optimizer, critic in zip(self.critic_optimizers, self.critics)
+                for critic_optimizer, critic in zip(
+                    self.critic_optimizers, self.critics
+                )
             ]
 
     def saveCheckpoint(self, path):

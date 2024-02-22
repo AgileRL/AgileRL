@@ -1,7 +1,6 @@
 import copy
 import random
 import warnings
-from collections import defaultdict
 
 import dill
 import numpy as np
@@ -11,10 +10,9 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
-
-from agilerl.utils.algo_utils import unwrap_optimizer
 
 
 class MATD3:
@@ -1036,11 +1034,15 @@ class MATD3:
             ]
             self.critic_1_optimizers = [
                 unwrap_optimizer(critic_optimizer, critic_1, self.lr_critic)
-                for critic_optimizer, critic_1 in zip(self.critic_1_optimizers, self.critics_1)
+                for critic_optimizer, critic_1 in zip(
+                    self.critic_1_optimizers, self.critics_1
+                )
             ]
             self.critic_2_optimizers = [
                 unwrap_optimizer(critic_optimizer, critic_2, self.lr_critic)
-                for critic_optimizer, critic_2 in zip(self.critic_2_optimizers, self.critics_2)
+                for critic_optimizer, critic_2 in zip(
+                    self.critic_2_optimizers, self.critics_2
+                )
             ]
 
     def saveCheckpoint(self, path):

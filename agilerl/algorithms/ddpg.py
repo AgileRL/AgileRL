@@ -11,9 +11,9 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-from agilerl.utils.algo_utils import unwrap_optimizer
 
 class DDPG:
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
@@ -255,12 +255,8 @@ class DDPG:
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor_optimizer = optim.Adam(
-            self.actor.parameters(), lr=self.lr_actor
-        )
-        self.critic_optimizer = optim.Adam(
-            self.critic.parameters(), lr=self.lr_critic
-        )
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr_critic)
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
@@ -429,8 +425,8 @@ class DDPG:
 
         else:
             actor_loss = None
-            critic_loss =  critic_loss.item()
-        
+            critic_loss = critic_loss.item()
+
         return actor_loss, critic_loss
 
     def softUpdate(self, net, target):
@@ -616,8 +612,12 @@ class DDPG:
             self.actor_target = self.accelerator.unwrap_model(self.actor_target)
             self.critic = self.accelerator.unwrap_model(self.critic)
             self.critic_target = self.accelerator.unwrap_model(self.critic_target)
-            self.actor_optimizer = unwrap_optimizer(self.actor_optimizer, self.actor, self.lr_actor)
-            self.critic_optimizer = unwrap_optimizer(self.critic_optimizer, self.critic, self.lr_critic)
+            self.actor_optimizer = unwrap_optimizer(
+                self.actor_optimizer, self.actor, self.lr_actor
+            )
+            self.critic_optimizer = unwrap_optimizer(
+                self.critic_optimizer, self.critic, self.lr_critic
+            )
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.

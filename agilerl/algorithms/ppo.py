@@ -10,9 +10,9 @@ from torch.distributions import Categorical, MultivariateNormal
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-from agilerl.utils.algo_utils import unwrap_optimizer
 
 class PPO:
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
@@ -659,7 +659,9 @@ class PPO:
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.critic = self.accelerator.unwrap_model(self.critic)
-            self.optimizer = unwrap_optimizer(self.optimizer, [self.actor, self.critic], self.lr)
+            self.optimizer = unwrap_optimizer(
+                self.optimizer, [self.actor, self.critic], self.lr
+            )
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
