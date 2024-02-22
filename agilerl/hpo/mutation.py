@@ -1,5 +1,10 @@
+import copy
+
 import fastrand
 import numpy as np
+import torch
+
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 
 class Mutations:
@@ -341,21 +346,21 @@ class Mutations:
     def reinit_opt(self, individual):
         if self.multi_agent:
             # Reinitialise optimizer
-            actor_opts = getattr(individual, self.algo["actor"]["optimizer"])               # Assign actor optimizer to actor opts
+            actor_opts = getattr(individual, self.algo["actor"]["optimizer"])
 
             net_params = [
                 actor.parameters()
-                for actor in getattr(individual, self.algo["actor"]["eval"])                # obtain actor net params
+                for actor in getattr(individual, self.algo["actor"]["eval"])
             ]
 
             offspring_actor_opts = [
                 type(actor_opt)(net_param, lr=individual.lr_actor)
-                for actor_opt, net_param in zip(actor_opts, net_params)                     # create new optimizer objects for actors
+                for actor_opt, net_param in zip(actor_opts, net_params)
             ]
 
             setattr(
                 individual,
-                self.algo["actor"]["optimizer"],                       # set actor_optimizer to the new actor optimizers
+                self.algo["actor"]["optimizer"].replace("_type", ""),
                 offspring_actor_opts,
             )
 
@@ -374,7 +379,7 @@ class Mutations:
 
                 setattr(
                     individual,
-                    critic_list["optimizer"],
+                    critic_list["optimizer"].replace("_type", ""),
                     offspring_critic_opts,
                 )
         else:
@@ -393,7 +398,7 @@ class Mutations:
                 ]
                 setattr(
                     individual,
-                    self.algo["actor"]["optimizer"],
+                    self.algo["actor"]["optimizer"].replace("_type", ""),
                     type(opt)(opt_args),
                 )
 
@@ -406,13 +411,13 @@ class Mutations:
                 if individual.algo in ["DDPG", "TD3"]:
                     setattr(
                         individual,
-                        self.algo["actor"]["optimizer"],
+                        self.algo["actor"]["optimizer"].replace("_type", ""),
                         type(actor_opt)(net_params, lr=individual.lr_actor),
                     )
                 else:
                     setattr(
                         individual,
-                        self.algo["actor"]["optimizer"],
+                        self.algo["actor"]["optimizer"].replace("_type", ""),
                         type(actor_opt)(net_params, lr=individual.lr),
                     )
 
@@ -422,7 +427,7 @@ class Mutations:
                     net_params = getattr(individual, critic["eval"]).parameters()
                     setattr(
                         individual,
-                        critic["optimizer"],
+                        critic["optimizer"].replace("_type", ""),
                         type(critic_opt)(net_params, lr=individual.lr_critic),
                     )
 
@@ -548,6 +553,16 @@ class Mutations:
                 else:
                     setattr(
                         individual, critic["eval"], offspring_critic.to(self.device)
+                    )
+
+            if individual.algo in ["NeuralUCB", "NeuralTS"]:
+                if self.arch == "mlp" and isinstance(individual.actor, EvolvableMLP):
+                    individual.exp_layer = (
+                        individual.actor.feature_net.linear_layer_output
+                    )
+                else:
+                    individual.exp_layer = (
+                        individual.actor.value_net.value_linear_layer_output
                     )
 
         self.reinit_opt(individual)  # Reinitialise optimizer
@@ -846,6 +861,13 @@ class Mutations:
                 setattr(individual, critics["eval"], offspring_critics)
 
         else:
+            if individual.algo in ["NeuralUCB", "NeuralTS"]:
+                old_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
+                if self.arch == "mlp" and isinstance(old_actor, EvolvableMLP):
+                    old_exp_layer = old_actor.feature_net.linear_layer_output
+                else:
+                    old_exp_layer = old_actor.value_net.value_linear_layer_output
+
             offspring_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
             offspring_critics = [
                 getattr(individual, critic["eval"]).clone()
@@ -958,9 +980,85 @@ class Mutations:
                         individual, critic["eval"], offspring_critic.to(self.device)
                     )
 
+            if individual.algo in ["NeuralUCB", "NeuralTS"]:
+                self._reinit_bandit_grads(individual, offspring_actor, old_exp_layer)
+
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "arch"
         return individual
+
+    def _reinit_bandit_grads(self, individual, offspring_actor, old_exp_layer):
+        if self.arch == "mlp" and isinstance(offspring_actor, EvolvableMLP):
+            exp_layer = offspring_actor.feature_net.linear_layer_output
+        else:
+            exp_layer = offspring_actor.value_net.value_linear_layer_output
+
+        individual.numel = sum(
+            w.numel() for w in exp_layer.parameters() if w.requires_grad
+        )
+        individual.theta_0 = torch.cat(
+            [w.flatten() for w in exp_layer.parameters() if w.requires_grad]
+        )
+
+        # create matrix that is copy of sigma inv
+        # first go through old params, figure out which to remove, then remove any difference
+        # then go through new params, figure out where to add, then add zeros/lambda
+        new_sigma_inv = copy.deepcopy(individual.sigma_inv).cpu().numpy()
+        old_params = dict(old_exp_layer.named_parameters())
+        new_params = dict(exp_layer.named_parameters())
+
+        to_remove = []
+        i = 0
+        for key, param in old_exp_layer.named_parameters():
+            if param.requires_grad:
+                old_size = param.numel()
+                if key not in new_params.keys():
+                    to_remove += list(range(i, i + old_size))
+                else:
+                    new_size = new_params[key].numel()
+                    if new_size < old_size:
+                        to_remove += list(range(i + new_size, i + old_size))
+                i += old_size
+
+        to_add = []
+        i = 0
+        for key, param in exp_layer.named_parameters():
+            if param.requires_grad:
+                new_size = param.numel()
+                if key in old_params.keys():
+                    old_size = old_params[key].numel()
+                    if new_size > old_size:
+                        to_add += list(range(i + old_size, i + new_size))
+                else:
+                    to_add += list(range(i, i + new_size))
+                i += new_size
+
+        # Adjust indixes to add after deletion
+        to_remove = np.array(to_remove)
+        to_add = np.array(to_add)
+        to_add -= np.sum(to_add[:, np.newaxis] > to_remove, axis=1)
+        to_add -= np.arange(len(to_add))
+
+        # Remove elements corresponding to old params
+        if len(to_remove) > 0:
+            new_sigma_inv = np.delete(
+                np.delete(new_sigma_inv, to_remove, 0), to_remove, 1
+            )
+
+        # Add new zeros corresponding to new params, make lambda down identity diagonal
+        if len(to_add) > 0:
+            new_sigma_inv = np.insert(
+                np.insert(new_sigma_inv, to_add, 0, 0), to_add, 0, 1
+            )
+            for i in to_add:
+                new_sigma_inv[i, i] = individual.lamb
+
+        individual.exp_layer = exp_layer
+        individual.sigma_inv = torch.from_numpy(new_sigma_inv).to(
+            individual.device
+            if individual.accelerator is None
+            else individual.accelerator.device
+        )
 
     def get_algo_nets(self, algo):
         """Returns dictionary with agent network names.
@@ -974,7 +1072,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "optimizer",
+                    "optimizer": "optimizer_type",
                 },
                 "critics": [],
             }
@@ -983,7 +1081,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "optimizer",
+                    "optimizer": "optimizer_type",
                 },
                 "critics": [],
             }
@@ -992,19 +1090,19 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "actor_optimizer",
+                    "optimizer": "actor_optimizer_type",
                 },
                 "critics": [
                     {
                         "eval": "critic",
                         "target": "critic_target",
-                        "optimizer": "critic_optimizer",
+                        "optimizer": "critic_optimizer_type",
                     }
                 ],
             }
         elif algo == "PPO":
             nets = {
-                "actor": {"eval": "actor", "optimizer": "optimizer"},
+                "actor": {"eval": "actor", "optimizer": "optimizer_type"},
                 "critics": [{"eval": "critic"}],
             }
         elif algo == "CQN":
@@ -1012,7 +1110,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "optimizer",
+                    "optimizer": "optimizer_type",
                 },
                 "critics": [],
             }
@@ -1030,18 +1128,18 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "actor_optimizer",
+                    "optimizer": "actor_optimizer_type",
                 },
                 "critics": [
                     {
                         "eval": "critic_1",
                         "target": "critic_target_1",
-                        "optimizer": "critic_1_optimizer",
+                        "optimizer": "critic_1_optimizer_type",
                     },
                     {
                         "eval": "critic_2",
                         "target": "critic_target_2",
-                        "optimizer": "critic_2_optimizer",
+                        "optimizer": "critic_2_optimizer_type",
                     },
                 ],
             }
@@ -1051,13 +1149,13 @@ class Mutations:
                 "actor": {
                     "eval": "actors",
                     "target": "actor_targets",
-                    "optimizer": "actor_optimizers",
+                    "optimizer": "actor_optimizers_type",
                 },
                 "critics": [
                     {
                         "eval": "critics",
                         "target": "critic_targets",
-                        "optimizer": "critic_optimizers",
+                        "optimizer": "critic_optimizers_type",
                     }
                 ],
             }
@@ -1067,20 +1165,25 @@ class Mutations:
                 "actor": {
                     "eval": "actors",
                     "target": "actor_targets",
-                    "optimizer": "actor_optimizers",
+                    "optimizer": "actor_optimizers_type",
                 },
                 "critics": [
                     {
                         "eval": "critics_1",
                         "target": "critic_targets_1",
-                        "optimizer": "critic_1_optimizers",
+                        "optimizer": "critic_1_optimizers_type",
                     },
                     {
                         "eval": "critics_2",
                         "target": "critic_targets_2",
-                        "optimizer": "critic_2_optimizers",
+                        "optimizer": "critic_2_optimizers_type",
                     },
                 ],
+            }
+        elif algo in ["NeuralUCB", "NeuralTS"]:
+            nets = {
+                "actor": {"eval": "actor", "optimizer": "optimizer_type"},
+                "critics": [],
             }
 
         return nets

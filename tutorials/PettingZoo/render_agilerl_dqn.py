@@ -3,7 +3,7 @@ import os
 import imageio
 import numpy as np
 import torch
-from agilerl_dqn_curriculum import Opponent
+from agilerl_dqn_curriculum import Opponent, transform_and_flip
 from pettingzoo.classic import connect_four_v3
 from PIL import Image, ImageDraw, ImageFont
 
@@ -120,8 +120,7 @@ if __name__ == "__main__":
             for idx_step in range(max_steps):
                 action_mask = observation["action_mask"]
                 if player < 0:
-                    state = np.moveaxis(observation["observation"], [-1], [-3])
-                    state = np.expand_dims(state, 0)
+                    state, _ = transform_and_flip(observation, player=0)
                     if opponent_first:
                         if opponent_difficulty == "self":
                             action = opponent.getAction(
@@ -138,9 +137,7 @@ if __name__ == "__main__":
                             0
                         ]  # Get next action from agent
                 if player > 0:
-                    state = np.moveaxis(observation["observation"], [-1], [-3])
-                    state[[0, 1], :, :] = state[[0, 1], :, :]
-                    state = np.expand_dims(state, 0)
+                    state, _ = transform_and_flip(observation, player=1)
                     if not opponent_first:
                         if opponent_difficulty == "self":
                             action = opponent.getAction(

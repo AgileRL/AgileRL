@@ -135,6 +135,7 @@ class EvolvableCNN(nn.Module):
             min_channel_size < max_channel_size
         ), "'min_channel_size' must be less than 'max_channel_size'."
 
+        self.arch = "cnn"
         self.input_shape = input_shape
         self.channel_size = channel_size
         self.kernel_size = kernel_size

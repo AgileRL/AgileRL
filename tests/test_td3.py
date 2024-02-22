@@ -156,14 +156,17 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.actor_network is None
     assert isinstance(td3.actor, EvolvableMLP)
     assert isinstance(td3.actor_target, EvolvableMLP)
-    assert isinstance(td3.actor_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer_type, optim.Adam)
     assert isinstance(td3.critic_1, EvolvableMLP)
     assert isinstance(td3.critic_target_1, EvolvableMLP)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer_type, optim.Adam)
     assert isinstance(td3.critic_2, EvolvableMLP)
     assert isinstance(td3.critic_target_2, EvolvableMLP)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer_type, optim.Adam)
     assert td3.arch == "mlp"
+    assert td3.actor_optimizer == td3.actor_optimizer_type
+    assert td3.critic_1_optimizer == td3.critic_1_optimizer_type
+    assert td3.critic_2_optimizer == td3.critic_2_optimizer_type
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -232,10 +235,13 @@ def test_initialize_td3_with_cnn_accelerator():
     assert td3.actor_network is None
     assert isinstance(td3.actor, EvolvableCNN)
     assert isinstance(td3.actor_target, EvolvableCNN)
+    assert isinstance(td3.actor_optimizer_type, optim.Adam)
     assert isinstance(td3.critic_1, EvolvableCNN)
     assert isinstance(td3.critic_target_1, EvolvableCNN)
+    assert isinstance(td3.critic_1_optimizer_type, optim.Adam)
     assert isinstance(td3.critic_2, EvolvableCNN)
     assert isinstance(td3.critic_target_2, EvolvableCNN)
+    assert isinstance(td3.critic_2_optimizer_type, optim.Adam)
     assert td3.arch == "cnn"
     assert isinstance(td3.actor_optimizer, AcceleratedOptimizer)
     assert isinstance(td3.critic_1_optimizer, AcceleratedOptimizer)
@@ -306,10 +312,13 @@ def test_initialize_td3_with_actor_network(
     assert td3.actor_network == actor_network
     assert td3.actor == actor_network
     assert td3.critic_networks == [critic_1_network, critic_2_network]
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer_type, optim.Adam)
     assert td3.arch == actor_network.arch
+    assert td3.actor_optimizer == td3.actor_optimizer_type
+    assert td3.critic_1_optimizer == td3.critic_1_optimizer_type
+    assert td3.critic_2_optimizer == td3.critic_2_optimizer_type
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -373,9 +382,12 @@ def test_initialize_td3_with_actor_network_no_critics(
     assert td3.steps == [0]
     assert td3.actor != actor_network
     assert td3.critic_networks is None
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer_type, optim.Adam)
+    assert td3.actor_optimizer == td3.actor_optimizer_type
+    assert td3.critic_1_optimizer == td3.critic_1_optimizer_type
+    assert td3.critic_2_optimizer == td3.critic_2_optimizer_type
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -439,10 +451,13 @@ def test_initialize_td3_with_actor_network_cnn(
     assert td3.actor_network == actor_network
     assert td3.actor == actor_network
     assert td3.critic_networks == [critic_1_network, critic_2_network]
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer_type, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer_type, optim.Adam)
     assert td3.arch == actor_network.arch
+    assert td3.actor_optimizer == td3.actor_optimizer_type
+    assert td3.critic_1_optimizer == td3.critic_1_optimizer_type
+    assert td3.critic_2_optimizer == td3.critic_2_optimizer_type
     assert isinstance(td3.criterion, nn.MSELoss)
 
 

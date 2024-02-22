@@ -1,6 +1,7 @@
 import os
 import warnings
 from datetime import datetime
+
 import numpy as np
 import wandb
 from torch.utils.data import DataLoader
@@ -138,13 +139,6 @@ def train_multi_agent(
                 wandb.login(key=wandb_api_key)
             else:
                 warnings.warn("Must login to wandb with API key.")
-
-        config_dict = {}
-        if INIT_HP is not None:
-            config_dict.update(INIT_HP)
-        if MUT_P is not None:
-            config_dict.update(MUT_P)
-
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -155,7 +149,24 @@ def train_multi_agent(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
-                    config=config_dict,
+                    config={
+                        "algo": f"Evo HPO {algo}",
+                        "env": env_name,
+                        "net_config": net_config,
+                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                        "lr_actor": INIT_HP["LR_ACTOR"] if INIT_HP else None,
+                        "lr_critic": INIT_HP["LR_CRITIC"] if INIT_HP else None,
+                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                        "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
+                        "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
+                        "tau": INIT_HP["TAU"] if INIT_HP else None,
+                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
+                    },
                 )
             accelerator.wait_for_everyone()
         else:
@@ -166,7 +177,24 @@ def train_multi_agent(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata
-                config=config_dict,
+                config={
+                    "algo": f"Evo HPO {algo}",
+                    "env": env_name,
+                    "net_config": net_config,
+                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
+                    "lr_actor": INIT_HP["LR_ACTOR"] if INIT_HP else None,
+                    "lr_critic": INIT_HP["LR_CRITIC"] if INIT_HP else None,
+                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
+                    "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
+                    "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
+                    "tau": INIT_HP["TAU"] if INIT_HP else None,
+                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
+                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
+                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
+                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
+                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
+                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
+                },
             )
 
     if accelerator is not None:
@@ -218,9 +246,8 @@ def train_multi_agent(
     else:
         pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
 
-    agent_ids = env.agents
-    pop_actor_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
-    pop_critic_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
+    pop_actor_loss = [{agent_id: [] for agent_id in env.agents} for _ in pop]
+    pop_critic_loss = [{agent_id: [] for agent_id in env.agents} for _ in pop]
     pop_fitnesses = []
     total_steps = 0
     loss = None
@@ -236,12 +263,10 @@ def train_multi_agent(
             accelerator.wait_for_everyone()
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
-            agent_reward = {agent_id: 0 for agent_id in agent_ids}
-            losses = {agent_id: []  for agent_id in agent_ids}
-
+            agent_reward = {agent_id: 0 for agent_id in env.agents}
             if is_vectorised:
-                rewards = {agent_id: [] for agent_id in agent_ids}
-                terminations = {agent_id: [] for agent_id in agent_ids}
+                rewards = {agent: [] for agent in env.agents}
+                terminations = {agent: [] for agent in env.agents}
 
             if swap_channels:
                 if is_vectorised:
@@ -305,8 +330,6 @@ def train_multi_agent(
                     experiences = sampler.sample(agent.batch_size)
                     # Learn according to agent's RL algorithm
                     loss = agent.learn(experiences)
-                    for agent_id in agent_ids:
-                        losses[agent_id].append(loss[agent_id])
 
                 # Update the state
                 if swap_channels and not is_vectorised:
@@ -316,15 +339,13 @@ def train_multi_agent(
                     }
 
                 if is_vectorised:
-                    for agent_id in agent_ids:
+                    for agent_id in env.agents:
                         rewards[agent_id].append(reward[agent_id])
                         terminations[agent_id].append(reward[agent_id])
                 else:
                     for agent_id, r in reward.items():
                         agent_reward[agent_id] += r
-                        
 
-                
                 state = next_state
 
             if is_vectorised:
@@ -335,7 +356,7 @@ def train_multi_agent(
                             np.array(terminations[agent_id]).transpose((1, 0)),
                         )
                     )
-                    for agent_id in agent_ids
+                    for agent_id in env.agents
                 ]
                 score = sum(scores)
             else:
@@ -343,13 +364,12 @@ def train_multi_agent(
 
             agent.scores.append(score)
 
-            if all([losses[a_id] for a_id in agent_ids]):
-                for agent_id in agent_ids:
-                    actor_losses, critic_losses = list(zip(*losses[agent_id]))
-                    actor_losses = [loss for loss in actor_losses if loss != None]
-                    if actor_losses:
-                        pop_actor_loss[agent_idx][agent_id].append(np.mean(actor_losses))
-                    pop_critic_loss[agent_idx][agent_id].append(np.mean(critic_losses))
+            if loss is not None:
+                for agent_id in env.agents:
+                    pop_actor_loss[agent_idx][agent_id].append(loss["actors"][agent_id])
+                    pop_critic_loss[agent_idx][agent_id].append(
+                        loss["critics"][agent_id]
+                    )
 
             agent.steps[-1] += max_steps
             total_steps += max_steps
@@ -382,9 +402,6 @@ def train_multi_agent(
                 "eval/best_fitness": np.max(fitnesses),
             }
 
-            actor_loss_dict = {}
-            critic_loss_dict = {}
-
             for agent_idx, agent in enumerate(pop):
                 for agent_id, actor_loss, critic_loss in zip(
                     pop_actor_loss[agent_idx].keys(),
@@ -392,15 +409,16 @@ def train_multi_agent(
                     pop_critic_loss[agent_idx].values(),
                 ):
                     if actor_loss:
-                    
-                        actor_loss_dict[
-                            f"train/agent_{agent_idx}_{agent_id}_actor_loss"
-                            ] = np.mean(actor_loss[-evo_epochs:])
-                        
-                        critic_loss_dict[
-                            f"train/agent_{agent_idx}_{agent_id}_critic_loss"] = np.mean(critic_loss[
-                                -evo_epochs:
-                            ])
+                        actor_loss_dict = {
+                            f"train/agent_{agent_idx}_{agent_id}_actor_loss": actor_loss[
+                                -1
+                            ]
+                        }
+                        critic_loss_dict = {
+                            f"train/agent_{agent_idx}_{agent_id}_critic_loss": critic_loss[
+                                -1
+                            ]
+                        }
                         wandb_dict.update(actor_loss_dict)
                         wandb_dict.update(critic_loss_dict)
 

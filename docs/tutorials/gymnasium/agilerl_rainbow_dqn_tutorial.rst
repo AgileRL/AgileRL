@@ -197,7 +197,8 @@ Training and Saving an Agent
 ----------------------------
 
 Using AgileRL ``train_off_policy`` function
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 To train a single agent without performing tournament selection, mutations, and hyperparameter optimisation
 we can still use the AgileRL ``train_off_policy`` function (Rainbow-DQN is an off-policy algorithm). We need to ensure
 that our single agent is passed to the function in a list (essentially a population of 1) and that we pass ``None``

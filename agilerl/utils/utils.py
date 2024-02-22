@@ -8,6 +8,8 @@ from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
+from agilerl.algorithms.neural_ts_bandit import NeuralTS
+from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
@@ -277,6 +279,44 @@ def initialPopulation(
                 discrete_actions=INIT_HP["DISCRETE_ACTIONS"],
                 actor_networks=actor_network,
                 critic_networks=critic_network,
+                device=device,
+                accelerator=accelerator,
+            )
+            population.append(agent)
+
+    elif algo == "NeuralUCB":
+        for idx in range(population_size):
+            agent = NeuralUCB(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                index=idx,
+                net_config=net_config,
+                gamma=INIT_HP["GAMMA"],
+                lamb=INIT_HP["LAMBDA"],
+                reg=INIT_HP["REG"],
+                batch_size=INIT_HP["BATCH_SIZE"],
+                lr=INIT_HP["LR"],
+                learn_step=INIT_HP["LEARN_STEP"],
+                actor_network=actor_network,
+                device=device,
+                accelerator=accelerator,
+            )
+            population.append(agent)
+
+    elif algo == "NeuralTS":
+        for idx in range(population_size):
+            agent = NeuralTS(
+                state_dim=state_dim,
+                action_dim=action_dim,
+                index=idx,
+                net_config=net_config,
+                gamma=INIT_HP["GAMMA"],
+                lamb=INIT_HP["LAMBDA"],
+                reg=INIT_HP["REG"],
+                batch_size=INIT_HP["BATCH_SIZE"],
+                lr=INIT_HP["LR"],
+                learn_step=INIT_HP["LEARN_STEP"],
+                actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
             )

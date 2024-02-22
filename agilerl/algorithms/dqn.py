@@ -176,20 +176,20 @@ class DQN:
         # Create the target network by copying the actor network
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
         if self.accelerator is not None:
-            #self.optimizer = self.optimizer_type
+            self.optimizer = self.optimizer_type
             if wrap:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
-            #self.optimizer = self.optimizer_type
+            self.optimizer = self.optimizer_type
 
         self.criterion = nn.MSELoss()
 
@@ -366,7 +366,7 @@ class DQN:
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        # clone.optimizer_type = optimizer
+        clone.optimizer_type = optimizer
         if self.accelerator is not None:
             if wrap:
                 (
@@ -408,7 +408,7 @@ class DQN:
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "actor_target", "optimizer"]
+        guarded_attributes = ["actor", "actor_target", "optimizer", "optimizer_type"]
 
         # Exclude private and built-in attributes
         attributes = [

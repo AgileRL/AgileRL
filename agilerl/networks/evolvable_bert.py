@@ -70,6 +70,7 @@ class EvolvableBERT(nn.Module):
     ):
         super().__init__()
 
+        self.arch = "bert"
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
         self.end2end = end2end
