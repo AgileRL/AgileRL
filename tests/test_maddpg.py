@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
+from accelerate.optimizer import AcceleratedOptimizer
 
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.networks.custom_components import GumbelSoftmax
@@ -338,16 +339,14 @@ def test_initialize_maddpg_with_net_config(
             isinstance(critic_optimizer, optim.Adam)
             for critic_optimizer in maddpg.critic_optimizers
         )
-        assert maddpg.actor_optimizers == maddpg.actor_optimizers_type
-        assert maddpg.critic_optimizers == maddpg.critic_optimizers_type
     else:
         assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in maddpg.actor_optimizers_type
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in maddpg.actor_optimizers
         )
         assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in maddpg.critic_optimizers_type
+            isinstance(critic_optimizer, AcceleratedOptimizer)
+            for critic_optimizer in maddpg.critic_optimizers
         )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
@@ -415,16 +414,14 @@ def test_initialize_maddpg_with_mlp_networks(
             isinstance(critic_optimizer, optim.Adam)
             for critic_optimizer in maddpg.critic_optimizers
         )
-        assert maddpg.actor_optimizers == maddpg.actor_optimizers_type
-        assert maddpg.critic_optimizers == maddpg.critic_optimizers_type
     else:
         assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in maddpg.actor_optimizers_type
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in maddpg.actor_optimizers
         )
         assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in maddpg.critic_optimizers_type
+            isinstance(critic_optimizer, AcceleratedOptimizer)
+            for critic_optimizer in maddpg.critic_optimizers
         )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
@@ -502,16 +499,14 @@ def test_initialize_maddpg_with_cnn_networks(
             isinstance(critic_optimizer, optim.Adam)
             for critic_optimizer in maddpg.critic_optimizers
         )
-        assert maddpg.actor_optimizers == maddpg.actor_optimizers_type
-        assert maddpg.critic_optimizers == maddpg.critic_optimizers_type
     else:
         assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in maddpg.actor_optimizers_type
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in maddpg.actor_optimizers
         )
         assert all(
-            isinstance(critic_optimizer, optim.Adam)
-            for critic_optimizer in maddpg.critic_optimizers_type
+            isinstance(critic_optimizer, AcceleratedOptimizer)
+            for critic_optimizer in maddpg.critic_optimizers
         )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
@@ -873,7 +868,7 @@ def test_maddpg_learns_from_experiences_mlp(
 
     assert isinstance(loss, dict)
     for agent_id in maddpg.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, maddpg.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -963,7 +958,7 @@ def test_maddpg_learns_from_experiences_mlp_distributed(
 
     assert isinstance(loss, dict)
     for agent_id in maddpg.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, maddpg.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -1039,7 +1034,7 @@ def test_maddpg_learns_from_experiences_cnn(
 
     assert isinstance(loss, dict)
     for agent_id in maddpg.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, maddpg.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -1124,7 +1119,7 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
 
     assert isinstance(loss, dict)
     for agent_id in maddpg.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, maddpg.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(

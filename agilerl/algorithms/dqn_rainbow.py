@@ -12,6 +12,7 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+from agilerl.utils.algo_utils import unwrap_optimizer
 
 class RainbowDQN:
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -227,20 +228,18 @@ class RainbowDQN:
         # Create the target network by copying the actor network
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer_type = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
         if self.accelerator is not None:
-            self.optimizer = self.optimizer_type
             if wrap:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
-            self.optimizer = self.optimizer_type
 
     def getAction(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
@@ -538,7 +537,6 @@ class RainbowDQN:
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        clone.optimizer_type = optimizer
         if self.accelerator is not None:
             if wrap:
                 (
@@ -580,7 +578,7 @@ class RainbowDQN:
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "actor_target", "optimizer", "optimizer_type"]
+        guarded_attributes = ["actor", "actor_target", "optimizer"]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -610,7 +608,7 @@ class RainbowDQN:
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.actor_target = self.accelerator.unwrap_model(self.actor_target)
-            self.optimizer = self.accelerator.unwrap_model(self.optimizer)
+            self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.

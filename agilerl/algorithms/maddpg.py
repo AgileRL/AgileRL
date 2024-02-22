@@ -14,6 +14,7 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
+from agilerl.utils.algo_utils import unwrap_optimizer
 
 class MADDPG:
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
@@ -286,17 +287,15 @@ class MADDPG:
         for critic, critic_target in zip(self.critics, self.critic_targets):
             critic_target.load_state_dict(critic.state_dict())
 
-        self.actor_optimizers_type = [
+        self.actor_optimizers = [
             optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
         ]
-        self.critic_optimizers_type = [
+        self.critic_optimizers = [
             optim.Adam(critic.parameters(), lr=self.lr_critic)
             for critic in self.critics
         ]
 
         if self.accelerator is not None:
-            self.actor_optimizers = self.actor_optimizers_type
-            self.critic_optimizers = self.critic_optimizers_type
             if wrap:
                 self.wrap_models()
         else:
@@ -308,8 +307,6 @@ class MADDPG:
             self.critic_targets = [
                 critic_target.to(self.device) for critic_target in self.critic_targets
             ]
-            self.actor_optimizers = self.actor_optimizers_type
-            self.critic_optimizers = self.critic_optimizers_type
 
         self.criterion = nn.MSELoss()
 
@@ -471,7 +468,7 @@ class MADDPG:
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
-        loss_dict = defaultdict(dict)
+        loss_dict = {}
         for idx, (
             agent_id,
             actor,
@@ -657,8 +654,7 @@ class MADDPG:
                 actor_loss.backward()
             actor_optimizer.step()
 
-            loss_dict["actors"][f"{agent_id}"] = actor_loss.item()
-            loss_dict["critics"][f"{agent_id}"] = critic_loss.item()
+            loss_dict[f"{agent_id}"] = actor_loss.item(), critic_loss.item()
 
         for actor, actor_target, critic, critic_target in zip(
             self.actors, self.actor_targets, self.critics, self.critic_targets
@@ -792,8 +788,6 @@ class MADDPG:
         critic_optimizers = [
             optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics
         ]
-        clone.actor_optimizers_type = actor_optimizers
-        clone.critic_optimizers_type = critic_optimizers
 
         if self.accelerator is not None:
             if wrap:
@@ -821,8 +815,8 @@ class MADDPG:
                     clone.actor_targets,
                     clone.critics,
                     clone.critic_targets,
-                    clone.actor_optimizer,
-                    clone.critic_optimizer,
+                    clone.actor_optimizers,
+                    clone.critic_optimizers,
                 ) = (
                     actors,
                     actor_targets,
@@ -863,11 +857,11 @@ class MADDPG:
             ]
             self.actor_optimizers = [
                 self.accelerator.prepare(actor_optimizer)
-                for actor_optimizer in self.actor_optimizers_type
+                for actor_optimizer in self.actor_optimizers
             ]
             self.critic_optimizers = [
                 self.accelerator.prepare(critic_optimizer)
-                for critic_optimizer in self.critic_optimizers_type
+                for critic_optimizer in self.critic_optimizers
             ]
 
     def unwrap_models(self):
@@ -887,12 +881,12 @@ class MADDPG:
                 for critic_target in self.critic_targets
             ]
             self.actor_optimizers = [
-                self.accelerator.unwrap_model(actor_optimizer)
-                for actor_optimizer in self.actor_optimizers
+                unwrap_optimizer(actor_optimizer, actor, self.lr_actor)
+                for actor_optimizer, actor,  in zip(self.actor_optimizers, self.actors)
             ]
             self.critic_optimizers = [
-                self.accelerator.unwrap_model(critic_optimizer)
-                for critic_optimizer in self.critic_optimizers
+                unwrap_optimizer(critic_optimizer, critic, self.lr_critic)
+                for critic_optimizer, critic in zip(self.critic_optimizers, self.critics)
             ]
 
     def saveCheckpoint(self, path):

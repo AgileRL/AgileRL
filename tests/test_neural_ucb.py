@@ -107,9 +107,8 @@ def test_initialize_bandit_with_minimum_parameters():
     assert bandit.steps == [0]
     assert bandit.actor_network is None
     assert isinstance(bandit.actor, EvolvableMLP)
-    assert isinstance(bandit.optimizer_type, optim.Adam)
+    assert isinstance(bandit.optimizer, optim.Adam)
     assert bandit.arch == "mlp"
-    assert bandit.optimizer == bandit.optimizer_type
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
@@ -171,7 +170,6 @@ def test_initialize_bandit_with_cnn_accelerator():
     assert bandit.steps == [0]
     assert bandit.actor_network is None
     assert isinstance(bandit.actor, EvolvableCNN)
-    assert isinstance(bandit.optimizer_type, optim.Adam)
     assert bandit.arch == "cnn"
     assert isinstance(bandit.optimizer, AcceleratedOptimizer)
     assert isinstance(bandit.criterion, nn.MSELoss)
@@ -212,9 +210,8 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.steps == [0]
     assert bandit.actor_network == actor_network
     assert bandit.actor == actor_network
-    assert isinstance(bandit.optimizer_type, optim.Adam)
+    assert isinstance(bandit.optimizer, optim.Adam)
     assert bandit.arch == actor_network.arch
-    assert bandit.optimizer == bandit.optimizer_type
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 

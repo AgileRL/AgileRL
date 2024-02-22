@@ -12,6 +12,7 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+from agilerl.utils.algo_utils import unwrap_optimizer
 
 class PPO:
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
@@ -285,7 +286,7 @@ class PPO:
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        self.optimizer_type = optim.Adam(
+        self.optimizer = optim.Adam(
             [
                 {"params": self.actor.parameters(), "lr": self.lr},
                 {"params": self.critic.parameters(), "lr": self.lr},
@@ -293,13 +294,11 @@ class PPO:
         )
 
         if self.accelerator is not None:
-            self.optimizer = self.optimizer_type
             if wrap:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.critic = self.critic.to(self.device)
-            self.optimizer = self.optimizer_type
 
     def prepare_state(self, state):
         """Prepares state for forward pass through neural network.
@@ -584,7 +583,6 @@ class PPO:
                 {"params": critic.parameters(), "lr": self.lr},
             ]
         )
-        clone.optimizer_type = optimizer
 
         if self.accelerator is not None:
             if wrap:
@@ -631,7 +629,7 @@ class PPO:
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "critic", "optimizer", "optimizer_type"]
+        guarded_attributes = ["actor", "critic", "optimizer"]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -654,14 +652,14 @@ class PPO:
     def wrap_models(self):
         if self.accelerator is not None:
             self.actor, self.critic, self.optimizer = self.accelerator.prepare(
-                self.actor, self.critic, self.optimizer_type
+                self.actor, self.critic, self.optimizer
             )
 
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.critic = self.accelerator.unwrap_model(self.critic)
-            self.optimizer = self.accelerator.unwrap_model(self.optimizer)
+            self.optimizer = unwrap_optimizer(self.optimizer, [self.actor, self.critic], self.lr)
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.

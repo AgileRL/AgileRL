@@ -154,13 +154,11 @@ def test_initialize_ddpg_with_minimum_parameters():
     assert ddpg.actor_network is None
     assert isinstance(ddpg.actor, EvolvableMLP)
     assert isinstance(ddpg.actor_target, EvolvableMLP)
-    assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
+    assert isinstance(ddpg.actor_optimizer, optim.Adam)
     assert isinstance(ddpg.critic, EvolvableMLP)
     assert isinstance(ddpg.critic_target, EvolvableMLP)
-    assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
+    assert isinstance(ddpg.critic_optimizer, optim.Adam)
     assert ddpg.arch == "mlp"
-    assert ddpg.actor_optimizer == ddpg.actor_optimizer_type
-    assert ddpg.critic_optimizer == ddpg.critic_optimizer_type
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
@@ -225,10 +223,8 @@ def test_initialize_ddpg_with_cnn_accelerator():
     assert ddpg.actor_network is None
     assert isinstance(ddpg.actor, EvolvableCNN)
     assert isinstance(ddpg.actor_target, EvolvableCNN)
-    assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
     assert isinstance(ddpg.critic, EvolvableCNN)
     assert isinstance(ddpg.critic_target, EvolvableCNN)
-    assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
     assert ddpg.arch == "cnn"
     assert isinstance(ddpg.actor_optimizer, AcceleratedOptimizer)
     assert isinstance(ddpg.critic_optimizer, AcceleratedOptimizer)
@@ -281,11 +277,9 @@ def test_initialize_ddpg_with_actor_network(
     assert ddpg.actor == actor_network
     assert ddpg.critic_network == critic_network
     assert ddpg.critic == critic_network
-    assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
-    assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
+    assert isinstance(ddpg.actor_optimizer, optim.Adam)
+    assert isinstance(ddpg.critic_optimizer, optim.Adam)
     assert ddpg.arch == actor_network.arch
-    assert ddpg.actor_optimizer == ddpg.actor_optimizer_type
-    assert ddpg.critic_optimizer == ddpg.critic_optimizer_type
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
@@ -331,10 +325,8 @@ def test_initialize_ddpg_with_actor_network_no_critic(
     assert ddpg.steps == [0]
     assert ddpg.actor != actor_network
     assert ddpg.critic_network is None
-    assert isinstance(ddpg.actor_optimizer_type, optim.Adam)
-    assert isinstance(ddpg.critic_optimizer_type, optim.Adam)
-    assert ddpg.actor_optimizer == ddpg.actor_optimizer_type
-    assert ddpg.critic_optimizer == ddpg.critic_optimizer_type
+    assert isinstance(ddpg.actor_optimizer, optim.Adam)
+    assert isinstance(ddpg.critic_optimizer, optim.Adam)
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 

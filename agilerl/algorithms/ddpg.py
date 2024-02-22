@@ -13,6 +13,7 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+from agilerl.utils.algo_utils import unwrap_optimizer
 
 class DDPG:
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
@@ -254,10 +255,10 @@ class DDPG:
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor_optimizer_type = optim.Adam(
+        self.actor_optimizer = optim.Adam(
             self.actor.parameters(), lr=self.lr_actor
         )
-        self.critic_optimizer_type = optim.Adam(
+        self.critic_optimizer = optim.Adam(
             self.critic.parameters(), lr=self.lr_critic
         )
 
@@ -266,8 +267,6 @@ class DDPG:
         )
 
         if self.accelerator is not None:
-            self.actor_optimizer = self.actor_optimizer_type
-            self.critic_optimizer = self.critic_optimizer_type
             if wrap:
                 self.wrap_models()
         else:
@@ -275,8 +274,6 @@ class DDPG:
             self.actor_target = self.actor_target.to(self.device)
             self.critic = self.critic.to(self.device)
             self.critic_target = self.critic_target.to(self.device)
-            self.actor_optimizer = self.actor_optimizer_type
-            self.critic_optimizer = self.critic_optimizer_type
 
         self.criterion = nn.MSELoss()
 
@@ -427,9 +424,14 @@ class DDPG:
             self.softUpdate(self.actor, self.actor_target)
             self.softUpdate(self.critic, self.critic_target)
 
-            return actor_loss.item(), critic_loss.item()
+            actor_loss = actor_loss.item()
+            critic_loss = critic_loss.item()
+
         else:
-            return None, critic_loss.item()
+            actor_loss = None
+            critic_loss =  critic_loss.item()
+        
+        return actor_loss, critic_loss
 
     def softUpdate(self, net, target):
         """Soft updates target network."""
@@ -498,8 +500,6 @@ class DDPG:
         critic_target = self.critic_target.clone()
         actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr_actor)
         critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr_critic)
-        clone.actor_optimizer_type = actor_optimizer
-        clone.critic_optimizer_type = critic_optimizer
 
         if self.accelerator is not None:
             if wrap:
@@ -572,8 +572,6 @@ class DDPG:
             "critic_target",
             "actor_optimizer",
             "critic_optimizer",
-            "actor_optimizer_type",
-            "critic_optimizer_type",
         ]
 
         # Exclude private and built-in attributes
@@ -608,8 +606,8 @@ class DDPG:
                 self.actor_target,
                 self.critic,
                 self.critic_target,
-                self.actor_optimizer_type,
-                self.critic_optimizer_type,
+                self.actor_optimizer,
+                self.critic_optimizer,
             )
 
     def unwrap_models(self):
@@ -618,8 +616,8 @@ class DDPG:
             self.actor_target = self.accelerator.unwrap_model(self.actor_target)
             self.critic = self.accelerator.unwrap_model(self.critic)
             self.critic_target = self.accelerator.unwrap_model(self.critic_target)
-            self.actor_optimizer = self.accelerator.unwrap_model(self.actor_optimizer)
-            self.critic_optimizer = self.accelerator.unwrap_model(self.critic_optimizer)
+            self.actor_optimizer = unwrap_optimizer(self.actor_optimizer, self.actor, self.lr_actor)
+            self.critic_optimizer = unwrap_optimizer(self.critic_optimizer, self.critic, self.lr_critic)
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.

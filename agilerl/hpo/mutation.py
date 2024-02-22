@@ -360,7 +360,7 @@ class Mutations:
 
             setattr(
                 individual,
-                self.algo["actor"]["optimizer"].replace("_type", ""),
+                self.algo["actor"]["optimizer"],
                 offspring_actor_opts,
             )
 
@@ -379,7 +379,7 @@ class Mutations:
 
                 setattr(
                     individual,
-                    critic_list["optimizer"].replace("_type", ""),
+                    critic_list["optimizer"],
                     offspring_critic_opts,
                 )
         else:
@@ -398,7 +398,7 @@ class Mutations:
                 ]
                 setattr(
                     individual,
-                    self.algo["actor"]["optimizer"].replace("_type", ""),
+                    self.algo["actor"]["optimizer"],
                     type(opt)(opt_args),
                 )
 
@@ -411,13 +411,13 @@ class Mutations:
                 if individual.algo in ["DDPG", "TD3"]:
                     setattr(
                         individual,
-                        self.algo["actor"]["optimizer"].replace("_type", ""),
+                        self.algo["actor"]["optimizer"],
                         type(actor_opt)(net_params, lr=individual.lr_actor),
                     )
                 else:
                     setattr(
                         individual,
-                        self.algo["actor"]["optimizer"].replace("_type", ""),
+                        self.algo["actor"]["optimizer"],
                         type(actor_opt)(net_params, lr=individual.lr),
                     )
 
@@ -427,7 +427,7 @@ class Mutations:
                     net_params = getattr(individual, critic["eval"]).parameters()
                     setattr(
                         individual,
-                        critic["optimizer"].replace("_type", ""),
+                        critic["optimizer"],
                         type(critic_opt)(net_params, lr=individual.lr_critic),
                     )
 
@@ -1072,7 +1072,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "optimizer_type",
+                    "optimizer": "optimizer",
                 },
                 "critics": [],
             }
@@ -1081,7 +1081,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "optimizer_type",
+                    "optimizer": "optimizer",
                 },
                 "critics": [],
             }
@@ -1090,19 +1090,19 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "actor_optimizer_type",
+                    "optimizer": "actor_optimizer",
                 },
                 "critics": [
                     {
                         "eval": "critic",
                         "target": "critic_target",
-                        "optimizer": "critic_optimizer_type",
+                        "optimizer": "critic_optimizer",
                     }
                 ],
             }
         elif algo == "PPO":
             nets = {
-                "actor": {"eval": "actor", "optimizer": "optimizer_type"},
+                "actor": {"eval": "actor", "optimizer": "optimizer"},
                 "critics": [{"eval": "critic"}],
             }
         elif algo == "CQN":
@@ -1110,7 +1110,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "optimizer_type",
+                    "optimizer": "optimizer",
                 },
                 "critics": [],
             }
@@ -1128,18 +1128,18 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
-                    "optimizer": "actor_optimizer_type",
+                    "optimizer": "actor_optimizer",
                 },
                 "critics": [
                     {
                         "eval": "critic_1",
                         "target": "critic_target_1",
-                        "optimizer": "critic_1_optimizer_type",
+                        "optimizer": "critic_1_optimizer",
                     },
                     {
                         "eval": "critic_2",
                         "target": "critic_target_2",
-                        "optimizer": "critic_2_optimizer_type",
+                        "optimizer": "critic_2_optimizer",
                     },
                 ],
             }
@@ -1149,13 +1149,13 @@ class Mutations:
                 "actor": {
                     "eval": "actors",
                     "target": "actor_targets",
-                    "optimizer": "actor_optimizers_type",
+                    "optimizer": "actor_optimizers",
                 },
                 "critics": [
                     {
                         "eval": "critics",
                         "target": "critic_targets",
-                        "optimizer": "critic_optimizers_type",
+                        "optimizer": "critic_optimizers",
                     }
                 ],
             }
@@ -1165,24 +1165,24 @@ class Mutations:
                 "actor": {
                     "eval": "actors",
                     "target": "actor_targets",
-                    "optimizer": "actor_optimizers_type",
+                    "optimizer": "actor_optimizers",
                 },
                 "critics": [
                     {
                         "eval": "critics_1",
                         "target": "critic_targets_1",
-                        "optimizer": "critic_1_optimizers_type",
+                        "optimizer": "critic_1_optimizers",
                     },
                     {
                         "eval": "critics_2",
                         "target": "critic_targets_2",
-                        "optimizer": "critic_2_optimizers_type",
+                        "optimizer": "critic_2_optimizers",
                     },
                 ],
             }
         elif algo in ["NeuralUCB", "NeuralTS"]:
             nets = {
-                "actor": {"eval": "actor", "optimizer": "optimizer_type"},
+                "actor": {"eval": "actor", "optimizer": "optimizer"},
                 "critics": [],
             }
 

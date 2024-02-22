@@ -402,3 +402,5 @@ def plotPopulationScore(pop):
     plt.xlabel("Steps")
     plt.ylim(bottom=-400)
     plt.show()
+
+

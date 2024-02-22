@@ -86,9 +86,9 @@ def train_off_policy(
     :type per: bool, optional
     :param noisy: Using noisy network exploration, defaults to False
     :type noisy: bool, optional
-    :param n_step_memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
+    :param memory: Multi-step Experience Replay Buffer to be used alongside Prioritized
         ERB, defaults to None
-    :type n_step_memory: object, optional
+    :type memory: object, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
@@ -150,6 +150,12 @@ def train_off_policy(
             else:
                 warnings.warn("Must login to wandb with API key.")
 
+        config_dict = {}
+        if INIT_HP is not None:
+            config_dict.update(INIT_HP)
+        if MUT_P is not None:
+            config_dict.update(MUT_P)
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -160,22 +166,7 @@ def train_off_policy(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
-                    config={
-                        "algo": f"Evo HPO {algo}",
-                        "env": env_name,
-                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                        "lr": INIT_HP["LR"] if INIT_HP else None,
-                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
-                        "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
-                        "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
-                        "tau": INIT_HP["TAU"] if INIT_HP else None,
-                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
-                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
-                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
-                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
-                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
-                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
-                    },
+                    config=config_dict,
                 )
             accelerator.wait_for_everyone()
         else:
@@ -186,22 +177,7 @@ def train_off_policy(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata
-                config={
-                    "algo": f"Evo HPO {algo}",
-                    "env": env_name,
-                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                    "lr": INIT_HP["LR"] if INIT_HP else None,
-                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
-                    "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
-                    "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
-                    "tau": INIT_HP["TAU"] if INIT_HP else None,
-                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
-                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
-                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
-                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
-                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
-                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
-                },
+                config=config_dict,
             )
 
     if accelerator is not None:
@@ -261,6 +237,7 @@ def train_off_policy(
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
+    loss = None
 
     # Pre-training mutation
     if accelerator is None:
@@ -273,7 +250,7 @@ def train_off_policy(
             accelerator.wait_for_everyone()
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
-            rewards, terminations, truncs = [], [], []
+            rewards, terminations, truncs, losses = [], [], [], []
             score = 0
 
             if algo in ["DQN", "Rainbow DQN"]:
@@ -381,6 +358,8 @@ def train_off_policy(
                     truncs.append(trunc)
                 else:
                     score += reward
+                if loss is not None:
+                    losses.append(loss)
                 state = next_state
 
             if is_vectorised:
@@ -391,7 +370,12 @@ def train_off_policy(
                 score = np.mean(scores)
 
             agent.scores.append(score)
-            pop_loss[agent_idx].append(loss)
+            if isinstance(losses[-1], tuple):
+                actor_losses, critic_losses = list(zip(*losses))
+                mean_loss = np.mean([loss for loss in actor_losses if loss != None]), np.mean(critic_losses)
+            else:
+                mean_loss = np.mean(losses)
+            pop_loss[agent_idx].append(mean_loss)
             agent.steps[-1] += max_steps
             total_steps += max_steps
 
@@ -424,18 +408,18 @@ def train_off_policy(
             # Create the loss dictionaries
             if algo in ["RainbowDQN", "DQN"]:
                 actor_loss_dict = {
-                    f"train/agent_{index}_actor_loss": loss[-1]
+                    f"train/agent_{index}_actor_loss": np.mean(loss[-evo_epochs:])
                     for index, loss in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
             elif algo in ["TD3", "DDPG"]:
                 actor_loss_dict = {
-                    f"train/agent_{index}_actor_loss": actor_loss[-1]
-                    for index, (actor_loss, _) in enumerate(pop_loss)
+                    f"train/agent_{index}_actor_loss": np.mean(list(zip(*loss_list))[0][-evo_epochs:])
+                    for index, loss_list in enumerate(pop_loss)
                 }
                 critic_loss_dict = {
-                    f"train/agent_{index}_critic_loss": critic_loss[-1]
-                    for index, (_, critic_loss) in enumerate(pop_loss)
+                    f"train/agent_{index}_critic_loss": np.mean(list(zip(*loss_list))[-1][-evo_epochs:])
+                    for index, loss_list in enumerate(pop_loss)
                 }
                 wandb_dict.update(actor_loss_dict)
                 wandb_dict.update(critic_loss_dict)
