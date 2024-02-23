@@ -28,6 +28,11 @@ NeuralUCB (:ref:`Neural Contextual Bandits with UCB-based Exploration<neural_ucb
 of deep neural networks and employs a neural network-based random feature mapping to create an upper
 confidence bound (UCB) for reward, enabling efficient exploration.
 
+For this tutorial, we will use the labelled Iris dataset from the `UCI Machine Learning Repository <https://archive.ics.uci.edu/>`_.
+These datasets can easily be imported and used for training with the Python package ``ucimlrepo``, and to choose from the hundreds of
+available datasets it is as simple as changing the ``id`` parameter used by ``fetch_uci_repo``.
+We can convert these labelled datasets into a bandit learning environment easily by using the ``agilerl.wrappers.learning.BanditEnv`` class.
+
 
 .. literalinclude:: ../../../tutorials/Bandits/agilerl_neural_ucb.py
     :language: python

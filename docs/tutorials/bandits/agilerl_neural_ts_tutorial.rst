@@ -27,6 +27,11 @@ NeuralTS (:ref:`Neural Contextual Bandits with Thompson Sampling<neural_ts>`) ad
 exploration and exploitation by using a posterior distribution of the reward with a neural network
 approximator as its mean, and neural tangent features as its variance.
 
+For this tutorial, we will use the labelled PenDigits dataset from the `UCI Machine Learning Repository <https://archive.ics.uci.edu/>`_.
+These datasets can easily be imported and used for training with the Python package ``ucimlrepo``, and to choose from the hundreds of
+available datasets it is as simple as changing the ``id`` parameter used by ``fetch_uci_repo``.
+We can convert these labelled datasets into a bandit learning environment easily by using the ``agilerl.wrappers.learning.BanditEnv`` class.
+
 
 .. literalinclude:: ../../../tutorials/Bandits/agilerl_neural_ts.py
     :language: python

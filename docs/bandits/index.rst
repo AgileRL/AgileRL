@@ -29,12 +29,17 @@ decision-making, as the algorithm becomes better at identifying which actions ar
      - :ref:`PenDigits Dataset<neural_ts_tutorial>`
 
 
-Population Creation
--------------------
+Population Creation and Environment Setup
+-----------------------------------------
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
+
+To demonstrate our bandit algorithms, we will use a labelled dataset from the `UCI Machine Learning Repository <https://archive.ics.uci.edu/>`_. These can easily
+be imported and used for training with the Python package ``ucimlrepo``, and to choose from the hundreds of available datasets it is as simple as changing the
+``id`` parameter used by ``fetch_uci_repo``.
+We can convert these labelled datasets into a bandit learning environment easily by using the ``agilerl.wrappers.learning.BanditEnv`` class.
 
 .. code-block:: python
 
