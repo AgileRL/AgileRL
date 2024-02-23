@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
+from accelerate.optimizer import AcceleratedOptimizer
 
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.networks.custom_components import GumbelSoftmax
@@ -351,21 +352,18 @@ def test_initialize_matd3_with_net_config(
             isinstance(critic_2_optimizer, optim.Adam)
             for critic_2_optimizer in matd3.critic_2_optimizers
         )
-        assert matd3.actor_optimizers == matd3.actor_optimizers_type
-        assert matd3.critic_1_optimizers == matd3.critic_1_optimizers_type
-        assert matd3.critic_2_optimizers == matd3.critic_2_optimizers_type
     else:
         assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in matd3.actor_optimizers_type
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in matd3.actor_optimizers
         )
         assert all(
-            isinstance(critic_1_optimizer, optim.Adam)
-            for critic_1_optimizer in matd3.critic_1_optimizers_type
+            isinstance(critic_1_optimizer, AcceleratedOptimizer)
+            for critic_1_optimizer in matd3.critic_1_optimizers
         )
         assert all(
-            isinstance(critic_2_optimizer, optim.Adam)
-            for critic_2_optimizer in matd3.critic_2_optimizers_type
+            isinstance(critic_2_optimizer, AcceleratedOptimizer)
+            for critic_2_optimizer in matd3.critic_2_optimizers
         )
     assert isinstance(matd3.criterion, nn.MSELoss)
 
@@ -445,21 +443,18 @@ def test_initialize_matd3_with_mlp_networks(
             isinstance(critic_2_optimizer, optim.Adam)
             for critic_2_optimizer in matd3.critic_2_optimizers
         )
-        assert matd3.actor_optimizers == matd3.actor_optimizers_type
-        assert matd3.critic_1_optimizers == matd3.critic_1_optimizers_type
-        assert matd3.critic_2_optimizers == matd3.critic_2_optimizers_type
     else:
         assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in matd3.actor_optimizers_type
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in matd3.actor_optimizers
         )
         assert all(
-            isinstance(critic_1_optimizer, optim.Adam)
-            for critic_1_optimizer in matd3.critic_1_optimizers_type
+            isinstance(critic_1_optimizer, AcceleratedOptimizer)
+            for critic_1_optimizer in matd3.critic_1_optimizers
         )
         assert all(
-            isinstance(critic_2_optimizer, optim.Adam)
-            for critic_2_optimizer in matd3.critic_2_optimizers_type
+            isinstance(critic_2_optimizer, AcceleratedOptimizer)
+            for critic_2_optimizer in matd3.critic_2_optimizers
         )
     assert isinstance(matd3.criterion, nn.MSELoss)
 
@@ -555,21 +550,18 @@ def test_initialize_matd3_with_cnn_networks(
             isinstance(critic_2_optimizer, optim.Adam)
             for critic_2_optimizer in matd3.critic_2_optimizers
         )
-        assert matd3.actor_optimizers == matd3.actor_optimizers_type
-        assert matd3.critic_1_optimizers == matd3.critic_1_optimizers_type
-        assert matd3.critic_2_optimizers == matd3.critic_2_optimizers_type
     else:
         assert all(
-            isinstance(actor_optimizer, optim.Adam)
-            for actor_optimizer in matd3.actor_optimizers_type
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in matd3.actor_optimizers
         )
         assert all(
-            isinstance(critic_1_optimizer, optim.Adam)
-            for critic_1_optimizer in matd3.critic_1_optimizers_type
+            isinstance(critic_1_optimizer, AcceleratedOptimizer)
+            for critic_1_optimizer in matd3.critic_1_optimizers
         )
         assert all(
-            isinstance(critic_2_optimizer, optim.Adam)
-            for critic_2_optimizer in matd3.critic_2_optimizers_type
+            isinstance(critic_2_optimizer, AcceleratedOptimizer)
+            for critic_2_optimizer in matd3.critic_2_optimizers
         )
     assert isinstance(matd3.criterion, nn.MSELoss)
 
@@ -865,7 +857,7 @@ def test_matd3_learns_from_experiences_mlp(
 
     assert isinstance(loss, dict)
     for agent_id in matd3.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -984,7 +976,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
 
     assert isinstance(loss, dict)
     for agent_id in matd3.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -1077,7 +1069,7 @@ def test_matd3_learns_from_experiences_cnn(
 
     assert isinstance(loss, dict)
     for agent_id in matd3.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(
@@ -1195,7 +1187,7 @@ def test_matd3_learns_from_experiences_cnn_distributed(
 
     assert isinstance(loss, dict)
     for agent_id in matd3.agent_ids:
-        assert loss["critics"][agent_id] >= 0.0
+        assert loss[agent_id][-1] >= 0.0
     for old_actor, updated_actor in zip(actors, matd3.actors):
         assert old_actor == updated_actor
     for old_actor_target, updated_actor_target in zip(

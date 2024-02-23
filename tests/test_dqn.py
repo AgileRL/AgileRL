@@ -109,9 +109,8 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.actor_network is None
     assert isinstance(dqn.actor, EvolvableMLP)
     assert isinstance(dqn.actor_target, EvolvableMLP)
-    assert isinstance(dqn.optimizer_type, optim.Adam)
+    assert isinstance(dqn.optimizer, optim.Adam)
     assert dqn.arch == "mlp"
-    assert dqn.optimizer == dqn.optimizer_type
     assert isinstance(dqn.criterion, nn.MSELoss)
 
 
@@ -177,7 +176,6 @@ def test_initialize_dqn_with_cnn_accelerator():
     assert dqn.actor_network is None
     assert isinstance(dqn.actor, EvolvableCNN)
     assert isinstance(dqn.actor_target, EvolvableCNN)
-    assert isinstance(dqn.optimizer_type, optim.Adam)
     assert dqn.arch == "cnn"
     assert isinstance(dqn.optimizer, AcceleratedOptimizer)
     assert isinstance(dqn.criterion, nn.MSELoss)
@@ -220,9 +218,8 @@ def test_initialize_dqn_with_actor_network(
     assert dqn.double is False
     assert dqn.actor_network == actor_network
     assert dqn.actor == actor_network
-    assert isinstance(dqn.optimizer_type, optim.Adam)
+    assert isinstance(dqn.optimizer, optim.Adam)
     assert dqn.arch == actor_network.arch
-    assert dqn.optimizer == dqn.optimizer_type
     assert isinstance(dqn.criterion, nn.MSELoss)
 
 
@@ -635,6 +632,9 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the DQN agent
     dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
 
+    initial_actor_state_dict = dqn.actor.state_dict()
+    init_optim_state_dict = dqn.optimizer.state_dict()
+
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     dqn.saveCheckpoint(checkpoint_path)
@@ -670,6 +670,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(dqn.actor_target, EvolvableMLP)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
+    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
+    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -695,6 +697,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     dqn = DQN(
         state_dim=[3, 32, 32], action_dim=2, one_hot=False, net_config=net_config_cnn
     )
+
+    initial_actor_state_dict = dqn.actor.state_dict()
+    init_optim_state_dict = dqn.optimizer.state_dict()
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -731,6 +736,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(dqn.actor_target, EvolvableCNN)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
+    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
+    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99
@@ -759,6 +766,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     dqn = DQN(
         state_dim=[3, 64, 64], action_dim=2, one_hot=False, actor_network=actor_network
     )
+
+    initial_actor_state_dict = dqn.actor.state_dict()
+    init_optim_state_dict = dqn.optimizer.state_dict()
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -795,6 +805,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
     assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
+    assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
+    assert str(init_optim_state_dict) == str(dqn.optimizer.state_dict())
     assert dqn.batch_size == 64
     assert dqn.learn_step == 5
     assert dqn.gamma == 0.99

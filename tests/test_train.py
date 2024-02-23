@@ -227,8 +227,8 @@ class DummyMultiAgent(DummyAgentOffPolicy):
 
     def learn(self, experiences):
         return {
-            "actors": {"agent_0": random.random(), "agent_1": random.random()},
-            "critics": {"agent_0": random.random(), "agent_1": random.random()},
+            "agent_0": (random.random(), random.random()),
+            "agent_1": (random.random(), random.random()),
         }
 
     def test(self, env, swap_channels, max_steps, loop):
@@ -620,8 +620,8 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.getAction.side_effect = getAction
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: {
-        "actors": {"agent_0": random.random(), "agent_1": random.random()},
-        "critics": {"agent_0": random.random(), "agent_1": random.random()},
+        "agent_0": (random.random(), random.random()),
+        "agent_1": (random.random(), random.random()),
     }
     mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
@@ -3204,8 +3204,6 @@ def test_train_bandit_agent_calls_made(
         else:
             accelerator = None
         mock_population = [mocked_bandit for _ in range(6)]
-        print(mocked_bandit)
-        print(mock_population)
 
         pop, pop_fitnesses = train_bandits(
             bandit_env,

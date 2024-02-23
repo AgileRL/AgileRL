@@ -11,6 +11,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -286,13 +287,11 @@ class TD3:
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-        self.actor_optimizer_type = optim.Adam(
-            self.actor.parameters(), lr=self.lr_actor
-        )
-        self.critic_1_optimizer_type = optim.Adam(
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
+        self.critic_1_optimizer = optim.Adam(
             self.critic_1.parameters(), lr=self.lr_critic
         )
-        self.critic_2_optimizer_type = optim.Adam(
+        self.critic_2_optimizer = optim.Adam(
             self.critic_2.parameters(), lr=self.lr_critic
         )
 
@@ -301,9 +300,6 @@ class TD3:
         )
 
         if self.accelerator is not None:
-            self.actor_optimizer = self.actor_optimizer_type
-            self.critic_1_optimizer = self.critic_1_optimizer_type
-            self.critic_2_optimizer = self.critic_2_optimizer_type
             if wrap:
                 self.wrap_models()
         else:
@@ -313,9 +309,6 @@ class TD3:
             self.critic_target_1 = self.critic_target_1.to(self.device)
             self.critic_2 = self.critic_2.to(self.device)
             self.critic_target_2 = self.critic_target_2.to(self.device)
-            self.actor_optimizer = self.actor_optimizer_type
-            self.critic_1_optimizer = self.critic_1_optimizer_type
-            self.critic_2_optimizer = self.critic_2_optimizer_type
 
         self.criterion = nn.MSELoss()
 
@@ -557,10 +550,6 @@ class TD3:
         critic_1_optimizer = optim.Adam(clone.critic_1.parameters(), lr=clone.lr_critic)
         critic_2_optimizer = optim.Adam(clone.critic_2.parameters(), lr=clone.lr_critic)
 
-        clone.actor_optimizer_type = actor_optimizer
-        clone.critic_1_optimizer_type = critic_1_optimizer
-        clone.critic_2_optimizer_type = critic_2_optimizer
-
         if self.accelerator is not None:
             if wrap:
                 (
@@ -649,9 +638,6 @@ class TD3:
             "critic_target_2" "actor_optimizer",
             "critic_1_optimizer",
             "critic_2_optimizer",
-            "actor_optimizer_type",
-            "critic_1_optimizer_type",
-            "critic_2_optimizer_type",
         ]
 
         # Exclude private and built-in attributes
@@ -691,9 +677,9 @@ class TD3:
                 self.critic_target_1,
                 self.critic_2,
                 self.critic_target_2,
-                self.actor_optimizer_type,
-                self.critic_1_optimizer_type,
-                self.critic_2_optimizer_type,
+                self.actor_optimizer,
+                self.critic_1_optimizer,
+                self.critic_2_optimizer,
             )
 
     def unwrap_models(self):
@@ -704,12 +690,14 @@ class TD3:
             self.critic_target_1 = self.accelerator.unwrap_model(self.critic_target_1)
             self.critic_2 = self.accelerator.unwrap_model(self.critic_2)
             self.critic_target_2 = self.accelerator.unwrap_model(self.critic_target_2)
-            self.actor_optimizer = self.accelerator.unwrap_model(self.actor_optimizer)
-            self.critic_1_optimizer = self.accelerator.unwrap_model(
-                self.critic_1_optimizer
+            self.actor_optimizer = unwrap_optimizer(
+                self.actor_optimizer, self.actor, self.lr_actor
             )
-            self.critic_2_optimizer = self.accelerator.unwrap_model(
-                self.critic_2_optimizer
+            self.critic_1_optimizer = unwrap_optimizer(
+                self.critic_1_optimizer, self.critic_1, self.lr_critic
+            )
+            self.critic_2_optimizer = unwrap_optimizer(
+                self.critic_2_optimizer, self.critic_2, self.lr_critic
             )
 
     def saveCheckpoint(self, path):
