@@ -215,7 +215,6 @@ def train_on_policy(
             dones = []
             values = []
             truncs = []
-            losses = []
 
             for idx_step in range(max_steps):
                 if swap_channels:
