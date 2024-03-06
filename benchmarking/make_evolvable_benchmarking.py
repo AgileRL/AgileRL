@@ -25,6 +25,8 @@ from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+from agilerl.networks.evolvable_mlp import EvolvableMLP
+
 
 def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,14 +101,23 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             else:
                 # DQN
                 if INIT_HP["ALGO"] == "DQN":
-                    network_actor_dqn = BasicNetActorDQN(
-                        state_dims[0], [64, 64], action_dims
-                    )
-                    actor = MakeEvolvable(
-                        network_actor_dqn,
-                        input_tensor=torch.ones(state_dims[0]),
+                    # network_actor_dqn = BasicNetActorDQN(
+                    #     state_dims[0], [64, 64], action_dims
+                    # )
+                    # actor = MakeEvolvable(
+                    #     network_actor_dqn,
+                    #     input_tensor=torch.ones(state_dims[0]),
+                    #     device=device,
+                    # )
+
+                    actor = EvolvableMLP(
+                        num_inputs=state_dims[0],
+                        num_outputs=action_dims,
                         device=device,
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU"
                     )
+
                     critic = None
                 if INIT_HP["ALGO"] == "DDPG":
                     network_actor_ddpg = BasicNetActor(
@@ -380,11 +391,11 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
 if __name__ == "__main__":
     dqn = True
-    ppo = True
-    ddpg = True
-    td3 = True
-    maddpg = True
-    matd3 = True
+    ppo = False
+    ddpg = False
+    td3 = False
+    maddpg = False
+    matd3 = False
     standard = True
     atari = False
 
@@ -393,18 +404,18 @@ if __name__ == "__main__":
             dqn_config = yaml.safe_load(file)
         INIT_HP = dqn_config["INIT_HP"]
         MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-        net_config_mlp = dqn_config["MLP"]
-        net_config_cnn = dqn_config["CNN"]
+        # net_config_mlp = dqn_config["MLP"]
+        # net_config_cnn = dqn_config["CNN"]
         if standard:
             print("-" * 20, "DQN Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-" * 20, "DQN Lunar Lander using net_config", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
-        if atari:
-            print("-" * 20, "DQN Atari using make evolvable", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
-            print("-" * 20, "DQN Atari using net_config", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
+            # print("-" * 20, "DQN Lunar Lander using net_config", "-" * 20)
+            # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+        # if atari:
+        #     print("-" * 20, "DQN Atari using make evolvable", "-" * 20)
+        #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
+        #     print("-" * 20, "DQN Atari using net_config", "-" * 20)
+        #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
 
     if ppo:
         with open("../configs/training/ppo.yaml") as file:

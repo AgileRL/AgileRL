@@ -618,6 +618,45 @@ def test_clone_returns_identical_agent():
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
 
+def test_clone_after_learning():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 8
+    dqn = DQN(state_dim, action_dim, one_hot)
+
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randint(0, 2, (batch_size, 1))
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.zeros(batch_size, 1)
+
+    experiences = states, actions, rewards, next_states, dones
+    dqn.learn(experiences)
+    clone_agent = dqn.clone()
+
+    assert clone_agent.state_dim == dqn.state_dim
+    assert clone_agent.action_dim == dqn.action_dim
+    assert clone_agent.one_hot == dqn.one_hot
+    assert clone_agent.net_config == dqn.net_config
+    assert clone_agent.actor_network == dqn.actor_network
+    assert clone_agent.batch_size == dqn.batch_size
+    assert clone_agent.lr == dqn.lr
+    assert clone_agent.learn_step == dqn.learn_step
+    assert clone_agent.gamma == dqn.gamma
+    assert clone_agent.tau == dqn.tau
+    assert clone_agent.mut == dqn.mut
+    assert clone_agent.device == dqn.device
+    assert clone_agent.accelerator == dqn.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(dqn.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        dqn.actor_target.state_dict()
+    )
+    assert str(clone_agent.optimizer.state_dict()) == str(dqn.optimizer.state_dict())
+    assert clone_agent.fitness == dqn.fitness
+    assert clone_agent.steps == dqn.steps
+    assert clone_agent.scores == dqn.scores
+
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():

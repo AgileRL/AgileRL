@@ -78,7 +78,7 @@ class MADDPG:
         discrete_actions,
         expl_noise=0.1,
         index=0,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
         lr_actor=0.001,
         lr_critic=0.01,
@@ -185,11 +185,6 @@ class MADDPG:
             self.critics = critic_networks
             self.net_config = None
         else:
-            if "output_activation" in self.net_config.keys():
-                pass
-            else:
-                if self.discrete_actions:
-                    self.net_config["output_activation"] = "GumbelSoftmax"
 
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
@@ -197,29 +192,33 @@ class MADDPG:
                 for idx, (action_dim, state_dim) in enumerate(
                     zip(self.action_dims, self.state_dims)
                 ):
-                    if not self.discrete_actions:
-                        if self.min_action[idx][0] < 0:
-                            self.net_config["output_activation"] = "Tanh"
+                    if "mlp_output_activation" not in self.net_config.keys():
+                        if not self.discrete_actions:
+                            if self.min_action[idx][0] < 0:
+                                self.net_config["mlp_output_activation"] = "Tanh"
+                            else:
+                                self.net_config["mlp_output_activation"] = "Sigmoid"
                         else:
-                            self.net_config["output_activation"] = "Sigmoid"
+                            self.net_config["mlp_output_activation"] = "GumbelSoftmax"
+
                     self.actors.append(
                         EvolvableMLP(
                             num_inputs=state_dim[0],
                             num_outputs=action_dim,
-                            hidden_size=self.net_config["h_size"],
-                            mlp_output_activation=self.net_config["output_activation"],
                             device=self.device,
                             accelerator=self.accelerator,
+                            **self.net_config
                         )
                     )
+                critic_net_config = copy.deepcopy(self.net_config)
+                critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
                 self.critics = [
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
                         num_outputs=1,
-                        hidden_size=self.net_config["h_size"],
                         device=self.device,
                         accelerator=self.accelerator,
-                        mlp_output_activation=None,
+                        **critic_net_config
                     )
                     for _ in range(self.n_agents)
                 ]
@@ -229,43 +228,37 @@ class MADDPG:
                 for idx, (action_dim, state_dim) in enumerate(
                     zip(self.action_dims, self.state_dims)
                 ):
-                    if not self.discrete_actions:
-                        if self.min_action[idx][0] < 0:
-                            self.net_config["output_activation"] = "Tanh"
+                    if "mlp_output_activation" not in self.net_config.keys():
+                        if not self.discrete_actions:
+                            if self.min_action[idx][0] < 0:
+                                self.net_config["output_activation"] = "Tanh"
+                            else:
+                                self.net_config["output_activation"] = "Sigmoid"
                         else:
-                            self.net_config["output_activation"] = "Sigmoid"
+                            self.net_config["mlp_output_activation"] = "GumbelSoftmax"
                     self.actors.append(
                         EvolvableCNN(
                             input_shape=state_dim,
                             num_actions=action_dim,
-                            channel_size=self.net_config["c_size"],
-                            kernel_size=self.net_config["k_size"],
-                            stride_size=self.net_config["s_size"],
-                            hidden_size=self.net_config["h_size"],
-                            normalize=self.net_config["normalize"],
-                            mlp_output_activation=self.net_config["output_activation"],
                             multi=self.multi,
                             n_agents=self.n_agents,
                             device=self.device,
                             accelerator=self.accelerator,
+                            **self.net_config
                         )
                     )
+                critic_net_config = copy.deepcopy(self.net_config)
+                critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
                 self.critics = [
                     EvolvableCNN(
                         input_shape=state_dim,
                         num_actions=self.total_actions,
-                        channel_size=self.net_config["c_size"],
-                        kernel_size=self.net_config["k_size"],
-                        stride_size=self.net_config["s_size"],
-                        hidden_size=self.net_config["h_size"],
-                        normalize=self.net_config["normalize"],
-                        mlp_activation="Tanh",
-                        mlp_output_activation=None,
                         critic=True,
                         n_agents=self.n_agents,
                         multi=self.multi,
                         device=self.device,
                         accelerator=self.accelerator,
+                        **critic_net_config
                     )
                     for state_dim in self.state_dims
                 ]

@@ -741,6 +741,57 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == ddpg.scores
 
 
+def test_clone_after_learning():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 8
+    ddpg = DDPG(state_dim, action_dim, one_hot)
+
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randn(batch_size, action_dim)
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.zeros(batch_size, 1)
+
+    experiences = states, actions, rewards, next_states, dones
+    ddpg.learn(experiences)
+    clone_agent = ddpg.clone()
+    
+    assert clone_agent.state_dim == ddpg.state_dim
+    assert clone_agent.action_dim == ddpg.action_dim
+    assert clone_agent.one_hot == ddpg.one_hot
+    assert clone_agent.net_config == ddpg.net_config
+    assert clone_agent.actor_network == ddpg.actor_network
+    assert clone_agent.critic_network == ddpg.critic_network
+    assert clone_agent.batch_size == ddpg.batch_size
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
+    assert clone_agent.learn_step == ddpg.learn_step
+    assert clone_agent.gamma == ddpg.gamma
+    assert clone_agent.tau == ddpg.tau
+    assert clone_agent.mut == ddpg.mut
+    assert clone_agent.device == ddpg.device
+    assert clone_agent.accelerator == ddpg.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
+    assert str(clone_agent.critic_target.state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert str(clone_agent.actor_optimizer.state_dict()) == str(
+        ddpg.actor_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_optimizer.state_dict()) == str(
+        ddpg.critic_optimizer.state_dict()
+    )
+    assert clone_agent.fitness == ddpg.fitness
+    assert clone_agent.steps == ddpg.steps
+    assert clone_agent.scores == ddpg.scores
+
+
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
     ddpg = DDPG(state_dim=[4], action_dim=2, one_hot=False, accelerator=Accelerator())

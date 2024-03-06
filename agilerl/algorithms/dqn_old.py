@@ -1,11 +1,11 @@
 import copy
 import inspect
+import random
 
 import dill
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
@@ -14,31 +14,33 @@ from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
-class NeuralUCB:
-    """The NeuralUCB algorithm class. NeuralUCB paper: https://arxiv.org/abs/1911.04462
+class DQN:
+    """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
-    :param state_dim: State observation (context) dimension
+    :param state_dim: State observation dimension
     :type state_dim: list[int]
-    :param action_dim: Action dimension (number of arms)
+    :param action_dim: Action dimension
     :type action_dim: int
+    :param one_hot: One-hot encoding, used with discrete observation spaces
+    :type one_hot: bool
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
-    :param gamma: Positive scaling factor, defaults to 1.0
-    :type gamma: float, optional
-    :param lamb: Regularization parameter lambda, defaults to 1.0
-    :type lamb: float, optional
-    :param reg: Loss regularization parameter, defaults to 0.000625
-    :type reg: float, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 1
+    :param learn_step: Learning frequency, defaults to 5
     :type learn_step: int, optional
+    :param gamma: Discount factor, defaults to 0.99
+    :type gamma: float, optional
+    :param tau: For soft update of target network parameters, defaults to 1e-3
+    :type tau: float, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
+    :param double: Use double Q-learning, defaults to False
+    :type double: bool, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -53,15 +55,16 @@ class NeuralUCB:
         self,
         state_dim,
         action_dim,
+        one_hot,
         index=0,
-        net_config={"arch": "mlp", "hidden_size": [128]},
-        gamma=1.0,
-        lamb=1.0,
-        reg=0.000625,
+        net_config={"arch": "mlp", "h_size": [64, 64]},
         batch_size=64,
-        lr=1e-3,
-        learn_step=1,
+        lr=1e-4,
+        learn_step=5,
+        gamma=0.99,
+        tau=1e-3,
         mut=None,
+        double=False,
         actor_network=None,
         device="cpu",
         accelerator=None,
@@ -73,23 +76,22 @@ class NeuralUCB:
         assert isinstance(
             action_dim, (int, np.integer)
         ), "Action dimension must be an integer."
+        assert isinstance(
+            one_hot, bool
+        ), "One-hot encoding flag must be boolean value True or False."
         assert isinstance(index, int), "Agent index must be an integer."
-        assert isinstance(
-            gamma, (float, int)
-        ), "Scaling factor must be a float or integer."
-        assert gamma > 0, "Scaling factor must be positive."
-        assert isinstance(
-            lamb, (float, int)
-        ), "Regularization parameter lambda must be a float or integer."
-        assert lamb > 0, "Regularization parameter lambda must be greater than zero."
-        assert isinstance(reg, float), "Loss regularization parameter must be a float."
-        assert reg > 0, "Loss regularization parameter must be greater than zero."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(tau, float), "Tau must be a float."
+        assert tau > 0, "Tau must be greater than zero."
+        assert isinstance(
+            double, bool
+        ), "Double Q-learning flag must be boolean value True or False."
         assert (
             isinstance(actor_network, nn.Module) or actor_network is None
         ), "Actor network must be an nn.Module or None."
@@ -97,34 +99,29 @@ class NeuralUCB:
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.algo = "NeuralUCB"
+        self.algo = "DQN"
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.one_hot = one_hot
         self.net_config = net_config
-        self.gamma = gamma
-        self.lamb = lamb
-        self.reg = reg
         self.batch_size = batch_size
         self.lr = lr
         self.learn_step = learn_step
+        self.gamma = gamma
+        self.tau = tau
         self.mut = mut
         self.device = device
         self.accelerator = accelerator
         self.index = index
         self.scores = []
-        self.regret = [0]
         self.fitness = []
         self.steps = [0]
+        self.double = double
         self.actor_network = actor_network
 
         if self.actor_network is not None:
             self.actor = actor_network
             self.net_config = None
-            layers = [module for module in self.actor.value_net.children()]
-            if self.actor.arch == "cnn":
-                layers = [
-                    module for module in self.actor.feature_net.children()
-                ] + layers
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -133,24 +130,23 @@ class NeuralUCB:
             ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
-                    "hidden_size" in self.net_config.keys()
-                ), "Net config must contain hidden_size: int."
+                    "h_size" in self.net_config.keys()
+                ), "Net config must contain h_size: int."
                 assert isinstance(
-                    self.net_config["hidden_size"], list
-                ), "Net config hidden_size must be a list."
+                    self.net_config["h_size"], list
+                ), "Net config h_size must be a list."
                 assert (
-                    len(self.net_config["hidden_size"]) > 0
-                ), "Net config hidden_size must contain at least one element."
+                    len(self.net_config["h_size"]) > 0
+                ), "Net config h_size must contain at least one element."
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
-                    num_outputs=1,
-                    layer_norm=False,
+                    num_outputs=action_dim,
+                    hidden_size=self.net_config["h_size"],
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in ["c_size", "k_size", "s_size", "h_size"]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -168,16 +164,19 @@ class NeuralUCB:
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=1,
-                    layer_norm=False,
+                    num_actions=action_dim,
+                    channel_size=self.net_config["c_size"],
+                    kernel_size=self.net_config["k_size"],
+                    stride_size=self.net_config["s_size"],
+                    hidden_size=self.net_config["h_size"],
+                    normalize=self.net_config["normalize"],
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
                 )
-            layers = [module for module in self.actor.feature_net.children()]
-            if self.actor.arch == "cnn":
-                layers += [module for module in self.actor.value_net.children()]
 
+        # Create the target network by copying the actor network
+        self.actor_target = copy.deepcopy(self.actor)
+        self.actor_target.load_state_dict(self.actor.state_dict())
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
 
         self.arch = (
@@ -189,129 +188,107 @@ class NeuralUCB:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
-
-        # Initialize network layers
-        l_no = 0
-        for i, layer in enumerate(layers):
-            if i < len(layers) - 1:
-                if isinstance(layer, (nn.Linear, nn.Conv2d)):
-                    if self.actor.arch == "mlp":
-                        hidden_size = self.actor.hidden_size[l_no]
-                    else:
-                        hidden_size = (
-                            self.actor.channel_size[l_no]
-                            if i <= len(self.actor.channel_size)
-                            else self.actor.hidden_size[
-                                l_no - len(self.actor.channel_size)
-                            ]
-                        )
-                    self._init_weights_gaussian(layer, mean=0, std=4 / hidden_size)
-                    l_no += 1
-            else:
-                self._init_weights_gaussian(layer, mean=0, std=2 / hidden_size)
-                self.exp_layer = layer
-
-        self.numel = sum(
-            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
-        )
-        self.sigma_inv = lamb * torch.eye(self.numel).to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-        self.theta_0 = torch.cat(
-            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
-        )
+            self.actor_target = self.actor_target.to(self.device)
 
         self.criterion = nn.MSELoss()
 
-    def _init_weights_gaussian(self, m, mean, std):
-        if type(m) == nn.Linear:
-            init.normal_(m.weight, mean=mean, std=std)
-            if m.bias is not None:
-                init.constant_(m.bias, 0)
-
-    def getAction(self, state, action_mask=None):
+    def getAction(self, state, epsilon=0, action_mask=None):
         """Returns the next action to take in the environment.
+        Epsilon is the probability of taking a random action, used for exploration.
+        For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
         :type state: numpy.ndarray[float]
+        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
+        :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
         state = torch.from_numpy(state).float()
-        state = state.to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
+        if self.accelerator is None:
+            state = state.to(self.device)
+        else:
+            state = state.to(self.accelerator.device)
+
+        if self.one_hot:
+            state = (
+                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
 
         if len(state.size()) < 2:
             state = state.unsqueeze(0)
 
-        mu = self.actor(state)
-        g = torch.zeros((self.action_dim, self.numel)).to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-        for k, fx in enumerate(mu):
-            self.optimizer.zero_grad()
-            fx.backward(retain_graph=True)
-            g[k] = torch.cat(
-                [
-                    w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1])
-                    for w in self.exp_layer.parameters()
-                    if w.requires_grad
-                ]
-            )
+        # epsilon-greedy
+        if random.random() < epsilon:
+            if action_mask is None:
+                action = np.random.randint(0, self.action_dim, size=state.size()[0])
+            else:
+                inv_mask = 1 - action_mask
 
-        with torch.no_grad():
-            action_values = self.actor(state) + self.gamma * torch.sqrt(
-                torch.matmul(
-                    torch.matmul(g[:, None, :], self.sigma_inv), g[:, :, None]
-                )[:, 0, :]
-            )
+                available_actions = np.ma.array(
+                    np.arange(0, self.action_dim), mask=inv_mask
+                ).compressed()
+                action = np.random.choice(available_actions, size=state.size()[0])
 
-        action_values = action_values.cpu().numpy()
-        if action_mask is None:
-            action = np.argmax(action_values)
         else:
-            inv_mask = 1 - action_mask
-            masked_action_values = np.ma.array(action_values, mask=inv_mask)
-            action = np.argmax(masked_action_values)
+            self.actor.eval()
+            with torch.no_grad():
+                action_values = self.actor(state)
+            self.actor.train()
 
-        # Sherman-Morrison-Woodbury Update
-        v = g[action].unsqueeze(-1)
-        self.sigma_inv -= (self.sigma_inv @ v @ v.T @ self.sigma_inv) / (
-            1 + v.T @ self.sigma_inv @ v
-        )
+            if action_mask is None:
+                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
+            else:
+                inv_mask = 1 - action_mask
+                masked_action_values = np.ma.array(
+                    action_values.cpu().data.numpy(), mask=inv_mask
+                )
+                action = np.argmax(masked_action_values, axis=-1)
 
         return action
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
 
-        :param experiences: Batched states, rewards in that order.
+        :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: list[torch.Tensor[float]]
         """
-        states, rewards = experiences
+        states, actions, rewards, next_states, dones = experiences
         if self.accelerator is not None:
             states = states.to(self.accelerator.device)
+            actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)
+            next_states = next_states.to(self.accelerator.device)
+            dones = dones.to(self.accelerator.device)
 
-        pred_rewards = self.actor(states)
+        if self.one_hot:
+            states = (
+                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
+            next_states = (
+                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
+
+        if self.double:  # Double Q-learning
+            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
+            q_target = self.actor(next_states).gather(dim=1, index=q_idx).detach()
+        else:
+            q_target = (
+                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
+            )
+
+        # target, if terminal then y_j = rewards
+        y_j = rewards + self.gamma * q_target * (1 - dones)
+        q_eval = self.actor(states).gather(1, actions.long())
 
         # loss backprop
-        loss = self.criterion(rewards, pred_rewards)
-        loss += (
-            self.reg
-            * torch.norm(
-                torch.cat(
-                    [
-                        w.flatten()
-                        for w in self.exp_layer.parameters()
-                        if w.requires_grad
-                    ]
-                )
-                - self.theta_0
-            )
-            ** 2
-        )
+        loss = self.criterion(q_eval, y_j)
         self.optimizer.zero_grad()
         if self.accelerator is not None:
             self.accelerator.backward(loss)
@@ -319,9 +296,20 @@ class NeuralUCB:
             loss.backward()
         self.optimizer.step()
 
+        # soft update target network
+        self.softUpdate()
         return loss.item()
 
-    def test(self, env, swap_channels=False, max_steps=100, loop=1):
+    def softUpdate(self):
+        """Soft updates target network."""
+        for eval_param, target_param in zip(
+            self.actor.parameters(), self.actor_target.parameters()
+        ):
+            target_param.data.copy_(
+                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
+            )
+
+    def test(self, env, swap_channels=False, max_steps=500, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -336,20 +324,26 @@ class NeuralUCB:
         with torch.no_grad():
             rewards = []
             for i in range(loop):
-                state = env.reset()
+                state = env.reset()[0]
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
-                    state = torch.from_numpy(state)
-                    state = state.to(
-                        self.device
-                        if self.accelerator is None
-                        else self.accelerator.device
-                    )
-                    action = np.argmax(self.actor(state).cpu().numpy())
-                    state, reward = env.step(action)
+                        # Handle unvectorised Atari environment
+                        if not hasattr(env, "num_envs"):
+                            state = np.expand_dims(state, 0)
+                        state = np.moveaxis(state, [3], [1])
+                    action = self.getAction(state, epsilon=0)
+                    # Handle unvectorised Atari environment
+                    if not hasattr(env, "num_envs"):
+                        action = action[0]
+                    state, reward, done, trunc, _ = env.step(action)
+                    if hasattr(env, "num_envs"):
+                        done = done[0]
+                        trunc = trunc[0]
+                        reward = reward[0]
                     score += reward
+                    if done or trunc:
+                        break
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
@@ -369,21 +363,26 @@ class NeuralUCB:
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
+        actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
         optimizer.load_state_dict(self.optimizer.state_dict())
+
         if self.accelerator is not None:
             if wrap:
                 (
                     clone.actor,
+                    clone.actor_target,
                     clone.optimizer,
-                ) = self.accelerator.prepare(actor, optimizer)
+                ) = self.accelerator.prepare(actor, actor_target, optimizer)
             else:
-                clone.actor, clone.optimizer = (
+                clone.actor, clone.actor_target, clone.optimizer = (
                     actor,
+                    actor_target,
                     optimizer,
                 )
         else:
             clone.actor = actor.to(self.device)
+            clone.actor_target = actor_target.to(self.device)
             clone.optimizer = optimizer
 
         for attribute in self.inspect_attributes().keys():
@@ -393,9 +392,6 @@ class NeuralUCB:
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
-                        setattr(clone, attribute, torch.clone(getattr(self, attribute)))
-                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
-                    if not np.array_equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
@@ -407,27 +403,12 @@ class NeuralUCB:
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
-        if clone.actor.arch == "mlp" and isinstance(clone.actor, EvolvableMLP):
-            clone.exp_layer = clone.actor.feature_net.linear_layer_output
-        else:
-            clone.exp_layer = clone.actor.value_net.value_linear_layer_output
-
-        clone.numel = sum(
-            w.numel() for w in clone.exp_layer.parameters() if w.requires_grad
-        )
-        clone.theta_0 = torch.cat(
-            [w.flatten() for w in clone.exp_layer.parameters() if w.requires_grad]
-        )
-        clone.sigma_inv = clone.sigma_inv.to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-
         return clone
 
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "optimizer"]
+        guarded_attributes = ["actor", "actor_target", "optimizer"]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -449,14 +430,15 @@ class NeuralUCB:
 
     def wrap_models(self):
         if self.accelerator is not None:
-            self.actor, self.optimizer = self.accelerator.prepare(
-                self.actor, self.optimizer
+            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(
+                self.actor, self.actor_target, self.optimizer
             )
 
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
-            self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
+            self.actor_target = self.accelerator.unwrap_model(self.actor_target)
+            self.optimizer = unwrap_optimizer(self.optimizer, self.actor, lr=self.lr)
 
     def saveCheckpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
@@ -470,6 +452,8 @@ class NeuralUCB:
         network_info = {
             "actor_init_dict": self.actor.init_dict,
             "actor_state_dict": self.actor.state_dict(),
+            "actor_target_init_dict": self.actor_target.init_dict,
+            "actor_target_state_dict": self.actor_target.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
 
@@ -489,8 +473,10 @@ class NeuralUCB:
         """
         network_info = [
             "actor_state_dict",
+            "actor_target_state_dict",
             "optimizer_state_dict",
             "actor_init_dict",
+            "actor_target_init_dict",
             "net_config",
             "lr",
         ]
@@ -507,30 +493,17 @@ class NeuralUCB:
             network_class = MakeEvolvable
 
         self.actor = network_class(**checkpoint["actor_init_dict"])
+        self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
 
         self.lr = checkpoint["lr"]
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
+        self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
         for attribute in checkpoint.keys():
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
-
-        if self.actor.arch == "mlp" and isinstance(self.actor, EvolvableMLP):
-            self.exp_layer = self.actor.feature_net.linear_layer_output
-        else:
-            self.exp_layer = self.actor.value_net.value_linear_layer_output
-
-        self.numel = sum(
-            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
-        )
-        self.theta_0 = torch.cat(
-            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
-        )
-        self.sigma_inv = self.sigma_inv.to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -545,9 +518,12 @@ class NeuralUCB:
         """
         checkpoint = torch.load(path, pickle_module=dill)
         checkpoint["actor_init_dict"]["device"] = device
+        checkpoint["actor_target_init_dict"]["device"] = device
 
         actor_init_dict = checkpoint.pop("actor_init_dict")
+        actor_target_init_dict = checkpoint.pop("actor_target_init_dict")
         actor_state_dict = checkpoint.pop("actor_state_dict")
+        actor_target_state_dict = checkpoint.pop("actor_target_state_dict")
         optimizer_state_dict = checkpoint.pop("optimizer_state_dict")
 
         checkpoint["device"] = device
@@ -563,14 +539,18 @@ class NeuralUCB:
             agent.arch = checkpoint["net_config"]["arch"]
             if agent.arch == "mlp":
                 agent.actor = EvolvableMLP(**actor_init_dict)
+                agent.actor_target = EvolvableMLP(**actor_target_init_dict)
             elif agent.arch == "cnn":
                 agent.actor = EvolvableCNN(**actor_init_dict)
+                agent.actor_target = EvolvableCNN(**actor_target_init_dict)
         else:
             class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
             agent = cls(**class_init_dict)
+            agent.actor_target = MakeEvolvable(**actor_target_init_dict)
 
         agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
         agent.actor.load_state_dict(actor_state_dict)
+        agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.optimizer.load_state_dict(optimizer_state_dict)
 
         if accelerator is not None:
@@ -578,20 +558,5 @@ class NeuralUCB:
 
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
-
-        if agent.actor.arch == "mlp" and isinstance(agent.actor, EvolvableMLP):
-            agent.exp_layer = agent.actor.feature_net.linear_layer_output
-        else:
-            agent.exp_layer = agent.actor.value_net.value_linear_layer_output
-
-        agent.numel = sum(
-            w.numel() for w in agent.exp_layer.parameters() if w.requires_grad
-        )
-        agent.theta_0 = torch.cat(
-            [w.flatten() for w in agent.exp_layer.parameters() if w.requires_grad]
-        )
-        agent.sigma_inv = agent.sigma_inv.to(
-            device if accelerator is None else accelerator.device
-        )
 
         return agent

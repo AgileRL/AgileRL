@@ -67,7 +67,7 @@ class RainbowDQN:
         action_dim,
         one_hot,
         index=0,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
         learn_step=5,
@@ -170,19 +170,21 @@ class RainbowDQN:
             ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
-                    "h_size" in self.net_config.keys()
-                ), "Net config must contain h_size: int."
+                    "hidden_size" in self.net_config.keys()
+                ), "Net config must contain hidden_size: int."
                 assert isinstance(
-                    self.net_config["h_size"], list
-                ), "Net config h_size must be a list."
+                    self.net_config["hidden_size"], list
+                ), "Net config hidden_size must be a list."
                 assert (
-                    len(self.net_config["h_size"]) > 0
-                ), "Net config h_size must contain at least one element."
+                    len(self.net_config["hidden_size"]) > 0
+                ), "Net config hidden_size must contain at least one element."
+
+                if "mlp_output_activation" not in self.net_config.keys():
+                    self.net_config["mlp_output_activation"] = "ReLU"
+
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
-                    hidden_size=self.net_config["h_size"],
-                    mlp_output_activation="ReLU",
                     output_vanish=False,
                     init_layers=False,
                     layer_norm=False,
@@ -191,9 +193,10 @@ class RainbowDQN:
                     rainbow=True,
                     device=self.device,
                     accelerator=self.accelerator,
+                    **self.net_config
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -212,17 +215,12 @@ class RainbowDQN:
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=action_dim,
-                    channel_size=self.net_config["c_size"],
-                    kernel_size=self.net_config["k_size"],
-                    stride_size=self.net_config["s_size"],
-                    hidden_size=self.net_config["h_size"],
-                    normalize=self.net_config["normalize"],
-                    mlp_output_activation="ReLU",
                     num_atoms=self.num_atoms,
                     support=self.support,
                     rainbow=True,
                     device=self.device,
                     accelerator=self.accelerator,
+                    **self.net_config
                 )
 
         # Create the target network by copying the actor network
@@ -537,6 +535,8 @@ class RainbowDQN:
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        optimizer.load_state_dict(self.optimizer.state_dict())
+        
         if self.accelerator is not None:
             if wrap:
                 (

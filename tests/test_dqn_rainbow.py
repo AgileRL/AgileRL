@@ -768,6 +768,45 @@ def test_clone_returns_identical_agent():
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
 
+def test_clone_after_learning():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 8
+    rainbow_dqn = RainbowDQN(state_dim, action_dim, one_hot, batch_size=batch_size)
+
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randint(0, 2, (batch_size, 1))
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.zeros(batch_size, 1)
+
+    experiences = states, actions, rewards, next_states, dones
+    rainbow_dqn.learn(experiences)
+    clone_agent = rainbow_dqn.clone()
+
+    assert clone_agent.state_dim == rainbow_dqn.state_dim
+    assert clone_agent.action_dim == rainbow_dqn.action_dim
+    assert clone_agent.one_hot == rainbow_dqn.one_hot
+    assert clone_agent.net_config == rainbow_dqn.net_config
+    assert clone_agent.actor_network == rainbow_dqn.actor_network
+    assert clone_agent.batch_size == rainbow_dqn.batch_size
+    assert clone_agent.lr == rainbow_dqn.lr
+    assert clone_agent.learn_step == rainbow_dqn.learn_step
+    assert clone_agent.gamma == rainbow_dqn.gamma
+    assert clone_agent.tau == rainbow_dqn.tau
+    assert clone_agent.mut == rainbow_dqn.mut
+    assert clone_agent.device == rainbow_dqn.device
+    assert clone_agent.accelerator == rainbow_dqn.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(rainbow_dqn.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        rainbow_dqn.actor_target.state_dict()
+    )
+    assert str(clone_agent.optimizer.state_dict()) == str(rainbow_dqn.optimizer.state_dict())
+    assert clone_agent.fitness == rainbow_dqn.fitness
+    assert clone_agent.steps == rainbow_dqn.steps
+    assert clone_agent.scores == rainbow_dqn.scores
+
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():

@@ -770,6 +770,53 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == ppo.scores
 
 
+def test_clone_after_learning():
+    state_dim = 4,
+    action_dim = 2
+    one_hot = False
+    max_env_steps = 20
+    num_vec_envs = 2
+    ppo = PPO(state_dim, action_dim, one_hot, discrete_actions=False)
+    states = np.random.randn(max_env_steps, num_vec_envs, state_dim[0]) if not one_hot else \
+                            torch.randint(0, state_dim[0], (max_env_steps, num_vec_envs))
+    next_states = np.random.randn(num_vec_envs, state_dim[0]) if not one_hot else \
+                            torch.randint(0, state_dim[0], (num_vec_envs,))
+    actions = np.random.rand(max_env_steps, num_vec_envs, action_dim)
+    log_probs = -np.random.rand(max_env_steps, num_vec_envs)
+    rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
+    dones = np.zeros((max_env_steps, num_vec_envs))
+    values = np.random.randn(max_env_steps, num_vec_envs)
+    experiences = states, actions, log_probs, rewards, dones, values, next_states
+    ppo.learn(experiences)
+    clone_agent = ppo.clone()
+    assert clone_agent.state_dim == ppo.state_dim
+    assert clone_agent.action_dim == ppo.action_dim
+    assert clone_agent.one_hot == ppo.one_hot
+    assert clone_agent.net_config == ppo.net_config
+    assert clone_agent.actor_network == ppo.actor_network
+    assert clone_agent.critic_network == ppo.critic_network
+    assert clone_agent.batch_size == ppo.batch_size
+    assert clone_agent.lr == ppo.lr
+    assert clone_agent.gamma == ppo.gamma
+    assert clone_agent.gae_lambda == ppo.gae_lambda
+    assert clone_agent.mut == ppo.mut
+    assert clone_agent.action_std_init == ppo.action_std_init
+    assert clone_agent.clip_coef == ppo.clip_coef
+    assert clone_agent.ent_coef == ppo.ent_coef
+    assert clone_agent.vf_coef == ppo.vf_coef
+    assert clone_agent.max_grad_norm == ppo.max_grad_norm
+    assert clone_agent.target_kl == ppo.target_kl
+    assert clone_agent.update_epochs == ppo.update_epochs
+    assert clone_agent.device == ppo.device
+    assert clone_agent.accelerator == ppo.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(ppo.actor.state_dict())
+    assert str(clone_agent.critic.state_dict()) == str(ppo.critic.state_dict())
+    assert str(clone_agent.optimizer.state_dict()) == str(ppo.optimizer.state_dict())
+    assert clone_agent.fitness == ppo.fitness
+    assert clone_agent.steps == ppo.steps
+    assert clone_agent.scores == ppo.scores
+    
+
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the ppo agent

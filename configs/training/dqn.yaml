@@ -6,10 +6,10 @@ INIT_HP:
     DOUBLE: false
   # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
-    BATCH_SIZE: 16            # Batch size
+    BATCH_SIZE: 256            # Batch size
     LR: 0.001              # Learning rate
     EPISODES: 1000             # Max no. episodes
-    TARGET_SCORE: 470.         # Early training stop at avg score of last 100 episodes
+    TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100000        # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
@@ -17,7 +17,7 @@ INIT_HP:
     TAU: 0.001                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 1                # Population size
+    POP_SIZE: 2                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
     WANDB: true              # Log with Weights and Biases
 
@@ -38,4 +38,12 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 512
 
 
-NET_CONFIG: {arch: mlp, h_size: [128, 128]}
+NET_CONFIG: {arch: mlp, # h_size: [64, 64]}
+              hidden_size: [64, 64],
+              mlp_activation: ReLU,
+              mlp_output_activation: null,
+              min_hidden_layers: 1,
+              max_hidden_layers: 3,
+              min_mlp_nodes: 64,
+              max_mlp_nodes: 500}
+ # {arch: mlp, h_size: [128, 128]}

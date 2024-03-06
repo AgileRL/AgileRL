@@ -98,6 +98,7 @@ class EvolvableCNN(nn.Module):
         normalize=True,
         device="cpu",
         accelerator=None,
+        arch="cnn"
     ):
         super().__init__()
         assert len(kernel_size) == len(
@@ -135,7 +136,7 @@ class EvolvableCNN(nn.Module):
             min_channel_size < max_channel_size
         ), "'min_channel_size' must be less than 'max_channel_size'."
 
-        self.arch = "cnn"
+        self.arch = arch
         self.input_shape = input_shape
         self.channel_size = channel_size
         self.kernel_size = kernel_size
@@ -163,9 +164,31 @@ class EvolvableCNN(nn.Module):
         self.accelerator = accelerator
         self.multi = multi
         self.n_agents = n_agents
+        self._net_config = {"arch": self.arch,
+                             "channel_size": self.channel_size,
+                             "kernel_size": self.kernel_size,
+                             "stride_size": self.stride_size,
+                             "normalize": self.normalize,
+                             "cnn_activation": self.cnn_activation,
+                             "hidden_size": self.hidden_size,
+                             "mlp_activation": self.mlp_activation,
+                             "mlp_output_activation": self.mlp_output_activation,
+                             "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
+                             "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
+                             "min_channel_size": self.min_channel_size,
+                             "max_channel_size": self.max_channel_size,
+                             "min_hidden_layers": self.min_hidden_layers,
+                             "max_hidden_layers": self.max_hidden_layers,
+                             "min_mlp_nodes": self.min_mlp_nodes,
+                             "max_mlp_nodes": self.max_mlp_nodes
+                            }
 
         self.net = self.create_nets()
         self.feature_net, self.value_net, self.advantage_net = self.create_nets()
+
+    @property
+    def net_config(self):
+        return self._net_config
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.

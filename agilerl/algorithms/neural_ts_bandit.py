@@ -54,7 +54,7 @@ class NeuralTS:
         state_dim,
         action_dim,
         index=0,
-        net_config={"arch": "mlp", "h_size": [128]},
+        net_config={"arch": "mlp", "hidden_size": [128]},
         gamma=1.0,
         lamb=1.0,
         reg=0.000625,
@@ -133,24 +133,24 @@ class NeuralTS:
             ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
-                    "h_size" in self.net_config.keys()
-                ), "Net config must contain h_size: int."
+                    "hidden_size" in self.net_config.keys()
+                ), "Net config must contain hidden_size: int."
                 assert isinstance(
-                    self.net_config["h_size"], list
-                ), "Net config h_size must be a list."
+                    self.net_config["hidden_size"], list
+                ), "Net config hidden_size must be a list."
                 assert (
-                    len(self.net_config["h_size"]) > 0
-                ), "Net config h_size must contain at least one element."
+                    len(self.net_config["hidden_size"]) > 0
+                ), "Net config hidden_size must contain at least one element."
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=1,
-                    hidden_size=self.net_config["h_size"],
                     layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,
+                    **self.net_config
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -169,14 +169,10 @@ class NeuralTS:
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=1,
-                    channel_size=self.net_config["c_size"],
-                    kernel_size=self.net_config["k_size"],
-                    stride_size=self.net_config["s_size"],
-                    hidden_size=self.net_config["h_size"],
-                    normalize=self.net_config["normalize"],
                     layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,
+                    **self.net_config
                 )
             layers = [module for module in self.actor.feature_net.children()]
             if self.actor.arch == "cnn":
@@ -378,6 +374,7 @@ class NeuralTS:
 
         actor = self.actor.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        optimizer.load_state_dict(self.optimizer.state_dict())
         if self.accelerator is not None:
             if wrap:
                 (

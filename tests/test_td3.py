@@ -918,6 +918,63 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == td3.scores
 
 
+def test_clone_after_learning():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 8
+    td3 = TD3(state_dim, action_dim, one_hot)
+
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randn(batch_size, action_dim)
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.zeros(batch_size, 1)
+
+    experiences = states, actions, rewards, next_states, dones
+    td3.learn(experiences)
+    clone_agent = td3.clone()
+    
+    assert clone_agent.state_dim == td3.state_dim
+    assert clone_agent.action_dim == td3.action_dim
+    assert clone_agent.one_hot == td3.one_hot
+    assert clone_agent.net_config == td3.net_config
+    assert clone_agent.actor_network == td3.actor_network
+    assert clone_agent.critic_networks == td3.critic_networks
+    assert clone_agent.batch_size == td3.batch_size
+    assert clone_agent.lr_actor == td3.lr_actor
+    assert clone_agent.lr_critic == td3.lr_critic
+    assert clone_agent.learn_step == td3.learn_step
+    assert clone_agent.gamma == td3.gamma
+    assert clone_agent.tau == td3.tau
+    assert clone_agent.mut == td3.mut
+    assert clone_agent.device == td3.device
+    assert clone_agent.accelerator == td3.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(td3.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        td3.actor_target.state_dict()
+    )
+    assert str(clone_agent.critic_1.state_dict()) == str(td3.critic_1.state_dict())
+    assert str(clone_agent.critic_target_1.state_dict()) == str(
+        td3.critic_target_1.state_dict()
+    )
+    assert str(clone_agent.critic_2.state_dict()) == str(td3.critic_2.state_dict())
+    assert str(clone_agent.critic_target_2.state_dict()) == str(
+        td3.critic_target_2.state_dict()
+    )
+    assert str(clone_agent.actor_optimizer.state_dict()) == str(
+        td3.actor_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_1_optimizer.state_dict()) == str(
+        td3.critic_1_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_2_optimizer.state_dict()) == str(
+        td3.critic_2_optimizer.state_dict()
+    )
+    assert clone_agent.fitness == td3.fitness
+    assert clone_agent.steps == td3.steps
+    assert clone_agent.scores == td3.scores
+
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
     td3 = TD3(
