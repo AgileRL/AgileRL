@@ -1,6 +1,7 @@
 import copy
 import random
 import warnings
+import inspect
 
 import dill
 import numpy as np
@@ -88,7 +89,7 @@ class MATD3:
         learn_step=5,
         gamma=0.95,
         tau=0.01,
-        mutation=None,
+        mut=None,
         actor_networks=None,
         critic_networks=None,
         device="cpu",
@@ -170,7 +171,7 @@ class MATD3:
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
-        self.mut = mutation
+        self.mut = mut
         self.device = device
         self.accelerator = accelerator
         self.index = index
@@ -827,35 +828,13 @@ class MATD3:
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
+        input_args = self.inspect_attributes(input_args_only=True)
+        input_args["wrap"] = wrap
+
         if index is None:
             index = self.index
 
-        clone = type(self)(
-            state_dims=self.state_dims,
-            action_dims=self.action_dims,
-            one_hot=self.one_hot,
-            n_agents=self.n_agents,
-            agent_ids=self.agent_ids,
-            max_action=self.max_action,
-            min_action=self.min_action,
-            expl_noise=self.expl_noise,
-            discrete_actions=self.discrete_actions,
-            index=index,
-            net_config=self.net_config,
-            batch_size=self.batch_size,
-            policy_freq=self.policy_freq,
-            lr_actor=self.lr_actor,
-            lr_critic=self.lr_critic,
-            learn_step=self.learn_step,
-            gamma=self.gamma,
-            tau=self.tau,
-            mutation=self.mut,
-            actor_networks=self.actor_networks,
-            critic_networks=self.critic_networks,
-            device=self.device,
-            accelerator=self.accelerator,
-            wrap=wrap,
-        )
+        clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
@@ -878,6 +857,13 @@ class MATD3:
         critic_2_optimizers = [
             optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_2
         ]
+
+        for clone_actor_optimizer, actor_optimizer, clone_critic_1_optimizer, critic_1_optimizer, \
+            clone_critic_2_optimizer, critic_2_optimizer in zip(actor_optimizers, self.actor_optimizers, \
+            critic_1_optimizers, self.critic_1_optimizers, critic_2_optimizers, self.critic_2_optimizers):
+            clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
+            clone_critic_1_optimizer.load_state_dict(critic_1_optimizer.state_dict())
+            clone_critic_2_optimizer.load_state_dict(critic_2_optimizer.state_dict())
 
         if self.accelerator is not None:
             if wrap:
@@ -957,6 +943,39 @@ class MATD3:
         clone.learn_counter = copy.deepcopy(self.learn_counter)
 
         return clone
+    
+    def inspect_attributes(self, input_args_only=False):
+        # Get all attributes of the current object
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        guarded_attributes = [
+            "actors",
+            "critics_1",
+            "actor_targets",
+            "critic_targets_1",
+            "actor_optimizers",
+            "critic_1_optimizers",
+            "critics_2",
+            "critic_targets_2",
+            "critic_2_optimizers",
+        ]
+
+        # Exclude private and built-in attributes
+        attributes = [
+            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
+        ]
+
+        if input_args_only:
+            constructor_params = inspect.signature(self.__init__).parameters.keys()
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in guarded_attributes and k in constructor_params
+            }
+        else:
+            # Remove the algo specific guarded variables
+            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
+
+        return attributes
 
     def wrap_models(self):
         if self.accelerator is not None:
@@ -1038,84 +1057,55 @@ class MATD3:
         :param path: Location to save checkpoint at
         :type path: string
         """
+        attribute_dict = self.inspect_attributes()
+
+        network_info = {
+            "actors_init_dict": [actor.init_dict for actor in self.actors],
+            "actors_state_dict": [actor.state_dict() for actor in self.actors],
+            "actor_targets_init_dict": [
+                actor_target.init_dict for actor_target in self.actor_targets
+            ],
+            "actor_targets_state_dict": [
+                actor_target.state_dict() for actor_target in self.actor_targets
+            ],
+            "critics_1_init_dict": [critic_1.init_dict for critic_1 in self.critics_1],
+            "critics_1_state_dict": [critic_1.state_dict() for critic_1 in self.critics_1],
+            "critic_targets_1_init_dict": [
+                critic_target_1.init_dict for critic_target_1 in self.critic_targets_1
+            ],
+            "critic_targets_1_state_dict": [
+                critic_target_1.state_dict() for critic_target_1 in self.critic_targets_1
+            ],
+            "actor_optimizers_state_dict": [
+                actor_optimizer.state_dict()
+                for actor_optimizer in self.actor_optimizers
+            ],
+            "critic_2_optimizers_state_dict": [
+                critic_2_optimizer.state_dict()
+                for critic_2_optimizer in self.critic_2_optimizers
+            ],
+            "critics_2_init_dict": [critic_2.init_dict for critic_2 in self.critics_2],
+            "critics_2_state_dict": [critic_2.state_dict() for critic_2 in self.critics_2],
+            "critic_targets_2_init_dict": [
+                critic_target_2.init_dict for critic_target_2 in self.critic_targets_2
+            ],
+            "critic_targets_2_state_dict": [
+                critic_target_2.state_dict() for critic_target_2 in self.critic_targets_2
+            ],
+            "critic_1_optimizers_state_dict": [
+                critic_2_optimizer.state_dict()
+                for critic_2_optimizer in self.critic_2_optimizers
+            ],
+        }
+
+        attribute_dict.update(network_info)
 
         torch.save(
-            {
-                "state_dims": self.state_dims,
-                "action_dims": self.action_dims,
-                "one_hot": self.one_hot,
-                "n_agents": self.n_agents,
-                "agent_ids": self.agent_ids,
-                "min_action": self.min_action,
-                "max_action": self.max_action,
-                "discrete_actions": self.discrete_actions,
-                "actors_init_dict": [actor.init_dict for actor in self.actors],
-                "actors_state_dict": [actor.state_dict() for actor in self.actors],
-                "actor_targets_init_dict": [
-                    actor_target.init_dict for actor_target in self.actor_targets
-                ],
-                "actor_targets_state_dict": [
-                    actor_target.state_dict() for actor_target in self.actor_targets
-                ],
-                "critics_1_init_dict": [
-                    critic_1.init_dict for critic_1 in self.critics_1
-                ],
-                "critics_1_state_dict": [
-                    critic_1.state_dict() for critic_1 in self.critics_1
-                ],
-                "critic_targets_1_init_dict": [
-                    critic_target_1.init_dict
-                    for critic_target_1 in self.critic_targets_1
-                ],
-                "critic_targets_1_state_dict": [
-                    critic_target_1.state_dict()
-                    for critic_target_1 in self.critic_targets_1
-                ],
-                "critics_2_init_dict": [
-                    critic_2.init_dict for critic_2 in self.critics_2
-                ],
-                "critics_2_state_dict": [
-                    critic_2.state_dict() for critic_2 in self.critics_2
-                ],
-                "critic_targets_2_init_dict": [
-                    critic_target_2.init_dict
-                    for critic_target_2 in self.critic_targets_2
-                ],
-                "critic_targets_2_state_dict": [
-                    critic_target_2.state_dict()
-                    for critic_target_2 in self.critic_targets_2
-                ],
-                "actor_optimizers_state_dict": [
-                    actor_optimizer.state_dict()
-                    for actor_optimizer in self.actor_optimizers
-                ],
-                "critic_1_optimizers_state_dict": [
-                    critic_1_optimizer.state_dict()
-                    for critic_1_optimizer in self.critic_1_optimizers
-                ],
-                "critic_2_optimizers_state_dict": [
-                    critic_2_optimizer.state_dict()
-                    for critic_2_optimizer in self.critic_2_optimizers
-                ],
-                "expl_noise": self.expl_noise,
-                "net_config": self.net_config,
-                "batch_size": self.batch_size,
-                "lr_actor": self.lr_actor,
-                "lr_critic": self.lr_critic,
-                "learn_step": self.learn_step,
-                "policy_freq": self.policy_freq,
-                "gamma": self.gamma,
-                "tau": self.tau,
-                "mutation": self.mut,
-                "index": self.index,
-                "scores": self.scores,
-                "fitness": self.fitness,
-                "steps": self.steps,
-                "learn_counter": self.learn_counter,
-            },
+            attribute_dict,
             path,
             pickle_module=dill,
         )
+
 
     def loadCheckpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
@@ -1123,85 +1113,51 @@ class MATD3:
         :param path: Location to load checkpoint from
         :type path: string
         """
+        network_info = {
+            "actors_init_dict",
+            "actors_state_dict",
+            "actor_targets_init_dict",
+            "actor_targets_state_dict",
+            "actor_optimizers_state_dict",
+            "critics_1_init_dict",
+            "critics_1_state_dict",
+            "critic_targets_1_init_dict",
+            "critic_targets_1_state_dict",
+            "critic_1_optimizers_state_dict",
+            "critics_2_init_dict",
+            "critics_2_state_dict",
+            "critic_targets_2_init_dict",
+            "critic_targets_2_state_dict",
+            "critic_2_optimizers_state_dict",
+            "net_config",
+            "lr_actor",
+            "lr_critic",
+        }
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
             self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
-                self.actors = [
-                    EvolvableMLP(**checkpoint["actors_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.actor_targets = [
-                    EvolvableMLP(**checkpoint["actor_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critics_1 = [
-                    EvolvableMLP(**checkpoint["critics_1_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critic_targets_1 = [
-                    EvolvableMLP(**checkpoint["critic_targets_1_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critics_2 = [
-                    EvolvableMLP(**checkpoint["critics_2_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critic_targets_2 = [
-                    EvolvableMLP(**checkpoint["critic_targets_2_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
+                network_class = EvolvableMLP
             elif self.arch == "cnn":
-                self.actors = [
-                    EvolvableCNN(**checkpoint["actors_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.actor_targets = [
-                    EvolvableCNN(**checkpoint["actor_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critics_1 = [
-                    EvolvableCNN(**checkpoint["critics_1_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critic_targets_1 = [
-                    EvolvableCNN(**checkpoint["critic_targets_1_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critics_2 = [
-                    EvolvableCNN(**checkpoint["critics_2_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critic_targets_2 = [
-                    EvolvableCNN(**checkpoint["critic_targets_2_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
+                network_class = EvolvableCNN
         else:
-            self.actors = [
-                MakeEvolvable(**checkpoint["actors_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.actor_targets = [
-                MakeEvolvable(**checkpoint["actor_targets_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.critics_1 = [
-                MakeEvolvable(**checkpoint["critics_1_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.critic_targets_1 = [
-                MakeEvolvable(**checkpoint["critic_targets_1_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.critics_2 = [
-                MakeEvolvable(**checkpoint["critics_2_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.critic_targets_2 = [
-                MakeEvolvable(**checkpoint["critic_targets_2_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
+            network_class = MakeEvolvable
+
+        self.actors = [network_class(**checkpoint["actors_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.actor_targets = [network_class(**checkpoint["actor_targets_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.critics_1 = [network_class(**checkpoint["critics_1_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.critic_targets_1 = [network_class(**checkpoint["critic_targets_1_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.critics_2 = [network_class(**checkpoint["critics_2_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.critic_targets_2 = [network_class(**checkpoint["critic_targets_2_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+
+        
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
         self.actor_optimizers = [
@@ -1286,18 +1242,10 @@ class MATD3:
         self.actor_optimizers = actor_optimizer_list
         self.critic_1_optimizers = critic_1_optimizer_list
         self.critic_2_optimizers = critic_2_optimizer_list
-        self.expl_noise = checkpoint["expl_noise"]
-        self.batch_size = checkpoint["batch_size"]
-        self.learn_step = checkpoint["learn_step"]
-        self.policy_freq = checkpoint["policy_freq"]
-        self.gamma = checkpoint["gamma"]
-        self.tau = checkpoint["tau"]
-        self.mut = checkpoint["mutation"]
-        self.index = checkpoint["index"]
-        self.scores = checkpoint["scores"]
-        self.fitness = checkpoint["fitness"]
-        self.steps = checkpoint["steps"]
-        self.learn_counter = checkpoint["learn_counter"]
+        
+        for attribute in checkpoint.keys():
+            if attribute not in network_info:
+                setattr(self, attribute, checkpoint[attribute])
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -1339,7 +1287,7 @@ class MATD3:
                 learn_step=checkpoint["learn_step"],
                 gamma=checkpoint["gamma"],
                 tau=checkpoint["tau"],
-                mutation=checkpoint["mutation"],
+                mut=checkpoint["mut"],
                 device=device,
                 accelerator=accelerator,
             )
@@ -1414,7 +1362,7 @@ class MATD3:
                 learn_step=checkpoint["learn_step"],
                 gamma=checkpoint["gamma"],
                 tau=checkpoint["tau"],
-                mutation=checkpoint["mutation"],
+                mut=checkpoint["mut"],
                 actor_networks=[
                     MakeEvolvable(**checkpoint["actors_init_dict"][idx])
                     for idx, _ in enumerate(checkpoint["agent_ids"])

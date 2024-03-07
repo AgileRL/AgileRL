@@ -156,8 +156,8 @@ class DDPG:
         self.mut = mut
         self.policy_freq = policy_freq
         self.expl_noise = expl_noise
-        self.actor_network = actor_network
-        self.critic_network = critic_network
+        # self.actor_network = actor_network
+        # self.critic_network = critic_network
         self.device = device
         self.accelerator = accelerator
 
@@ -167,19 +167,28 @@ class DDPG:
         self.steps = [0]
         self.learn_counter = 0
 
-        if self.actor_network is not None and self.critic_network is not None:
+        if actor_network is not None and critic_network is not None:
             assert type(actor_network) == type(critic_network), f"'actor_network' and 'critic_network' must be the same type."
             self.actor = actor_network
             self.critic = critic_network
             if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(self.critic, (EvolvableMLP, EvolvableCNN)):
                 self.net_config = self.actor.net_config
+                self.actor_network = None
+                self.critic_network = None
             elif isinstance(self.actor, MakeEvolvable) and isinstance(self.critic, MakeEvolvable):
                 self.net_config = None
+                self.actor_network = actor_network
+                self.critic_network = critic_network
             else:
                 assert False, f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-       
+                
+
+            print("in the first part od the if statement")
+    
+
         else:
+            print("in the second part od the if statement")
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
             assert (

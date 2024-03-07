@@ -406,7 +406,6 @@ class DQN:
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
-
         return clone
 
     def inspect_attributes(self, input_args_only=False):

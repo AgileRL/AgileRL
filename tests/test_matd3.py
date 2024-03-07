@@ -240,14 +240,14 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
 @pytest.mark.parametrize(
     "net_config, accelerator_flag, state_dims",
     [
-        ({"arch": "mlp", "h_size": [64, 64]}, False, [(4,), (4,)]),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)]),
         (
             {
                 "arch": "cnn",
-                "h_size": [8],
-                "c_size": [3],
-                "k_size": [3],
-                "s_size": [1],
+                "hidden_size": [8],
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
                 "normalize": False,
             },
             False,
@@ -256,10 +256,10 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
         (
             {
                 "arch": "cnn",
-                "h_size": [8],
-                "c_size": [3],
-                "k_size": [3],
-                "s_size": [1],
+                "hidden_size": [8],
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
                 "normalize": False,
             },
             True,
@@ -621,7 +621,7 @@ def test_matd3_getAction_epsilon_greedy_mlp(
         state_dims,
         action_dims,
         one_hot=one_hot,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
         n_agents=2,
         agent_ids=agent_ids,
         max_action=[[1], [1]],
@@ -671,10 +671,10 @@ def test_matd3_getAction_epsilon_greedy_cnn(
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
         "arch": "cnn",
-        "h_size": [64, 64],
-        "c_size": [16],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [64, 64],
+        "channel_size": [16],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     state = {agent: np.random.randn(1, *state_dims[0]) for agent in agent_ids}
@@ -1030,10 +1030,10 @@ def test_matd3_learns_from_experiences_cnn(
     policy_freq = 2
     net_config = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [16],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [16],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     matd3 = MATD3(
@@ -1124,10 +1124,10 @@ def test_matd3_learns_from_experiences_cnn_distributed(
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [16],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [16],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     policy_freq = 2
@@ -1320,10 +1320,10 @@ def test_matd3_algorithm_test_loop_cnn(device):
     agent_state_dims = [(3, 32, 32), (3, 32, 32)]
     net_config = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [16],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [16],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     action_dims = [2, 2]
@@ -1351,10 +1351,10 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device):
     agent_state_dims = [(3, 32, 32), (3, 32, 32)]
     net_config = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [16],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [16],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     action_dims = [2, 2]
@@ -1392,14 +1392,14 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     expl_noise = 0.1
     discrete_actions = False
     index = 0
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
     lr_actor = 0.001
     lr_critic = 0.01
     learn_step = 5
     gamma = 0.95
     tau = 0.01
-    mutation = None
+    mut = None
     actor_networks = None
     critic_networks = None
     policy_freq = 2
@@ -1428,7 +1428,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
         learn_step,
         gamma,
         tau,
-        mutation,
+        mut,
         actor_networks,
         critic_networks,
         device,
@@ -1488,7 +1488,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
 
 
 def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
-    net_config = {"arch": "mlp", "h_size": [32, 32]}
+    net_config = {"arch": "mlp", "hidden_size": [32, 32]}
     # Initialize the ddpg agent
     matd3 = MATD3(
         state_dims=[
@@ -1537,7 +1537,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -1612,10 +1612,10 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [16],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [16],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     policy_freq = 2
@@ -1663,7 +1663,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -1804,7 +1804,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     assert "learn_step" in checkpoint
     assert "gamma" in checkpoint
     assert "tau" in checkpoint
-    assert "mutation" in checkpoint
+    assert "mut" in checkpoint
     assert "index" in checkpoint
     assert "scores" in checkpoint
     assert "fitness" in checkpoint
@@ -2064,10 +2064,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         discrete_actions=False,
         net_config={
             "arch": "cnn",
-            "h_size": [8],
-            "c_size": [3],
-            "k_size": [3],
-            "s_size": [1],
+            "hidden_size": [8],
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
             "normalize": False,
         },
     )

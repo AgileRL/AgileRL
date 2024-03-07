@@ -1,6 +1,7 @@
 import copy
 import random
 import warnings
+import inspect
 
 import dill
 import numpy as np
@@ -85,7 +86,7 @@ class MADDPG:
         learn_step=5,
         gamma=0.95,
         tau=0.01,
-        mutation=None,
+        mut=None,
         actor_networks=None,
         critic_networks=None,
         device="cpu",
@@ -165,7 +166,7 @@ class MADDPG:
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
-        self.mut = mutation
+        self.mut = mut
         self.device = device
         self.accelerator = accelerator
         self.index = index
@@ -181,9 +182,18 @@ class MADDPG:
         self.critic_networks = critic_networks
 
         if self.actor_networks is not None and self.critic_networks is not None:
+            assert len(set(type(net) for net in actor_networks)) == 1, "'actor_networks' must all be the same type"
+            assert len(set(type(net) for net in critic_networks)) == 1, "'critic_networks' must all be the same type"
+            assert type(actor_networks[0]) == type(critic_networks[0]), "actor and critic networks must be the same type"
             self.actors = actor_networks
             self.critics = critic_networks
-            self.net_config = None
+            if isinstance(self.actors[0], (EvolvableMLP, EvolvableCNN)) and isinstance(self.critics[0], (EvolvableMLP, EvolvableCNN)):
+                self.net_config = self.actors[0].net_config
+            elif isinstance(self.actors[0], MakeEvolvable) and isinstance(self.critics[0], MakeEvolvable):
+                self.net_config = None
+            else:
+                assert False, "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
+                                type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
 
             # model
@@ -231,9 +241,9 @@ class MADDPG:
                     if "mlp_output_activation" not in self.net_config.keys():
                         if not self.discrete_actions:
                             if self.min_action[idx][0] < 0:
-                                self.net_config["output_activation"] = "Tanh"
+                                self.net_config["mlp_output_activation"] = "Tanh"
                             else:
-                                self.net_config["output_activation"] = "Sigmoid"
+                                self.net_config["mlp_output_activation"] = "Sigmoid"
                         else:
                             self.net_config["mlp_output_activation"] = "GumbelSoftmax"
                     self.actors.append(
@@ -737,34 +747,13 @@ class MADDPG:
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
         """
+        input_args = self.inspect_attributes(input_args_only=True)
+        input_args["wrap"] = wrap
+
         if index is None:
             index = self.index
 
-        clone = type(self)(
-            state_dims=self.state_dims,
-            action_dims=self.action_dims,
-            one_hot=self.one_hot,
-            n_agents=self.n_agents,
-            agent_ids=self.agent_ids,
-            max_action=self.max_action,
-            min_action=self.min_action,
-            expl_noise=self.expl_noise,
-            discrete_actions=self.discrete_actions,
-            index=index,
-            net_config=self.net_config,
-            batch_size=self.batch_size,
-            lr_actor=self.lr_actor,
-            lr_critic=self.lr_critic,
-            learn_step=self.learn_step,
-            gamma=self.gamma,
-            tau=self.tau,
-            mutation=self.mut,
-            actor_networks=self.actor_networks,
-            critic_networks=self.critic_networks,
-            device=self.device,
-            accelerator=self.accelerator,
-            wrap=wrap,
-        )
+        clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
@@ -780,6 +769,11 @@ class MADDPG:
         critic_optimizers = [
             optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics
         ]
+
+        for clone_actor_optimizer, actor_optimizer, clone_critic_optimizer, critic_optimizer \
+              in zip(actor_optimizers, self.actor_optimizers, critic_optimizers, self.critic_optimizers):
+            clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
+            clone_critic_optimizer.load_state_dict(critic_optimizer.state_dict())
 
         if self.accelerator is not None:
             if wrap:
@@ -829,11 +823,55 @@ class MADDPG:
             clone.actor_optimizers = actor_optimizers
             clone.critic_optimizers = critic_optimizers
 
-        clone.fitness = copy.deepcopy(self.fitness)
-        clone.steps = copy.deepcopy(self.steps)
-        clone.scores = copy.deepcopy(self.scores)
+        for attribute in self.inspect_attributes().keys():
+            if hasattr(self, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                else:
+                    if attr != clone_attr:
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
         return clone
+    
+    def inspect_attributes(self, input_args_only=False):
+        # Get all attributes of the current object
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        guarded_attributes = [
+            "actors",
+            "critics",
+            "actor_targets",
+            "critic_targets",
+            "actor_optimizers",
+            "critic_optimizers",
+        ]
+
+        # Exclude private and built-in attributes
+        attributes = [
+            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
+        ]
+
+        if input_args_only:
+            constructor_params = inspect.signature(self.__init__).parameters.keys()
+            attributes = {
+                k: v
+                for k, v in attributes
+                if k not in guarded_attributes and k in constructor_params
+            }
+        else:
+            # Remove the algo specific guarded variables
+            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
+
+        return attributes
 
     def wrap_models(self):
         if self.accelerator is not None:
@@ -889,18 +927,10 @@ class MADDPG:
         :param path: Location to save checkpoint at
         :type path: string
         """
+        attribute_dict = self.inspect_attributes()
 
-        torch.save(
-            {
-                "state_dims": self.state_dims,
-                "action_dims": self.action_dims,
-                "one_hot": self.one_hot,
-                "n_agents": self.n_agents,
-                "agent_ids": self.agent_ids,
-                "min_action": self.min_action,
-                "max_action": self.max_action,
-                "discrete_actions": self.discrete_actions,
-                "actors_init_dict": [actor.init_dict for actor in self.actors],
+        network_info = {
+            "actors_init_dict": [actor.init_dict for actor in self.actors],
                 "actors_state_dict": [actor.state_dict() for actor in self.actors],
                 "actor_targets_init_dict": [
                     actor_target.init_dict for actor_target in self.actor_targets
@@ -924,20 +954,12 @@ class MADDPG:
                     critic_optimizer.state_dict()
                     for critic_optimizer in self.critic_optimizers
                 ],
-                "expl_noise": self.expl_noise,
-                "net_config": self.net_config,
-                "batch_size": self.batch_size,
-                "lr_actor": self.lr_actor,
-                "lr_critic": self.lr_critic,
-                "learn_step": self.learn_step,
-                "gamma": self.gamma,
-                "tau": self.tau,
-                "mutation": self.mut,
-                "index": self.index,
-                "scores": self.scores,
-                "fitness": self.fitness,
-                "steps": self.steps,
-            },
+        }
+
+        attribute_dict.update(network_info)
+
+        torch.save(
+            attribute_dict,
             path,
             pickle_module=dill,
         )
@@ -948,61 +970,41 @@ class MADDPG:
         :param path: Location to load checkpoint from
         :type path: string
         """
+        network_info = {
+            "actors_init_dict",
+            "actors_state_dict",
+            "actor_targets_init_dict",
+            "actor_targets_state_dict",
+            "critics_init_dict",
+            "critics_state_dict",
+            "critic_targets_init_dict",
+            "critic_targets_state_dict",
+            "actor_optimizers_state_dict",
+            "critic_optimizers_state_dict",
+            "net_config",
+            "lr_actor",
+            "lr_critic",
+        }
         checkpoint = torch.load(path, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
             self.arch = checkpoint["net_config"]["arch"]
             if self.arch == "mlp":
-                self.actors = [
-                    EvolvableMLP(**checkpoint["actors_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.actor_targets = [
-                    EvolvableMLP(**checkpoint["actor_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critics = [
-                    EvolvableMLP(**checkpoint["critics_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critic_targets = [
-                    EvolvableMLP(**checkpoint["critic_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
+                network_class = EvolvableMLP
             elif self.arch == "cnn":
-                self.actors = [
-                    EvolvableCNN(**checkpoint["actors_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.actor_targets = [
-                    EvolvableCNN(**checkpoint["actor_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critics = [
-                    EvolvableCNN(**checkpoint["critics_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
-                self.critic_targets = [
-                    EvolvableCNN(**checkpoint["critic_targets_init_dict"][idx])
-                    for idx, _ in enumerate(self.agent_ids)
-                ]
+                network_class = EvolvableCNN
         else:
-            self.actors = [
-                MakeEvolvable(**checkpoint["actors_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.actor_targets = [
-                MakeEvolvable(**checkpoint["actor_targets_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.critics = [
-                MakeEvolvable(**checkpoint["critics_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
-            self.critic_targets = [
-                MakeEvolvable(**checkpoint["critic_targets_init_dict"][idx])
-                for idx, _ in enumerate(self.agent_ids)
-            ]
+            network_class = MakeEvolvable
+
+        self.actors = [network_class(**checkpoint["actors_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.actor_targets = [network_class(**checkpoint["actor_targets_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.critics = [network_class(**checkpoint["critics_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+        self.critic_targets = [network_class(**checkpoint["critic_targets_init_dict"][idx])
+                       for idx, _ in enumerate(self.agent_ids)]
+
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
         self.actor_optimizers = [
@@ -1059,16 +1061,11 @@ class MADDPG:
         self.critic_targets = critic_target_list
         self.actor_optimizers = actor_optimizer_list
         self.critic_optimizers = critic_optimizer_list
-        self.expl_noise = checkpoint["expl_noise"]
-        self.batch_size = checkpoint["batch_size"]
-        self.learn_step = checkpoint["learn_step"]
-        self.gamma = checkpoint["gamma"]
-        self.tau = checkpoint["tau"]
-        self.mut = checkpoint["mutation"]
-        self.index = checkpoint["index"]
-        self.scores = checkpoint["scores"]
-        self.fitness = checkpoint["fitness"]
-        self.steps = checkpoint["steps"]
+
+
+        for attribute in checkpoint.keys():
+            if attribute not in network_info:
+                setattr(self, attribute, checkpoint[attribute])
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -1107,7 +1104,7 @@ class MADDPG:
                 learn_step=checkpoint["learn_step"],
                 gamma=checkpoint["gamma"],
                 tau=checkpoint["tau"],
-                mutation=checkpoint["mutation"],
+                mut=checkpoint["mut"],
                 device=device,
                 accelerator=accelerator,
             )
@@ -1165,7 +1162,7 @@ class MADDPG:
                 learn_step=checkpoint["learn_step"],
                 gamma=checkpoint["gamma"],
                 tau=checkpoint["tau"],
-                mutation=checkpoint["mutation"],
+                mut=checkpoint["mut"],
                 actor_networks=[
                     MakeEvolvable(**checkpoint["actors_init_dict"][idx])
                     for idx, _ in enumerate(checkpoint["agent_ids"])

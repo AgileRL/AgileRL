@@ -14,7 +14,6 @@ from networks import (
 )
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
-
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -24,7 +23,6 @@ from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 
@@ -136,6 +134,25 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         torch.ones(state_dims[0] + action_dims),
                         device=device,
                     )
+
+                    actor = EvolvableMLP(
+                        num_inputs=state_dims[0],
+                        num_outputs=action_dims,
+                        device=device,
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU",
+                        mlp_output_activation="Tanh"
+                    )
+
+                    critic = EvolvableMLP(
+                        num_inputs=state_dims[0] + action_dims,
+                        num_outputs=action_dims,
+                        device=device,
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU"
+                    )
+
+
                 elif INIT_HP["ALGO"] == "TD3":
                     network_actor_td3 = BasicNetActor(
                         state_dims[0], [64, 64], action_dims
@@ -390,9 +407,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
 
 if __name__ == "__main__":
-    dqn = True
+    dqn = False
     ppo = False
-    ddpg = False
+    ddpg = True
     td3 = False
     maddpg = False
     matd3 = False
@@ -440,19 +457,19 @@ if __name__ == "__main__":
             ddpg_config = yaml.safe_load(file)
         INIT_HP = ddpg_config["INIT_HP"]
         MUTATION_PARAMS = ddpg_config["MUTATION_PARAMS"]
-        net_config_mlp = ddpg_config["MLP"]
+        #net_config_mlp = ddpg_config["MLP"]
         if standard:
             print("-" * 20, "DDPG Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-" * 20, "DDPG Lunar Lander using net_config", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+            # print("-" * 20, "DDPG Lunar Lander using net_config", "-" * 20)
+            # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 
     if td3:
         with open("../configs/training/td3.yaml") as file:
             td3_config = yaml.safe_load(file)
         INIT_HP = td3_config["INIT_HP"]
         MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
-        net_config_mlp = td3_config["MLP"]
+        #net_config_mlp = td3_config["MLP"]
         if standard:
             print("-" * 20, "TD3 Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
