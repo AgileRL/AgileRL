@@ -123,8 +123,10 @@ class DQN:
             self.actor = actor_network
             if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
                 self.net_config = self.actor.net_config
+                self.actor_network = None
             elif isinstance(self.actor, MakeEvolvable):
                 self.net_config = None
+                self.actor_network = actor_network
             else:
                 assert False, f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:

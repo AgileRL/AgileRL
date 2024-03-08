@@ -7,6 +7,8 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
+from agilerl.networks.evolvable_mlp import EvolvableMLP
+
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
@@ -14,7 +16,7 @@ from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparam
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
@@ -64,6 +66,27 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
+    if use_net:
+        actor =  EvolvableMLP(
+                            num_inputs=state_dim[0],
+                            num_outputs=action_dim,
+                            device=device,
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU",
+                            mlp_output_activation="Tanh"
+                        )
+        NET_CONFIG = None
+        critic = [EvolvableMLP(
+                            num_inputs=state_dim[0] + action_dim,
+                            num_outputs=1,
+                            device=device,
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU"
+                        ) for _ in range(2)]
+    else:
+        actor=None
+        critic=None
+
     agent_pop = initialPopulation(
         algo=INIT_HP["ALGO"],
         state_dim=state_dim,
@@ -71,6 +94,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         one_hot=one_hot,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        actor_network=actor,
+        critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
         device=device,
     )
@@ -108,4 +133,4 @@ if __name__ == "__main__":
     INIT_HP = dqn_config["INIT_HP"]
     MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
     NET_CONFIG = dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

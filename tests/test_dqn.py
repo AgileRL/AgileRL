@@ -92,7 +92,7 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.state_dim == state_dim
     assert dqn.action_dim == action_dim
     assert dqn.one_hot == one_hot
-    assert dqn.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert dqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
     assert dqn.learn_step == 5
@@ -122,10 +122,10 @@ def test_initialize_dqn_with_cnn_accelerator():
     index = 0
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     batch_size = 64
@@ -189,7 +189,7 @@ def test_initialize_dqn_with_cnn_accelerator():
         ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-def test_initialize_dqn_with_actor_network(
+def test_initialize_dqn_with_actor_network_make_evo(
     state_dim, actor_network, input_tensor, request
 ):
     action_dim = 2
@@ -221,6 +221,73 @@ def test_initialize_dqn_with_actor_network(
     assert isinstance(dqn.optimizer, optim.Adam)
     assert dqn.arch == actor_network.arch
     assert isinstance(dqn.criterion, nn.MSELoss)
+
+
+@pytest.mark.parametrize(
+    "state_dim, net_type",
+    [
+        ([4], "mlp"),
+        ([3, 64, 64], "cnn"),
+    ],
+)
+def test_initialize_dqn_with_actor_network_evo_net(
+    state_dim, net_type
+):
+    action_dim = 2
+    one_hot = False
+    if net_type == "mlp":
+        actor_network = EvolvableMLP(
+                            num_inputs=state_dim[0],
+                            num_outputs=action_dim,
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU")
+    else:
+        actor_network = EvolvableCNN(
+                            input_shape=state_dim,
+                            num_actions=action_dim,
+                            channel_size=[8,8],
+                            kernel_size=[2,2],
+                            stride_size=[1,1],
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU")
+
+    dqn = DQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+
+    assert dqn.state_dim == state_dim
+    assert dqn.action_dim == action_dim
+    assert dqn.one_hot == one_hot
+    assert dqn.net_config is not None
+    assert dqn.batch_size == 64
+    assert dqn.lr == 0.0001
+    assert dqn.learn_step == 5
+    assert dqn.gamma == 0.99
+    assert dqn.tau == 0.001
+    assert dqn.mut is None
+    assert dqn.device == "cpu"
+    assert dqn.accelerator is None
+    assert dqn.index == 0
+    assert dqn.scores == []
+    assert dqn.fitness == []
+    assert dqn.steps == [0]
+    assert dqn.double is False
+    assert dqn.actor_network is None
+    assert dqn.actor == actor_network
+    assert isinstance(dqn.optimizer, optim.Adam)
+    assert dqn.arch == actor_network.arch
+    assert isinstance(dqn.criterion, nn.MSELoss)
+
+
+def test_initialize_dqn_with_incorrect_actor_net_type():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    actor_network = "dummy"
+
+    with pytest.raises(AssertionError) as a:
+        dqn = DQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+
+        assert str(a.value) == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+       
 
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
@@ -362,10 +429,10 @@ def test_handles_double_q_learning_cnn():
     batch_size = 64
     net_config = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -408,7 +475,7 @@ def test_soft_update():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -489,10 +556,10 @@ def test_algorithm_test_loop_images():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -515,10 +582,10 @@ def test_algorithm_test_loop_images_unvectorized():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -704,7 +771,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     dqn.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert dqn.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert dqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert isinstance(dqn.actor, EvolvableMLP)
     assert isinstance(dqn.actor_target, EvolvableMLP)
     assert dqn.lr == 1e-4
@@ -725,10 +792,10 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -915,10 +982,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         one_hot=False,
         net_config={
             "arch": "cnn",
-            "h_size": [8],
-            "c_size": [3],
-            "k_size": [3],
-            "s_size": [1],
+            "hidden_size": [8],
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
             "normalize": False,
         },
     )

@@ -43,7 +43,7 @@ MUTATION_PARAMS:
 NET_CONFIG: {arch: mlp, # h_size: [64, 64]}
               hidden_size: [64, 64],
               mlp_activation: ReLU,
-              #mlp_output_activation: null,
+              mlp_output_activation: Tanh,
               min_hidden_layers: 1,
               max_hidden_layers: 3,
               min_mlp_nodes: 64,

@@ -161,7 +161,12 @@ class RainbowDQN:
 
         if self.actor_network is not None:
             self.actor = actor_network
-            self.net_config = None
+            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
+                self.net_config = self.actor.net_config
+                self.actor_network = None
+            else:
+                assert False, f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP or EvolvableCNN "
+       
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."

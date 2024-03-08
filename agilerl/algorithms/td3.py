@@ -176,7 +176,7 @@ class TD3:
         self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_networks is not None:
-            assert type(actor_network) == type(critic_network[0]) == type(critic_network[1]),\
+            assert type(actor_network) == type(critic_networks[0]) == type(critic_networks[1]),\
                   f"'actor_network' and 'critic_networks' must be the same type."
             self.actor = actor_network
             self.critic_1, self.critic_2 = critic_networks
@@ -546,9 +546,9 @@ class TD3:
         critic_2 = self.critic_2.clone()
         critic_target_2 = self.critic_target_2.clone()
 
-        actor_optimizer = optim.Adam(clone.actor.parameters(), lr=clone.lr_actor)
-        critic_1_optimizer = optim.Adam(clone.critic_1.parameters(), lr=clone.lr_critic)
-        critic_2_optimizer = optim.Adam(clone.critic_2.parameters(), lr=clone.lr_critic)
+        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr_actor)
+        critic_1_optimizer = optim.Adam(critic_1.parameters(), lr=clone.lr_critic)
+        critic_2_optimizer = optim.Adam(critic_2.parameters(), lr=clone.lr_critic)
 
         actor_optimizer.load_state_dict(self.actor_optimizer.state_dict())
         critic_1_optimizer.load_state_dict(self.critic_1_optimizer.state_dict())

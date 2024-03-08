@@ -166,6 +166,8 @@ class DDPG:
         self.fitness = []
         self.steps = [0]
         self.learn_counter = 0
+        self.actor_network = None 
+        self.critic_network = None
 
         if actor_network is not None and critic_network is not None:
             assert type(actor_network) == type(critic_network), f"'actor_network' and 'critic_network' must be the same type."
@@ -182,13 +184,9 @@ class DDPG:
             else:
                 assert False, f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-                
-
-            print("in the first part od the if statement")
-    
+                    
 
         else:
-            print("in the second part od the if statement")
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
             assert (
@@ -282,6 +280,7 @@ class DDPG:
             self.critic_target = self.critic_target.to(self.device)
 
         self.criterion = nn.MSELoss()
+
 
     def scale_to_action_space(self, action):
         """Scales actions to action space defined by self.min_action and self.max_action.

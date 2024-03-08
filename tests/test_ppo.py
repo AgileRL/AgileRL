@@ -136,10 +136,11 @@ def test_initializes_with_default_values():
     action_dim = 2
     one_hot = False
     discrete_actions = False
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
 
     ppo = PPO(state_dim, action_dim, one_hot, discrete_actions, net_config=net_config)
 
+    print("ppo net config", ppo.net_config)
     assert ppo.algo == "PPO"
     assert ppo.state_dim == state_dim
     assert ppo.action_dim == action_dim
@@ -147,9 +148,11 @@ def test_initializes_with_default_values():
     assert ppo.discrete_actions == discrete_actions
     assert ppo.net_config == {
         "arch": "mlp",
-        "h_size": [64, 64],
-        "output_activation": "Tanh",
-    }
+        "hidden_size": [64, 64],
+        "mlp_activation": "Tanh",
+        "mlp_output_activation": "Tanh",
+    }, ppo.net_config
+
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -185,10 +188,10 @@ def test_initialize_ppo_with_cnn_accelerator():
     index = 0
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     batch_size = 64
@@ -233,7 +236,7 @@ def test_initialize_ppo_with_cnn_accelerator():
         wrap=wrap,
     )
 
-    net_config_cnn.update({"output_activation": "Softmax"})
+    net_config_cnn.update({"mlp_output_activation": "Softmax"})
 
     assert ppo.state_dim == state_dim
     assert ppo.action_dim == action_dim
@@ -315,35 +318,63 @@ def test_initialize_ppo_with_actor_network(
     assert isinstance(ppo.optimizer, optim.Adam)
     assert ppo.arch == actor_network.arch
 
-
-# Can initialize ppo with an actor network but no critic - should trigger warning
 @pytest.mark.parametrize(
-    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    "state_dim, net_type",
     [
-        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        ([4], "mlp"),
+        ([3, 64, 64], "cnn"),
     ],
 )
-def test_initialize_ppo_with_actor_network_no_critic(
-    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+def test_initialize_ppo_with_actor_network_evo_net(
+    state_dim, net_type
 ):
     action_dim = 2
     one_hot = False
-    actor_network = request.getfixturevalue(actor_network)
-    actor_network = MakeEvolvable(actor_network, input_tensor)
+    if net_type == "mlp":
+        actor_network = EvolvableMLP(
+                            num_inputs=state_dim[0],
+                            num_outputs=action_dim,
+                            hidden_size=[64, 64],
+                            mlp_activation="Tanh",
+                            mlp_output_activation="Tanh")
+        critic_network = EvolvableMLP(
+                            num_inputs=state_dim[0] + action_dim,
+                            num_outputs=1,
+                            hidden_size=[64, 64],
+                            mlp_activation="Tanh")
+    else:
+        actor_network = EvolvableCNN(
+                            input_shape=state_dim,
+                            num_actions=action_dim,
+                            channel_size=[8,8],
+                            kernel_size=[2,2],
+                            stride_size=[1,1],
+                            hidden_size=[64, 64],
+                            mlp_activation="Tanh",
+                            mlp_output_activation="Tanh")
+
+        critic_network = EvolvableCNN(
+                            input_shape=state_dim,
+                            num_actions=action_dim,
+                            channel_size=[8,8],
+                            kernel_size=[2,2],
+                            stride_size=[1,1],
+                            hidden_size=[64, 64],
+                            critic=True,
+                            mlp_activation="Tanh")
 
     ppo = PPO(
         state_dim,
         action_dim,
         one_hot,
-        discrete_actions=True,
         actor_network=actor_network,
-        critic_network=None,
+        critic_network=critic_network,
+        discrete_actions=True
     )
 
     assert ppo.state_dim == state_dim
     assert ppo.action_dim == action_dim
     assert ppo.one_hot == one_hot
-    assert ppo.net_config is not None
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -362,9 +393,54 @@ def test_initialize_ppo_with_actor_network_no_critic(
     assert ppo.scores == []
     assert ppo.fitness == []
     assert ppo.steps == [0]
-    assert ppo.actor != actor_network
-    assert ppo.critic_network is None
+    assert ppo.actor_network == actor_network
+    assert ppo.actor == actor_network
+    assert ppo.critic_network == critic_network
+    assert ppo.critic == critic_network
     assert isinstance(ppo.optimizer, optim.Adam)
+    assert ppo.arch == actor_network.arch
+
+def test_initialize_ddpg_with_incorrect_actor_net():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    actor_network = "dummy"
+    critic_network = "dummy"
+    with pytest.raises(AssertionError):
+        ppo = PPO(
+        state_dim,
+        action_dim,
+        one_hot,
+        actor_network=actor_network,
+        critic_network=critic_network,
+        discrete_actions=True
+    )
+
+
+# Can initialize ppo with an actor network but no critic - should trigger warning
+@pytest.mark.parametrize(
+    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    [
+        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+    ],
+)
+def test_initialize_ppo_with_actor_network_no_critic(
+    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+):
+    action_dim = 2
+    one_hot = False
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+    with pytest.raises(AssertionError):
+        ppo = PPO(
+            state_dim,
+            action_dim,
+            one_hot,
+            discrete_actions=True,
+            actor_network=actor_network,
+            critic_network=critic_network,
+        )
+
 
 
 # Converts numpy array to torch tensor of type float
@@ -388,10 +464,10 @@ def test_prepare_state_cnn_accelerator():
     state = torch.rand(*state_dim)
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     ppo = PPO(
@@ -484,10 +560,10 @@ def test_learns_from_experiences():
     batch_size = 10
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -541,7 +617,7 @@ def test_learns_from_experiences_continuous_accel():
         action_dim=action_dim,
         one_hot=one_hot,
         discrete_actions=discrete_actions,
-        net_config={"arch": "mlp", "h_size": [64, 64], "output_activation": "Tanh"},
+        net_config={"arch": "mlp", "hidden_size": [64, 64], "mlp_output_activation": "Tanh"},
         target_kl=target_kl,
         batch_size=batch_size,
         accelerator=accelerator,
@@ -612,10 +688,10 @@ def test_algorithm_test_loop_images():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -639,10 +715,10 @@ def test_algorithm_test_loop_images_unvectorized():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -829,6 +905,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
+    print("netty c ", ppo.net_config)
+
     # Check if the loaded checkpoint has the correct keys
     assert "actor_init_dict" in checkpoint
     assert "actor_state_dict" in checkpoint
@@ -861,8 +939,9 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Check if properties and weights are loaded correctly
     assert ppo.net_config == {
         "arch": "mlp",
-        "h_size": [64, 64],
-        "output_activation": "Softmax",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "Softmax",
+        "mlp_activation": "Tanh"
     }
     assert isinstance(ppo.actor, EvolvableMLP)
     assert isinstance(ppo.critic, EvolvableMLP)
@@ -886,10 +965,10 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -1104,10 +1183,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         one_hot=False,
         net_config={
             "arch": "cnn",
-            "h_size": [8],
-            "c_size": [3],
-            "k_size": [3],
-            "s_size": [1],
+            "hidden_size": [8],
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
             "normalize": False,
         },
         discrete_actions=False,

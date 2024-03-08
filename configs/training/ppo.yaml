@@ -21,7 +21,7 @@ INIT_HP:
     UPDATE_EPOCHS: 4           # Number of policy update epochs
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 6                # Population size
+    POP_SIZE: 2                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
     WANDB: false               # Log with Weights and Biases
 
@@ -41,4 +41,10 @@ MUTATION_PARAMS:
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+NET_CONFIG: {arch: mlp, # h_size: [64, 64]}
+              hidden_size: [64, 64],
+              mlp_activation: Tanh,
+              min_hidden_layers: 1,
+              max_hidden_layers: 3,
+              min_mlp_nodes: 64,
+              max_mlp_nodes: 500}

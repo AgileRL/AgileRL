@@ -510,6 +510,132 @@ def test_initialize_maddpg_with_cnn_networks(
         )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
+@pytest.mark.parametrize(
+    "state_dims, action_dims, net",
+    [
+        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp"),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn")
+    ],
+)
+def test_initialize_maddpg_with_evo_networks(
+    state_dims, action_dims, net, device
+):
+    if net == "mlp":
+        evo_actors = [
+            EvolvableMLP(num_inputs=state_dims[x][0],
+                        num_outputs=action_dims[x],
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU",
+                        mlp_output_activation="Tanh")
+            for x in range(2)
+        ]
+        evo_critics = [
+             EvolvableMLP(num_inputs=sum(state_dim[0] for state_dim in state_dims) + sum(action_dims),
+                            num_outputs=1,
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU")
+            for x in range(2)
+        ]
+    else:
+        evo_actors = [
+            EvolvableCNN(input_shape=state_dims[0],
+                            num_actions=action_dims[0],
+                            channel_size=[8,8],
+                            kernel_size=[2,2],
+                            stride_size=[1,1],
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU",
+                            multi=True,
+                            n_agents=2,
+                            mlp_output_activation="Tanh")
+            for _ in range(2)
+        ]
+        evo_critics = [
+             EvolvableCNN(input_shape=state_dims[0],
+                            num_actions=sum(action_dims),
+                            channel_size=[8,8],
+                            kernel_size=[2,2],
+                            stride_size=[1,1],
+                            hidden_size=[64, 64],
+                            n_agents=2,
+                            critic=True,
+                            multi=True,
+                            mlp_activation="ReLU")
+            for _ in range(2)
+        ]
+    maddpg = MADDPG(
+        state_dims=state_dims,
+        action_dims=action_dims,
+        one_hot=False,
+        agent_ids=["agent_0", "agent_1"],
+        n_agents=len(state_dims),
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
+        discrete_actions=True,
+        actor_networks=evo_actors,
+        critic_networks=evo_critics,
+        device=device,
+    )
+    assert all(isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in maddpg.actors)
+    assert all(isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in maddpg.critics)
+    if net == "mlp":
+        assert maddpg.arch == "mlp"
+    else:
+        assert maddpg.arch == "cnn"
+    assert maddpg.state_dims == state_dims
+    assert maddpg.action_dims == action_dims
+    assert maddpg.one_hot is False
+    assert maddpg.n_agents == 2
+    assert maddpg.agent_ids == ["agent_0", "agent_1"]
+    assert maddpg.max_action == [(1,), (1,)]
+    assert maddpg.min_action == [(-1,), (-1,)]
+    assert maddpg.discrete_actions is True
+    assert maddpg.multi
+    assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
+    assert maddpg.total_actions == sum(action_dims)
+    assert maddpg.scores == []
+    assert maddpg.fitness == []
+    assert maddpg.steps == [0]
+    assert all(
+        isinstance(actor_optimizer, optim.Adam)
+        for actor_optimizer in maddpg.actor_optimizers
+    )
+    assert all(
+        isinstance(critic_optimizer, optim.Adam)
+        for critic_optimizer in maddpg.critic_optimizers
+    )
+   
+    assert isinstance(maddpg.criterion, nn.MSELoss)
+
+
+
+@pytest.mark.parametrize(
+    "state_dims, action_dims",
+    [
+        ([[4] for _ in range(2)], [2 for _ in range(2)]),
+    ],
+)
+def test_initialize_maddpg_with_incorrect_evo_networks(
+    state_dims, action_dims, device
+):
+    evo_actors = []
+    evo_critics = []
+ 
+    with pytest.raises(AssertionError):
+        maddpg = MADDPG(
+            state_dims=state_dims,
+            action_dims=action_dims,
+            one_hot=False,
+            agent_ids=["agent_0", "agent_1"],
+            n_agents=len(state_dims),
+            max_action=[(1,), (1,)],
+            min_action=[(-1,), (-1,)],
+            discrete_actions=True,
+            actor_networks=evo_actors,
+            critic_networks=evo_critics,)
+        
+
+
 
 @pytest.mark.parametrize(
     "state_dims, action_dims",
