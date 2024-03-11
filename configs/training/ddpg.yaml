@@ -40,7 +40,7 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 512
 
 
-NET_CONFIG: {arch: mlp, # h_size: [64, 64]}
+NET_CONFIG: {arch: mlp, 
               hidden_size: [64, 64],
               mlp_activation: ReLU,
               mlp_output_activation: Tanh,

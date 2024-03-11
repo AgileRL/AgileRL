@@ -635,8 +635,6 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
             critic_networks=evo_critics,)
         
 
-
-
 @pytest.mark.parametrize(
     "state_dims, action_dims",
     [

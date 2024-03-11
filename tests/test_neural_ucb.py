@@ -507,6 +507,35 @@ def test_clone_returns_identical_agent(state_dim, net_config):
     assert clone_agent.scores == bandit.scores
 
 
+
+def test_clone_after_learning():
+    action_dim = 2
+    state_dim = 4, 
+    batch_size = 4
+    states = torch.randn(batch_size, state_dim[0])
+    rewards = torch.rand(batch_size, 1)
+    experiences = states, rewards
+    bandit = NeuralUCB(state_dim, action_dim, batch_size=batch_size)
+    bandit.learn(experiences)
+    clone_agent = bandit.clone()
+
+    assert clone_agent.state_dim == bandit.state_dim
+    assert clone_agent.action_dim == bandit.action_dim
+    assert clone_agent.net_config == bandit.net_config
+    assert clone_agent.actor_network == bandit.actor_network
+    assert clone_agent.batch_size == bandit.batch_size
+    assert clone_agent.lr == bandit.lr
+    assert clone_agent.learn_step == bandit.learn_step
+    assert clone_agent.gamma == bandit.gamma
+    assert clone_agent.mut == bandit.mut
+    assert clone_agent.device == bandit.device
+    assert clone_agent.accelerator == bandit.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(bandit.actor.state_dict())
+    assert str(clone_agent.optimizer.state_dict()) == str(bandit.optimizer.state_dict())
+    assert clone_agent.fitness == bandit.fitness
+    assert clone_agent.steps == bandit.steps
+    assert clone_agent.scores == bandit.scores
+
 # The method successfully unwraps the actor model when an accelerator is present.
 def test_unwrap_models():
     bandit = NeuralUCB(state_dim=[4], action_dim=2, accelerator=Accelerator())

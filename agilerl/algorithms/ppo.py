@@ -304,7 +304,6 @@ class PPO:
             self.actor = self.actor.to(self.device)
             self.critic = self.critic.to(self.device)
 
-        print("internal net config", self.net_config)
     def prepare_state(self, state):
         """Prepares state for forward pass through neural network.
 

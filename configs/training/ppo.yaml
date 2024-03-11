@@ -21,9 +21,9 @@ INIT_HP:
     UPDATE_EPOCHS: 4           # Number of policy update epochs
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 2                # Population size
+    POP_SIZE: 1                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
