@@ -350,7 +350,7 @@ def train_off_policy(
                             experiences += n_step_experiences
                             loss, *_ = agent.learn(experiences, n_step=n_step)
                         else:
-                            loss = agent.learn(experiences)
+                            loss, *_ = agent.learn(experiences)
 
                 if is_vectorised:
                     terminations.append(done)
