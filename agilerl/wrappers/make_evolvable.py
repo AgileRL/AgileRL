@@ -151,21 +151,22 @@ class MakeEvolvable(nn.Module):
         if self.accelerator is None:
             x = x.to(self.device)
 
+        if x.dtype != torch.float32:
+            x = x.type(torch.float32)
+        x = self.feature_net(x)
+
         # Check if there is a cnn
         if self.cnn_layer_info:
-            if x.dtype != torch.float32:
-                x = x.type(torch.float32)
-            x = self.feature_net(x)
             x = x.reshape(x.size(0), -1)
             # Ensure dtype is float32
 
-        # Concatenate actions if passed to network as a separate tensor
-        if xc is not None:
-            if self.accelerator is None:
-                xc = xc.to(self.device)
-            x = torch.cat([x, xc], dim=1)
+            # Concatenate actions if passed to network as a separate tensor
+            if xc is not None:
+                if self.accelerator is None:
+                    xc = xc.to(self.device)
+                x = torch.cat([x, xc], dim=1)
 
-        x = self.value_net(x)
+            x = self.value_net(x)
 
         return x
 
@@ -640,22 +641,28 @@ class MakeEvolvable(nn.Module):
 
             if self.secondary_input_tensor is not None:
                 input_size += self.extra_critic_dims
+
+            value_net = self.create_mlp(
+                                            input_size,
+                                            self.num_outputs,
+                                            self.hidden_size,
+                                            name="value",
+                                        )
+
         else:
-            feature_net = None
+            value_net = None
             input_size = self.num_inputs
 
-        value_net = self.create_mlp(
-            input_size,
-            self.num_outputs,
-            self.hidden_size,
-            name="value",
-        )
+            feature_net = self.create_mlp(
+                input_size,
+                self.num_outputs,
+                self.hidden_size,
+                name="feature",
+            )
 
         if self.accelerator is None:
-            feature_net = (
-                feature_net.to(self.device) if feature_net is not None else feature_net
-            )
-            value_net = value_net.to(self.device)
+            feature_net = feature_net.to(self.device) 
+            value_net = value_net.to(self.device) if value_net is not None else value_net
 
         return feature_net, value_net
 
@@ -951,21 +958,21 @@ class MakeEvolvable(nn.Module):
         new_feature_net, new_value_net = self.create_nets()
 
         if shrink_params:
-            new_value_net = self.shrink_preserve_parameters(
-                old_net=self.value_net, new_net=new_value_net
-            )
-            if self.feature_net is not None:
-                new_feature_net = self.shrink_preserve_parameters(
-                    old_net=self.feature_net, new_net=new_feature_net
+            if self.value_net is not None:
+                new_value_net = self.shrink_preserve_parameters(
+                    old_net=self.value_net, new_net=new_value_net
                 )
+            new_feature_net = self.shrink_preserve_parameters(
+                old_net=self.feature_net, new_net=new_feature_net
+            )
         else:
-            new_value_net = self.preserve_parameters(
-                old_net=self.value_net, new_net=new_value_net
-            )
-            if self.feature_net is not None:
-                new_feature_net = self.preserve_parameters(
-                    old_net=self.feature_net, new_net=new_feature_net
+            if self.value_net is not None:
+                new_value_net = self.preserve_parameters(
+                    old_net=self.value_net, new_net=new_value_net
                 )
+            new_feature_net = self.preserve_parameters(
+                old_net=self.feature_net, new_net=new_feature_net
+            )
 
         self.feature_net, self.value_net = (new_feature_net, new_value_net)
 

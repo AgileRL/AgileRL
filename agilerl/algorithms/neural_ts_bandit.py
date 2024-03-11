@@ -120,11 +120,6 @@ class NeuralTS:
         if self.actor_network is not None:
             self.actor = actor_network
             self.net_config = None
-            layers = [module for module in self.actor.value_net.children()]
-            if self.actor.arch == "cnn":
-                layers = [
-                    module for module in self.actor.feature_net.children()
-                ] + layers
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -174,9 +169,9 @@ class NeuralTS:
                     accelerator=self.accelerator,
                     **self.net_config
                 )
-            layers = [module for module in self.actor.feature_net.children()]
-            if self.actor.arch == "cnn":
-                layers += [module for module in self.actor.value_net.children()]
+        layers = [module for module in self.actor.feature_net.children()]
+        if self.actor.arch == "cnn":
+            layers += [module for module in self.actor.value_net.children()]
 
         self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
 
@@ -411,8 +406,11 @@ class NeuralTS:
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
-        if clone.actor.arch == "mlp" and isinstance(clone.actor, EvolvableMLP):
-            clone.exp_layer = clone.actor.feature_net.linear_layer_output
+        if clone.actor.arch == "mlp":
+            if isinstance(clone.actor, EvolvableMLP):
+                clone.exp_layer = clone.actor.feature_net.linear_layer_output
+            else:
+                clone.exp_layer = clone.actor.feature_net.feature_linear_layer_output
         else:
             clone.exp_layer = clone.actor.value_net.value_linear_layer_output
 
@@ -521,8 +519,11 @@ class NeuralTS:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
-        if self.actor.arch == "mlp" and isinstance(self.actor, EvolvableMLP):
-            self.exp_layer = self.actor.feature_net.linear_layer_output
+        if self.actor.arch == "mlp":
+            if isinstance(self.actor, EvolvableMLP):
+                self.exp_layer = self.actor.feature_net.linear_layer_output
+            else:
+                self.exp_layer = self.actor.feature_net.feature_linear_layer_output
         else:
             self.exp_layer = self.actor.value_net.value_linear_layer_output
 
@@ -583,8 +584,11 @@ class NeuralTS:
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
 
-        if agent.actor.arch == "mlp" and isinstance(agent.actor, EvolvableMLP):
-            agent.exp_layer = agent.actor.feature_net.linear_layer_output
+        if agent.actor.arch == "mlp":
+            if isinstance(agent.actor, EvolvableMLP):
+                agent.exp_layer = agent.actor.feature_net.linear_layer_output
+            else:
+                agent.exp_layer = agent.actor.feature_net.feature_linear_layer_output
         else:
             agent.exp_layer = agent.actor.value_net.value_linear_layer_output
 
