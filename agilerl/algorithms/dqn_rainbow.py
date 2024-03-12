@@ -164,9 +164,19 @@ class RainbowDQN:
             if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
                 self.net_config = self.actor.net_config
                 self.actor_network = None
+            elif isinstance(self.actor, MakeEvolvable):
+                self.net_config = None
+                self.actor.rainbow = True
+                self.actor_network = actor_network
+                self.actor.support = self.support
+                self.actor.num_atoms = self.num_atoms
+                self.actor = MakeEvolvable(**self.actor.init_dict)
+                self.actor.load_state_dict(self.actor.state_dict())
             else:
-                assert False, f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP or EvolvableCNN "
-       
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -198,10 +208,15 @@ class RainbowDQN:
                     rainbow=True,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -225,7 +240,7 @@ class RainbowDQN:
                     rainbow=True,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
 
         # Create the target network by copying the actor network
@@ -243,6 +258,8 @@ class RainbowDQN:
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
+
+        print(self.actor)
 
     def getAction(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
@@ -541,7 +558,7 @@ class RainbowDQN:
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
         optimizer.load_state_dict(self.optimizer.state_dict())
-        
+
         if self.accelerator is not None:
             if wrap:
                 (

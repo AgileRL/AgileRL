@@ -166,25 +166,32 @@ class DDPG:
         self.fitness = []
         self.steps = [0]
         self.learn_counter = 0
-        self.actor_network = None 
+        self.actor_network = None
         self.critic_network = None
 
         if actor_network is not None and critic_network is not None:
-            assert type(actor_network) == type(critic_network), f"'actor_network' and 'critic_network' must be the same type."
+            assert type(actor_network) == type(
+                critic_network
+            ), "'actor_network' and 'critic_network' must be the same type."
             self.actor = actor_network
             self.critic = critic_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(self.critic, (EvolvableMLP, EvolvableCNN)):
+            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(
+                self.critic, (EvolvableMLP, EvolvableCNN)
+            ):
                 self.net_config = self.actor.net_config
                 self.actor_network = None
                 self.critic_network = None
-            elif isinstance(self.actor, MakeEvolvable) and isinstance(self.critic, MakeEvolvable):
+            elif isinstance(self.actor, MakeEvolvable) and isinstance(
+                self.critic, MakeEvolvable
+            ):
                 self.net_config = None
                 self.actor_network = actor_network
                 self.critic_network = critic_network
             else:
-                assert False, f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-                    
 
         else:
             # model
@@ -200,8 +207,10 @@ class DDPG:
                     net_config["mlp_output_activation"] = "Sigmoid"
 
             critic_net_config = copy.deepcopy(self.net_config)
-            critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
-            
+            critic_net_config["mlp_output_activation"] = (
+                None  # Critic must have no output activation
+            )
+
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
                     "hidden_size" in self.net_config.keys()
@@ -217,17 +226,22 @@ class DDPG:
                     num_outputs=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
                 self.critic = EvolvableMLP(
                     num_inputs=state_dim[0] + action_dim,
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -248,7 +262,7 @@ class DDPG:
                     num_actions=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
                 self.critic = EvolvableCNN(
                     input_shape=state_dim,
@@ -256,7 +270,7 @@ class DDPG:
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
 
         self.actor_target = copy.deepcopy(self.actor)
@@ -280,7 +294,6 @@ class DDPG:
             self.critic_target = self.critic_target.to(self.device)
 
         self.criterion = nn.MSELoss()
-
 
     def scale_to_action_space(self, action):
         """Scales actions to action space defined by self.min_action and self.max_action.

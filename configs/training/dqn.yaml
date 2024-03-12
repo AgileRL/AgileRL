@@ -38,12 +38,6 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 512
 
 
-NET_CONFIG: {arch: mlp, # h_size: [64, 64]}
-              hidden_size: [64, 64],
-              mlp_activation: ReLU,
-              mlp_output_activation: null,
-              min_hidden_layers: 1,
-              max_hidden_layers: 3,
-              min_mlp_nodes: 64,
-              max_mlp_nodes: 500}
+NET_CONFIG: {arch: mlp, hidden_size: [64, 64], mlp_activation: ReLU, mlp_output_activation: null, min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64,
+    max_mlp_nodes: 500}
  # {arch: mlp, h_size: [128, 128]}

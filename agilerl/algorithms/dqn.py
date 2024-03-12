@@ -128,7 +128,9 @@ class DQN:
                 self.net_config = None
                 self.actor_network = actor_network
             else:
-                assert False, f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -150,11 +152,16 @@ class DQN:
                     num_outputs=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
 
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -175,7 +182,7 @@ class DQN:
                     num_actions=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
 
         # Create the target network by copying the actor network
@@ -195,7 +202,6 @@ class DQN:
             self.actor_target = self.actor_target.to(self.device)
 
         self.criterion = nn.MSELoss()
-
 
     def getAction(self, state, epsilon=0, action_mask=None):
         """Returns the next action to take in the environment.

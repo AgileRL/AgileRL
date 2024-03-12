@@ -510,57 +510,65 @@ def test_initialize_maddpg_with_cnn_networks(
         )
     assert isinstance(maddpg.criterion, nn.MSELoss)
 
+
 @pytest.mark.parametrize(
     "state_dims, action_dims, net",
     [
         ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn")
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn"),
     ],
 )
-def test_initialize_maddpg_with_evo_networks(
-    state_dims, action_dims, net, device
-):
+def test_initialize_maddpg_with_evo_networks(state_dims, action_dims, net, device):
     if net == "mlp":
         evo_actors = [
-            EvolvableMLP(num_inputs=state_dims[x][0],
-                        num_outputs=action_dims[x],
-                        hidden_size=[64, 64],
-                        mlp_activation="ReLU",
-                        mlp_output_activation="Tanh")
+            EvolvableMLP(
+                num_inputs=state_dims[x][0],
+                num_outputs=action_dims[x],
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+                mlp_output_activation="Tanh",
+            )
             for x in range(2)
         ]
         evo_critics = [
-             EvolvableMLP(num_inputs=sum(state_dim[0] for state_dim in state_dims) + sum(action_dims),
-                            num_outputs=1,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU")
+            EvolvableMLP(
+                num_inputs=sum(state_dim[0] for state_dim in state_dims)
+                + sum(action_dims),
+                num_outputs=1,
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+            )
             for x in range(2)
         ]
     else:
         evo_actors = [
-            EvolvableCNN(input_shape=state_dims[0],
-                            num_actions=action_dims[0],
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU",
-                            multi=True,
-                            n_agents=2,
-                            mlp_output_activation="Tanh")
+            EvolvableCNN(
+                input_shape=state_dims[0],
+                num_actions=action_dims[0],
+                channel_size=[8, 8],
+                kernel_size=[2, 2],
+                stride_size=[1, 1],
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+                multi=True,
+                n_agents=2,
+                mlp_output_activation="Tanh",
+            )
             for _ in range(2)
         ]
         evo_critics = [
-             EvolvableCNN(input_shape=state_dims[0],
-                            num_actions=sum(action_dims),
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            n_agents=2,
-                            critic=True,
-                            multi=True,
-                            mlp_activation="ReLU")
+            EvolvableCNN(
+                input_shape=state_dims[0],
+                num_actions=sum(action_dims),
+                channel_size=[8, 8],
+                kernel_size=[2, 2],
+                stride_size=[1, 1],
+                hidden_size=[64, 64],
+                n_agents=2,
+                critic=True,
+                multi=True,
+                mlp_activation="ReLU",
+            )
             for _ in range(2)
         ]
     maddpg = MADDPG(
@@ -576,8 +584,12 @@ def test_initialize_maddpg_with_evo_networks(
         critic_networks=evo_critics,
         device=device,
     )
-    assert all(isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in maddpg.actors)
-    assert all(isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in maddpg.critics)
+    assert all(
+        isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in maddpg.actors
+    )
+    assert all(
+        isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in maddpg.critics
+    )
     if net == "mlp":
         assert maddpg.arch == "mlp"
     else:
@@ -604,9 +616,8 @@ def test_initialize_maddpg_with_evo_networks(
         isinstance(critic_optimizer, optim.Adam)
         for critic_optimizer in maddpg.critic_optimizers
     )
-   
-    assert isinstance(maddpg.criterion, nn.MSELoss)
 
+    assert isinstance(maddpg.criterion, nn.MSELoss)
 
 
 @pytest.mark.parametrize(
@@ -615,12 +626,10 @@ def test_initialize_maddpg_with_evo_networks(
         ([[4] for _ in range(2)], [2 for _ in range(2)]),
     ],
 )
-def test_initialize_maddpg_with_incorrect_evo_networks(
-    state_dims, action_dims, device
-):
+def test_initialize_maddpg_with_incorrect_evo_networks(state_dims, action_dims, device):
     evo_actors = []
     evo_critics = []
- 
+
     with pytest.raises(AssertionError):
         maddpg = MADDPG(
             state_dims=state_dims,
@@ -632,8 +641,10 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
             min_action=[(-1,), (-1,)],
             discrete_actions=True,
             actor_networks=evo_actors,
-            critic_networks=evo_critics,)
-        
+            critic_networks=evo_critics,
+        )
+        assert maddpg
+
 
 @pytest.mark.parametrize(
     "state_dims, action_dims",
@@ -1491,6 +1502,7 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.actor_networks == maddpg.actor_networks
     assert clone_agent.critic_networks == maddpg.critic_networks
 
+
 def test_clone_after_learning():
     state_dims = [(4,), (4,)]
     action_dims = [2, 2]
@@ -1501,18 +1513,33 @@ def test_clone_after_learning():
     min_action = [(-1,), (-1,)]
     discrete_actions = False
     batch_size = 8
-    
-    maddpg = MADDPG(state_dims, 
-                    action_dims, 
-                    one_hot, 
-                    n_agents, 
-                    agent_ids, max_action, min_action, discrete_actions, batch_size=batch_size)
 
-    states = {agent_id : torch.randn(batch_size, state_dims[idx][0]) for idx, agent_id in enumerate(agent_ids)}
-    actions = {agent_id : torch.randn(batch_size, action_dims[idx]) for idx, agent_id in enumerate(agent_ids)} 
-    rewards = {agent_id : torch.randn(batch_size, 1) for agent_id in agent_ids} 
-    next_states = {agent_id : torch.randn(batch_size, state_dims[idx][0]) for idx, agent_id in enumerate(agent_ids)}  
-    dones = {agent_id : torch.zeros(batch_size, 1) for agent_id in agent_ids} 
+    maddpg = MADDPG(
+        state_dims,
+        action_dims,
+        one_hot,
+        n_agents,
+        agent_ids,
+        max_action,
+        min_action,
+        discrete_actions,
+        batch_size=batch_size,
+    )
+
+    states = {
+        agent_id: torch.randn(batch_size, state_dims[idx][0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    actions = {
+        agent_id: torch.randn(batch_size, action_dims[idx])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+    next_states = {
+        agent_id: torch.randn(batch_size, state_dims[idx][0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
     experiences = states, actions, rewards, next_states, dones
     maddpg.learn(experiences)
@@ -1549,13 +1576,16 @@ def test_clone_after_learning():
         clone_agent.critic_targets, maddpg.critic_targets
     ):
         assert str(clone_critic_target.state_dict()) == str(critic_target.state_dict())
-    for clone_actor_opt, actor_opt in zip(clone_agent.actor_optimizers, maddpg.actor_optimizers):
+    for clone_actor_opt, actor_opt in zip(
+        clone_agent.actor_optimizers, maddpg.actor_optimizers
+    ):
         assert str(clone_actor_opt) == str(actor_opt)
-    for clone_critic_opt, critic_opt in zip(clone_agent.critic_optimizers, maddpg.critic_optimizers):
+    for clone_critic_opt, critic_opt in zip(
+        clone_agent.critic_optimizers, maddpg.critic_optimizers
+    ):
         assert str(clone_critic_opt) == str(critic_opt)
     assert clone_agent.actor_networks == maddpg.actor_networks
     assert clone_agent.critic_networks == maddpg.critic_networks
-
 
 
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):

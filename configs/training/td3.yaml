@@ -40,10 +40,4 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 1024
 
 
-NET_CONFIG: {arch: mlp, # h_size: [64, 64]}
-              hidden_size: [64, 64],
-              mlp_activation: ReLU,
-              min_hidden_layers: 1,
-              max_hidden_layers: 3,
-              min_mlp_nodes: 64,
-              max_mlp_nodes: 500}
+NET_CONFIG: {arch: mlp, hidden_size: [64, 64], mlp_activation: ReLU, min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64, max_mlp_nodes: 500}

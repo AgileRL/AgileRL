@@ -318,6 +318,7 @@ def test_initialize_ppo_with_actor_network(
     assert isinstance(ppo.optimizer, optim.Adam)
     assert ppo.arch == actor_network.arch
 
+
 @pytest.mark.parametrize(
     "state_dim, net_type",
     [
@@ -325,43 +326,45 @@ def test_initialize_ppo_with_actor_network(
         ([3, 64, 64], "cnn"),
     ],
 )
-def test_initialize_ppo_with_actor_network_evo_net(
-    state_dim, net_type
-):
+def test_initialize_ppo_with_actor_network_evo_net(state_dim, net_type):
     action_dim = 2
     one_hot = False
     if net_type == "mlp":
         actor_network = EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            hidden_size=[64, 64],
-                            mlp_activation="Tanh",
-                            mlp_output_activation="Tanh")
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            mlp_activation="Tanh",
+            mlp_output_activation="Tanh",
+        )
         critic_network = EvolvableMLP(
-                            num_inputs=state_dim[0] + action_dim,
-                            num_outputs=1,
-                            hidden_size=[64, 64],
-                            mlp_activation="Tanh")
+            num_inputs=state_dim[0] + action_dim,
+            num_outputs=1,
+            hidden_size=[64, 64],
+            mlp_activation="Tanh",
+        )
     else:
         actor_network = EvolvableCNN(
-                            input_shape=state_dim,
-                            num_actions=action_dim,
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            mlp_activation="Tanh",
-                            mlp_output_activation="Tanh")
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            mlp_activation="Tanh",
+            mlp_output_activation="Tanh",
+        )
 
         critic_network = EvolvableCNN(
-                            input_shape=state_dim,
-                            num_actions=action_dim,
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            critic=True,
-                            mlp_activation="Tanh")
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            critic=True,
+            mlp_activation="Tanh",
+        )
 
     ppo = PPO(
         state_dim,
@@ -369,7 +372,7 @@ def test_initialize_ppo_with_actor_network_evo_net(
         one_hot,
         actor_network=actor_network,
         critic_network=critic_network,
-        discrete_actions=True
+        discrete_actions=True,
     )
 
     assert ppo.state_dim == state_dim
@@ -400,6 +403,7 @@ def test_initialize_ppo_with_actor_network_evo_net(
     assert isinstance(ppo.optimizer, optim.Adam)
     assert ppo.arch == actor_network.arch
 
+
 def test_initialize_ddpg_with_incorrect_actor_net():
     state_dim = [4]
     action_dim = 2
@@ -408,13 +412,14 @@ def test_initialize_ddpg_with_incorrect_actor_net():
     critic_network = "dummy"
     with pytest.raises(AssertionError):
         ppo = PPO(
-        state_dim,
-        action_dim,
-        one_hot,
-        actor_network=actor_network,
-        critic_network=critic_network,
-        discrete_actions=True
-    )
+            state_dim,
+            action_dim,
+            one_hot,
+            actor_network=actor_network,
+            critic_network=critic_network,
+            discrete_actions=True,
+        )
+        assert ppo
 
 
 # Can initialize ppo with an actor network but no critic - should trigger warning
@@ -440,7 +445,7 @@ def test_initialize_ppo_with_actor_network_no_critic(
             actor_network=actor_network,
             critic_network=critic_network,
         )
-
+        assert ppo
 
 
 # Converts numpy array to torch tensor of type float
@@ -617,7 +622,11 @@ def test_learns_from_experiences_continuous_accel():
         action_dim=action_dim,
         one_hot=one_hot,
         discrete_actions=discrete_actions,
-        net_config={"arch": "mlp", "hidden_size": [64, 64], "mlp_output_activation": "Tanh"},
+        net_config={
+            "arch": "mlp",
+            "hidden_size": [64, 64],
+            "mlp_output_activation": "Tanh",
+        },
         target_kl=target_kl,
         batch_size=batch_size,
         accelerator=accelerator,
@@ -847,16 +856,22 @@ def test_clone_returns_identical_agent():
 
 
 def test_clone_after_learning():
-    state_dim = 4,
+    state_dim = (4,)
     action_dim = 2
     one_hot = False
     max_env_steps = 20
     num_vec_envs = 2
     ppo = PPO(state_dim, action_dim, one_hot, discrete_actions=False)
-    states = np.random.randn(max_env_steps, num_vec_envs, state_dim[0]) if not one_hot else \
-                            torch.randint(0, state_dim[0], (max_env_steps, num_vec_envs))
-    next_states = np.random.randn(num_vec_envs, state_dim[0]) if not one_hot else \
-                            torch.randint(0, state_dim[0], (num_vec_envs,))
+    states = (
+        np.random.randn(max_env_steps, num_vec_envs, state_dim[0])
+        if not one_hot
+        else torch.randint(0, state_dim[0], (max_env_steps, num_vec_envs))
+    )
+    next_states = (
+        np.random.randn(num_vec_envs, state_dim[0])
+        if not one_hot
+        else torch.randint(0, state_dim[0], (num_vec_envs,))
+    )
     actions = np.random.rand(max_env_steps, num_vec_envs, action_dim)
     log_probs = -np.random.rand(max_env_steps, num_vec_envs)
     rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
@@ -891,7 +906,7 @@ def test_clone_after_learning():
     assert clone_agent.fitness == ppo.fitness
     assert clone_agent.steps == ppo.steps
     assert clone_agent.scores == ppo.scores
-    
+
 
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
@@ -941,7 +956,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         "arch": "mlp",
         "hidden_size": [64, 64],
         "mlp_output_activation": "Softmax",
-        "mlp_activation": "Tanh"
+        "mlp_activation": "Tanh",
     }
     assert isinstance(ppo.actor, EvolvableMLP)
     assert isinstance(ppo.critic, EvolvableMLP)

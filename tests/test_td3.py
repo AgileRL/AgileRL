@@ -139,7 +139,11 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.action_dim == action_dim
     assert td3.one_hot == one_hot
     assert td3.max_action == max_action
-    assert td3.net_config == {"arch": "mlp", "hidden_size": [64, 64], "mlp_output_activation": "Tanh"}
+    assert td3.net_config == {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "Tanh",
+    }
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -934,7 +938,7 @@ def test_clone_after_learning():
     experiences = states, actions, rewards, next_states, dones
     td3.learn(experiences)
     clone_agent = td3.clone()
-    
+
     assert clone_agent.state_dim == td3.state_dim
     assert clone_agent.action_dim == td3.action_dim
     assert clone_agent.one_hot == td3.one_hot
@@ -974,6 +978,7 @@ def test_clone_after_learning():
     assert clone_agent.fitness == td3.fitness
     assert clone_agent.steps == td3.steps
     assert clone_agent.scores == td3.scores
+
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
@@ -1040,7 +1045,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     td3.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert td3.net_config == {"arch": "mlp", "hidden_size": [64, 64], "mlp_output_activation": "Tanh"}
+    assert td3.net_config == {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "Tanh",
+    }
     assert isinstance(td3.actor, EvolvableMLP)
     assert isinstance(td3.actor_target, EvolvableMLP)
     assert isinstance(td3.critic_1, EvolvableMLP)
@@ -1255,6 +1264,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert td3.fitness == []
     assert td3.steps == [0]
 
+
 @pytest.mark.parametrize(
     "state_dim, net_type",
     [
@@ -1262,44 +1272,52 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
         ([3, 64, 64], "cnn"),
     ],
 )
-def test_initialize_td3_with_actor_network_evo_net(
-    state_dim, net_type
-):
+def test_initialize_td3_with_actor_network_evo_net(state_dim, net_type):
     action_dim = 2
     one_hot = False
     max_action = 1
     if net_type == "mlp":
         actor_network = EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU",
-                            mlp_output_activation="Tanh")
-        critic_networks = [EvolvableMLP(
-                            num_inputs=state_dim[0] + action_dim,
-                            num_outputs=1,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU") for _ in range(2)]
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+            mlp_output_activation="Tanh",
+        )
+        critic_networks = [
+            EvolvableMLP(
+                num_inputs=state_dim[0] + action_dim,
+                num_outputs=1,
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+            )
+            for _ in range(2)
+        ]
     else:
         actor_network = EvolvableCNN(
-                            input_shape=state_dim,
-                            num_actions=action_dim,
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU",
-                            mlp_output_activation="Tanh")
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+            mlp_output_activation="Tanh",
+        )
 
-        critic_networks = [EvolvableCNN(
-                            input_shape=state_dim,
-                            num_actions=action_dim,
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            critic=True,
-                            mlp_activation="ReLU") for _ in range(2)]
+        critic_networks = [
+            EvolvableCNN(
+                input_shape=state_dim,
+                num_actions=action_dim,
+                channel_size=[8, 8],
+                kernel_size=[2, 2],
+                stride_size=[1, 1],
+                hidden_size=[64, 64],
+                critic=True,
+                mlp_activation="ReLU",
+            )
+            for _ in range(2)
+        ]
 
     td3 = TD3(
         state_dim,
@@ -1307,7 +1325,7 @@ def test_initialize_td3_with_actor_network_evo_net(
         one_hot,
         actor_network=actor_network,
         critic_networks=critic_networks,
-        max_action=max_action 
+        max_action=max_action,
     )
 
     assert td3.state_dim == state_dim
@@ -1336,6 +1354,7 @@ def test_initialize_td3_with_actor_network_evo_net(
     assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 
+
 def test_initialize_td3_with_incorrect_actor_net():
     state_dim = [4]
     action_dim = 2
@@ -1344,13 +1363,15 @@ def test_initialize_td3_with_incorrect_actor_net():
     critic_networks = "dummy"
     with pytest.raises(AssertionError):
         td3 = TD3(
-        state_dim,
-        action_dim,
-        one_hot,
-        actor_network=actor_network,
-        critic_networks=critic_networks,
-        max_action=1
-    )
+            state_dim,
+            action_dim,
+            one_hot,
+            actor_network=actor_network,
+            critic_networks=critic_networks,
+            max_action=1,
+        )
+        assert td3
+
 
 # Returns the input action scaled to the action space defined by self.min_action and self.max_action.
 def test_action_scaling():

@@ -119,7 +119,16 @@ class NeuralUCB:
 
         if self.actor_network is not None:
             self.actor = actor_network
-            self.net_config = None
+            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
+                self.net_config = self.actor.net_config
+                self.actor_network = None
+            elif isinstance(self.actor, MakeEvolvable):
+                self.net_config = None
+                self.actor_network = actor_network
+            else:
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -142,10 +151,15 @@ class NeuralUCB:
                     layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -167,7 +181,7 @@ class NeuralUCB:
                     layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
         layers = [module for module in self.actor.feature_net.children()]
         if self.actor.arch == "cnn":

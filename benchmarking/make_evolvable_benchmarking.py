@@ -5,7 +5,6 @@ import yaml
 from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
 from networks import (
     BasicNetActor,
-    BasicNetActorDQN,
     BasicNetCritic,
     ClipReward,
     SimpleCNNActor,
@@ -14,16 +13,17 @@ from networks import (
 )
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
+
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 
 def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
@@ -113,7 +113,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         num_outputs=action_dims,
                         device=device,
                         hidden_size=[64, 64],
-                        mlp_activation="ReLU"
+                        mlp_activation="ReLU",
                     )
 
                     critic = None
@@ -141,7 +141,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         device=device,
                         hidden_size=[64, 64],
                         mlp_activation="ReLU",
-                        mlp_output_activation="Tanh"
+                        mlp_output_activation="Tanh",
                     )
 
                     critic = EvolvableMLP(
@@ -149,9 +149,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         num_outputs=action_dims,
                         device=device,
                         hidden_size=[64, 64],
-                        mlp_activation="ReLU"
+                        mlp_activation="ReLU",
                     )
-
 
                 elif INIT_HP["ALGO"] == "TD3":
                     network_actor_td3 = BasicNetActor(
@@ -457,7 +456,7 @@ if __name__ == "__main__":
             ddpg_config = yaml.safe_load(file)
         INIT_HP = ddpg_config["INIT_HP"]
         MUTATION_PARAMS = ddpg_config["MUTATION_PARAMS"]
-        #net_config_mlp = ddpg_config["MLP"]
+        # net_config_mlp = ddpg_config["MLP"]
         if standard:
             print("-" * 20, "DDPG Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
@@ -469,7 +468,7 @@ if __name__ == "__main__":
             td3_config = yaml.safe_load(file)
         INIT_HP = td3_config["INIT_HP"]
         MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
-        #net_config_mlp = td3_config["MLP"]
+        # net_config_mlp = td3_config["MLP"]
         if standard:
             print("-" * 20, "TD3 Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)

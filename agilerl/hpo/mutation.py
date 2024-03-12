@@ -872,10 +872,11 @@ class Mutations:
                     if isinstance(old_actor, EvolvableMLP):
                         old_exp_layer = old_actor.feature_net.linear_layer_output
                     else:
-                        old_exp_layer = old_actor.feature_net.feature_linear_layer_output
+                        old_exp_layer = (
+                            old_actor.feature_net.feature_linear_layer_output
+                        )
                 else:
                     old_exp_layer = old_actor.value_net.value_linear_layer_output
-
 
             offspring_actor = getattr(individual, self.algo["actor"]["eval"]).clone()
             offspring_critics = [

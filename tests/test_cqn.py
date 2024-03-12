@@ -91,7 +91,7 @@ def test_initialize_cqn_with_minimum_parameters():
     assert cqn.state_dim == state_dim
     assert cqn.action_dim == action_dim
     assert cqn.one_hot == one_hot
-    assert cqn.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert cqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert cqn.batch_size == 64
     assert cqn.lr == 0.0001
     assert cqn.learn_step == 5
@@ -121,10 +121,10 @@ def test_initialize_cqn_with_cnn_accelerator():
     index = 0
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     batch_size = 64
@@ -353,7 +353,7 @@ def test_soft_update():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -434,10 +434,10 @@ def test_algorithm_test_loop_images():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -460,10 +460,10 @@ def test_algorithm_test_loop_images_unvectorized():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -607,7 +607,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     cqn.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert cqn.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert cqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert isinstance(cqn.actor, EvolvableMLP)
     assert isinstance(cqn.actor_target, EvolvableMLP)
     assert cqn.lr == 1e-4
@@ -626,10 +626,10 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -806,10 +806,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         one_hot=False,
         net_config={
             "arch": "cnn",
-            "h_size": [8],
-            "c_size": [3],
-            "k_size": [3],
-            "s_size": [1],
+            "hidden_size": [8],
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
             "normalize": False,
         },
     )

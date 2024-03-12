@@ -176,20 +176,29 @@ class TD3:
         self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_networks is not None:
-            assert type(actor_network) == type(critic_networks[0]) == type(critic_networks[1]),\
-                  f"'actor_network' and 'critic_networks' must be the same type."
+            assert isinstance(critic_networks[0], type(actor_network)) and isinstance(
+                critic_networks[1], type(actor_network)
+            ), "'actor_network' and 'critic_networks' must be the same type."
             self.actor = actor_network
             self.critic_1, self.critic_2 = critic_networks
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN)) \
-                and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN)):
+            if (
+                isinstance(self.actor, (EvolvableMLP, EvolvableCNN))
+                and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN))
+                and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN))
+            ):
                 self.net_config = self.actor.net_config
-            elif isinstance(self.actor, MakeEvolvable) and isinstance(self.critic_1, MakeEvolvable) \
-                and isinstance(self.critic_1, MakeEvolvable):
-                self.net_config = None 
+            elif (
+                isinstance(self.actor, MakeEvolvable)
+                and isinstance(self.critic_1, MakeEvolvable)
+                and isinstance(self.critic_1, MakeEvolvable)
+            ):
+                self.net_config = None
             else:
-                assert False, f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_network[0])}, \
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_network[0])}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-       
+
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -203,9 +212,10 @@ class TD3:
                 else:
                     self.net_config["mlp_output_activation"] = "Sigmoid"
 
-            
             critic_net_config = copy.deepcopy(self.net_config)
-            critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
+            critic_net_config["mlp_output_activation"] = (
+                None  # Critic must have no output activation
+            )
 
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
@@ -223,7 +233,7 @@ class TD3:
                     num_outputs=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
 
                 self.critic_1 = EvolvableMLP(
@@ -231,17 +241,22 @@ class TD3:
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
                 self.critic_2 = EvolvableMLP(
                     num_inputs=state_dim[0] + action_dim,
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -262,7 +277,7 @@ class TD3:
                     num_actions=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
                 self.critic_1 = EvolvableCNN(
                     input_shape=state_dim,
@@ -270,7 +285,7 @@ class TD3:
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
                 self.critic_2 = EvolvableCNN(
                     input_shape=state_dim,
@@ -278,7 +293,7 @@ class TD3:
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
 
         self.actor_target = copy.deepcopy(self.actor)

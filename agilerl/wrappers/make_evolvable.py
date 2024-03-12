@@ -4,8 +4,9 @@ from collections import OrderedDict
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from agilerl.networks.custom_components import GumbelSoftmax
+from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
 
 
 class MakeEvolvable(nn.Module):
@@ -52,6 +53,7 @@ class MakeEvolvable(nn.Module):
         network,
         input_tensor,
         secondary_input_tensor=None,
+        num_atoms=51,
         min_hidden_layers=1,
         max_hidden_layers=3,
         min_mlp_nodes=64,
@@ -62,6 +64,8 @@ class MakeEvolvable(nn.Module):
         max_channel_size=256,
         output_vanish=False,
         init_layers=False,
+        support=None,
+        rainbow=False,
         device="cpu",
         accelerator=None,
         extra_critic_dims=None,
@@ -105,6 +109,11 @@ class MakeEvolvable(nn.Module):
         self.device = device
         self.accelerator = accelerator
 
+        #### Rainbow attributes
+        self.rainbow = rainbow  #### add in as a doc string
+        self.num_atoms = num_atoms
+        self.support = support
+
         # Set the layer counters
         self.conv_counter = -1
         self.lin_counter = -1
@@ -135,15 +144,17 @@ class MakeEvolvable(nn.Module):
             for key, value in kwargs.items():
                 setattr(self, key, value)
 
-        self.feature_net, self.value_net = self.create_nets()
+        self.feature_net, self.value_net, self.advantage_net = self.create_nets()
 
-    def forward(self, x, xc=None):
+    def forward(self, x, xc=None, q=True):
         """Returns output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
         :param xc: Actions to be evaluated by critic, defaults to None
         :type xc: torch.Tensor() or np.array, optional
+        :param q: Return Q value if using rainbow, defaults to True
+        :type q: bool, optional
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
@@ -153,11 +164,14 @@ class MakeEvolvable(nn.Module):
 
         if x.dtype != torch.float32:
             x = x.type(torch.float32)
+
+        batch_size = x.size(0)
+
         x = self.feature_net(x)
 
         # Check if there is a cnn
         if self.cnn_layer_info:
-            x = x.reshape(x.size(0), -1)
+            x = x.reshape(batch_size, -1)
             # Ensure dtype is float32
 
             # Concatenate actions if passed to network as a separate tensor
@@ -166,7 +180,32 @@ class MakeEvolvable(nn.Module):
                     xc = xc.to(self.device)
                 x = torch.cat([x, xc], dim=1)
 
-            x = self.value_net(x)
+            value = self.value_net(x)
+
+        # add in cnn functionality
+        if self.rainbow:
+            advantage = self.advantage_net(x)
+            if not self.cnn_layer_info:
+                value = self.value_net(x)
+                value = value.view(-1, 1, self.num_atoms)
+                advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
+                x = value + advantage - advantage.mean(1, keepdim=True)
+                x = F.softmax(x, dim=-1)
+            else:
+                value = value.view(batch_size, 1, self.num_atoms)
+                advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
+
+                x = value + advantage - advantage.mean(1, keepdim=True)
+                x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                    -1, self.num_outputs, self.num_atoms
+                )
+            x = x.clamp(min=1e-3)
+
+            if q:
+                x = torch.sum(x * self.support, dim=2)
+        else:
+            if self.cnn_layer_info:
+                x = value
 
         return x
 
@@ -464,7 +503,17 @@ class MakeEvolvable(nn.Module):
         self.conv_counter = -1
         self.lin_counter = -1
 
-    def create_mlp(self, input_size, output_size, hidden_size, name):
+    def create_mlp(
+        self,
+        input_size,
+        output_size,
+        hidden_size,
+        name,
+        mlp_activation,
+        mlp_output_activation,
+        noisy=False,
+        rainbow_feature_net=False,
+    ):
         """Creates and returns multi-layer perceptron.
 
         :param input_size: Input dimensions to first MLP layer
@@ -475,9 +524,18 @@ class MakeEvolvable(nn.Module):
         :type hidden_size: list[int]
         :param name: Layer name
         :type name: str
+        ####
+        :param noisy:
+        :type noisy:
+        :param rainbow_feature_net:
+        :type rainbow_feature_net:
         """
+
         net_dict = OrderedDict()
-        net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
+        if noisy:
+            net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+        else:
+            net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
 
         if self.init_layers:
             net_dict[f"{name}_linear_layer_0"] = self.layer_init(
@@ -494,13 +552,22 @@ class MakeEvolvable(nn.Module):
         if ("activation_layers" in self.mlp_layer_info.keys()) and (
             0 in self.mlp_layer_info["activation_layers"].keys()
         ):
-            net_dict[f"{name}_activation_0"] = self.get_activation(self.mlp_activation)
+            net_dict[f"{name}_activation_0"] = self.get_activation(
+                mlp_output_activation
+                if (len(hidden_size) == 1 and rainbow_feature_net)
+                else mlp_activation
+            )
 
         if len(hidden_size) > 1:
             for l_no in range(1, len(hidden_size)):
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
-                    hidden_size[l_no - 1], hidden_size[l_no]
-                )
+                if noisy:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
+                else:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
+                        hidden_size[l_no - 1], hidden_size[l_no]
+                    )
                 if self.init_layers:
                     net_dict[f"{name}_linear_layer_{str(l_no)}"] = self.layer_init(
                         net_dict[f"{name}_linear_layer_{str(l_no)}"]
@@ -513,21 +580,27 @@ class MakeEvolvable(nn.Module):
                     )
                 if l_no in self.mlp_layer_info["activation_layers"].keys():
                     net_dict[f"{name}_activation_{str(l_no)}"] = self.get_activation(
-                        self.mlp_activation
+                        mlp_activation
+                        if not rainbow_feature_net
+                        else mlp_output_activation
                     )
-        output_layer = nn.Linear(hidden_size[-1], output_size)
-        if self.init_layers:
-            output_layer = self.layer_init(output_layer)
+        if not rainbow_feature_net:
+            if noisy:
+                output_layer = NoisyLinear(hidden_size[-1], output_size)
+            else:
+                output_layer = nn.Linear(hidden_size[-1], output_size)
+            if self.init_layers:
+                output_layer = self.layer_init(output_layer)
 
-        if self.output_vanish:
-            output_layer.weight.data.mul_(0.1)
-            output_layer.bias.data.mul_(0.1)
+            if self.output_vanish:
+                output_layer.weight.data.mul_(0.1)
+                output_layer.bias.data.mul_(0.1)
 
-        net_dict[f"{name}_linear_layer_output"] = output_layer
-        if self.mlp_output_activation is not None:
-            net_dict[f"{name}_activation_output"] = self.get_activation(
-                self.mlp_output_activation
-            )
+            net_dict[f"{name}_linear_layer_output"] = output_layer
+            if mlp_output_activation is not None:
+                net_dict[f"{name}_activation_output"] = self.get_activation(
+                    mlp_output_activation
+                )
 
         return nn.Sequential(net_dict)
 
@@ -642,29 +715,90 @@ class MakeEvolvable(nn.Module):
             if self.secondary_input_tensor is not None:
                 input_size += self.extra_critic_dims
 
-            value_net = self.create_mlp(
-                                            input_size,
-                                            self.num_outputs,
-                                            self.hidden_size,
-                                            name="value",
-                                        )
+            if self.rainbow:
+                value_net = self.create_mlp(
+                    input_size,
+                    output_size=self.num_atoms,
+                    hidden_size=self.hidden_size,
+                    name="value",
+                    noisy=True,
+                    mlp_output_activation=self.mlp_output_activation,
+                    mlp_activation=self.mlp_activation,
+                )
+                advantage_net = self.create_mlp(
+                    input_size,
+                    output_size=self.num_atoms * self.num_outputs,  ####
+                    hidden_size=self.hidden_size,
+                    name="advantage",
+                    noisy=True,
+                    mlp_output_activation=self.mlp_output_activation,
+                    mlp_activation=self.mlp_activation,
+                )
+            else:
+                value_net = self.create_mlp(
+                    input_size,
+                    self.num_outputs,
+                    self.hidden_size,
+                    name="value",
+                    mlp_activation=self.mlp_activation,
+                    mlp_output_activation=self.mlp_output_activation,
+                )
+                advantage_net = None
 
         else:
-            value_net = None
             input_size = self.num_inputs
-
-            feature_net = self.create_mlp(
-                input_size,
-                self.num_outputs,
-                self.hidden_size,
-                name="feature",
-            )
+            if self.rainbow:
+                feature_net = self.create_mlp(
+                    input_size=self.num_inputs,
+                    output_size=128,
+                    hidden_size=[128],
+                    name="feature",
+                    rainbow_feature_net=True,
+                    mlp_activation=self.mlp_activation,
+                    mlp_output_activation="ReLU",
+                )
+                value_net = self.create_mlp(
+                    input_size=128,
+                    output_size=self.num_atoms,
+                    hidden_size=self.hidden_size,
+                    noisy=True,
+                    name="value",
+                    mlp_output_activation=self.mlp_output_activation,
+                    mlp_activation=self.mlp_activation,
+                )
+                advantage_net = self.create_mlp(
+                    input_size=128,
+                    output_size=self.num_atoms * self.num_outputs,
+                    hidden_size=self.hidden_size,
+                    noisy=True,
+                    name="advantage",
+                    mlp_output_activation=self.mlp_output_activation,
+                    mlp_activation=self.mlp_activation,
+                )
+            else:
+                value_net = None
+                advantage_net = None
+                feature_net = self.create_mlp(
+                    input_size,
+                    self.num_outputs,
+                    self.hidden_size,
+                    name="feature",
+                    mlp_activation=self.mlp_activation,
+                    mlp_output_activation=self.mlp_output_activation,
+                )
 
         if self.accelerator is None:
-            feature_net = feature_net.to(self.device) 
-            value_net = value_net.to(self.device) if value_net is not None else value_net
+            feature_net = feature_net.to(self.device)
+            value_net = (
+                value_net.to(self.device) if value_net is not None else value_net
+            )
+            advantage_net = (
+                advantage_net.to(self.device)
+                if advantage_net is not None
+                else advantage_net
+            )
 
-        return feature_net, value_net
+        return feature_net, value_net, advantage_net
 
     @property
     def init_dict(self):
@@ -692,6 +826,9 @@ class MakeEvolvable(nn.Module):
             "arch": self.arch,
             "cnn_layer_info": self.cnn_layer_info,
             "mlp_layer_info": self.mlp_layer_info,
+            "num_atoms": self.num_atoms,
+            "rainbow": self.rainbow,
+            "support": self.support,
         }
 
         return init_dict
@@ -949,18 +1086,32 @@ class MakeEvolvable(nn.Module):
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
+    def reset_noise(self):
+        """Resets noise of value and advantage networks."""
+        if self.rainbow:
+            for layer in self.value_net:
+                if isinstance(layer, NoisyLinear):
+                    layer.reset_noise()
+            for layer in self.advantage_net:
+                if isinstance(layer, NoisyLinear):
+                    layer.reset_noise()
+
     def recreate_nets(self, shrink_params=False):
         """Recreates neural networks.
 
         :param shrink_params: Boolean flag to shrink parameters
         :type shrink_params: bool
         """
-        new_feature_net, new_value_net = self.create_nets()
+        new_feature_net, new_value_net, new_advantage_net = self.create_nets()
 
         if shrink_params:
             if self.value_net is not None:
                 new_value_net = self.shrink_preserve_parameters(
                     old_net=self.value_net, new_net=new_value_net
+                )
+            if self.advantage_net is not None:
+                new_advantage_net = self.shrink_preserve_parameters(
+                    old_net=self.advantage_net, new_net=new_advantage_net
                 )
             new_feature_net = self.shrink_preserve_parameters(
                 old_net=self.feature_net, new_net=new_feature_net
@@ -970,11 +1121,19 @@ class MakeEvolvable(nn.Module):
                 new_value_net = self.preserve_parameters(
                     old_net=self.value_net, new_net=new_value_net
                 )
+            if self.advantage_net is not None:
+                new_advantage_net = self.preserve_parameters(
+                    old_net=self.advantage_net, new_net=new_advantage_net
+                )
             new_feature_net = self.preserve_parameters(
                 old_net=self.feature_net, new_net=new_feature_net
             )
 
-        self.feature_net, self.value_net = (new_feature_net, new_value_net)
+        self.feature_net, self.value_net, self.advantage_net = (
+            new_feature_net,
+            new_value_net,
+            new_advantage_net,
+        )
 
     def clone(self):
         """Returns clone of neural net with identical parameters."""

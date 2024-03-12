@@ -125,7 +125,7 @@ def test_create_initial_population_single_agent():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 4
     device = "cpu"
     accelerator = None
@@ -167,7 +167,7 @@ def test_create_initial_population_multi_agent():
     state_dim = [[4], [4]]
     action_dim = [2, 2]
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 4
     device = "cpu"
     accelerator = None
@@ -271,7 +271,7 @@ def test_prints_hyperparams():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 1
     device = "cpu"
     accelerator = None

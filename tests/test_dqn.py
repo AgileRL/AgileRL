@@ -230,26 +230,26 @@ def test_initialize_dqn_with_actor_network_make_evo(
         ([3, 64, 64], "cnn"),
     ],
 )
-def test_initialize_dqn_with_actor_network_evo_net(
-    state_dim, net_type
-):
+def test_initialize_dqn_with_actor_network_evo_net(state_dim, net_type):
     action_dim = 2
     one_hot = False
     if net_type == "mlp":
         actor_network = EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU")
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
     else:
         actor_network = EvolvableCNN(
-                            input_shape=state_dim,
-                            num_actions=action_dim,
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU")
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
 
     dqn = DQN(state_dim, action_dim, one_hot, actor_network=actor_network)
 
@@ -286,8 +286,11 @@ def test_initialize_dqn_with_incorrect_actor_net_type():
     with pytest.raises(AssertionError) as a:
         dqn = DQN(state_dim, action_dim, one_hot, actor_network=actor_network)
 
-        assert str(a.value) == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-       
+        assert dqn
+        assert (
+            str(a.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+        )
 
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
@@ -684,6 +687,7 @@ def test_clone_returns_identical_agent():
     assert clone_agent.fitness == dqn.fitness
     assert clone_agent.steps == dqn.steps
     assert clone_agent.scores == dqn.scores
+
 
 def test_clone_after_learning():
     state_dim = [4]

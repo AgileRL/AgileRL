@@ -1,12 +1,17 @@
 import torch
+import torch.nn as nn
 import yaml
 
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.replay_buffer import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+    ReplayBuffer,
+)
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -15,12 +20,12 @@ from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparam
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
         state_dim = (env.single_observation_space.n,)
@@ -36,14 +41,54 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    if INIT_HP["ALGO"] == "TD3":
-        max_action = float(env.single_action_space.high[0])
-        INIT_HP["MAX_ACTION"] = max_action
-
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(
-        action_dim, INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
-    )
+    n_step_memory = None
+    per = INIT_HP["PER"]
+    n_step = True if INIT_HP["N_STEP"] > 1 else False
+    if per:
+        memory = PrioritizedReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            num_envs=INIT_HP["NUM_ENVS"],
+            alpha=INIT_HP["ALPHA"],
+            gamma=INIT_HP["GAMMA"],
+            device=device,
+        )
+        if n_step:
+            n_step_memory = MultiStepReplayBuffer(
+                action_dim,
+                memory_size=INIT_HP["MEMORY_SIZE"],
+                field_names=field_names,
+                num_envs=INIT_HP["NUM_ENVS"],
+                n_step=INIT_HP["N_STEP"],
+                gamma=INIT_HP["GAMMA"],
+                device=device,
+            )
+    elif n_step:
+        memory = ReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            device=device,
+        )
+        n_step_memory = MultiStepReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            num_envs=INIT_HP["NUM_ENVS"],
+            n_step=INIT_HP["N_STEP"],
+            gamma=INIT_HP["GAMMA"],
+            device=device,
+        )
+    else:
+        memory = ReplayBuffer(
+            action_dim,
+            memory_size=INIT_HP["MEMORY_SIZE"],
+            field_names=field_names,
+            device=device,
+        )
+
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -64,21 +109,28 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
-
     if use_net:
-        actor = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            output_vanish=False,
-            init_layers=False,
-            layer_norm=False,
-            num_atoms=51,
-            support=torch.linspace(-200, 200, 51).to(device),
-            rainbow=True,
+        # actor =  EvolvableMLP(
+        #                     num_inputs=state_dim[0],
+        #                     num_outputs=action_dim,
+        #                     output_vanish=False,
+        #                     init_layers=False,
+        #                     layer_norm=False,
+        #                     num_atoms=51,
+        #                     support=torch.linspace(-200, 200, 51).to(device),
+        #                     rainbow=True,
+        #                     device=device,
+        #                     hidden_size=[128, 128],
+        #                     mlp_activation="ReLU",
+        #                     mlp_output_activation="ReLU"
+        #                 )
+        network_actor_dqn = nn.Sequential(
+            nn.Linear(state_dim[0], 64), nn.ReLU(), nn.Linear(64, action_dim)
+        )
+        actor = MakeEvolvable(
+            network_actor_dqn,
+            input_tensor=torch.ones(state_dim[0]),
             device=device,
-            hidden_size=[128, 128],
-            mlp_activation="ReLU",
-            mlp_output_activation="ReLU",
         )
         NET_CONFIG = None
         # critic = [EvolvableMLP(
@@ -100,7 +152,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         actor_network=actor,
-        # critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
         device=device,
     )
@@ -111,20 +162,25 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         INIT_HP["ALGO"],
         agent_pop,
         memory=memory,
+        n_step_memory=n_step_memory,
+        n_step=n_step,
+        per=per,
+        noisy=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
         n_episodes=INIT_HP["EPISODES"],
         evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        evo_loop=INIT_HP["EVO_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
         wb=INIT_HP["WANDB"],
+        save_elite=True,
+        elite_path="elite_rainbow.pt",
     )
 
     printHyperparams(trained_pop)
-    # plotPopulationScore(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()
@@ -134,8 +190,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 if __name__ == "__main__":
     with open("../configs/training/dqn_rainbow.yaml") as file:
-        dqn_config = yaml.safe_load(file)
-    INIT_HP = dqn_config["INIT_HP"]
-    MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+        rainbow_dqn_config = yaml.safe_load(file)
+    INIT_HP = rainbow_dqn_config["INIT_HP"]
+    MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
+    NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

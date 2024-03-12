@@ -566,60 +566,72 @@ def test_initialize_matd3_with_cnn_networks(
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
-
 @pytest.mark.parametrize(
     "state_dims, action_dims, net",
     [
         ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn")
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn"),
     ],
 )
-def test_initialize_matd3_with_evo_networks(
-    state_dims, action_dims, net, device
-):
+def test_initialize_matd3_with_evo_networks(state_dims, action_dims, net, device):
     if net == "mlp":
         evo_actors = [
-            EvolvableMLP(num_inputs=state_dims[x][0],
-                        num_outputs=action_dims[x],
-                        hidden_size=[64, 64],
-                        mlp_activation="ReLU",
-                        mlp_output_activation="Tanh")
+            EvolvableMLP(
+                num_inputs=state_dims[x][0],
+                num_outputs=action_dims[x],
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+                mlp_output_activation="Tanh",
+            )
             for x in range(2)
         ]
-        evo_critics = [[
-             EvolvableMLP(num_inputs=sum(state_dim[0] for state_dim in state_dims) + sum(action_dims),
-                            num_outputs=1,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU")
-            for x in range(2)
-        ] for _ in range(2)]
+        evo_critics = [
+            [
+                EvolvableMLP(
+                    num_inputs=sum(state_dim[0] for state_dim in state_dims)
+                    + sum(action_dims),
+                    num_outputs=1,
+                    hidden_size=[64, 64],
+                    mlp_activation="ReLU",
+                )
+                for x in range(2)
+            ]
+            for _ in range(2)
+        ]
     else:
         evo_actors = [
-            EvolvableCNN(input_shape=state_dims[0],
-                            num_actions=action_dims[0],
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU",
-                            multi=True,
-                            n_agents=2,
-                            mlp_output_activation="Tanh")
+            EvolvableCNN(
+                input_shape=state_dims[0],
+                num_actions=action_dims[0],
+                channel_size=[8, 8],
+                kernel_size=[2, 2],
+                stride_size=[1, 1],
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+                multi=True,
+                n_agents=2,
+                mlp_output_activation="Tanh",
+            )
             for _ in range(2)
         ]
-        evo_critics = [[
-             EvolvableCNN(input_shape=state_dims[0],
-                            num_actions=sum(action_dims),
-                            channel_size=[8,8],
-                            kernel_size=[2,2],
-                            stride_size=[1,1],
-                            hidden_size=[64, 64],
-                            n_agents=2,
-                            critic=True,
-                            multi=True,
-                            mlp_activation="ReLU")
+        evo_critics = [
+            [
+                EvolvableCNN(
+                    input_shape=state_dims[0],
+                    num_actions=sum(action_dims),
+                    channel_size=[8, 8],
+                    kernel_size=[2, 2],
+                    stride_size=[1, 1],
+                    hidden_size=[64, 64],
+                    n_agents=2,
+                    critic=True,
+                    multi=True,
+                    mlp_activation="ReLU",
+                )
+                for _ in range(2)
+            ]
             for _ in range(2)
-        ] for _ in range(2)]
+        ]
     matd3 = MATD3(
         state_dims=state_dims,
         action_dims=action_dims,
@@ -633,9 +645,15 @@ def test_initialize_matd3_with_evo_networks(
         critic_networks=evo_critics,
         device=device,
     )
-    assert all(isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in matd3.actors)
-    assert all(isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in matd3.critics_1)
-    assert all(isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in matd3.critics_2)
+    assert all(
+        isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in matd3.actors
+    )
+    assert all(
+        isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in matd3.critics_1
+    )
+    assert all(
+        isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in matd3.critics_2
+    )
     if net == "mlp":
         assert matd3.arch == "mlp"
     else:
@@ -667,9 +685,8 @@ def test_initialize_matd3_with_evo_networks(
         isinstance(critic_2_optimizer, optim.Adam)
         for critic_2_optimizer in matd3.critic_2_optimizers
     )
- 
-    assert isinstance(matd3.criterion, nn.MSELoss)
 
+    assert isinstance(matd3.criterion, nn.MSELoss)
 
 
 @pytest.mark.parametrize(
@@ -678,12 +695,10 @@ def test_initialize_matd3_with_evo_networks(
         ([[4] for _ in range(2)], [2 for _ in range(2)]),
     ],
 )
-def test_initialize_matd3_with_incorrect_evo_networks(
-    state_dims, action_dims, device
-):
+def test_initialize_matd3_with_incorrect_evo_networks(state_dims, action_dims, device):
     evo_actors = []
     evo_critics = []
- 
+
     with pytest.raises(AssertionError):
         matd3 = MATD3(
             state_dims=state_dims,
@@ -695,8 +710,9 @@ def test_initialize_matd3_with_incorrect_evo_networks(
             min_action=[(-1,), (-1,)],
             discrete_actions=True,
             actor_networks=evo_actors,
-            critic_networks=evo_critics,)
-        
+            critic_networks=evo_critics,
+        )
+        assert matd3
 
 
 @pytest.mark.parametrize(
@@ -1630,18 +1646,33 @@ def test_clone_after_learning():
     min_action = [(-1,), (-1,)]
     discrete_actions = False
     batch_size = 8
-    
-    matd3 = MATD3(state_dims, 
-                    action_dims, 
-                    one_hot, 
-                    n_agents, 
-                    agent_ids, max_action, min_action, discrete_actions, batch_size=batch_size)
 
-    states = {agent_id : torch.randn(batch_size, state_dims[idx][0]) for idx, agent_id in enumerate(agent_ids)}
-    actions = {agent_id : torch.randn(batch_size, action_dims[idx]) for idx, agent_id in enumerate(agent_ids)} 
-    rewards = {agent_id : torch.randn(batch_size, 1) for agent_id in agent_ids} 
-    next_states = {agent_id : torch.randn(batch_size, state_dims[idx][0]) for idx, agent_id in enumerate(agent_ids)}  
-    dones = {agent_id : torch.zeros(batch_size, 1) for agent_id in agent_ids} 
+    matd3 = MATD3(
+        state_dims,
+        action_dims,
+        one_hot,
+        n_agents,
+        agent_ids,
+        max_action,
+        min_action,
+        discrete_actions,
+        batch_size=batch_size,
+    )
+
+    states = {
+        agent_id: torch.randn(batch_size, state_dims[idx][0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    actions = {
+        agent_id: torch.randn(batch_size, action_dims[idx])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
+    next_states = {
+        agent_id: torch.randn(batch_size, state_dims[idx][0])
+        for idx, agent_id in enumerate(agent_ids)
+    }
+    dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
 
     experiences = states, actions, rewards, next_states, dones
     matd3.learn(experiences)
@@ -1692,15 +1723,22 @@ def test_clone_after_learning():
             critic_target_2.state_dict()
         )
 
-    for clone_actor_opt, actor_opt in zip(clone_agent.actor_optimizers, matd3.actor_optimizers):
+    for clone_actor_opt, actor_opt in zip(
+        clone_agent.actor_optimizers, matd3.actor_optimizers
+    ):
         assert str(clone_actor_opt) == str(actor_opt)
-    for clone_critic_opt_1, critic_opt_1 in zip(clone_agent.critic_1_optimizers, matd3.critic_1_optimizers):
+    for clone_critic_opt_1, critic_opt_1 in zip(
+        clone_agent.critic_1_optimizers, matd3.critic_1_optimizers
+    ):
         assert str(clone_critic_opt_1) == str(critic_opt_1)
-    for clone_critic_opt_2, critic_opt_2 in zip(clone_agent.critic_2_optimizers, matd3.critic_2_optimizers):
+    for clone_critic_opt_2, critic_opt_2 in zip(
+        clone_agent.critic_2_optimizers, matd3.critic_2_optimizers
+    ):
         assert str(clone_critic_opt_2) == str(critic_opt_2)
 
     assert clone_agent.actor_networks == matd3.actor_networks
     assert clone_agent.critic_networks == matd3.critic_networks
+
 
 def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
     net_config = {"arch": "mlp", "hidden_size": [32, 32]}

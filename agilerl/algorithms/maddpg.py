@@ -1,7 +1,7 @@
 import copy
+import inspect
 import random
 import warnings
-import inspect
 
 import dill
 import numpy as np
@@ -182,17 +182,29 @@ class MADDPG:
         self.critic_networks = critic_networks
 
         if self.actor_networks is not None and self.critic_networks is not None:
-            assert len(set(type(net) for net in actor_networks)) == 1, "'actor_networks' must all be the same type"
-            assert len(set(type(net) for net in critic_networks)) == 1, "'critic_networks' must all be the same type"
-            assert type(actor_networks[0]) == type(critic_networks[0]), "actor and critic networks must be the same type"
+            assert (
+                len({type(net) for net in actor_networks}) == 1
+            ), "'actor_networks' must all be the same type"
+            assert (
+                len({type(net) for net in critic_networks}) == 1
+            ), "'critic_networks' must all be the same type"
+            assert isinstance(
+                actor_networks[0], type(critic_networks[0])
+            ), "actor and critic networks must be the same type"
             self.actors = actor_networks
             self.critics = critic_networks
-            if isinstance(self.actors[0], (EvolvableMLP, EvolvableCNN)) and isinstance(self.critics[0], (EvolvableMLP, EvolvableCNN)):
+            if isinstance(self.actors[0], (EvolvableMLP, EvolvableCNN)) and isinstance(
+                self.critics[0], (EvolvableMLP, EvolvableCNN)
+            ):
                 self.net_config = self.actors[0].net_config
-            elif isinstance(self.actors[0], MakeEvolvable) and isinstance(self.critics[0], MakeEvolvable):
+            elif isinstance(self.actors[0], MakeEvolvable) and isinstance(
+                self.critics[0], MakeEvolvable
+            ):
                 self.net_config = None
             else:
-                assert False, "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
+                assert (
+                    False
+                ), "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
                                 type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
 
@@ -217,18 +229,20 @@ class MADDPG:
                             num_outputs=action_dim,
                             device=self.device,
                             accelerator=self.accelerator,
-                            **self.net_config
+                            **self.net_config,
                         )
                     )
                 critic_net_config = copy.deepcopy(self.net_config)
-                critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
+                critic_net_config["mlp_output_activation"] = (
+                    None  # Critic must have no output activation
+                )
                 self.critics = [
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
                         num_outputs=1,
                         device=self.device,
                         accelerator=self.accelerator,
-                        **critic_net_config
+                        **critic_net_config,
                     )
                     for _ in range(self.n_agents)
                 ]
@@ -254,11 +268,13 @@ class MADDPG:
                             n_agents=self.n_agents,
                             device=self.device,
                             accelerator=self.accelerator,
-                            **self.net_config
+                            **self.net_config,
                         )
                     )
                 critic_net_config = copy.deepcopy(self.net_config)
-                critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
+                critic_net_config["mlp_output_activation"] = (
+                    None  # Critic must have no output activation
+                )
                 self.critics = [
                     EvolvableCNN(
                         input_shape=state_dim,
@@ -268,7 +284,7 @@ class MADDPG:
                         multi=self.multi,
                         device=self.device,
                         accelerator=self.accelerator,
-                        **critic_net_config
+                        **critic_net_config,
                     )
                     for state_dim in self.state_dims
                 ]
@@ -770,8 +786,17 @@ class MADDPG:
             optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics
         ]
 
-        for clone_actor_optimizer, actor_optimizer, clone_critic_optimizer, critic_optimizer \
-              in zip(actor_optimizers, self.actor_optimizers, critic_optimizers, self.critic_optimizers):
+        for (
+            clone_actor_optimizer,
+            actor_optimizer,
+            clone_critic_optimizer,
+            critic_optimizer,
+        ) in zip(
+            actor_optimizers,
+            self.actor_optimizers,
+            critic_optimizers,
+            self.critic_optimizers,
+        ):
             clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
             clone_critic_optimizer.load_state_dict(critic_optimizer.state_dict())
 
@@ -842,7 +867,7 @@ class MADDPG:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
         return clone
-    
+
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
@@ -931,29 +956,29 @@ class MADDPG:
 
         network_info = {
             "actors_init_dict": [actor.init_dict for actor in self.actors],
-                "actors_state_dict": [actor.state_dict() for actor in self.actors],
-                "actor_targets_init_dict": [
-                    actor_target.init_dict for actor_target in self.actor_targets
-                ],
-                "actor_targets_state_dict": [
-                    actor_target.state_dict() for actor_target in self.actor_targets
-                ],
-                "critics_init_dict": [critic.init_dict for critic in self.critics],
-                "critics_state_dict": [critic.state_dict() for critic in self.critics],
-                "critic_targets_init_dict": [
-                    critic_target.init_dict for critic_target in self.critic_targets
-                ],
-                "critic_targets_state_dict": [
-                    critic_target.state_dict() for critic_target in self.critic_targets
-                ],
-                "actor_optimizers_state_dict": [
-                    actor_optimizer.state_dict()
-                    for actor_optimizer in self.actor_optimizers
-                ],
-                "critic_optimizers_state_dict": [
-                    critic_optimizer.state_dict()
-                    for critic_optimizer in self.critic_optimizers
-                ],
+            "actors_state_dict": [actor.state_dict() for actor in self.actors],
+            "actor_targets_init_dict": [
+                actor_target.init_dict for actor_target in self.actor_targets
+            ],
+            "actor_targets_state_dict": [
+                actor_target.state_dict() for actor_target in self.actor_targets
+            ],
+            "critics_init_dict": [critic.init_dict for critic in self.critics],
+            "critics_state_dict": [critic.state_dict() for critic in self.critics],
+            "critic_targets_init_dict": [
+                critic_target.init_dict for critic_target in self.critic_targets
+            ],
+            "critic_targets_state_dict": [
+                critic_target.state_dict() for critic_target in self.critic_targets
+            ],
+            "actor_optimizers_state_dict": [
+                actor_optimizer.state_dict()
+                for actor_optimizer in self.actor_optimizers
+            ],
+            "critic_optimizers_state_dict": [
+                critic_optimizer.state_dict()
+                for critic_optimizer in self.critic_optimizers
+            ],
         }
 
         attribute_dict.update(network_info)
@@ -996,14 +1021,22 @@ class MADDPG:
         else:
             network_class = MakeEvolvable
 
-        self.actors = [network_class(**checkpoint["actors_init_dict"][idx])
-                       for idx, _ in enumerate(self.agent_ids)]
-        self.actor_targets = [network_class(**checkpoint["actor_targets_init_dict"][idx])
-                       for idx, _ in enumerate(self.agent_ids)]
-        self.critics = [network_class(**checkpoint["critics_init_dict"][idx])
-                       for idx, _ in enumerate(self.agent_ids)]
-        self.critic_targets = [network_class(**checkpoint["critic_targets_init_dict"][idx])
-                       for idx, _ in enumerate(self.agent_ids)]
+        self.actors = [
+            network_class(**checkpoint["actors_init_dict"][idx])
+            for idx, _ in enumerate(self.agent_ids)
+        ]
+        self.actor_targets = [
+            network_class(**checkpoint["actor_targets_init_dict"][idx])
+            for idx, _ in enumerate(self.agent_ids)
+        ]
+        self.critics = [
+            network_class(**checkpoint["critics_init_dict"][idx])
+            for idx, _ in enumerate(self.agent_ids)
+        ]
+        self.critic_targets = [
+            network_class(**checkpoint["critic_targets_init_dict"][idx])
+            for idx, _ in enumerate(self.agent_ids)
+        ]
 
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
@@ -1061,7 +1094,6 @@ class MADDPG:
         self.critic_targets = critic_target_list
         self.actor_optimizers = actor_optimizer_list
         self.critic_optimizers = critic_optimizer_list
-
 
         for attribute in checkpoint.keys():
             if attribute not in network_info:
@@ -1143,13 +1175,13 @@ class MADDPG:
                 ]
         else:
             class_init_dict["actor_networks"] = [
-                    MakeEvolvable(**actors_init_dict[idx])
-                    for idx, _ in enumerate(checkpoint["agent_ids"])
-                ]
+                MakeEvolvable(**actors_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
             class_init_dict["critic_networks"] = [
-                    MakeEvolvable(**critics_init_dict[idx])
-                    for idx, _ in enumerate(checkpoint["agent_ids"])
-                ]
+                MakeEvolvable(**critics_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
             agent = cls(**class_init_dict)
             agent.actor_targets = [
                 MakeEvolvable(**actor_targets_init_dict[idx])
@@ -1199,13 +1231,9 @@ class MADDPG:
             critic_list.append(critic)
             critic_target.load_state_dict(critic_targets_state_dict[idx])
             critic_target_list.append(critic_target)
-            actor_optimizer.load_state_dict(
-                actor_optimizers_state_dict[idx]
-            )
+            actor_optimizer.load_state_dict(actor_optimizers_state_dict[idx])
             actor_optimizer_list.append(actor_optimizer)
-            critic_optimizer.load_state_dict(
-                critic_optimizers_state_dict[idx]
-            )
+            critic_optimizer.load_state_dict(critic_optimizers_state_dict[idx])
             critic_optimizer_list.append(critic_optimizer)
 
         agent.actors = actor_list

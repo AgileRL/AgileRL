@@ -198,37 +198,46 @@ class PPO:
                 self.action_var = self.action_var.to(self.accelerator.device)
 
         if self.actor_network is not None and self.critic_network is not None:
-            assert type(actor_network) == type(critic_network), f"'actor_network' and 'critic_network' must be the same type."
+            assert type(actor_network) == type(
+                critic_network
+            ), "'actor_network' and 'critic_network' must be the same type."
             self.actor = actor_network
             self.critic = critic_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(self.critic, (EvolvableMLP, EvolvableCNN)):
+            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(
+                self.critic, (EvolvableMLP, EvolvableCNN)
+            ):
                 self.net_config = self.actor.net_config
-            elif isinstance(self.actor, MakeEvolvable) and isinstance(self.critic, MakeEvolvable):
+            elif isinstance(self.actor, MakeEvolvable) and isinstance(
+                self.critic, MakeEvolvable
+            ):
                 self.net_config = None
             else:
-                assert False, f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-       
+
         else:
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
             assert (
                 "arch" in self.net_config.keys()
             ), "Net config must contain arch: 'mlp' or 'cnn'."
 
-
             # Set up network output activations
             if "mlp_output_activation" not in self.net_config.keys():
-                    if self.discrete_actions:
-                        self.net_config["mlp_output_activation"] = "Softmax"
-                    else:
-                        self.net_config["mlp_output_activation"] = "Tanh"
+                if self.discrete_actions:
+                    self.net_config["mlp_output_activation"] = "Softmax"
+                else:
+                    self.net_config["mlp_output_activation"] = "Tanh"
 
             if "mlp_activation" not in self.net_config.keys():
                 self.net_config["mlp_activation"] = "Tanh"
 
             critic_net_config = copy.deepcopy(self.net_config)
-            critic_net_config["mlp_output_activation"] = None # Critic must have no output activation
-            
+            critic_net_config["mlp_output_activation"] = (
+                None  # Critic must have no output activation
+            )
+
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
@@ -245,17 +254,22 @@ class PPO:
                     num_outputs=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
                 self.critic = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["channel_size", "kernel_size", "stride_size", "hidden_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -276,14 +290,14 @@ class PPO:
                     num_actions=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **self.net_config
+                    **self.net_config,
                 )
                 self.critic = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=1,
                     device=self.device,
                     accelerator=self.accelerator,
-                    **critic_net_config
+                    **critic_net_config,
                 )
 
         self.arch = (

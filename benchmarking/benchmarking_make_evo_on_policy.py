@@ -3,10 +3,9 @@ import yaml
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
-from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.networks.evolvable_cnn import EvolvableCNN
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -57,20 +56,22 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
     if use_net:
-        actor =  EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            device=device,
-                            hidden_size=[64, 64],
-                            mlp_activation="Tanh",
-                            mlp_output_activation="Tanh"
-                            )
+        actor = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            device=device,
+            hidden_size=[64, 64],
+            mlp_activation="Tanh",
+            mlp_output_activation="Tanh",
+        )
         NET_CONFIG = None
-        critic = EvolvableMLP(num_inputs=state_dim[0] + action_dim,
-                            num_outputs=1,
-                            device=device,
-                            hidden_size=[64, 64],
-                            mlp_activation="Tanh")
+        critic = EvolvableMLP(
+            num_inputs=state_dim[0] + action_dim,
+            num_outputs=1,
+            device=device,
+            hidden_size=[64, 64],
+            mlp_activation="Tanh",
+        )
     else:
         actor = None
         critic = None
