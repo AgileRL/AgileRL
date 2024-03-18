@@ -1446,7 +1446,7 @@ def check_policy_q_learning_with_probe_env(
 #             "max_action": [(1.0,), (1.0,)],
 #             "min_action": [(0.0,), (0.0,)],
 #             "discrete_actions": True,
-#             "net_config": {"arch": "mlp", "h_size": [32, 32]},
+#             "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
 #             "batch_size": 256,
 #         }
 #         field_names = ["state", "action", "reward", "next_state", "done"]
@@ -1480,10 +1480,10 @@ def check_policy_q_learning_with_probe_env(
 #             "discrete_actions": True,
 #             "net_config": {
 #                 "arch": "cnn",  # Network architecture
-#                 "h_size": [32],  # Network hidden size
-#                 "c_size": [32, 32],  # CNN channel size
-#                 "k_size": [(1, 4, 4), (1, 3, 3)],  # CNN kernel size
-#                 "s_size": [4, 2],  # CNN stride size
+#                 "hidden_size": [32],  # Network hidden size
+#                 "channel_size": [32, 32],  # CNN channel size
+#                 "kernel_size": [(1, 4, 4), (1, 3, 3)],  # CNN kernel size
+#                 "stride_size": [4, 2],  # CNN stride size
 #                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
 #             },
 #             "lr_actor": 1e-5,
@@ -1518,7 +1518,7 @@ def check_policy_q_learning_with_probe_env(
 #             "max_action": [(1.0,), (1.0,)],
 #             "min_action": [(0.0,), (0.0,)],
 #             "discrete_actions": False,
-#             "net_config": {"arch": "mlp", "h_size": [32, 32]},
+#             "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
 #             "batch_size": 256,
 #         }
 #         field_names = ["state", "action", "reward", "next_state", "done"]
@@ -1551,10 +1551,10 @@ def check_policy_q_learning_with_probe_env(
 #             "discrete_actions": False,
 #             "net_config": {
 #                 "arch": "cnn",  # Network architecture
-#                 "h_size": [32],  # Network hidden size
-#                 "c_size": [32, 32],  # CNN channel size
-#                 "k_size": [(1, 4, 4), (1, 3, 3)],  # CNN kernel size
-#                 "s_size": [4, 2],  # CNN stride size
+#                 "hidden_size": [32],  # Network hidden size
+#                 "channel_size": [32, 32],  # CNN channel size
+#                 "kernel_size": [(1, 4, 4), (1, 3, 3)],  # CNN kernel size
+#                 "stride_size": [4, 2],  # CNN stride size
 #                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
 #             },
 #             "lr_actor": 1e-4,

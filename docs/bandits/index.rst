@@ -50,7 +50,7 @@ We can convert these labelled datasets into a bandit learning environment easily
 
     NET_CONFIG = {
         'arch': 'mlp',  # Network architecture
-        'h_size': [128],  # Actor hidden size
+        'hidden_size': [128],  # Actor hidden size
     }
 
     INIT_HP = {
@@ -218,7 +218,7 @@ Alternatively, use a custom bandit training loop:
 
         NET_CONFIG = {
             "arch": "mlp",  # Network architecture
-            "h_size": [128],  # Actor hidden size
+            "hidden_size": [128],  # Actor hidden size
         }
 
         INIT_HP = {

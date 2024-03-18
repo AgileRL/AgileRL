@@ -57,7 +57,7 @@ class DQN:
         action_dim,
         one_hot,
         index=0,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
         learn_step=5,
@@ -92,9 +92,6 @@ class DQN:
         assert isinstance(
             double, bool
         ), "Double Q-learning flag must be boolean value True or False."
-        assert (
-            isinstance(actor_network, nn.Module) or actor_network is None
-        ), "Actor network must be an nn.Module or None."
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
@@ -121,7 +118,16 @@ class DQN:
 
         if self.actor_network is not None:
             self.actor = actor_network
-            self.net_config = None
+            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
+                self.net_config = self.actor.net_config
+                self.actor_network = None
+            elif isinstance(self.actor, MakeEvolvable):
+                self.net_config = None
+                self.actor_network = actor_network
+            else:
+                assert (
+                    False
+                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -130,23 +136,29 @@ class DQN:
             ), "Net config must contain arch: 'mlp' or 'cnn'."
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 assert (
-                    "h_size" in self.net_config.keys()
-                ), "Net config must contain h_size: int."
+                    "hidden_size" in self.net_config.keys()
+                ), "Net config must contain hidden_size: int."
                 assert isinstance(
-                    self.net_config["h_size"], list
-                ), "Net config h_size must be a list."
+                    self.net_config["hidden_size"], list
+                ), "Net config hidden_size must be a list."
                 assert (
-                    len(self.net_config["h_size"]) > 0
-                ), "Net config h_size must contain at least one element."
+                    len(self.net_config["hidden_size"]) > 0
+                ), "Net config hidden_size must contain at least one element."
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
-                    hidden_size=self.net_config["h_size"],
                     device=self.device,
                     accelerator=self.accelerator,
+                    **self.net_config,
                 )
+
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in ["c_size", "k_size", "s_size", "h_size"]:
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
                     assert (
                         key in self.net_config.keys()
                     ), f"Net config must contain {key}: int."
@@ -165,13 +177,9 @@ class DQN:
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
                     num_actions=action_dim,
-                    channel_size=self.net_config["c_size"],
-                    kernel_size=self.net_config["k_size"],
-                    stride_size=self.net_config["s_size"],
-                    hidden_size=self.net_config["h_size"],
-                    normalize=self.net_config["normalize"],
                     device=self.device,
                     accelerator=self.accelerator,
+                    **self.net_config,
                 )
 
         # Create the target network by copying the actor network
@@ -365,6 +373,8 @@ class DQN:
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        optimizer.load_state_dict(self.optimizer.state_dict())
+
         if self.accelerator is not None:
             if wrap:
                 (

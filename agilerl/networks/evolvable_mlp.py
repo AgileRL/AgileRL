@@ -71,6 +71,7 @@ class EvolvableMLP(nn.Module):
         rainbow=False,
         device="cpu",
         accelerator=None,
+        arch="mlp",
     ):
         super().__init__()
 
@@ -92,7 +93,7 @@ class EvolvableMLP(nn.Module):
             min_mlp_nodes < max_mlp_nodes
         ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
 
-        self.arch = "mlp"
+        self.arch = arch
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation
@@ -111,8 +112,22 @@ class EvolvableMLP(nn.Module):
         self.device = device
         self.accelerator = accelerator
         self.feature_hidden_size = feature_hidden_size
+        self._net_config = {
+            "arch": self.arch,
+            "hidden_size": self.hidden_size,
+            "mlp_activation": self.mlp_activation,
+            "mlp_output_activation": self.mlp_output_activation,
+            "min_hidden_layers": self.min_hidden_layers,
+            "max_hidden_layers": self.max_hidden_layers,
+            "min_mlp_nodes": self.min_mlp_nodes,
+            "max_mlp_nodes": self.max_mlp_nodes,
+        }
 
         self.feature_net, self.value_net, self.advantage_net = self.create_net()
+
+    @property
+    def net_config(self):
+        return self._net_config
 
     def get_activation(self, activation_names):
         """Returns activation function for corresponding activation name.

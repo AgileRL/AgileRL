@@ -4,6 +4,7 @@ import yaml
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
@@ -14,7 +15,7 @@ from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparam
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
@@ -64,6 +65,37 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
+    if use_net:
+        # Currently set up for TD3
+        actor = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            output_vanish=False,
+            init_layers=False,
+            layer_norm=False,
+            num_atoms=51,
+            support=torch.linspace(-200, 200, 51).to(device),
+            rainbow=True,
+            device=device,
+            hidden_size=[128, 128],
+            mlp_activation="ReLU",
+            mlp_output_activation="ReLU",
+        )
+        NET_CONFIG = None
+        critic = [
+            EvolvableMLP(
+                num_inputs=state_dim[0] + action_dim,
+                num_outputs=1,
+                device=device,
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+            )
+            for _ in range(2)
+        ]
+    else:
+        actor = None
+        critic = None
+
     agent_pop = initialPopulation(
         algo=INIT_HP["ALGO"],
         state_dim=state_dim,
@@ -71,6 +103,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         one_hot=one_hot,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        actor_network=actor,
+        critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
         device=device,
     )
@@ -103,9 +137,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/dqn.yaml") as file:
-        dqn_config = yaml.safe_load(file)
-    INIT_HP = dqn_config["INIT_HP"]
-    MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-    NET_CONFIG = dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    with open("../configs/training/td3.yaml") as file:
+        td3_config = yaml.safe_load(file)
+    INIT_HP = td3_config["INIT_HP"]
+    MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
+    NET_CONFIG = td3_config["NET_CONFIG"]
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)

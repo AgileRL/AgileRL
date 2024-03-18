@@ -18,9 +18,9 @@ INIT_HP:
     TAU: 0.01                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 3                # Population size
+    POP_SIZE: 6                # Population size
     EVO_EPOCHS: 20             # Evolution frequency
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -40,6 +40,6 @@ MUTATION_PARAMS:
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+NET_CONFIG: {arch: mlp, hidden_size: [64, 64], min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64, max_mlp_nodes: 500}
 
 DISTRIBUTED_TRAINING: false

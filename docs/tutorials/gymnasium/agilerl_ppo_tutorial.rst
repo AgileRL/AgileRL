@@ -150,7 +150,7 @@ followed by mutations) is detailed further below.
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
 
     # Define a population
     pop = initialPopulation(

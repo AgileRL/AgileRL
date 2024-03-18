@@ -167,7 +167,7 @@ See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_pr
                 "max_action": [(1.0,), (1.0,)],
                 "min_action": [(0.0,), (0.0,)],
                 "discrete_actions": True,
-                "net_config": {"arch": "mlp", "h_size": [32, 32]},
+                "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
                 "batch_size": 256,
             }
             field_names = ["state", "action", "reward", "next_state", "done"]

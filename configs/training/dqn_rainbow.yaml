@@ -26,10 +26,10 @@ INIT_HP:
     V_MAX: 200.                # Maximum value of support
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 1                # Population size
+    POP_SIZE: 6                # Population size
     EVO_LOOP: 3                # Number of evaluation episodes
-    EVO_EPOCHS: 10             # Evolution frequency
-    WANDB: true               # Log with Weights and Biases
+    EVO_EPOCHS: 20             # Evolution frequency
+    WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -50,4 +50,5 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 512
 
 
-NET_CONFIG: {arch: mlp, h_size: [128, 128]}
+NET_CONFIG: {arch: mlp, hidden_size: [128, 128], mlp_activation: ReLU, mlp_output_activation: ReLU, min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64,
+    max_mlp_nodes: 500}

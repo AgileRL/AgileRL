@@ -58,6 +58,7 @@ Imports
 Importing the following packages, functions and classes will enable us to run the tutorial.
 
 .. collapse:: Imports
+   :open:
 
    .. code-block:: python
 
@@ -103,17 +104,20 @@ Config files
 It is best to use YAML config files to define the lessons in our curriculum and easily change and keep track of our settings. The first three lessons in our curriculum can be defined as follows:
 
 .. collapse:: Lesson 1
+   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson1.yaml
       :language: yaml
 
 
 .. collapse:: Lesson 2
+   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson2.yaml
       :language: yaml
 
 .. collapse:: Lesson 3
+   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson3.yaml
       :language: yaml
@@ -121,6 +125,7 @@ It is best to use YAML config files to define the lessons in our curriculum and 
 To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a wrapper on top of our Connect Four environment and enables us to alter the reward to guide the training of our agent. This uses the configs that we set up to define the lesson.
 
 .. collapse:: CurriculumEnv
+   :open:
 
    .. code-block:: python
 
@@ -406,6 +411,7 @@ To implement our curriculum, we create a ``CurriculumEnv`` class that acts as a 
 When defining the different lessons in our curriculum, we can increase the difficulty of our task by modifying environment observations for our agent - in Connect Four, we can increase the skill level of our opponent. By progressively doing this, we can help our agent improve. We can change our rewards between lessons too; for example, we may wish to reward wins in all directions equally once we have learned to beat a random agent and now wish to train against a harder opponent. In this tutorial, an ``Opponent`` class is implemented to provide different levels of difficulty for training our agent.
 
 .. collapse:: Opponent
+   :open:
 
    .. code-block:: python
 
@@ -587,6 +593,7 @@ General setup
 Before we go any further in this tutorial, it would be helpful to define and set up everything remaining we need for training.
 
 .. collapse:: Setup code
+   :open:
 
    .. code-block:: python
 
@@ -602,10 +609,10 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Define the network configuration
       NET_CONFIG = {
          "arch": "cnn",  # Network architecture
-         "h_size": [64, 64],  # Actor hidden size
-         "c_size": [128],  # CNN channel size
-         "k_size": [4],  # CNN kernel size
-         "s_size": [1],  # CNN stride size
+         "hidden_size": [64, 64],  # Actor hidden size
+         "channel_size": [128],  # CNN channel size
+         "kernel_size": [4],  # CNN kernel size
+         "stride_size": [1],  # CNN stride size
          "normalize": False,  # Normalize image from range [0,255] to [0,1]
       }
 
@@ -727,6 +734,7 @@ Before we go any further in this tutorial, it would be helpful to define and set
 As part of the curriculum, we may also choose to fill the replay buffer with random experiences, and also train on these offline.
 
 .. collapse:: Fill replay buffer
+   :open:
 
    .. code-block:: python
 
@@ -748,7 +756,9 @@ As part of the curriculum, we may also choose to fill the replay buffer with ran
                print("Agent population warmed up.")
 
 The observation space of Connect Four is (6, 7, 2), where the first two dimensions represent the board and the third dimension represents the player. As PyTorch uses channels-first by default, we need to preprocess the observation. Moreover, we need to flip and swap the planes of the observation to account for the fact that the agent will play as both player 0 and player 1. We can define a function to do this as follows:
+
 .. collapse:: Transform and flip
+   :open:
 
    .. code-block:: python
 
@@ -776,6 +786,7 @@ Self-play
 In this tutorial, we use self-play as the final lesson in our curriculum. By iteratively improving our agent and making it learn to win against itself, we can allow it to discover new strategies and achieve higher performance. The weights of our pretrained agent from an earlier lesson can be loaded to the population as follows:
 
 .. collapse:: Load pretrained weights
+   :open:
 
    .. code-block:: python
 
@@ -793,6 +804,7 @@ In this tutorial, we use self-play as the final lesson in our curriculum. By ite
 To train against an old version of our agent, we create a pool of opponents. At training time, we randomly select an opponent from this pool. At regular intervals, we update the opponent pool by removing the oldest opponent and adding a copy of the latest version of our agent. This provides a balance between training against an increasingly difficult opponent and providing variety in the moves an opponent might make.
 
 .. collapse:: Create opponent pool
+   :open:
 
    .. code-block:: python
 
@@ -809,6 +821,7 @@ To train against an old version of our agent, we create a pool of opponents. At 
 A sample lesson config for self-play training could be defined as follows:
 
 .. collapse:: Lesson 4
+   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/curriculums/connect_four/lesson4.yaml
       :language: yaml
@@ -823,6 +836,7 @@ The Connect Four training loop must take into account that the agent only takes 
 At regular intervals, we evaluate the performance, or 'fitness',  of the agents in our population, and do an evolutionary step. Those which perform best are more likely to become members of the next generation, and the hyperparameters and neural architectures of agents in the population are mutated. This evolution allows us to optimize hyperparameters and maximise the performance of our agents in a single training run.
 
 .. collapse:: Training loop
+   :open:
 
    .. code-block:: python
 
@@ -1216,6 +1230,7 @@ Watch the trained agents play
 The following code allows you to load your saved DQN agent from the previous training block, test the agent's performance, and then visualise a number of episodes as a gif.
 
 .. collapse:: Render trained agents
+   :open:
 
    .. literalinclude:: ../../../tutorials/PettingZoo/render_agilerl_dqn.py
       :language: python

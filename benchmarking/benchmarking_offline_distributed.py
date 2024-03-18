@@ -138,7 +138,7 @@ if __name__ == "__main__":
 
     NET_CONFIG = {
         "arch": "mlp",  # Network architecture
-        "h_size": [32, 32],  # Actor hidden size
+        "hidden_size": [32, 32],  # Actor hidden size
     }
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

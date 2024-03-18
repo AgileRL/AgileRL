@@ -137,7 +137,11 @@ def test_initialize_ddpg_with_minimum_parameters():
     assert ddpg.state_dim == state_dim
     assert ddpg.action_dim == action_dim
     assert ddpg.one_hot == one_hot
-    assert ddpg.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert ddpg.net_config == {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "Tanh",
+    }
     assert ddpg.batch_size == 64
     assert ddpg.lr_actor == 0.0001
     assert ddpg.lr_critic == 0.001
@@ -170,10 +174,10 @@ def test_initialize_ddpg_with_cnn_accelerator():
     index = 0
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     batch_size = 64
@@ -283,6 +287,102 @@ def test_initialize_ddpg_with_actor_network(
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
+@pytest.mark.parametrize(
+    "state_dim, net_type",
+    [
+        ([4], "mlp"),
+        ([3, 64, 64], "cnn"),
+    ],
+)
+def test_initialize_ddpg_with_actor_network_evo_net(state_dim, net_type):
+    action_dim = 2
+    one_hot = False
+    if net_type == "mlp":
+        actor_network = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+            mlp_output_activation="Tanh",
+        )
+        critic_network = EvolvableMLP(
+            num_inputs=state_dim[0] + action_dim,
+            num_outputs=1,
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
+    else:
+        actor_network = EvolvableCNN(
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+            mlp_output_activation="Tanh",
+        )
+
+        critic_network = EvolvableCNN(
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            critic=True,
+            mlp_activation="ReLU",
+        )
+
+    ddpg = DDPG(
+        state_dim,
+        action_dim,
+        one_hot,
+        actor_network=actor_network,
+        critic_network=critic_network,
+    )
+
+    assert ddpg.state_dim == state_dim
+    assert ddpg.action_dim == action_dim
+    assert ddpg.one_hot == one_hot
+    assert ddpg.batch_size == 64
+    assert ddpg.lr_actor == 0.0001
+    assert ddpg.lr_critic == 0.001
+    assert ddpg.learn_step == 5
+    assert ddpg.gamma == 0.99
+    assert ddpg.tau == 0.001
+    assert ddpg.mut is None
+    assert ddpg.device == "cpu"
+    assert ddpg.accelerator is None
+    assert ddpg.index == 0
+    assert ddpg.scores == []
+    assert ddpg.fitness == []
+    assert ddpg.steps == [0]
+    assert ddpg.actor == actor_network
+    assert ddpg.critic == critic_network
+    assert isinstance(ddpg.actor_optimizer, optim.Adam)
+    assert isinstance(ddpg.critic_optimizer, optim.Adam)
+    assert ddpg.arch == actor_network.arch
+    assert isinstance(ddpg.criterion, nn.MSELoss)
+
+
+def test_initialize_ddpg_with_incorrect_actor_net():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    actor_network = "dummy"
+    critic_network = "dummy"
+    with pytest.raises(AssertionError):
+        ddpg = DDPG(
+            state_dim,
+            action_dim,
+            one_hot,
+            actor_network=actor_network,
+            critic_network=critic_network,
+        )
+        assert ddpg
+
+
 # Can initialize ddpg with an actor network but no critic - should trigger warning
 @pytest.mark.parametrize(
     "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
@@ -367,10 +467,10 @@ def test_learns_from_experiences():
     policy_freq = 4
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -481,7 +581,7 @@ def test_soft_update():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -576,10 +676,10 @@ def test_algorithm_test_loop_images():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -602,10 +702,10 @@ def test_algorithm_test_loop_images_unvectorized():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -741,6 +841,57 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == ddpg.scores
 
 
+def test_clone_after_learning():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 8
+    ddpg = DDPG(state_dim, action_dim, one_hot)
+
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randn(batch_size, action_dim)
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.zeros(batch_size, 1)
+
+    experiences = states, actions, rewards, next_states, dones
+    ddpg.learn(experiences)
+    clone_agent = ddpg.clone()
+
+    assert clone_agent.state_dim == ddpg.state_dim
+    assert clone_agent.action_dim == ddpg.action_dim
+    assert clone_agent.one_hot == ddpg.one_hot
+    assert clone_agent.net_config == ddpg.net_config
+    assert clone_agent.actor_network == ddpg.actor_network
+    assert clone_agent.critic_network == ddpg.critic_network
+    assert clone_agent.batch_size == ddpg.batch_size
+    assert clone_agent.lr_actor == ddpg.lr_actor
+    assert clone_agent.lr_critic == ddpg.lr_critic
+    assert clone_agent.learn_step == ddpg.learn_step
+    assert clone_agent.gamma == ddpg.gamma
+    assert clone_agent.tau == ddpg.tau
+    assert clone_agent.mut == ddpg.mut
+    assert clone_agent.device == ddpg.device
+    assert clone_agent.accelerator == ddpg.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(ddpg.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        ddpg.actor_target.state_dict()
+    )
+    assert str(clone_agent.critic.state_dict()) == str(ddpg.critic.state_dict())
+    assert str(clone_agent.critic_target.state_dict()) == str(
+        ddpg.critic_target.state_dict()
+    )
+    assert str(clone_agent.actor_optimizer.state_dict()) == str(
+        ddpg.actor_optimizer.state_dict()
+    )
+    assert str(clone_agent.critic_optimizer.state_dict()) == str(
+        ddpg.critic_optimizer.state_dict()
+    )
+    assert clone_agent.fitness == ddpg.fitness
+    assert clone_agent.steps == ddpg.steps
+    assert clone_agent.scores == ddpg.scores
+
+
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
     ddpg = DDPG(state_dim=[4], action_dim=2, one_hot=False, accelerator=Accelerator())
@@ -796,7 +947,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     ddpg.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ddpg.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert ddpg.net_config == {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "Tanh",
+    }
     assert isinstance(ddpg.actor, EvolvableMLP)
     assert isinstance(ddpg.actor_target, EvolvableMLP)
     assert isinstance(ddpg.critic, EvolvableMLP)
@@ -819,10 +974,10 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -869,7 +1024,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         state_dim=[3, 32, 32],
         action_dim=2,
         one_hot=False,
-        net_config={"arch": "mlp", "h_size": [64, 64]},
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
     )
     ddpg.loadCheckpoint(checkpoint_path)
 
@@ -1082,10 +1237,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         one_hot=False,
         net_config={
             "arch": "cnn",
-            "h_size": [8],
-            "c_size": [3],
-            "k_size": [3],
-            "s_size": [1],
+            "hidden_size": [8],
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
             "normalize": False,
         },
     )

@@ -131,6 +131,7 @@ def initialPopulation(
                 v_min=INIT_HP["V_MIN"],
                 v_max=INIT_HP["V_MAX"],
                 n_step=INIT_HP["N_STEP"],
+                actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
             )

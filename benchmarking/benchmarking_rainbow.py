@@ -8,6 +8,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
@@ -18,7 +19,7 @@ from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparam
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
@@ -107,6 +108,25 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
+    if use_net:
+        actor = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            output_vanish=False,
+            init_layers=False,
+            layer_norm=False,
+            num_atoms=51,
+            support=torch.linspace(-200, 200, 51).to(device),
+            rainbow=True,
+            device=device,
+            hidden_size=[128, 128],
+            mlp_activation="ReLU",
+            mlp_output_activation="ReLU",
+        )
+        NET_CONFIG = None
+
+    else:
+        actor = None
 
     agent_pop = initialPopulation(
         algo=INIT_HP["ALGO"],
@@ -115,6 +135,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         one_hot=one_hot,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        actor_network=actor,
         population_size=INIT_HP["POP_SIZE"],
         device=device,
     )
@@ -157,4 +178,4 @@ if __name__ == "__main__":
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
     NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)

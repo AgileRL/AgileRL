@@ -5,7 +5,6 @@ import yaml
 from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
 from networks import (
     BasicNetActor,
-    BasicNetActorDQN,
     BasicNetCritic,
     ClipReward,
     SimpleCNNActor,
@@ -19,6 +18,7 @@ from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
@@ -99,14 +99,23 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             else:
                 # DQN
                 if INIT_HP["ALGO"] == "DQN":
-                    network_actor_dqn = BasicNetActorDQN(
-                        state_dims[0], [64, 64], action_dims
-                    )
-                    actor = MakeEvolvable(
-                        network_actor_dqn,
-                        input_tensor=torch.ones(state_dims[0]),
+                    # network_actor_dqn = BasicNetActorDQN(
+                    #     state_dims[0], [64, 64], action_dims
+                    # )
+                    # actor = MakeEvolvable(
+                    #     network_actor_dqn,
+                    #     input_tensor=torch.ones(state_dims[0]),
+                    #     device=device,
+                    # )
+
+                    actor = EvolvableMLP(
+                        num_inputs=state_dims[0],
+                        num_outputs=action_dims,
                         device=device,
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU",
                     )
+
                     critic = None
                 if INIT_HP["ALGO"] == "DDPG":
                     network_actor_ddpg = BasicNetActor(
@@ -125,6 +134,24 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                         torch.ones(state_dims[0] + action_dims),
                         device=device,
                     )
+
+                    actor = EvolvableMLP(
+                        num_inputs=state_dims[0],
+                        num_outputs=action_dims,
+                        device=device,
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU",
+                        mlp_output_activation="Tanh",
+                    )
+
+                    critic = EvolvableMLP(
+                        num_inputs=state_dims[0] + action_dims,
+                        num_outputs=action_dims,
+                        device=device,
+                        hidden_size=[64, 64],
+                        mlp_activation="ReLU",
+                    )
+
                 elif INIT_HP["ALGO"] == "TD3":
                     network_actor_td3 = BasicNetActor(
                         state_dims[0], [64, 64], action_dims
@@ -379,12 +406,12 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
 
 if __name__ == "__main__":
-    dqn = True
-    ppo = True
+    dqn = False
+    ppo = False
     ddpg = True
-    td3 = True
-    maddpg = True
-    matd3 = True
+    td3 = False
+    maddpg = False
+    matd3 = False
     standard = True
     atari = False
 
@@ -393,18 +420,18 @@ if __name__ == "__main__":
             dqn_config = yaml.safe_load(file)
         INIT_HP = dqn_config["INIT_HP"]
         MUTATION_PARAMS = dqn_config["MUTATION_PARAMS"]
-        net_config_mlp = dqn_config["MLP"]
-        net_config_cnn = dqn_config["CNN"]
+        # net_config_mlp = dqn_config["MLP"]
+        # net_config_cnn = dqn_config["CNN"]
         if standard:
             print("-" * 20, "DQN Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-" * 20, "DQN Lunar Lander using net_config", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
-        if atari:
-            print("-" * 20, "DQN Atari using make evolvable", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
-            print("-" * 20, "DQN Atari using net_config", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
+            # print("-" * 20, "DQN Lunar Lander using net_config", "-" * 20)
+            # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+        # if atari:
+        #     print("-" * 20, "DQN Atari using make evolvable", "-" * 20)
+        #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=None)
+        #     print("-" * 20, "DQN Atari using net_config", "-" * 20)
+        #     main(INIT_HP, MUTATION_PARAMS, atari=True, NET_CONFIG=net_config_cnn)
 
     if ppo:
         with open("../configs/training/ppo.yaml") as file:
@@ -429,19 +456,19 @@ if __name__ == "__main__":
             ddpg_config = yaml.safe_load(file)
         INIT_HP = ddpg_config["INIT_HP"]
         MUTATION_PARAMS = ddpg_config["MUTATION_PARAMS"]
-        net_config_mlp = ddpg_config["MLP"]
+        # net_config_mlp = ddpg_config["MLP"]
         if standard:
             print("-" * 20, "DDPG Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
-            print("-" * 20, "DDPG Lunar Lander using net_config", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
+            # print("-" * 20, "DDPG Lunar Lander using net_config", "-" * 20)
+            # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 
     if td3:
         with open("../configs/training/td3.yaml") as file:
             td3_config = yaml.safe_load(file)
         INIT_HP = td3_config["INIT_HP"]
         MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
-        net_config_mlp = td3_config["MLP"]
+        # net_config_mlp = td3_config["MLP"]
         if standard:
             print("-" * 20, "TD3 Lunar Lander using make evolvable", "-" * 20)
             main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)

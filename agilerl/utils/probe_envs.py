@@ -734,10 +734,10 @@ def check_policy_on_policy_with_probe_env(
 #             "one_hot": False,
 #             "net_config": {
 #                 "arch": "cnn",  # Network architecture
-#                 "h_size": [32],  # Network hidden size
-#                 "c_size": [32, 32],  # CNN channel size
-#                 "k_size": [8, 4],  # CNN kernel size
-#                 "s_size": [4, 2],  # CNN stride size
+#                 "hidden_size": [32],  # Network hidden size
+#                 "channel_size": [32, 32],  # CNN channel size
+#                 "kernel_size": [8, 4],  # CNN kernel size
+#                 "stride_size": [4, 2],  # CNN stride size
 #                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
 #             },
 #             "lr": 1e-2,
@@ -800,10 +800,10 @@ def check_policy_on_policy_with_probe_env(
 #             "one_hot": False,
 #             "net_config": {
 #                 "arch": "cnn",  # Network architecture
-#                 "h_size": [64],  # Network hidden size
-#                 "c_size": [32, 32],  # CNN channel size
-#                 "k_size": [8, 4],  # CNN kernel size
-#                 "s_size": [4, 2],  # CNN stride size
+#                 "hidden_size": [64],  # Network hidden size
+#                 "channel_size": [32, 32],  # CNN channel size
+#                 "kernel_size": [8, 4],  # CNN kernel size
+#                 "stride_size": [4, 2],  # CNN stride size
 #                 "normalize": False,  # Normalize image from range [0,255] to [0,1]
 #             },
 #             "max_action": 1.0,

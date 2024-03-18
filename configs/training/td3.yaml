@@ -28,7 +28,7 @@ MUTATION_PARAMS:
     ARCH_MUT: 0.2                          # Architecture mutation
     NEW_LAYER: 0.2                         # New layer mutation
     PARAMS_MUT: 0.2                        # Network parameters mutation
-    ACT_MUT: 0                             # Activation layer mutation
+    ACT_MUT: 0.2                             # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
   # Learning HPs to choose from
     RL_HP_SELECTION: [lr, batch_size]
@@ -40,4 +40,4 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 1024
 
 
-NET_CONFIG: {arch: mlp, h_size: [64, 64]}
+NET_CONFIG: {arch: mlp, hidden_size: [64, 64], min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64, max_mlp_nodes: 500}

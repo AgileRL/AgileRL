@@ -92,7 +92,11 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.state_dim == state_dim
     assert dqn.action_dim == action_dim
     assert dqn.one_hot == one_hot
-    assert dqn.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert dqn.net_config == {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "ReLU",
+    }
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
     assert dqn.learn_step == 5
@@ -112,6 +116,72 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.arch == "mlp"
 
 
+@pytest.mark.parametrize(
+    "state_dim, net_type",
+    [
+        ([4], "mlp"),
+        ([3, 64, 64], "cnn"),
+    ],
+)
+def test_initialize_dqn_with_actor_network_evo_net(state_dim, net_type):
+    action_dim = 2
+    one_hot = False
+    if net_type == "mlp":
+        actor_network = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
+    else:
+        actor_network = EvolvableCNN(
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
+
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+
+    assert dqn.state_dim == state_dim
+    assert dqn.action_dim == action_dim
+    assert dqn.one_hot == one_hot
+    assert dqn.batch_size == 64
+    assert dqn.lr == 0.0001
+    assert dqn.learn_step == 5
+    assert dqn.gamma == 0.99
+    assert dqn.tau == 0.001
+    assert dqn.mut is None
+    assert dqn.device == "cpu"
+    assert dqn.accelerator is None
+    assert dqn.index == 0
+    assert dqn.scores == []
+    assert dqn.fitness == []
+    assert dqn.steps == [0]
+    assert dqn.actor_network is None
+    assert dqn.actor == actor_network
+    assert isinstance(dqn.optimizer, optim.Adam)
+    assert dqn.arch == actor_network.arch
+
+
+def test_initialize_dqn_with_incorrect_actor_net_type():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    actor_network = "dummy"
+
+    with pytest.raises(AssertionError) as a:
+        dqn = RainbowDQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+        assert dqn
+        assert (
+            str(a.value)
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+        )
+
+
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_dqn_with_cnn_accelerator():
     state_dim = [3, 32, 32]
@@ -120,10 +190,10 @@ def test_initialize_dqn_with_cnn_accelerator():
     index = 0
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
     batch_size = 64
@@ -210,7 +280,6 @@ def test_initialize_dqn_with_actor_network(
     assert dqn.fitness == []
     assert dqn.steps == [0]
     assert dqn.actor_network == actor_network
-    assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer, optim.Adam)
     assert dqn.arch == actor_network.arch
 
@@ -555,7 +624,7 @@ def test_soft_update():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "h_size": [64, 64]}
+    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -634,10 +703,10 @@ def test_algorithm_test_loop_images():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -660,10 +729,10 @@ def test_algorithm_test_loop_images_unvectorized():
 
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -769,6 +838,48 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == dqn.scores
 
 
+def test_clone_after_learning():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    batch_size = 8
+    rainbow_dqn = RainbowDQN(state_dim, action_dim, one_hot, batch_size=batch_size)
+
+    states = torch.randn(batch_size, state_dim[0])
+    actions = torch.randint(0, 2, (batch_size, 1))
+    rewards = torch.rand(batch_size, 1)
+    next_states = torch.randn(batch_size, state_dim[0])
+    dones = torch.zeros(batch_size, 1)
+
+    experiences = states, actions, rewards, next_states, dones
+    rainbow_dqn.learn(experiences)
+    clone_agent = rainbow_dqn.clone()
+
+    assert clone_agent.state_dim == rainbow_dqn.state_dim
+    assert clone_agent.action_dim == rainbow_dqn.action_dim
+    assert clone_agent.one_hot == rainbow_dqn.one_hot
+    assert clone_agent.net_config == rainbow_dqn.net_config
+    assert clone_agent.actor_network == rainbow_dqn.actor_network
+    assert clone_agent.batch_size == rainbow_dqn.batch_size
+    assert clone_agent.lr == rainbow_dqn.lr
+    assert clone_agent.learn_step == rainbow_dqn.learn_step
+    assert clone_agent.gamma == rainbow_dqn.gamma
+    assert clone_agent.tau == rainbow_dqn.tau
+    assert clone_agent.mut == rainbow_dqn.mut
+    assert clone_agent.device == rainbow_dqn.device
+    assert clone_agent.accelerator == rainbow_dqn.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(rainbow_dqn.actor.state_dict())
+    assert str(clone_agent.actor_target.state_dict()) == str(
+        rainbow_dqn.actor_target.state_dict()
+    )
+    assert str(clone_agent.optimizer.state_dict()) == str(
+        rainbow_dqn.optimizer.state_dict()
+    )
+    assert clone_agent.fitness == rainbow_dqn.fitness
+    assert clone_agent.steps == rainbow_dqn.steps
+    assert clone_agent.scores == rainbow_dqn.scores
+
+
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
     dqn = RainbowDQN(
@@ -815,7 +926,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     dqn.loadCheckpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert dqn.net_config == {"arch": "mlp", "h_size": [64, 64]}
+    assert dqn.net_config == {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": "ReLU",
+    }
     assert isinstance(dqn.actor, EvolvableMLP)
     assert isinstance(dqn.actor_target, EvolvableMLP)
     assert dqn.lr == 1e-4
@@ -836,10 +951,10 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "h_size": [8],
-        "c_size": [3],
-        "k_size": [3],
-        "s_size": [1],
+        "hidden_size": [8],
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
         "normalize": False,
     }
 
@@ -1023,10 +1138,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         one_hot=False,
         net_config={
             "arch": "cnn",
-            "h_size": [8],
-            "c_size": [3],
-            "k_size": [3],
-            "s_size": [1],
+            "hidden_size": [8],
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
             "normalize": False,
         },
     )

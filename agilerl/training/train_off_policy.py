@@ -351,6 +351,8 @@ def train_off_policy(
                             loss, *_ = agent.learn(experiences, n_step=n_step)
                         else:
                             loss = agent.learn(experiences)
+                            if algo == "Rainbow DQN":
+                                loss, *_ = loss
 
                 if is_vectorised:
                     terminations.append(done)
