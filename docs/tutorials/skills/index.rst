@@ -54,6 +54,7 @@ Imports
 Importing the following packages, functions and classes will enable us to run the tutorial.
 
 .. collapse:: Imports
+   :open:
 
    .. code-block:: python
 
@@ -82,6 +83,7 @@ This method takes the inputs and returns the outputs ``observation``, ``reward``
 we define three skills: ``StabilizeSkill``, ``CenterSkill`` and ``LandingSkill``.
 
 .. collapse:: Stabilize
+   :open:
 
    .. code-block:: python
 
@@ -129,6 +131,7 @@ we define three skills: ``StabilizeSkill``, ``CenterSkill`` and ``LandingSkill``
             return observation, reward, terminated, truncated, info
 
 .. collapse:: Center
+   :open:
 
    .. code-block:: python
 
@@ -174,6 +177,7 @@ we define three skills: ``StabilizeSkill``, ``CenterSkill`` and ``LandingSkill``
             return observation, reward, terminated, truncated, info
 
 .. collapse:: Landing
+   :open:
 
    .. code-block:: python
 
@@ -207,6 +211,7 @@ Training skills
 Once the skills have been defined, training agents to solve them is very straightforward using AgileRL. In this tutorial we will train ``PPO`` agents, but this is equally possible with any on- or off-policy single-agent algorithm.
 
 .. collapse:: Training skills individually
+   :open:
 
    First define the initial hyperparameters and skill objects:
 
@@ -321,6 +326,7 @@ Instead, we can load an agent for each skill, whose policy we can execute if cal
 These skill-agents and skill durations can be defined in a dictionary.
 
 .. collapse:: Loading and defining skill agents
+   :open:
 
    .. code-block:: python
 
@@ -339,6 +345,7 @@ These skill-agents and skill durations can be defined in a dictionary.
 Next we can define the variables we will need in our training loop.
 
 .. collapse:: Setting up training
+   :open:
 
    .. code-block:: python
 
@@ -400,6 +407,7 @@ Next we can define the variables we will need in our training loop.
 Finally, we can run the training loop for the selector agent. Each skill agent's policy is executed in the environment for the number of timesteps defined in the ``trained_skills`` dictionary.
 
 .. collapse:: Training the selector agent
+   :open:
 
    .. code-block:: python
 
@@ -506,11 +514,13 @@ Rendering agents
 We can visualise the performance of the skills agents individually, or when combined by the selector agent, as a gif.
 
 .. collapse:: Rendering individual skills
+   :open:
 
    .. literalinclude:: ../../../tutorials/Skills/render_agilerl_skills.py
       :language: python
 
 .. collapse:: Rendering the hierarchical policy
+   :open:
 
    .. literalinclude:: ../../../tutorials/Skills/render_agilerl_selector.py
       :language: python
