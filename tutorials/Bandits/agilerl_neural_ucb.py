@@ -19,7 +19,7 @@ if __name__ == "__main__":
 
     NET_CONFIG = {
         "arch": "mlp",  # Network architecture
-        "h_size": [128],  # Actor hidden size
+        "hidden_size": [128],  # Actor hidden size
     }
 
     INIT_HP = {

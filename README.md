@@ -138,7 +138,7 @@ MUTATION_PARAMS = {
 ```python
 NET_CONFIG = {
     'arch': 'mlp',      # Network architecture
-    'h_size': [32, 32], # Actor hidden size
+    'hidden_size': [32, 32], # Actor hidden size
 }
 ```
 First, use <code>utils.utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.

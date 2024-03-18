@@ -36,7 +36,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
     NET_CONFIG = {
         'arch': 'mlp',          # Network architecture
-        'h_size': [32, 32],     # Actor hidden size
+        'hidden_size': [32, 32],     # Actor hidden size
     }
 
     INIT_HP = {
@@ -219,7 +219,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     NET_CONFIG = {
                     'arch': 'mlp',       # Network architecture
-                    'h_size': [32, 32],  # Actor hidden size
+                    'hidden_size': [32, 32],  # Actor hidden size
                 }
 
     INIT_HP = {

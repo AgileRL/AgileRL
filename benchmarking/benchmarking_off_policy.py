@@ -1,10 +1,11 @@
 import torch
 import yaml
 
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.training.train_on_policy import train_on_policy
+from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -14,7 +15,7 @@ from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparam
 # sys.path.append('../')
 
 
-def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
@@ -22,7 +23,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
 
     try:
-        state_dim = env.single_observation_space.n
+        state_dim = (env.single_observation_space.n,)
         one_hot = True
     except Exception:
         state_dim = env.single_observation_space.shape
@@ -35,6 +36,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
+    if INIT_HP["ALGO"] == "TD3":
+        max_action = float(env.single_action_space.high[0])
+        INIT_HP["MAX_ACTION"] = max_action
+
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        action_dim, INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
+    )
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
@@ -55,23 +64,31 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
+
     if use_net:
+        # Currently set up for TD3
         actor = EvolvableMLP(
             num_inputs=state_dim[0],
             num_outputs=action_dim,
+            output_vanish=False,
+            init_layers=False,
+            layer_norm=False,
+            num_atoms=51,
+            support=torch.linspace(-200, 200, 51).to(device),
+            rainbow=True,
             device=device,
-            hidden_size=[64, 64],
-            mlp_activation="Tanh",
-            mlp_output_activation="Tanh",
+            hidden_size=[128, 128],
+            mlp_activation="ReLU",
+            mlp_output_activation="ReLU",
         )
         NET_CONFIG = None
-        critic = EvolvableMLP(
-            num_inputs=state_dim[0] + action_dim,
-            num_outputs=1,
-            device=device,
-            hidden_size=[64, 64],
-            mlp_activation="Tanh",
-        )
+        critic = [EvolvableMLP(
+                            num_inputs=state_dim[0] + action_dim,
+                            num_outputs=1,
+                            device=device,
+                            hidden_size=[64, 64],
+                            mlp_activation="ReLU"
+                        ) for _ in range(2)]
     else:
         actor = None
         critic = None
@@ -89,11 +106,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
 
-    trained_pop, pop_fitnesses = train_on_policy(
+    trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],
         agent_pop,
+        memory=memory,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
@@ -107,6 +125,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     )
 
     printHyperparams(trained_pop)
+    # plotPopulationScore(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()
@@ -115,9 +134,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/ppo.yaml") as file:
-        ppo_config = yaml.safe_load(file)
-    INIT_HP = ppo_config["INIT_HP"]
-    MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
-    NET_CONFIG = ppo_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    with open("../configs/training/td3.yaml") as file:
+        td3_config = yaml.safe_load(file)
+    INIT_HP = td3_config["INIT_HP"]
+    MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
+    NET_CONFIG = td3_config["NET_CONFIG"]
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)

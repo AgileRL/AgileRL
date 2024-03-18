@@ -19,8 +19,8 @@ INIT_HP:
     TAU: 0.005                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 2                # Population size
-    EVO_EPOCHS: 2             # Evolution frequency
+    POP_SIZE: 6                # Population size
+    EVO_EPOCHS: 20             # Evolution frequency
     WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:

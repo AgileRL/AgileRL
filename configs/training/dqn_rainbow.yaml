@@ -26,7 +26,7 @@ INIT_HP:
     V_MAX: 200.                # Maximum value of support
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 2                # Population size
+    POP_SIZE: 6                # Population size
     EVO_LOOP: 3                # Number of evaluation episodes
     EVO_EPOCHS: 20             # Evolution frequency
     WANDB: false               # Log with Weights and Biases

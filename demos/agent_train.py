@@ -36,7 +36,7 @@ def agent_test():
 
     NET_CONFIG = {
         "arch": "mlp",  # Network architecture
-        "h_size": [400, 300],  # Network hidden size
+        "hidden_size": [400, 300],  # Network hidden size
     }
     print(f"THIS IS THE OBSERVATION SPACE: {env.single_observation_space}")
     print(f"THESE ARE THE OBSERVATION DIMS: {env.single_observation_space.shape}")

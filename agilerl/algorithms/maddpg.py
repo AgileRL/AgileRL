@@ -288,6 +288,7 @@ class MADDPG:
                     )
                     for state_dim in self.state_dims
                 ]
+
         # Assign architecture
         self.arch = (
             self.net_config["arch"]

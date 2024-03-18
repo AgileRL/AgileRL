@@ -602,10 +602,10 @@ Before we go any further in this tutorial, it would be helpful to define and set
       # Define the network configuration
       NET_CONFIG = {
          "arch": "cnn",  # Network architecture
-         "h_size": [64, 64],  # Actor hidden size
-         "c_size": [128],  # CNN channel size
-         "k_size": [4],  # CNN kernel size
-         "s_size": [1],  # CNN stride size
+         "hidden_size": [64, 64],  # Actor hidden size
+         "channel_size": [128],  # CNN channel size
+         "kernel_size": [4],  # CNN kernel size
+         "stride_size": [1],  # CNN stride size
          "normalize": False,  # Normalize image from range [0,255] to [0,1]
       }
 
@@ -748,6 +748,7 @@ As part of the curriculum, we may also choose to fill the replay buffer with ran
                print("Agent population warmed up.")
 
 The observation space of Connect Four is (6, 7, 2), where the first two dimensions represent the board and the third dimension represents the player. As PyTorch uses channels-first by default, we need to preprocess the observation. Moreover, we need to flip and swap the planes of the observation to account for the fact that the agent will play as both player 0 and player 1. We can define a function to do this as follows:
+
 .. collapse:: Transform and flip
 
    .. code-block:: python

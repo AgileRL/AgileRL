@@ -139,7 +139,7 @@ Instantiate an Agent
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"arch": "mlp", "h_size": [128, 128]}
+    net_config = {"arch": "mlp", "hidden_size": [128, 128]}
 
     # Define a Rainbow-DQN agent
     rainbow_dqn = RainbowDQN(

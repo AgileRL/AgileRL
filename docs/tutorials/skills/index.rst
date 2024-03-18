@@ -214,7 +214,7 @@ Once the skills have been defined, training agents to solve them is very straigh
 
       NET_CONFIG = {
          "arch": "mlp",  # Network architecture
-         "h_size": [64, 64],  # Actor hidden size
+         "hidden_size": [64, 64],  # Actor hidden size
       }
 
       INIT_HP = {
