@@ -980,10 +980,23 @@ class MATD3:
             clone.critic_1_optimizers = critic_1_optimizers
             clone.critic_2_optimizers = critic_2_optimizers
 
-        clone.fitness = copy.deepcopy(self.fitness)
-        clone.steps = copy.deepcopy(self.steps)
-        clone.scores = copy.deepcopy(self.scores)
-        clone.learn_counter = copy.deepcopy(self.learn_counter)
+        for attribute in self.inspect_attributes().keys():
+            if hasattr(self, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                else:
+                    if attr != clone_attr:
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
 
         return clone
 
