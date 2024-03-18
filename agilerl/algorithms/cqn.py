@@ -93,9 +93,6 @@ class CQN:
         assert isinstance(
             double, bool
         ), "Double Q-learning flag must be boolean value True or False."
-        assert (
-            isinstance(actor_network, nn.Module) or actor_network is None
-        ), "Actor network must be an nn.Module or None."
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."

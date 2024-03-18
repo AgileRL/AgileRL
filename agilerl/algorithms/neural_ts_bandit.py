@@ -90,9 +90,6 @@ class NeuralTS:
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
-        assert (
-            isinstance(actor_network, nn.Module) or actor_network is None
-        ), "Actor network must be an nn.Module or None."
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."

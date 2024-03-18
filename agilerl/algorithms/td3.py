@@ -126,18 +126,6 @@ class TD3:
         assert (
             policy_freq >= 1
         ), "Policy frequency must be greater than or equal to one."
-        assert (
-            isinstance(actor_network, nn.Module) or actor_network is None
-        ), "Actor network must be an nn.Module or None."
-        assert (
-            isinstance(critic_networks, (list, tuple)) or critic_networks is None
-        ), "Critic network must be a list or tuple, or None."
-        if critic_networks is not None:
-            assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
-            for critic_network in critic_networks:
-                assert (
-                    isinstance(critic_network, nn.Module) or critic_network is None
-                ), "Critic network must be an nn.Module or None."
         if (actor_network is not None) != (
             critic_networks is not None
         ):  # XOR operation
@@ -176,6 +164,10 @@ class TD3:
         self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_networks is not None:
+            assert isinstance(
+                critic_networks, (list, tuple)
+            ), "Critic network must be a list or tuple"
+            assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
             assert isinstance(critic_networks[0], type(actor_network)) and isinstance(
                 critic_networks[1], type(actor_network)
             ), "'actor_network' and 'critic_networks' must be the same type."
@@ -196,7 +188,7 @@ class TD3:
             else:
                 assert (
                     False
-                ), f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_network[0])}, \
+                ), f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_networks[0])}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
 
         else:

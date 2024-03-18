@@ -188,9 +188,7 @@ def test_initialize_cqn_with_cnn_accelerator():
         ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
-def test_initialize_cqn_with_actor_network(
-    state_dim, actor_network, input_tensor, request
-):
+def test_initialize_cqn_with_make_evo(state_dim, actor_network, input_tensor, request):
     action_dim = 2
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
@@ -220,6 +218,75 @@ def test_initialize_cqn_with_actor_network(
     assert isinstance(cqn.optimizer, optim.Adam)
     assert cqn.arch == actor_network.arch
     assert isinstance(cqn.criterion, nn.MSELoss)
+
+
+@pytest.mark.parametrize(
+    "state_dim, net_type",
+    [
+        ([4], "mlp"),
+        ([3, 64, 64], "cnn"),
+    ],
+)
+def test_initialize_cqn_with_actor_network_evo_net(state_dim, net_type):
+    action_dim = 2
+    one_hot = False
+    if net_type == "mlp":
+        actor_network = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
+    else:
+        actor_network = EvolvableCNN(
+            input_shape=state_dim,
+            num_actions=action_dim,
+            channel_size=[8, 8],
+            kernel_size=[2, 2],
+            stride_size=[1, 1],
+            hidden_size=[64, 64],
+            mlp_activation="ReLU",
+        )
+
+    cqn = CQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+
+    assert cqn.state_dim == state_dim
+    assert cqn.action_dim == action_dim
+    assert cqn.one_hot == one_hot
+    assert cqn.net_config is not None
+    assert cqn.batch_size == 64
+    assert cqn.lr == 0.0001
+    assert cqn.learn_step == 5
+    assert cqn.gamma == 0.99
+    assert cqn.tau == 0.001
+    assert cqn.mut is None
+    assert cqn.device == "cpu"
+    assert cqn.accelerator is None
+    assert cqn.index == 0
+    assert cqn.scores == []
+    assert cqn.fitness == []
+    assert cqn.steps == [0]
+    assert cqn.double is False
+    assert cqn.actor_network is None
+    assert cqn.actor == actor_network
+    assert isinstance(cqn.optimizer, optim.Adam)
+    assert cqn.arch == actor_network.arch
+    assert isinstance(cqn.criterion, nn.MSELoss)
+
+
+def test_init_with_incorrect_actor_net():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+    actor_network = "String"
+
+    with pytest.raises(AssertionError) as e:
+        cqn = CQN(state_dim, action_dim, one_hot, actor_network=actor_network)
+        assert cqn
+        assert (
+            e
+            == "'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+        )
 
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.

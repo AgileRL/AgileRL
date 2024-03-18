@@ -126,12 +126,7 @@ class DDPG:
         assert (
             policy_freq >= 1
         ), "Policy frequency must be greater than or equal to one."
-        assert (
-            isinstance(actor_network, nn.Module) or actor_network is None
-        ), "Actor network must be an nn.Module or None."
-        assert (
-            isinstance(critic_network, nn.Module) or critic_network is None
-        ), "Critic network must be an nn.Module or None."
+
         if (actor_network is not None) != (critic_network is not None):  # XOR operation
             warnings.warn(
                 "Actor and critic networks must both be supplied to use custom networks. Defaulting to net config."

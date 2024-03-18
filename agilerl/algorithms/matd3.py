@@ -140,15 +140,7 @@ class MATD3:
         assert n_agents == len(
             agent_ids
         ), "Number of agents must be equal to the length of the agent IDs list."
-        if actor_networks is not None:
-            assert all(
-                isinstance(actor, nn.Module) for actor in actor_networks
-            ), "Actor networks must be an nn.Module or None."
-        if critic_networks is not None:
-            for critic_network in critic_networks:
-                assert all(
-                    isinstance(critic, nn.Module) for critic in critic_network
-                ), "Critic networks must be an nn.Module or None."
+
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
                 "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
