@@ -40,7 +40,6 @@ MUTATION_PARAMS:
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 
-NET_CONFIG: {arch: mlp, hidden_size: [64, 64], min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64,
-    max_mlp_nodes: 500}
+NET_CONFIG: {arch: mlp, hidden_size: [64, 64], min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64, max_mlp_nodes: 500}
 
 DISTRIBUTED_TRAINING: false

@@ -5,10 +5,10 @@ from ucimlrepo import fetch_ucirepo
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_bandits import train_bandits
 from agilerl.utils.utils import initialPopulation, printHyperparams
 from agilerl.wrappers.learning import BanditEnv
-from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -68,10 +68,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             num_outputs=1,
             layer_norm=False,
             device=device,
-            arch="mlp", 
-            hidden_size=[128]
+            arch="mlp",
+            hidden_size=[128],
         )
-        NET_CONFIG = None 
+        NET_CONFIG = None
     else:
         actor = None
 

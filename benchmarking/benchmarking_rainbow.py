@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import yaml
 
 from agilerl.components.replay_buffer import (
@@ -9,9 +8,9 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
-from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -110,20 +109,20 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
     if use_net:
-        actor =  EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            output_vanish=False,
-                            init_layers=False,
-                            layer_norm=False,
-                            num_atoms=51,
-                            support=torch.linspace(-200, 200, 51).to(device),
-                            rainbow=True,
-                            device=device,
-                            hidden_size=[128, 128],
-                            mlp_activation="ReLU",
-                            mlp_output_activation="ReLU"
-                        )
+        actor = EvolvableMLP(
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            output_vanish=False,
+            init_layers=False,
+            layer_norm=False,
+            num_atoms=51,
+            support=torch.linspace(-200, 200, 51).to(device),
+            rainbow=True,
+            device=device,
+            hidden_size=[128, 128],
+            mlp_activation="ReLU",
+            mlp_output_activation="ReLU",
+        )
         NET_CONFIG = None
 
     else:

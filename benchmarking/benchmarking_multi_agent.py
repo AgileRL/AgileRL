@@ -8,9 +8,9 @@ from accelerate import Accelerator
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.utils.utils import initialPopulation, printHyperparams
-from agilerl.networks.evolvable_mlp import EvolvableMLP
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -72,7 +72,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
             (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dims
         ]
 
-
     INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
@@ -114,28 +113,37 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator=accelerator,
     )
 
-    total_state_dims = sum(state_dim[0] for state_dim in state_dims) 
+    total_state_dims = sum(state_dim[0] for state_dim in state_dims)
     total_action_dims = sum(action_dims)
 
     if use_net:
         ## Critic nets currently set-up for MATD3
-        actor = [EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU",
-                            mlp_output_activation="Sigmoid",
-                            device=device,
-                        ) for state_dim, action_dim in zip(state_dims, action_dims)] 
+        actor = [
+            EvolvableMLP(
+                num_inputs=state_dim[0],
+                num_outputs=action_dim,
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+                mlp_output_activation="Sigmoid",
+                device=device,
+            )
+            for state_dim, action_dim in zip(state_dims, action_dims)
+        ]
         NET_CONFIG = None
-        critic = [[EvolvableMLP(
-                            num_inputs=total_state_dims + total_action_dims,
-                            num_outputs=1,
-                            device=device,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU",
-                            mlp_output_activation=None,
-                        ) for _ in range(INIT_HP["N_AGENTS"])] for _ in range(2)]
+        critic = [
+            [
+                EvolvableMLP(
+                    num_inputs=total_state_dims + total_action_dims,
+                    num_outputs=1,
+                    device=device,
+                    hidden_size=[64, 64],
+                    mlp_activation="ReLU",
+                    mlp_output_activation=None,
+                )
+                for _ in range(INIT_HP["N_AGENTS"])
+            ]
+            for _ in range(2)
+        ]
     else:
         actor = None
         critic = None

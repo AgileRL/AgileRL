@@ -82,13 +82,16 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
             mlp_output_activation="ReLU",
         )
         NET_CONFIG = None
-        critic = [EvolvableMLP(
-                            num_inputs=state_dim[0] + action_dim,
-                            num_outputs=1,
-                            device=device,
-                            hidden_size=[64, 64],
-                            mlp_activation="ReLU"
-                        ) for _ in range(2)]
+        critic = [
+            EvolvableMLP(
+                num_inputs=state_dim[0] + action_dim,
+                num_outputs=1,
+                device=device,
+                hidden_size=[64, 64],
+                mlp_activation="ReLU",
+            )
+            for _ in range(2)
+        ]
     else:
         actor = None
         critic = None
