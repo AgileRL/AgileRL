@@ -1073,7 +1073,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
         critic_network,
         input_tensor,
         torch.randn(1, action_dim),
-        extra_critic_dims=action_dim,
     )
 
     # Initialize the ppo agent

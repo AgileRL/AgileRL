@@ -403,14 +403,12 @@ def test_initialize_td3_with_actor_network_cnn(
         critic_1_network,
         input_tensor,
         torch.randn(1, action_dim),
-        extra_critic_dims=action_dim,
     )
     critic_2_network = SimpleCNN()
     critic_2_network = MakeEvolvable(
         critic_2_network,
         input_tensor,
         torch.randn(1, action_dim),
-        extra_critic_dims=action_dim,
     )
 
     td3 = TD3(
@@ -1180,14 +1178,12 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
         critic_1_network,
         input_tensor,
         torch.randn(1, action_dim),
-        extra_critic_dims=action_dim,
     )
     critic_2_network = SimpleCNN()
     critic_2_network = MakeEvolvable(
         critic_2_network,
         input_tensor,
         torch.randn(1, action_dim),
-        extra_critic_dims=action_dim,
     )
 
     td3 = TD3(
