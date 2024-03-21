@@ -44,8 +44,6 @@ class MakeEvolvable(nn.Module):
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param extra_critic_dims: Critic action dimensions, needed when using CNNs with actor-critic algorithms, defaults to None
-    :type extra_critic_dims: int, optional
     """
 
     def __init__(
@@ -68,7 +66,6 @@ class MakeEvolvable(nn.Module):
         rainbow=False,
         device="cpu",
         accelerator=None,
-        extra_critic_dims=None,
         **kwargs,
     ):
         super().__init__()
@@ -88,13 +85,6 @@ class MakeEvolvable(nn.Module):
             assert isinstance(
                 network, nn.Module
             ), f"'network' must be of type 'nn.Module'.{type(network)}"
-        if secondary_input_tensor is not None:
-            assert (
-                extra_critic_dims is not None
-            ), "Must add extra critic dimensions, equal to the sum of all agents action dims."
-            assert isinstance(
-                extra_critic_dims, int
-            ), "Extra critic dimensions must be an integer."
 
         self.init_layers = init_layers
         self.min_hidden_layers = min_hidden_layers
@@ -117,7 +107,11 @@ class MakeEvolvable(nn.Module):
         # Set the layer counters
         self.conv_counter = -1
         self.lin_counter = -1
-        self.extra_critic_dims = extra_critic_dims
+        self.extra_critic_dims = (
+            secondary_input_tensor.shape[-1]
+            if secondary_input_tensor is not None
+            else None
+        )
 
         # Set placeholder attributes (needed for init_dict function to work)
         self.has_conv_layers = False

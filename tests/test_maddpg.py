@@ -453,7 +453,6 @@ def test_initialize_maddpg_with_cnn_networks(
             network=cnn_critic,
             input_tensor=torch.randn(1, 4, 2, 210, 160),
             secondary_input_tensor=torch.randn(1, 2),
-            extra_critic_dims=2,
             device=device,
         )
         for _ in range(2)
@@ -2133,9 +2132,9 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor, extra_critic_dims",
+    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor",
     [
-        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
+        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None),
         (
             [[4, 210, 160], [4, 210, 160]],
             [2, 2],
@@ -2143,7 +2142,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 2),
-            2,
         ),
     ],
 )
@@ -2159,7 +2157,6 @@ def test_load_from_pretrained_networks(
     input_tensor,
     critic_input_tensor,
     secondary_input_tensor,
-    extra_critic_dims,
     tmpdir,
 ):
     one_hot = False
@@ -2175,7 +2172,6 @@ def test_load_from_pretrained_networks(
         critic_network,
         critic_input_tensor,
         secondary_input_tensor=secondary_input_tensor,
-        extra_critic_dims=extra_critic_dims,
     )
 
     # Initialize the maddpg agent

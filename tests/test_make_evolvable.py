@@ -241,7 +241,6 @@ def test_forward_method(
             network,
             input_tensor,
             secondary_input_tensor,
-            extra_critic_dims=2,
             device=device,
         )
         with torch.no_grad():
@@ -277,7 +276,6 @@ def test_forward_method_rainbow(
             network,
             input_tensor,
             secondary_input_tensor,
-            extra_critic_dims=2,
             support=support,
             rainbow=True,
             device=device,
@@ -700,7 +698,6 @@ def test_add_cnn_layer_multi(two_arg_cnn, device):
         torch.randn(1, 4, 2, 210, 160),
         torch.randn(1, 2),
         device=device,
-        extra_critic_dims=2,
     )
     original_channels = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
@@ -938,7 +935,6 @@ def test_change_kernel_multi_two_arg(two_arg_cnn, device):
         torch.randn(1, 4, 2, 210, 160),
         torch.randn(1, 2),
         device=device,
-        extra_critic_dims=2,
     )
     while evolvable_cnn.kernel_size == [(2, 3, 3), (1, 3, 3)]:
         evolvable_cnn.change_cnn_kernel()
@@ -1031,28 +1027,29 @@ def test_recreate_nets_parameters_shrink_preserved(device):
 
 # The clone() method successfully creates a deep copy of the model.
 @pytest.mark.parametrize(
-    "network, input_tensor, secondary_input_tensor, extra_critic_dims",
+    "network, input_tensor, secondary_input_tensor",
     [
-        ("simple_mlp", torch.randn(1, 10), None, None),
-        ("simple_cnn", torch.randn(1, 3, 64, 64), None, None),
-        ("two_arg_cnn", torch.randn(1, 4, 2, 210, 160), torch.randn(1, 2), 2),
+        ("simple_mlp", torch.randn(1, 10), None),
+        ("simple_cnn", torch.randn(1, 3, 64, 64), None),
+        ("two_arg_cnn", torch.randn(1, 4, 2, 210, 160), torch.randn(1, 2)),
     ],
 )
 def test_clone_method_with_equal_state_dicts(
-    network, input_tensor, secondary_input_tensor, request, device, extra_critic_dims
+    network,
+    input_tensor,
+    secondary_input_tensor,
+    request,
+    device,
 ):
     network = request.getfixturevalue(network)
     if secondary_input_tensor is None:
-        evolvable_network = MakeEvolvable(
-            network, input_tensor, device=device, extra_critic_dims=extra_critic_dims
-        )
+        evolvable_network = MakeEvolvable(network, input_tensor, device=device)
     else:
         evolvable_network = MakeEvolvable(
             network,
             input_tensor,
             secondary_input_tensor,
             device=device,
-            extra_critic_dims=2,
         )
     clone_network = evolvable_network.clone()
     assert isinstance(clone_network, MakeEvolvable)
