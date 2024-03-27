@@ -538,10 +538,7 @@ class TD3:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
-
-        if index is None:
-            input_args["index"] = self.index
-
+        input_args["index"] = self.index if index is None else index
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:

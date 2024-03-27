@@ -368,9 +368,7 @@ class CQN:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
-
-        if index is None:
-            input_args["index"] = self.index
+        input_args["index"] = self.index if index is None else index
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
