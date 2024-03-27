@@ -567,6 +567,17 @@ def test_clone_returns_identical_agent(state_dim, net_config):
     assert clone_agent.scores == bandit.scores
 
 
+def test_clone_new_index():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    bandit = NeuralUCB(state_dim, action_dim, one_hot)
+    clone_agent = bandit.clone(index=100)
+
+    assert clone_agent.index == 100
+
+
 def test_clone_after_learning():
     action_dim = 2
     state_dim = (4,)

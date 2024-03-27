@@ -855,6 +855,17 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == ppo.scores
 
 
+def test_clone_new_index():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    ppo = PPO(state_dim, action_dim, one_hot, discrete_actions=True)
+    clone_agent = ppo.clone(index=100)
+
+    assert clone_agent.index == 100
+
+
 def test_clone_after_learning():
     state_dim = (4,)
     action_dim = 2

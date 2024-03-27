@@ -1634,6 +1634,31 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.critic_networks == matd3.critic_networks
 
 
+def test_clone_new_index():
+    state_dims = [(4,), (4,)]
+    action_dims = [2, 2]
+    one_hot = False
+    n_agents = 2
+    agent_ids = ["agent_0", "agent_1"]
+    max_action = [(1,), (1,)]
+    min_action = [(-1,), (-1,)]
+    discrete_actions = False
+
+    matd3 = MATD3(
+        state_dims,
+        action_dims,
+        one_hot,
+        n_agents,
+        agent_ids,
+        max_action,
+        min_action,
+        discrete_actions,
+    )
+    clone_agent = matd3.clone(index=100)
+
+    assert clone_agent.index == 100
+
+
 def test_clone_after_learning():
     state_dims = [(4,), (4,)]
     action_dims = [2, 2]

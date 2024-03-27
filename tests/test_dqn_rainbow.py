@@ -838,6 +838,17 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == dqn.scores
 
 
+def test_clone_new_index():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    dqn = RainbowDQN(state_dim, action_dim, one_hot)
+    clone_agent = dqn.clone(index=100)
+
+    assert clone_agent.index == 100
+
+
 def test_clone_after_learning():
     state_dim = [4]
     action_dim = 2

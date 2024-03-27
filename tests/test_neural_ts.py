@@ -483,7 +483,6 @@ def test_clone_returns_identical_agent(state_dim, net_config):
     action_dim = 2
 
     bandit = DummyNeuralTS(state_dim, action_dim, net_config)
-    print(bandit.actor)
     bandit.tensor_attribute = torch.randn(1)
     bandit.numpy_attribute = np.random.rand(1)
     clone_agent = bandit.clone()
@@ -550,6 +549,17 @@ def test_clone_returns_identical_agent(state_dim, net_config):
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
+
+
+def test_clone_new_index():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    bandit = NeuralTS(state_dim, action_dim, one_hot)
+    clone_agent = bandit.clone(index=100)
+
+    assert clone_agent.index == 100
 
 
 def test_clone_after_learning():

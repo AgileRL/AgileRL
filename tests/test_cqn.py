@@ -631,6 +631,17 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == cqn.scores
 
 
+def test_clone_new_index():
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    cqn = CQN(state_dim, action_dim, one_hot)
+    clone_agent = cqn.clone(index=100)
+
+    assert clone_agent.index == 100
+
+
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
     cqn = CQN(state_dim=[4], action_dim=2, one_hot=False, accelerator=Accelerator())

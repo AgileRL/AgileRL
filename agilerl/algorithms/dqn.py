@@ -365,7 +365,6 @@ class DQN:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
-        input_args["index"] = self.index if index is None else index
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
@@ -408,6 +407,9 @@ class DQN:
                         )
             else:
                 setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+
+        if index is not None:
+            clone.index = index
 
         return clone
 
