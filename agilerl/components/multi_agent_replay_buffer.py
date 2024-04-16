@@ -25,7 +25,7 @@ class MultiAgentReplayBuffer:
         assert len(field_names) > 0, "Field names must contain at least one field name."
         assert len(agent_ids) > 0, "Agent ids must contain at least one agent id."
 
-        self.memory = memory_size
+        self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
         self.field_names = field_names
         self.experience = namedtuple("Experience", field_names=self.field_names)
