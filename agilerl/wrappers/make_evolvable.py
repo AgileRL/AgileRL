@@ -16,6 +16,8 @@ class MakeEvolvable(nn.Module):
     :type network: nn.Module
     :param input_tensor: Example input tensor so forward pass can be made to detect the network architecture
     :type input_tensor: torch.Tensor
+    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
+    :type num_atoms: int, optional
     :param secondary_input_tensor: Second input tensor if network performs forward pass with two tensors, for example, \
         off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN \
         architecture, defaults to None
@@ -40,6 +42,10 @@ class MakeEvolvable(nn.Module):
     :type output_vanish: bool, optional
     :param init_layers: Initialise network layers, defaults to False
     :type init_layers: bool, optional
+    :param support: Atoms support tensor, defaults to None
+    :type support: torch.Tensor(), optional
+    :param rainbow: Using Rainbow DQN, defaults to False
+    :type rainbow: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -924,6 +930,11 @@ class MakeEvolvable(nn.Module):
 
     def add_cnn_layer(self):
         """Adds a hidden layer to convolutional neural network."""
+
+        max_kernels = self.calc_max_kernel_sizes()
+        stride_size_ranges = self.calc_stride_size_ranges()
+
+
         if len(self.channel_size) < self.max_cnn_hidden_layers:  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
             if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
@@ -993,6 +1004,57 @@ class MakeEvolvable(nn.Module):
             self.recreate_nets()
         else:
             self.add_cnn_channel()
+
+    def calc_max_kernel_sizes(self):
+        "Calculates the max kernel size for each convolutional layer of the feature net."
+        max_kernel_list = []
+        if not self.multi:
+            height_in, width_in = self.input_tensor.shape[-2:]
+            for idx, _ in enumerate(self.channel_size):
+                height_out = 1 + (height_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][0]-1) - 1) / (self.stride_size[idx][0])
+                width_out = 1 + (width_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][1]-1) - 1) / (self.stride_size[idx][1])
+                max_kernel_size = min(height_out, width_out) - 1 
+                if max_kernel_size < 0:
+                    max_kernel_size = 0
+                max_kernel_list.append(int(max_kernel_size))
+                height_in = height_out 
+                width_in = width_out
+        else:
+            pass
+
+            ###########################################################
+            # Add in the ability to handle this for multi-agent cases #
+            ###########################################################
+
+        return max_kernel_list
+
+    
+    def calc_stride_size_ranges(self):
+        "Calculates a range of stride sizes for each convolutional layer of the feature net."
+        stride_range_list = [] 
+        if not self.multi:
+            height_in, width_in = self.input_shape[-2:]
+            for idx, _ in enumerate(self.channel_size):
+                height_out = 1 + (height_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][0]-1) - 1) / (self.stride_size[idx][0])
+                width_out = 1 + (width_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][1]-1) - 1) / (self.stride_size[idx][1])
+                min_stride = min(
+                    -(-height_out // 40), -(-width_out // 40)
+                )
+                max_stride = min(
+                    -(-height_out // 5), -(-width_out // 5)
+                )
+                stride_range_list.append((int(min_stride), int(max_stride)))
+                height_in = height_out 
+                width_in = width_out
+        else:
+            pass
+
+            ###########################################################
+            # Add in the ability to handle this for multi-agent cases #
+            ###########################################################
+
+        return stride_range_list
+
 
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""

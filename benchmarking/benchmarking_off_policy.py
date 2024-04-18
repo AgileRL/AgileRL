@@ -119,6 +119,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
         n_episodes=INIT_HP["EPISODES"],
+        max_steps=500,
         evo_epochs=INIT_HP["EVO_EPOCHS"],
         evo_loop=1,
         target=INIT_HP["TARGET_SCORE"],
@@ -137,7 +138,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/td3.yaml") as file:
+    with open("../configs/training/dqn.yaml") as file:
         td3_config = yaml.safe_load(file)
     INIT_HP = td3_config["INIT_HP"]
     MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]

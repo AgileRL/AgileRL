@@ -370,6 +370,7 @@ def test_create_mlp_create_cnn(noisy, device):
         stride_size=[1, 1],
         hidden_size=[64, 64],
         num_actions=10,
+        rainbow=True if noisy else False,
         layer_norm=True,
         device=device,
     )
@@ -390,6 +391,7 @@ def test_create_mlp_create_cnn_multi(noisy, device):
         stride_size=[1, 1],
         hidden_size=[64, 64],
         num_actions=10,
+        rainbow=True if noisy else False,
         layer_norm=True,
         multi=True,
         n_agents=2,
@@ -628,7 +630,6 @@ def test_add_cnn_layer(
     else:
         assert len(evolvable_cnn.channel_size) == initial_channel_num
 
-
 def test_add_cnn_layer_else_statement(device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
@@ -643,7 +644,6 @@ def test_add_cnn_layer_else_statement(device):
     original_num_hidden_layers = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
     assert len(original_num_hidden_layers) == len(evolvable_cnn.channel_size)
-
 
 def test_add_cnn_layer_rainbow(device):
     evolvable_cnn = EvolvableCNN(
@@ -955,3 +955,43 @@ def test_clone_instance(
         torch.testing.assert_close(param, original_feature_net_dict[key])
     for key, param in clone_value_net.named_parameters():
         torch.testing.assert_close(param, original_value_net_dict[key])
+
+
+@pytest.mark.parametrize(
+    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+    [
+        ([1, 16, 16], [32,16], [3, 2], [1,1], [128], 10),
+    ],
+)
+def test_calc_max_kernel_sizes(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        hidden_size=hidden_size,
+        num_actions=num_actions,
+        device=device,
+    )
+    max_kernel_sizes = evolvable_cnn.calc_max_kernel_sizes()
+    assert max_kernel_sizes == [13, 12]
+
+@pytest.mark.parametrize(
+    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+    [
+        ([1, 164, 164], [32,16], [3, 2], [1,1], [128], 10),
+    ],
+)
+def  test_calc_stride_size_ranges(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        hidden_size=hidden_size,
+        num_actions=num_actions,
+        device=device,
+    )
+    stride_size_ranges = evolvable_cnn.calc_stride_size_ranges()
+    assert stride_size_ranges == [(2, 5), (2, 5)]

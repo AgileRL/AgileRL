@@ -63,6 +63,8 @@ class EvolvableCNN(nn.Module):
     :type critic: bool, optional
     :param normalize: Normalize CNN inputs, defaults to True
     :type normalize: bool, optional
+    :param init_layers: Initialise network layers, defaults to True
+    :type init_layers: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -96,6 +98,7 @@ class EvolvableCNN(nn.Module):
         rainbow=False,
         critic=False,
         normalize=True,
+        init_layers=True,
         device="cpu",
         accelerator=None,
         arch="cnn",
@@ -160,6 +163,7 @@ class EvolvableCNN(nn.Module):
         self.rainbow = rainbow
         self.critic = critic
         self.normalize = normalize
+        self.init_layers = False if rainbow else init_layers
         self.device = device
         self.accelerator = accelerator
         self.multi = multi
@@ -232,6 +236,8 @@ class EvolvableCNN(nn.Module):
             net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
         else:
             net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
+        if self.init_layers:
+            net_dict[f"{name}_linear_layer_0"] = self.layer_init(net_dict[f"{name}_linear_layer_0"])
         if self.layer_norm:
             net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0])
         net_dict["activation_0"] = self.get_activation(self.mlp_activation)
@@ -245,6 +251,10 @@ class EvolvableCNN(nn.Module):
                     net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
                         hidden_size[l_no - 1], hidden_size[l_no]
                     )
+                if self.init_layers:
+                    net_dict[f"{name}_linear_layer_{str(l_no)}"] = self.layer_init(
+                        net_dict[f"{name}_linear_layer_{str(l_no)}"]
+                    )
                 if self.layer_norm:
                     net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(
                         hidden_size[l_no]
@@ -256,6 +266,8 @@ class EvolvableCNN(nn.Module):
             output_layer = NoisyLinear(hidden_size[-1], output_size)
         else:
             output_layer = nn.Linear(hidden_size[-1], output_size)
+        if self.init_layers:
+            output_layer = self.layer_init(output_layer)
         net_dict[f"{name}_linear_layer_output"] = output_layer
         if output_activation is not None:
             net_dict[f"{name}_activation_output"] = self.get_activation(
@@ -287,6 +299,8 @@ class EvolvableCNN(nn.Module):
                 kernel_size=k_size,
                 stride=stride_size[0],
             )
+            if self.init_layers:
+                net_dict[f"{name}_conv_layer_0"] = self.layer_init(net_dict[f"{name}_conv_layer_0"])
             if self.layer_norm:
                 net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm3d(channel_size[0])
             net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
@@ -300,6 +314,8 @@ class EvolvableCNN(nn.Module):
                         kernel_size=k_size,
                         stride=stride_size[l_no],
                     )
+                    if self.init_layers:
+                        net_dict[f"{name}_conv_layer_{str(l_no)}"] = self.layer_init(net_dict[f"{name}_conv_layer_{str(l_no)}"])
                     if self.layer_norm:
                         net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm3d(
                             channel_size[l_no]
@@ -315,6 +331,9 @@ class EvolvableCNN(nn.Module):
                 kernel_size=kernel_size[0],
                 stride=stride_size[0],
             )
+            #print(net_dict[f"{name}_conv_layer_0"] )
+            if self.init_layers:
+                net_dict[f"{name}_conv_layer_0"] = self.layer_init(net_dict[f"{name}_conv_layer_0"])
             if self.layer_norm:
                 net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm2d(channel_size[0])
             net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
@@ -327,6 +346,8 @@ class EvolvableCNN(nn.Module):
                         kernel_size=kernel_size[l_no],
                         stride=stride_size[l_no],
                     )
+                    if self.init_layers:
+                        net_dict[f"{name}_conv_layer_{str(l_no)}"] = self.layer_init(net_dict[f"{name}_conv_layer_{str(l_no)}"])
                     if self.layer_norm:
                         net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm2d(
                             channel_size[l_no]
@@ -375,16 +396,19 @@ class EvolvableCNN(nn.Module):
                         .unsqueeze(2)
                         .repeat(1, 1, self.n_agents, 1, 1)
                     )
-                    input_size = feature_net(critic_input).view(1, -1).size(1)
+                    cnn_output = feature_net(critic_input)
+                    input_size = cnn_output.view(1, -1).size(1)
                 else:
+                    cnn_output = feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
                     input_size = (
-                        feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
+                        cnn_output
                         .view(1, -1)
                         .size(1)
                     )
             else:
+                cnn_output = feature_net(torch.zeros(1, *self.input_shape))
                 input_size = (
-                    feature_net(torch.zeros(1, *self.input_shape)).view(1, -1).size(1)
+                    cnn_output.view(1, -1).size(1)
                 )
 
         if self.critic:
@@ -443,6 +467,8 @@ class EvolvableCNN(nn.Module):
                     self.device
                 ), value_net.to(self.device)
 
+        self.cnn_output_size = cnn_output.shape
+
         return feature_net, value_net, advantage_net
 
     def reset_noise(self):
@@ -454,6 +480,11 @@ class EvolvableCNN(nn.Module):
             for layer in self.advantage_net:
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
+
+    def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
+        torch.nn.init.orthogonal_(layer.weight, std)
+        torch.nn.init.constant_(layer.bias, bias_const)
+        return layer
 
     def forward(self, x, xc=None, q=True):
         """Returns output of neural network.
@@ -604,45 +635,86 @@ class EvolvableCNN(nn.Module):
 
     def add_cnn_layer(self):
         """Adds a hidden layer to convolutional neural network."""
-        if len(self.channel_size) < self.max_cnn_hidden_layers:  # HARD LIMIT
+
+        max_kernels = self.calc_max_kernel_sizes()
+        stride_size_ranges = self.calc_stride_size_ranges()
+
+        print("CNN SIZE", self.cnn_output_size[-2:])
+        print(any(self.cnn_output_size[-2:]) <= 2)
+
+        if len(self.channel_size) < self.max_cnn_hidden_layers and not any(i<=2 for i in self.cnn_output_size[-2:]):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            self.kernel_size += [3]
+            k_size = min(self.kernel_size[-1], max_kernels[-1])
+            self.kernel_size += [k_size]
             stride_size_list = [
-                [4],
-                [4, 2],
-                [4, 2, 1],
-                [2, 2, 2, 1],
-                [2, 1, 2, 1, 2],
-                [2, 1, 2, 1, 2, 1],
+                np.random.randint(tup[0], tup[1] + 1)
+                for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            print("STRIDE LIST", stride_size_list)
+            self.stride_size = stride_size_list + [1]
+            print(len(self.stride_size), len(self.channel_size))
             self.recreate_nets()
         else:
             self.add_cnn_channel()
 
     def remove_cnn_layer(self):
         """Removes a hidden layer from convolutional neural network."""
+        stride_size_ranges = self.calc_stride_size_ranges()
         if len(self.channel_size) > self.min_cnn_hidden_layers:
             self.channel_size = self.channel_size[:-1]
             self.kernel_size = self.kernel_size[:-1]
             stride_size_list = [
-                [4],
-                [4, 2],
-                [4, 2, 1],
-                [2, 2, 2, 1],
-                [2, 1, 2, 1, 2],
-                [2, 1, 2, 1, 2, 1],
+                np.random.randint(tup[0], tup[1] + 1)
+                for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            self.stride_size = stride_size_list #+ stride_size_list[-1][0]# self.stride_size[:-1] # = stride_size_list[:-1]
             self.recreate_nets(shrink_params=True)
         else:
             self.add_cnn_channel()
 
+
+    def calc_max_kernel_sizes(self):
+        "Calculates the max kernel size for each convolutional layer of the feature net."
+        max_kernel_list = []
+        height_in, width_in = self.input_shape[-2:]
+        for idx, _ in enumerate(self.channel_size):
+            height_out = 1 + (height_in + 2*0 - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
+            width_out = 1 + (width_in + 2*(0) - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
+            max_kernel_size = min(height_out, width_out) - 1 
+            if max_kernel_size < 0:
+                max_kernel_size = 0
+            max_kernel_list.append(int(max_kernel_size))
+            height_in = height_out 
+            width_in = width_out
+        return max_kernel_list
+
+    def calc_stride_size_ranges(self):
+        "Calculates a range of stride sizes for each convolutional layer of the feature net."
+        stride_range_list = [] 
+        height_in, width_in = self.input_shape[-2:]
+        for idx, _ in enumerate(self.channel_size):
+            height_out = 1 + (height_in + 2*0 - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
+            width_out = 1 + (width_in + 2*(0) - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
+            min_stride = min(
+                -(-height_out // 100), -(-width_out // 100)
+            )
+            max_stride = min(
+                -(-height_out // 40), -(-width_out // 40)
+            )
+            stride_range_list.append((int(min_stride), int(max_stride)))
+            height_in = height_out 
+            width_in = width_out
+
+        return stride_range_list
+
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
+        max_kernels = self.calc_max_kernel_sizes()
         if len(self.channel_size) > 1:
             hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
-            self.kernel_size[hidden_layer] = np.random.choice([3, 4, 5, 7])
+            max_kernel = max_kernels[hidden_layer]
+            random_kernel = np.random.choice([3, 4, 5, 7])
+            self.kernel_size[hidden_layer] = random_kernel if random_kernel <= max_kernel else max_kernel
 
             self.recreate_nets()
         else:
