@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gymnasium as gym
 import gymnasium.spaces
 import numpy as np
 from gymnasium.utils import seeding
@@ -70,3 +71,50 @@ class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper)
         self.num_envs = n_envs
         self.env = SubprocVecEnv([lambda: self.env for _ in range(n_envs)])
         return
+
+
+class Gym2PZWrapper:
+    """
+    Wrapper to make make any gymnasium environment conform to the PettingZoo API. Allows
+    single agent environments to be used with multi-agent algorithms for benchmarking purposes.
+
+    :param env: Gymnasium environment
+    :type env: gymnasium.Env
+    """
+
+    def __init__(self, env: gym.Env) -> None:
+        self.metadata = env.metadata
+        self.possible_agents = ["agent_0"]
+        self.env = env
+        self.agents = ["agent_0"]
+        self.name = "agent_0"
+        self.observation_spaces = {self.name: env.observation_space}
+        self.action_spaces = {self.name: env.action_space}
+        self.num_agents = len(self.agents)
+
+    def reset(self, seed=None, options=None):
+        obs, info = self.env.reset()
+        return {self.name: obs}, {0: info}
+
+    def step(self, action):
+        action = action[self.name]
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return (
+            {self.name: obs},
+            {self.name: reward},
+            {self.name: terminated},
+            {self.name: truncated},
+            {0: info},
+        )
+
+    def close(self):
+        self.env.close()
+
+    def render(self):
+        self.env.render()
+
+    def action_space(self, agent):
+        return self.action_spaces[agent]
+
+    def observation_space(self, agent):
+        return self.observation_spaces[agent]

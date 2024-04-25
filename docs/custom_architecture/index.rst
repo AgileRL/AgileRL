@@ -287,4 +287,4 @@ The following table highlights which AgileRL algorithms are currently compatible
      - ✔️
      - ✔️
      - ❌
-     - ❌
+     - ✔️

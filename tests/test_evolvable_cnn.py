@@ -630,6 +630,7 @@ def test_add_cnn_layer(
     else:
         assert len(evolvable_cnn.channel_size) == initial_channel_num
 
+
 def test_add_cnn_layer_else_statement(device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
@@ -644,6 +645,7 @@ def test_add_cnn_layer_else_statement(device):
     original_num_hidden_layers = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_cnn_layer()
     assert len(original_num_hidden_layers) == len(evolvable_cnn.channel_size)
+
 
 def test_add_cnn_layer_rainbow(device):
     evolvable_cnn = EvolvableCNN(
@@ -960,10 +962,18 @@ def test_clone_instance(
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
     [
-        ([1, 16, 16], [32,16], [3, 2], [1,1], [128], 10),
+        ([1, 16, 16], [32, 16], [3, 2], [1, 1], [128], 10),
     ],
 )
-def test_calc_max_kernel_sizes(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+def test_calc_max_kernel_sizes(
+    input_shape,
+    channel_size,
+    kernel_size,
+    stride_size,
+    hidden_size,
+    num_actions,
+    device,
+):
 
     evolvable_cnn = EvolvableCNN(
         input_shape=input_shape,
@@ -977,13 +987,22 @@ def test_calc_max_kernel_sizes(input_shape, channel_size, kernel_size, stride_si
     max_kernel_sizes = evolvable_cnn.calc_max_kernel_sizes()
     assert max_kernel_sizes == [13, 12]
 
+
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
     [
-        ([1, 164, 164], [32,16], [3, 2], [1,1], [128], 10),
+        ([1, 164, 164], [32, 16], [3, 2], [1, 1], [128], 10),
     ],
 )
-def  test_calc_stride_size_ranges(input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions, device):
+def test_calc_stride_size_ranges(
+    input_shape,
+    channel_size,
+    kernel_size,
+    stride_size,
+    hidden_size,
+    num_actions,
+    device,
+):
     evolvable_cnn = EvolvableCNN(
         input_shape=input_shape,
         channel_size=channel_size,

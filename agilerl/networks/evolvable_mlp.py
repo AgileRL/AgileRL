@@ -21,7 +21,7 @@ class EvolvableMLP(nn.Module):
     :type hidden_size: list[int]
     :param feature_hidden_size: Hidden size for the feature network when using Rainbow DQN, defaults to [128]
     :type feature_hidden_size: list[int]
-    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
+    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 51
     :type num_atoms: int, optional
     :param mlp_activation: Activation layer, defaults to 'relu'
     :type mlp_activation: str, optional
@@ -57,7 +57,7 @@ class EvolvableMLP(nn.Module):
         num_outputs: int,
         hidden_size: List[int],
         feature_hidden_size=[128],
-        num_atoms=50,
+        num_atoms=51,
         mlp_activation="ReLU",
         mlp_output_activation=None,
         min_hidden_layers=1,

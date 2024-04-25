@@ -16,7 +16,7 @@ class MakeEvolvable(nn.Module):
     :type network: nn.Module
     :param input_tensor: Example input tensor so forward pass can be made to detect the network architecture
     :type input_tensor: torch.Tensor
-    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
+    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 51
     :type num_atoms: int, optional
     :param secondary_input_tensor: Second input tensor if network performs forward pass with two tensors, for example, \
         off-policy algorithms that use a critic(s) with environments that have RGB image observations and thus require CNN \
@@ -622,7 +622,15 @@ class MakeEvolvable(nn.Module):
         :param name: Layer name
         :type name: str
         """
+
         net_dict = OrderedDict()
+        # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
+        #     k_size = [
+        #         (self.input_tensor.shape[-3], k_size[1], k_size[2])
+        #         for k_size in kernel_size
+        #     ]
+        # else:
+
         net_dict[f"{name}_conv_layer_0"] = self.get_conv_layer(
             self.cnn_layer_info["conv_layer_type"],
             in_channels=input_size,
@@ -704,13 +712,9 @@ class MakeEvolvable(nn.Module):
                 self.padding,
                 name="feature",
             )
-
-            input_size = (
-                (feature_net(torch.zeros(*self.input_tensor.shape)))
-                .to(self.device)
-                .view(1, -1)
-                .size(1)
-            )
+            cnn_output = feature_net(torch.zeros(*self.input_tensor.shape))
+            self.cnn_output_size = cnn_output.shape
+            input_size = (cnn_output).to(self.device).view(1, -1).size(1)
 
             if self.secondary_input_tensor is not None:
                 input_size += self.extra_critic_dims
@@ -797,7 +801,6 @@ class MakeEvolvable(nn.Module):
                 if advantage_net is not None
                 else advantage_net
             )
-
         return feature_net, value_net, advantage_net
 
     @property
@@ -930,27 +933,27 @@ class MakeEvolvable(nn.Module):
 
     def add_cnn_layer(self):
         """Adds a hidden layer to convolutional neural network."""
-
         max_kernels = self.calc_max_kernel_sizes()
         stride_size_ranges = self.calc_stride_size_ranges()
-
-
-        if len(self.channel_size) < self.max_cnn_hidden_layers:  # HARD LIMIT
+        if len(self.channel_size) < self.max_cnn_hidden_layers and not any(
+            i <= 2 for i in self.cnn_output_size[-2:]
+        ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
-                self.kernel_size += [(1, 3, 3)]
-            else:
-                self.kernel_size += [(3, 3)]
+            k_size = tuple(
+                min(np.random.randint(1, 1 + k), self.kernel_size[-1][idx])
+                for idx, k in enumerate(max_kernels[-1])
+            )
+            self.kernel_size += [k_size]
             self.padding += [self.padding[-1]]
             stride_size_list = [
-                [4],
-                [4, 2],
-                [4, 2, 1],
-                [2, 2, 2, 1],
-                [2, 1, 2, 1, 2],
-                [2, 1, 2, 1, 2, 1],
+                tuple(
+                    np.random.randint(tup[0], tup[1] + 1) for _ in self.stride_size[-1]
+                )
+                for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            self.stride_size = stride_size_list + [
+                tuple(1 for _ in self.stride_size[-1])
+            ]
             if "activation_layers" not in self.cnn_layer_info.keys():
                 self.cnn_layer_info["activation_layers"] = dict()
             self.cnn_layer_info["activation_layers"][
@@ -963,18 +966,18 @@ class MakeEvolvable(nn.Module):
 
     def remove_cnn_layer(self):
         """Removes a hidden layer from the convolutional neural network."""
+        stride_size_ranges = self.calc_stride_size_ranges()
         if len(self.channel_size) > self.min_cnn_hidden_layers:
             self.channel_size = self.channel_size[:-1]
             self.kernel_size = self.kernel_size[:-1]
+
             stride_size_list = [
-                [4],
-                [4, 2],
-                [4, 2, 1],
-                [2, 2, 2, 1],
-                [2, 1, 2, 1, 2],
-                [2, 1, 2, 1, 2, 1],
+                tuple(
+                    np.random.randint(tup[0], tup[1] + 1) for _ in self.stride_size[-1]
+                )
+                for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list[len(self.channel_size) - 1]
+            self.stride_size = stride_size_list
 
             if "activation_layers" in self.cnn_layer_info.keys():
                 if len(self.channel_size) in self.cnn_layer_info["activation_layers"]:
@@ -1008,91 +1011,134 @@ class MakeEvolvable(nn.Module):
     def calc_max_kernel_sizes(self):
         "Calculates the max kernel size for each convolutional layer of the feature net."
         max_kernel_list = []
-        if not self.multi:
+        if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
             height_in, width_in = self.input_tensor.shape[-2:]
             for idx, _ in enumerate(self.channel_size):
-                height_out = 1 + (height_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][0]-1) - 1) / (self.stride_size[idx][0])
-                width_out = 1 + (width_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][1]-1) - 1) / (self.stride_size[idx][1])
-                max_kernel_size = min(height_out, width_out) - 1 
-                if max_kernel_size < 0:
-                    max_kernel_size = 0
-                max_kernel_list.append(int(max_kernel_size))
-                height_in = height_out 
+                height_out = 1 + (
+                    height_in
+                    + 2 * self.padding[idx][0]
+                    - 1 * (self.kernel_size[idx][0] - 1)
+                    - 1
+                ) / (self.stride_size[idx][0])
+                width_out = 1 + (
+                    width_in
+                    + 2 * self.padding[idx][0]
+                    - 1 * (self.kernel_size[idx][1] - 1)
+                    - 1
+                ) / (self.stride_size[idx][1])
+                max_kernel_sizes = np.array([height_out - 1, width_out - 1])
+                max_kernel_sizes = np.where(max_kernel_sizes < 0, 0, max_kernel_sizes)
+                max_kernel_list.append(tuple(max_kernel_sizes))
+                height_in = height_out
                 width_in = width_out
         else:
-            pass
-
-            ###########################################################
-            # Add in the ability to handle this for multi-agent cases #
-            ###########################################################
+            depth_in, height_in, width_in = self.input_tensor.shape[-3:]
+            for idx, _ in enumerate(self.channel_size):
+                depth_out = 1 + (
+                    depth_in
+                    + 2 * self.padding[idx][0]
+                    - 1 * (self.kernel_size[idx][0] - 1)
+                    - 1
+                ) / (self.stride_size[idx][0])
+                height_out = 1 + (
+                    height_in
+                    + 2 * self.padding[idx][1]
+                    - 1 * (self.kernel_size[idx][1] - 1)
+                    - 1
+                ) / (self.stride_size[idx][1])
+                width_out = 1 + (
+                    width_in
+                    + 2 * self.padding[idx][2]
+                    - 1 * (self.kernel_size[idx][2] - 1)
+                    - 1
+                ) / (self.stride_size[idx][2])
+                max_kernel_sizes = np.array([depth_out, height_out - 1, width_out - 1])
+                max_kernel_sizes = np.where(max_kernel_sizes < 0, 0, max_kernel_sizes)
+                max_kernel_list.append(tuple(max_kernel_sizes))
+                height_in = height_out
+                width_in = width_out
+                depth_in = depth_out
 
         return max_kernel_list
 
-    
     def calc_stride_size_ranges(self):
         "Calculates a range of stride sizes for each convolutional layer of the feature net."
-        stride_range_list = [] 
-        if not self.multi:
-            height_in, width_in = self.input_shape[-2:]
+        stride_range_list = []
+        if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
+            height_in, width_in = self.input_tensor.shape[-2:]
             for idx, _ in enumerate(self.channel_size):
-                height_out = 1 + (height_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][0]-1) - 1) / (self.stride_size[idx][0])
-                width_out = 1 + (width_in + 2*self.padding[idx][0] - 1*(self.kernel_size[idx][1]-1) - 1) / (self.stride_size[idx][1])
-                min_stride = min(
-                    -(-height_out // 40), -(-width_out // 40)
-                )
-                max_stride = min(
-                    -(-height_out // 5), -(-width_out // 5)
-                )
+                height_out = 1 + (
+                    height_in
+                    + 2 * self.padding[idx][0]
+                    - 1 * (self.kernel_size[idx][0] - 1)
+                    - 1
+                ) / (self.stride_size[idx][0])
+                width_out = 1 + (
+                    width_in
+                    + 2 * self.padding[idx][0]
+                    - 1 * (self.kernel_size[idx][1] - 1)
+                    - 1
+                ) / (self.stride_size[idx][1])
+
+                min_stride = min(-(-height_out // 100), -(-width_out // 100))
+                max_stride = min(-(-height_out // 40), -(-width_out // 40))
+
                 stride_range_list.append((int(min_stride), int(max_stride)))
-                height_in = height_out 
+                height_in = height_out
                 width_in = width_out
         else:
-            pass
+            depth_in, height_in, width_in = self.input_tensor.shape[-3:]
+            for idx, _ in enumerate(self.channel_size):
+                depth_out = 1 + (
+                    depth_in
+                    + 2 * self.padding[idx][0]
+                    - 1 * (self.kernel_size[idx][0] - 1)
+                    - 1
+                ) / (self.stride_size[idx][0])
+                height_out = 1 + (
+                    height_in
+                    + 2 * self.padding[idx][1]
+                    - 1 * (self.kernel_size[idx][1] - 1)
+                    - 1
+                ) / (self.stride_size[idx][1])
+                width_out = 1 + (
+                    width_in
+                    + 2 * self.padding[idx][2]
+                    - 1 * (self.kernel_size[idx][2] - 1)
+                    - 1
+                ) / (self.stride_size[idx][2])
 
-            ###########################################################
-            # Add in the ability to handle this for multi-agent cases #
-            ###########################################################
+                min_stride = min(
+                    -(-height_out // 100), -(-width_out // 100), -(-depth_out // 100)
+                )
+                max_stride = min(
+                    -(-height_out // 40), -(-width_out // 40), -(-depth_out // 40)
+                )
+
+                stride_range_list.append((int(min_stride), int(max_stride)))
+                height_in = height_out
+                width_in = width_out
+                depth_in = depth_out
 
         return stride_range_list
 
-
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
-
-        if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
-            if len(self.channel_size) > 1:
-                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[
-                    0
-                ]
-                kernel_size_value = np.random.choice([3, 4, 5, 7])
-                if self.secondary_input_tensor is not None:
-                    self.kernel_size[hidden_layer] = tuple(
-                        (
-                            min(kernel_size_value, self.extra_critic_dims - 1)
-                            if idx == 0
-                            else kernel_size_value
-                        )
-                        for idx in range(3)
-                    )
-                else:
-                    self.kernel_size[hidden_layer] = tuple(
-                        1 if idx == 0 else kernel_size_value for idx in range(3)
-                    )
-
-                self.recreate_nets()
-            else:
-                self.add_cnn_layer()
+        max_kernels = self.calc_max_kernel_sizes()
+        # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
+        if len(self.channel_size) > 1:
+            hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+            kernel_size_values = tuple(
+                np.random.choice([3, 4, 5, 7]) for _ in self.kernel_size[-1]
+            )
+            kernel_size_values = tuple(
+                i if i <= max_kernels[-1][idx] else int(max_kernels[-1][idx])
+                for idx, i in enumerate(kernel_size_values)
+            )
+            self.kernel_size[hidden_layer] = kernel_size_values
+            self.recreate_nets()
         else:
-            if len(self.channel_size) > 1:
-                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[
-                    0
-                ]
-                kernel_size_value = np.random.choice([3, 4, 5, 7])
-                self.kernel_size[hidden_layer] = kernel_size_value, kernel_size_value
-
-                self.recreate_nets()
-            else:
-                self.add_cnn_layer()
+            self.add_cnn_layer()
 
     def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
         """Adds channel to hidden layer of Convolutional Neural Network.

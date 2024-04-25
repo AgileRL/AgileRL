@@ -25,7 +25,7 @@ class EvolvableCNN(nn.Module):
     :type hidden_size: list[int]
     :param num_actions: Action dimension
     :type num_actions: int
-    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 50
+    :param num_atoms: Number of atoms for Rainbow DQN, defaults to 51
     :type num_atoms: int, optional
     :param mlp_output_activation: MLP output activation layer, defaults to None
     :type mlp_output_activation: str, optional
@@ -237,7 +237,9 @@ class EvolvableCNN(nn.Module):
         else:
             net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.init_layers:
-            net_dict[f"{name}_linear_layer_0"] = self.layer_init(net_dict[f"{name}_linear_layer_0"])
+            net_dict[f"{name}_linear_layer_0"] = self.layer_init(
+                net_dict[f"{name}_linear_layer_0"]
+            )
         if self.layer_norm:
             net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0])
         net_dict["activation_0"] = self.get_activation(self.mlp_activation)
@@ -300,7 +302,9 @@ class EvolvableCNN(nn.Module):
                 stride=stride_size[0],
             )
             if self.init_layers:
-                net_dict[f"{name}_conv_layer_0"] = self.layer_init(net_dict[f"{name}_conv_layer_0"])
+                net_dict[f"{name}_conv_layer_0"] = self.layer_init(
+                    net_dict[f"{name}_conv_layer_0"]
+                )
             if self.layer_norm:
                 net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm3d(channel_size[0])
             net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
@@ -315,7 +319,9 @@ class EvolvableCNN(nn.Module):
                         stride=stride_size[l_no],
                     )
                     if self.init_layers:
-                        net_dict[f"{name}_conv_layer_{str(l_no)}"] = self.layer_init(net_dict[f"{name}_conv_layer_{str(l_no)}"])
+                        net_dict[f"{name}_conv_layer_{str(l_no)}"] = self.layer_init(
+                            net_dict[f"{name}_conv_layer_{str(l_no)}"]
+                        )
                     if self.layer_norm:
                         net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm3d(
                             channel_size[l_no]
@@ -331,9 +337,11 @@ class EvolvableCNN(nn.Module):
                 kernel_size=kernel_size[0],
                 stride=stride_size[0],
             )
-            #print(net_dict[f"{name}_conv_layer_0"] )
+            # print(net_dict[f"{name}_conv_layer_0"] )
             if self.init_layers:
-                net_dict[f"{name}_conv_layer_0"] = self.layer_init(net_dict[f"{name}_conv_layer_0"])
+                net_dict[f"{name}_conv_layer_0"] = self.layer_init(
+                    net_dict[f"{name}_conv_layer_0"]
+                )
             if self.layer_norm:
                 net_dict[f"{name}_layer_norm_0"] = nn.BatchNorm2d(channel_size[0])
             net_dict[f"{name}_activation_0"] = self.get_activation(self.cnn_activation)
@@ -347,7 +355,9 @@ class EvolvableCNN(nn.Module):
                         stride=stride_size[l_no],
                     )
                     if self.init_layers:
-                        net_dict[f"{name}_conv_layer_{str(l_no)}"] = self.layer_init(net_dict[f"{name}_conv_layer_{str(l_no)}"])
+                        net_dict[f"{name}_conv_layer_{str(l_no)}"] = self.layer_init(
+                            net_dict[f"{name}_conv_layer_{str(l_no)}"]
+                        )
                     if self.layer_norm:
                         net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.BatchNorm2d(
                             channel_size[l_no]
@@ -399,17 +409,13 @@ class EvolvableCNN(nn.Module):
                     cnn_output = feature_net(critic_input)
                     input_size = cnn_output.view(1, -1).size(1)
                 else:
-                    cnn_output = feature_net(torch.zeros(1, *self.input_shape).unsqueeze(2))
-                    input_size = (
-                        cnn_output
-                        .view(1, -1)
-                        .size(1)
+                    cnn_output = feature_net(
+                        torch.zeros(1, *self.input_shape).unsqueeze(2)
                     )
+                    input_size = cnn_output.view(1, -1).size(1)
             else:
                 cnn_output = feature_net(torch.zeros(1, *self.input_shape))
-                input_size = (
-                    cnn_output.view(1, -1).size(1)
-                )
+                input_size = cnn_output.view(1, -1).size(1)
 
         if self.critic:
             input_size += self.num_actions
@@ -639,20 +645,16 @@ class EvolvableCNN(nn.Module):
         max_kernels = self.calc_max_kernel_sizes()
         stride_size_ranges = self.calc_stride_size_ranges()
 
-        print("CNN SIZE", self.cnn_output_size[-2:])
-        print(any(self.cnn_output_size[-2:]) <= 2)
-
-        if len(self.channel_size) < self.max_cnn_hidden_layers and not any(i<=2 for i in self.cnn_output_size[-2:]):  # HARD LIMIT
+        if len(self.channel_size) < self.max_cnn_hidden_layers and not any(
+            i <= 2 for i in self.cnn_output_size[-2:]
+        ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
             k_size = min(self.kernel_size[-1], max_kernels[-1])
             self.kernel_size += [k_size]
             stride_size_list = [
-                np.random.randint(tup[0], tup[1] + 1)
-                for tup in stride_size_ranges
+                np.random.randint(tup[0], tup[1] + 1) for tup in stride_size_ranges
             ]
-            print("STRIDE LIST", stride_size_list)
             self.stride_size = stride_size_list + [1]
-            print(len(self.stride_size), len(self.channel_size))
             self.recreate_nets()
         else:
             self.add_cnn_channel()
@@ -664,45 +666,47 @@ class EvolvableCNN(nn.Module):
             self.channel_size = self.channel_size[:-1]
             self.kernel_size = self.kernel_size[:-1]
             stride_size_list = [
-                np.random.randint(tup[0], tup[1] + 1)
-                for tup in stride_size_ranges
+                np.random.randint(tup[0], tup[1] + 1) for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list #+ stride_size_list[-1][0]# self.stride_size[:-1] # = stride_size_list[:-1]
+            self.stride_size = stride_size_list  # + stride_size_list[-1][0]# self.stride_size[:-1] # = stride_size_list[:-1]
             self.recreate_nets(shrink_params=True)
         else:
             self.add_cnn_channel()
-
 
     def calc_max_kernel_sizes(self):
         "Calculates the max kernel size for each convolutional layer of the feature net."
         max_kernel_list = []
         height_in, width_in = self.input_shape[-2:]
         for idx, _ in enumerate(self.channel_size):
-            height_out = 1 + (height_in + 2*0 - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
-            width_out = 1 + (width_in + 2*(0) - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
-            max_kernel_size = min(height_out, width_out) - 1 
+            height_out = 1 + (
+                height_in + 2 * 0 - 1 * (self.kernel_size[idx] - 1) - 1
+            ) / (self.stride_size[idx])
+            width_out = 1 + (
+                width_in + 2 * (0) - 1 * (self.kernel_size[idx] - 1) - 1
+            ) / (self.stride_size[idx])
+            max_kernel_size = min(height_out, width_out) - 1
             if max_kernel_size < 0:
                 max_kernel_size = 0
             max_kernel_list.append(int(max_kernel_size))
-            height_in = height_out 
+            height_in = height_out
             width_in = width_out
         return max_kernel_list
 
     def calc_stride_size_ranges(self):
         "Calculates a range of stride sizes for each convolutional layer of the feature net."
-        stride_range_list = [] 
+        stride_range_list = []
         height_in, width_in = self.input_shape[-2:]
         for idx, _ in enumerate(self.channel_size):
-            height_out = 1 + (height_in + 2*0 - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
-            width_out = 1 + (width_in + 2*(0) - 1*(self.kernel_size[idx]-1) - 1) / (self.stride_size[idx])
-            min_stride = min(
-                -(-height_out // 100), -(-width_out // 100)
-            )
-            max_stride = min(
-                -(-height_out // 40), -(-width_out // 40)
-            )
+            height_out = 1 + (
+                height_in + 2 * 0 - 1 * (self.kernel_size[idx] - 1) - 1
+            ) / (self.stride_size[idx])
+            width_out = 1 + (
+                width_in + 2 * (0) - 1 * (self.kernel_size[idx] - 1) - 1
+            ) / (self.stride_size[idx])
+            min_stride = min(-(-height_out // 100), -(-width_out // 100))
+            max_stride = min(-(-height_out // 40), -(-width_out // 40))
             stride_range_list.append((int(min_stride), int(max_stride)))
-            height_in = height_out 
+            height_in = height_out
             width_in = width_out
 
         return stride_range_list
@@ -714,7 +718,9 @@ class EvolvableCNN(nn.Module):
             hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
             max_kernel = max_kernels[hidden_layer]
             random_kernel = np.random.choice([3, 4, 5, 7])
-            self.kernel_size[hidden_layer] = random_kernel if random_kernel <= max_kernel else max_kernel
+            self.kernel_size[hidden_layer] = (
+                random_kernel if random_kernel <= max_kernel else max_kernel
+            )
 
             self.recreate_nets()
         else:
