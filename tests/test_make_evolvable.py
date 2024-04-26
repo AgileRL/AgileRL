@@ -881,10 +881,8 @@ def test_change_cnn_kernel_else_statement(device):
     # Change kernel size
     evolvable_network.change_cnn_kernel()
     # Check if kernel size has changed
-    assert evolvable_network.kernel_size == [
-        (3, 3),
-        (3, 3),
-    ], evolvable_network.kernel_size
+    assert len(evolvable_network.kernel_size) == 2
+    assert len(evolvable_network.kernel_size[-1]) == 2
 
 
 def test_change_kernel_multi_single_arg(device):
@@ -923,10 +921,8 @@ def test_change_kernel_multi_single_arg_else_statement(device):
         network, torch.randn(1, 3, 1, 210, 160), device=device
     )
     evolvable_cnn.change_cnn_kernel()
-    assert evolvable_cnn.kernel_size == [
-        (1, 3, 3),
-        (1, 3, 3),
-    ], evolvable_cnn.kernel_size
+    assert len(evolvable_cnn.kernel_size) == 2
+    assert len(evolvable_cnn.kernel_size[-1]) == 3
 
 
 def test_change_kernel_multi_two_arg(two_arg_cnn, device):

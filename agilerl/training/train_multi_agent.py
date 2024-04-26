@@ -274,6 +274,11 @@ def train_multi_agent(
                 next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
+
+                if not is_vectorised:
+                    if any(truncation.values()) or any(done.values()):
+                        break
+
                 # Save experience to replay buffer
                 if swap_channels:
                     if not is_vectorised:
@@ -284,10 +289,6 @@ def train_multi_agent(
                         agent_id: np.moveaxis(ns, [-1], [-3])
                         for agent_id, ns in next_state.items()
                     }
-
-                if not is_vectorised:
-                    if any(truncation.values()) or any(done.values()):
-                        break
 
                 memory.save2memory(
                     state,

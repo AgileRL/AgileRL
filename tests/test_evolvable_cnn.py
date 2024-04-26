@@ -913,10 +913,7 @@ def test_change_cnn_kernel_multi_else_statement(device):
         evolvable_cnn.change_cnn_kernel()
 
     # Check if kernel size has changed
-    assert evolvable_cnn.kernel_size == [
-        3,
-        3,
-    ], evolvable_cnn.kernel_size
+    assert len(evolvable_cnn.kernel_size) == 2
 
 
 ######### Test clone #########
@@ -984,8 +981,10 @@ def test_calc_max_kernel_sizes(
         num_actions=num_actions,
         device=device,
     )
-    max_kernel_sizes = evolvable_cnn.calc_max_kernel_sizes()
-    assert max_kernel_sizes == [13, 12]
+    max_kernel_sizes = evolvable_cnn.calc_max_kernel_sizes(
+        channel_size, kernel_size, stride_size, input_shape
+    )
+    assert max_kernel_sizes == [2, 2]
 
 
 @pytest.mark.parametrize(
@@ -1013,4 +1012,4 @@ def test_calc_stride_size_ranges(
         device=device,
     )
     stride_size_ranges = evolvable_cnn.calc_stride_size_ranges()
-    assert stride_size_ranges == [(2, 5), (2, 5)]
+    assert stride_size_ranges == [(1, 3), (1, 3)]

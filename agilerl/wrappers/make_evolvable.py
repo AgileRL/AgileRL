@@ -935,14 +935,13 @@ class MakeEvolvable(nn.Module):
         """Adds a hidden layer to convolutional neural network."""
         max_kernels = self.calc_max_kernel_sizes()
         stride_size_ranges = self.calc_stride_size_ranges()
-        if len(self.channel_size) < self.max_cnn_hidden_layers and not any(
-            i <= 2 for i in self.cnn_output_size[-2:]
+        if (
+            len(self.channel_size) < self.max_cnn_hidden_layers
+            and not any(i <= 2 for i in self.cnn_output_size[-2:])
+            and all(i > 0 for i in max_kernels[-1])
         ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            k_size = tuple(
-                min(np.random.randint(1, 1 + k), self.kernel_size[-1][idx])
-                for idx, k in enumerate(max_kernels[-1])
-            )
+            k_size = tuple(np.random.randint(1, 1 + k) for k in max_kernels[-1])
             self.kernel_size += [k_size]
             self.padding += [self.padding[-1]]
             stride_size_list = [
@@ -977,7 +976,7 @@ class MakeEvolvable(nn.Module):
                 )
                 for tup in stride_size_ranges
             ]
-            self.stride_size = stride_size_list
+            self.stride_size = stride_size_list[:-1]
 
             if "activation_layers" in self.cnn_layer_info.keys():
                 if len(self.channel_size) in self.cnn_layer_info["activation_layers"]:
@@ -1026,8 +1025,9 @@ class MakeEvolvable(nn.Module):
                     - 1 * (self.kernel_size[idx][1] - 1)
                     - 1
                 ) / (self.stride_size[idx][1])
-                max_kernel_sizes = np.array([height_out - 1, width_out - 1])
+                max_kernel_sizes = np.array([height_out * 0.2, width_out * 0.2])
                 max_kernel_sizes = np.where(max_kernel_sizes < 0, 0, max_kernel_sizes)
+                max_kernel_sizes = np.where(max_kernel_sizes > 10, 10, max_kernel_sizes)
                 max_kernel_list.append(tuple(max_kernel_sizes))
                 height_in = height_out
                 width_in = width_out
@@ -1052,8 +1052,11 @@ class MakeEvolvable(nn.Module):
                     - 1 * (self.kernel_size[idx][2] - 1)
                     - 1
                 ) / (self.stride_size[idx][2])
-                max_kernel_sizes = np.array([depth_out, height_out - 1, width_out - 1])
+                max_kernel_sizes = np.array(
+                    [depth_out, height_out * 0.2, width_out * 0.2]
+                )
                 max_kernel_sizes = np.where(max_kernel_sizes < 0, 0, max_kernel_sizes)
+                max_kernel_sizes = np.where(max_kernel_sizes > 10, 10, max_kernel_sizes)
                 max_kernel_list.append(tuple(max_kernel_sizes))
                 height_in = height_out
                 width_in = width_out
@@ -1080,8 +1083,8 @@ class MakeEvolvable(nn.Module):
                     - 1
                 ) / (self.stride_size[idx][1])
 
-                min_stride = min(-(-height_out // 100), -(-width_out // 100))
-                max_stride = min(-(-height_out // 40), -(-width_out // 40))
+                min_stride = min(-(-height_out // 200), -(-width_out // 200))
+                max_stride = min(-(-height_out // 75), -(-width_out // 75))
 
                 stride_range_list.append((int(min_stride), int(max_stride)))
                 height_in = height_out
