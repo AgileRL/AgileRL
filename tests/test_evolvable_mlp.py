@@ -207,7 +207,7 @@ def test_forward_rainbow(device):
         num_outputs=4,
         hidden_size=[32, 32],
         rainbow=True,
-        support=torch.linspace(0.0, 200.0, 50).to(device),
+        support=torch.linspace(0.0, 200.0, 51).to(device),
         device=device,
     )
     input_tensor = torch.randn(1, 10).to(device)

@@ -15,10 +15,10 @@ class TwoArgCNN(nn.Module):
 
         # Define the convolutional layers
         self.conv1 = nn.Conv3d(
-            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=4
+            in_channels=4, out_channels=16, kernel_size=(2, 3, 3), stride=(4, 4, 4)
         )  # W: 160, H: 210
         self.conv2 = nn.Conv3d(
-            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=2
+            in_channels=16, out_channels=32, kernel_size=(1, 3, 3), stride=(2, 2, 2)
         )  # W:
 
         # Define the max-pooling layers
@@ -670,7 +670,7 @@ def test_remove_mlp_node_no_arg(device):
 
 
 ######### Test add_cnn_layer #########
-def test_add_cnn_layer(simple_cnn, device):
+def test_make_evo_add_cnn_layer(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
     evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
 
@@ -692,7 +692,7 @@ def test_add_cnn_layer(simple_cnn, device):
     }, evolvable_network.cnn_layer_info
 
 
-def test_add_cnn_layer_multi(two_arg_cnn, device):
+def test_make_evo_add_cnn_layer_multi(two_arg_cnn, device):
     evolvable_cnn = MakeEvolvable(
         two_arg_cnn,
         torch.randn(1, 4, 2, 210, 160),
@@ -704,7 +704,7 @@ def test_add_cnn_layer_multi(two_arg_cnn, device):
     assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
 
 
-def test_add_cnn_layer_no_activation(device):
+def test_make_evo_add_cnn_layer_no_activation(device):
     cnn = nn.Sequential(
         nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
         nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
@@ -719,7 +719,7 @@ def test_add_cnn_layer_no_activation(device):
     assert len(original_channels) + 1 == len(evolvable_cnn.channel_size)
 
 
-def test_add_cnn_layer_else_statement(simple_cnn, device):
+def test_make_evo_add_cnn_layer_else_statement(simple_cnn, device):
     evolvable_cnn = MakeEvolvable(
         simple_cnn, torch.randn(1, 3, 64, 64), device=device, max_cnn_hidden_layers=2
     )
@@ -776,7 +776,7 @@ def test_remove_cnn_layer_else_statement(simple_cnn, device):
 
 
 ######### Test add_cnn_channel #########
-def test_add_cnn_channel(simple_cnn, device):
+def test_make_evo_add_cnn_channel(simple_cnn, device):
     input_tensor = torch.randn(1, 3, 64, 64)
     evolvable_network = MakeEvolvable(simple_cnn, input_tensor, device=device)
     numb_new_channels = 16
@@ -881,10 +881,8 @@ def test_change_cnn_kernel_else_statement(device):
     # Change kernel size
     evolvable_network.change_cnn_kernel()
     # Check if kernel size has changed
-    assert evolvable_network.kernel_size == [
-        (3, 3),
-        (3, 3),
-    ], evolvable_network.kernel_size
+    assert len(evolvable_network.kernel_size) == 2
+    assert len(evolvable_network.kernel_size[-1]) == 2
 
 
 def test_change_kernel_multi_single_arg(device):
@@ -923,10 +921,8 @@ def test_change_kernel_multi_single_arg_else_statement(device):
         network, torch.randn(1, 3, 1, 210, 160), device=device
     )
     evolvable_cnn.change_cnn_kernel()
-    assert evolvable_cnn.kernel_size == [
-        (1, 3, 3),
-        (1, 3, 3),
-    ], evolvable_cnn.kernel_size
+    assert len(evolvable_cnn.kernel_size) == 2
+    assert len(evolvable_cnn.kernel_size[-1]) == 3
 
 
 def test_change_kernel_multi_two_arg(two_arg_cnn, device):

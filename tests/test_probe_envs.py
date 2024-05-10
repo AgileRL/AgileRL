@@ -344,6 +344,8 @@ def test_policy_q_learning_with_probe_env_cnn():
         "max_action": 1.0,
         "min_action": 0.0,
         "policy_freq": 2,
+        "lr_actor": 0.1,
+        "lr_critic": 0.1,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
