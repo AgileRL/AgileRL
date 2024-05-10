@@ -161,7 +161,7 @@ def test_load_minari_dataset_errors(dataset_id):
 
 @pytest.mark.parametrize(
     "dataset_id",
-    [("door-human-v1")],
+    [("door-human-v2")],
 )
 def test_load_remote_minari_dataset(dataset_id):
     dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
@@ -173,7 +173,7 @@ def test_load_remote_minari_dataset(dataset_id):
 
 @pytest.mark.parametrize(
     "dataset_id",
-    [("door-human-v1")],
+    [("door-human-v2")],
 )
 def test_load_remote_minari_dataset_accelerator(dataset_id):
     accelerator = Accelerator()
