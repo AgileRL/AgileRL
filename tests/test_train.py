@@ -2498,12 +2498,13 @@ def test_train_multi_agent_calls(
             accelerator=accelerator,
         )
 
-        mocked_multi_agent.getAction.assert_called()
-        mocked_multi_agent.learn.assert_called()
-        mocked_multi_agent.test.assert_called()
-        if accelerator is not None:
-            mocked_multi_agent.wrap_models.assert_called()
-            mocked_multi_agent.unwrap_models.assert_called()
+        for agent in mock_population:
+            agent.getAction.assert_called()
+            agent.learn.assert_called()
+            agent.test.assert_called()
+            if accelerator is not None:
+                agent.wrap_models.assert_called()
+                agent.unwrap_models.assert_called()
 
 
 @pytest.mark.parametrize(

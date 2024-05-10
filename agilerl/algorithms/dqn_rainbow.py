@@ -256,8 +256,6 @@ class RainbowDQN:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
 
-        print(self.actor)
-
     def getAction(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
 
