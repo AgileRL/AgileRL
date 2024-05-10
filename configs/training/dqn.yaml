@@ -41,4 +41,4 @@ MUTATION_PARAMS:
 # NET_CONFIG: {arch: mlp, hidden_size: [64, 64], mlp_activation: ReLU, mlp_output_activation: null, min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64,
 #     max_mlp_nodes: 500}
 
-NET_CONFIG: {arch: cnn, hidden_size: [16], channel_size: [16,32], kernel_size: [5,3], stride_size: [1,1], normalize: False}
+NET_CONFIG: {arch: cnn, hidden_size: [16], channel_size: [16, 32], kernel_size: [5, 3], stride_size: [1, 1], normalize: false}
