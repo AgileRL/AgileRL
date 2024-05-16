@@ -799,7 +799,8 @@ class MATD3:
                 state, info = env.reset()
                 agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
                 score = 0
-                for _ in range(max_steps):
+                finished = False
+                while not finished:
                     if swap_channels:
                         if is_vectorised:
                             state = {
@@ -839,7 +840,7 @@ class MATD3:
                     score = sum(agent_reward.values())
                     if not isinstance(env, PettingZooVectorizationParallelWrapper):
                         if any(done.values()) or all(trunc.values()):
-                            break
+                            finished = True
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
