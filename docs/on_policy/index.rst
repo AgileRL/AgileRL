@@ -216,6 +216,7 @@ Alternatively, use a custom on-policy training loop:
         "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
+        "LEARN_STEP": 128,  # Learning frequency
         "GAMMA": 0.99,  # Discount factor
         "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
         "ACTION_STD_INIT": 0.6,  # Initial action standard deviation

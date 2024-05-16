@@ -172,6 +172,7 @@ def initialPopulation(
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr=INIT_HP["LR"],
+                learn_step=INIT_HP["LEARN_STEP"],
                 gamma=INIT_HP["GAMMA"],
                 gae_lambda=INIT_HP["GAE_LAMBDA"],
                 action_std_init=INIT_HP["ACTION_STD_INIT"],
@@ -337,7 +338,7 @@ def calculate_vectorized_scores(
         termination_indices = np.where(terminations[env_index] == 1)[0]
 
         # If no terminations, sum the entire reward array for this environment
-        if len(termination_indices) == 0:
+        if len(termination_indices) == 0 and include_unterminated:
             episode_reward = np.sum(rewards[env_index])
             episode_rewards.append(episode_reward)
             continue  # Skip to the next environment
