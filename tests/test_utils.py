@@ -259,7 +259,7 @@ def test_returns_list_of_episode_rewards_with_no_terminations():
     expected_rewards = [15, 30]
 
     result = calculate_vectorized_scores(
-        rewards, terminations, include_unterminated=False, only_first_episode=False
+        rewards, terminations, include_unterminated=True, only_first_episode=False
     )
 
     assert result == expected_rewards
