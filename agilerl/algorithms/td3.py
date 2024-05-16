@@ -509,7 +509,8 @@ class TD3:
             for i in range(loop):
                 state = env.reset()[0]
                 score = 0
-                for idx_step in range(max_steps):
+                finished = False
+                while not finished:
                     if swap_channels:
                         if not hasattr(env, "num_envs"):
                             state = np.expand_dims(state, 0)
@@ -524,7 +525,7 @@ class TD3:
                         reward = reward[0]
                     score += reward
                     if done or trunc:
-                        break
+                        finished = True
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

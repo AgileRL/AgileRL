@@ -8,6 +8,7 @@ INIT_HP:
     CHANNELS_LAST: false
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
+    LEARN_STEP: 128            # Learning frequency
     EPISODES: 1000             # Max no. episodes
     TARGET_SCORE: 190.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
@@ -40,5 +41,7 @@ MUTATION_PARAMS:
     MAX_LR: 0.01
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
+    MIN_LS: 32
+    MAX_LS: 1024
 
 NET_CONFIG: {arch: mlp, hidden_size: [64, 64], mlp_activation: Tanh, min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64, max_mlp_nodes: 500}

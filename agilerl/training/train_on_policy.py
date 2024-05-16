@@ -208,65 +208,68 @@ def train_on_policy(
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
 
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
-            truncs = []
+            for _ in range(max_steps // agent.learn_step):
 
-            for idx_step in range(max_steps):
+                states = []
+                actions = []
+                log_probs = []
+                rewards = []
+                dones = []
+                values = []
+                truncs = []
+
+                for idx_step in range(agent.learn_step):
+
+                    if swap_channels:
+                        state = np.moveaxis(state, [-1], [-3])
+                    # Get next action from agent
+                    action, log_prob, _, value = agent.getAction(state)
+
+                    if not is_vectorised:
+                        action = action[0]
+                        log_prob = log_prob[0]
+                        value = value[0]
+                    next_state, reward, done, trunc, _ = env.step(
+                        action
+                    )  # Act in environment
+
+                    states.append(state)
+                    actions.append(action)
+                    log_probs.append(log_prob)
+                    rewards.append(reward)
+                    dones.append(done)
+                    values.append(value)
+                    truncs.append(trunc)
+
+                    state = next_state
+                    score += reward
+
                 if swap_channels:
-                    state = np.moveaxis(state, [-1], [-3])
-                # Get next action from agent
-                action, log_prob, _, value = agent.getAction(state)
+                    next_state = np.moveaxis(next_state, [-1], [-3])
 
-                if not is_vectorised:
-                    action = action[0]
-                    log_prob = log_prob[0]
-                    value = value[0]
-                next_state, reward, done, trunc, _ = env.step(
-                    action
-                )  # Act in environment
+                if is_vectorised:
+                    scores = calculate_vectorized_scores(
+                        np.array(rewards).transpose((1, 0)),
+                        np.array(dones).transpose((1, 0)),
+                    )
+                    score = np.mean(scores)
 
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
-                truncs.append(trunc)
+                agent.scores.append(score)
 
-                state = next_state
-                score += reward
-
-            if swap_channels:
-                next_state = np.moveaxis(next_state, [-1], [-3])
-
-            if is_vectorised:
-                scores = calculate_vectorized_scores(
-                    np.array(rewards).transpose((1, 0)),
-                    np.array(dones).transpose((1, 0)),
+                experiences = (
+                    states,
+                    actions,
+                    log_probs,
+                    rewards,
+                    dones,
+                    values,
+                    next_state,
                 )
-                score = np.mean(scores)
-
-            agent.scores.append(score)
-
-            experiences = (
-                states,
-                actions,
-                log_probs,
-                rewards,
-                dones,
-                values,
-                next_state,
-            )
-            # Learn according to agent's RL algorithm
-            loss = agent.learn(experiences)
-            pop_loss[agent_idx].append(loss)
-            agent.steps[-1] += idx_step + 1
-            total_steps += idx_step + 1
+                # Learn according to agent's RL algorithm
+                loss = agent.learn(experiences)
+                pop_loss[agent_idx].append(loss)
+                agent.steps[-1] += agent.learn_step
+                total_steps += agent.learn_step
 
         # Now evolve if necessary
         if (idx_epi + 1) % evo_epochs == 0:

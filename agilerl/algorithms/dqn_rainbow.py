@@ -519,7 +519,8 @@ class RainbowDQN:
             for i in range(loop):
                 state = env.reset()[0]
                 score = 0
-                for idx_step in range(max_steps):
+                finished = False
+                while not finished:
                     if swap_channels:
                         # Handle unvectorised image environment
                         if not hasattr(env, "num_envs"):
@@ -529,7 +530,7 @@ class RainbowDQN:
                     state, reward, done, trunc, _ = env.step(action)
                     score += reward[0]
                     if done[0] or trunc[0]:
-                        break
+                        finished = True
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

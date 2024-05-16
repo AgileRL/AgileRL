@@ -33,6 +33,8 @@ class PPO:
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
+    :param learn_step: Learning frequency, defaults to 128
+    :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
     :param gae_lambda: Lambda for general advantage estimation, defaults to 0.95
@@ -75,6 +77,7 @@ class PPO:
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
+        learn_step=128,
         gamma=0.99,
         gae_lambda=0.95,
         mut=None,
@@ -166,6 +169,7 @@ class PPO:
         self.net_config = net_config
         self.batch_size = batch_size
         self.lr = lr
+        self.learn_step = learn_step
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.mut = mut
@@ -552,7 +556,8 @@ class PPO:
             for i in range(loop):
                 state = env.reset()[0]
                 score = 0
-                for idx_step in range(max_steps):
+                finished = False
+                while not finished:
                     if swap_channels:
                         if not hasattr(env, "num_envs"):
                             state = np.expand_dims(state, 0)
@@ -567,7 +572,7 @@ class PPO:
                         reward = reward[0]
                     score += reward
                     if done or trunc:
-                        break
+                        finished = True
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
