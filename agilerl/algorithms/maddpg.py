@@ -704,7 +704,9 @@ class MADDPG:
                 agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
                 score = 0
                 finished = False
+                idx_step = 0
                 while not finished:
+                    idx_step += 1
                     if swap_channels:
                         if is_vectorised:
                             state = {
@@ -746,6 +748,8 @@ class MADDPG:
                     if not isinstance(env, PettingZooVectorizationParallelWrapper):
                         if any(done.values()) or all(trunc.values()):
                             finished = True
+                    if idx_step == max_steps:
+                        finished = True
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)

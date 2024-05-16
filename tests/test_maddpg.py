@@ -40,7 +40,7 @@ class DummyMultiEnv:
         return (
             {agent: np.random.rand(*self.state_dims) for agent in self.agents},
             {agent: np.random.randint(0, 5) for agent in self.agents},
-            {agent: np.random.randint(0, 2) for agent in self.agents},
+            {agent: 1 for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: "info_string" for agent in self.agents},
         )
