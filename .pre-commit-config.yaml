@@ -25,14 +25,14 @@ repos:
       hooks:
           - id: black
     - repo: https://github.com/codespell-project/codespell
-      rev: v2.2.6
+      rev: v2.3.0
       hooks:
           - id: codespell
             args:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.4.4
+      rev: v0.4.5
       hooks:
           - id: ruff
             args:
