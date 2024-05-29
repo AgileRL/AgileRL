@@ -984,7 +984,7 @@ def test_calc_max_kernel_sizes(
     max_kernel_sizes = evolvable_cnn.calc_max_kernel_sizes(
         channel_size, kernel_size, stride_size, input_shape
     )
-    assert max_kernel_sizes == [2, 2]
+    assert max_kernel_sizes == [3, 3]
 
 
 @pytest.mark.parametrize(
@@ -1020,7 +1020,7 @@ def test_max_kernel_size_negative(
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
     [
-        ([1, 164, 164], [32, 16], [3, 2], [1, 1], [128], 10),
+        ([1, 164, 164], [32, 16], [4, 3], [1, 1], [128], 10),
     ],
 )
 def test_calc_stride_size_ranges(
@@ -1042,4 +1042,4 @@ def test_calc_stride_size_ranges(
         device=device,
     )
     stride_size_ranges = evolvable_cnn.calc_stride_size_ranges()
-    assert stride_size_ranges == [(1, 3), (1, 3)]
+    assert stride_size_ranges == [(2, 4), (2, 3)]

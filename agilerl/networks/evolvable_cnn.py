@@ -645,13 +645,15 @@ class EvolvableCNN(nn.Module):
         )
         stride_size_ranges = self.calc_stride_size_ranges()
 
+        print(max_kernels, stride_size_ranges)
+
         if (
             len(self.channel_size) < self.max_cnn_hidden_layers
             and not any(i <= 2 for i in self.cnn_output_size[-2:])
-            and max_kernels[-1] > 0
+            and max_kernels[-1] > 2
         ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            k_size = np.random.randint(1, max_kernels[-1] + 1)
+            k_size = np.random.randint(3, max_kernels[-1] + 1)
             self.kernel_size += [k_size]
             stride_size_list = [
                 np.random.randint(tup[0], tup[1] + 1) for tup in stride_size_ranges
@@ -693,11 +695,11 @@ class EvolvableCNN(nn.Module):
             width_out = 1 + (width_in + 2 * (0) - 1 * (kernel_size[idx] - 1) - 1) / (
                 stride_size[idx]
             )
-            max_kernel_size = min(height_out, width_out) * 0.2
+            max_kernel_size = min(height_out, width_out) * 0.25
             if max_kernel_size < 0:
                 max_kernel_size = 0
-            elif max_kernel_size > 10:
-                max_kernel_size = 10
+            elif max_kernel_size > 9:
+                max_kernel_size = 9
             max_kernel_list.append(int(max_kernel_size))
             height_in = height_out
             width_in = width_out
@@ -705,22 +707,7 @@ class EvolvableCNN(nn.Module):
 
     def calc_stride_size_ranges(self):
         "Calculates a range of stride sizes for each convolutional layer of the feature net."
-        stride_range_list = []
-        # if not self.multi:
-        height_in, width_in = self.input_shape[-2:]
-        for idx, _ in enumerate(self.channel_size):
-            height_out = 1 + (
-                height_in + 2 * 0 - 1 * (self.kernel_size[idx] - 1) - 1
-            ) / (self.stride_size[idx])
-            width_out = 1 + (
-                width_in + 2 * (0) - 1 * (self.kernel_size[idx] - 1) - 1
-            ) / (self.stride_size[idx])
-            min_stride = min(-(-height_out // 200), -(-width_out // 200))
-            max_stride = min(-(-height_out // 75), -(-width_out // 75))
-            stride_range_list.append((int(min_stride), int(max_stride)))
-            height_in = height_out
-            width_in = width_out
-
+        stride_range_list = [(2, k_size) for k_size in self.kernel_size]
         return stride_range_list
 
     def change_cnn_kernel(self):
