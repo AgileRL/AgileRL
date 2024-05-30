@@ -11,6 +11,7 @@ from torch.nn.utils import clip_grad_norm_
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import unwrap_optimizer
+from agilerl.utils.utils import chkpt_attribute_to_device
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -711,14 +712,25 @@ class RainbowDQN:
         checkpoint["actor_init_dict"]["device"] = device
         checkpoint["actor_target_init_dict"]["device"] = device
 
-        actor_init_dict = checkpoint.pop("actor_init_dict")
-        actor_target_init_dict = checkpoint.pop("actor_target_init_dict")
-        actor_state_dict = checkpoint.pop("actor_state_dict")
-        actor_target_state_dict = checkpoint.pop("actor_target_state_dict")
-        optimizer_state_dict = checkpoint.pop("optimizer_state_dict")
+        actor_init_dict = chkpt_attribute_to_device(
+            checkpoint.pop("actor_init_dict"), device
+        )
+        actor_target_init_dict = chkpt_attribute_to_device(
+            checkpoint.pop("actor_target_init_dict"), device
+        )
+        actor_state_dict = chkpt_attribute_to_device(
+            checkpoint.pop("actor_state_dict"), device
+        )
+        actor_target_state_dict = chkpt_attribute_to_device(
+            checkpoint.pop("actor_target_state_dict"), device
+        )
+        optimizer_state_dict = chkpt_attribute_to_device(
+            checkpoint.pop("optimizer_state_dict"), device
+        )
 
         checkpoint["device"] = device
         checkpoint["accelerator"] = accelerator
+        checkpoint = chkpt_attribute_to_device(checkpoint, device)
 
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
         class_init_dict = {

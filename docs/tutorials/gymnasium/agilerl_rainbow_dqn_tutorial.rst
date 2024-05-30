@@ -356,7 +356,7 @@ Load agent
 ~~~~~~~~~~
 .. code-block:: python
 
-    rainbow_dqn = RainbowDQN.load(save_path)
+    rainbow_dqn = RainbowDQN.load(save_path, device=device)
 
 
 Test loop for inference
@@ -378,7 +378,7 @@ Test loop for inference
                     state = np.moveaxis(state, [-1], [-3])
 
                 # Get next action from agent
-                action, *_ = rainbow_dqn.getAction(state)
+                action, *_ = rainbow_dqn.getAction(state, training=False)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()
