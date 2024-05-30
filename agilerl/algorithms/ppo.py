@@ -556,7 +556,7 @@ class PPO:
             for i in range(loop):
                 state, _ = env.reset()
                 scores = np.zeros(num_envs)
-                completed_episode_scores = []
+                completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
@@ -568,7 +568,7 @@ class PPO:
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):
                         if d:
-                            completed_episode_scores.append(scores[idx])
+                            completed_episode_scores[idx] = scores[idx]
                         if d or t or (max_steps is not None and step == max_steps):
                             scores[idx] = 0
                             finished[idx] = 1
