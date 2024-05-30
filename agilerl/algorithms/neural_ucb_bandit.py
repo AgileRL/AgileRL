@@ -10,8 +10,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import unwrap_optimizer
-from agilerl.utils.utils import chkpt_attribute_to_device
+from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 

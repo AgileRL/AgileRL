@@ -10,8 +10,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import unwrap_optimizer
-from agilerl.utils.utils import chkpt_attribute_to_device
+from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -220,6 +219,7 @@ class DQN:
             state = state.to(self.accelerator.device)
 
         if self.one_hot:
+
             state = (
                 nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
                 .float()

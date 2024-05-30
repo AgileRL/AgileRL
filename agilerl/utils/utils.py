@@ -54,20 +54,6 @@ def makeSkillVectEnvs(env_name, skill, num_envs=1):
     )
 
 
-def chkpt_attribute_to_device(chkpt_dict, device):
-    """Place checkpoint attributes on device. Used when loading saved agents.
-
-    :param chkpt_dict: Checkpoint dictionary
-    :type chkpt_dict: dict
-    :param device: Device for accelerated computing, 'cpu' or 'cuda'
-    :type device: str
-    """
-    for key, value in chkpt_dict.items():
-        if hasattr(value, "device"):
-            chkpt_dict[key] = value.to(device)
-    return chkpt_dict
-
-
 def initialPopulation(
     algo,
     state_dim,
