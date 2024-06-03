@@ -1181,7 +1181,7 @@ class ILQL(nn.Module):
         :param path: Location to load checkpoint from
         :type path: string
         """
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location=self.device)
         self.double_q = checkpoint["double_q"]
         self.net_config = checkpoint["net_config"]
         self.model = EvolvableGPT(**checkpoint["model_init_dict"])

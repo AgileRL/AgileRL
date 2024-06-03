@@ -774,7 +774,7 @@ class TD3:
             "lr_critic",
         ]
 
-        checkpoint = torch.load(path, pickle_module=dill)
+        checkpoint = torch.load(path, map_location=self.device, pickle_module=dill)
         self.net_config = checkpoint["net_config"]
         if self.net_config is not None:
             self.arch = checkpoint["net_config"]["arch"]
@@ -829,7 +829,7 @@ class TD3:
         :param accelerator: Accelerator for distributed computing, defaults to None
         :type accelerator: accelerate.Accelerator(), optional
         """
-        checkpoint = torch.load(path, pickle_module=dill)
+        checkpoint = torch.load(path, map_location=device, pickle_module=dill)
         checkpoint["actor_init_dict"]["device"] = device
         checkpoint["actor_target_init_dict"]["device"] = device
         checkpoint["critic_1_init_dict"]["device"] = device
