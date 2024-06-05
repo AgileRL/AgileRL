@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -53,3 +54,4 @@ def test_dump_makedirs():
 
         mock_md.assert_called()
         mock_dump.assert_called()
+    os.remove(cache_path)

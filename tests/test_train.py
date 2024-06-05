@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
@@ -3783,3 +3784,10 @@ def test_bandit_train_save_checkpoint(
     for i in range(6):  # iterate through the population indices
         assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
         os.remove(f"{checkpoint_path}_{i}_{10}.pt")
+
+
+# LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
+# FIXME: Properly handle saving/deletion in tests
+def test_remove_saved_models():
+    if os.path.exists("models"):
+        shutil.rmtree("models")
