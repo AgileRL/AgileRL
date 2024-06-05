@@ -353,10 +353,10 @@ class CQN:
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):
-                        if d:
+                        if (
+                            d or t or (max_steps is not None and step == max_steps)
+                        ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]
-                        if d or t or (max_steps is not None and step == max_steps):
-                            scores[idx] = 0
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)

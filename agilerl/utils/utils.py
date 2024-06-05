@@ -338,7 +338,7 @@ def calculate_vectorized_scores(
         termination_indices = np.where(terminations[env_index] == 1)[0]
 
         # If no terminations, sum the entire reward array for this environment
-        if len(termination_indices) == 0 and include_unterminated:
+        if len(termination_indices) == 0:
             episode_reward = np.sum(rewards[env_index])
             episode_rewards.append(episode_reward)
             continue  # Skip to the next environment

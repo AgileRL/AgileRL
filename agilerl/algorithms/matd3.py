@@ -790,9 +790,7 @@ class MATD3:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
-        is_vectorised = (
-            True if isinstance(env, PettingZooVectorizationParallelWrapper) else False
-        )
+        is_vectorised = isinstance(env, PettingZooVectorizationParallelWrapper)
         with torch.no_grad():
             rewards = []
             for i in range(loop):
@@ -834,17 +832,22 @@ class MATD3:
                         action = cont_actions
                     state, reward, done, trunc, info = env.step(action)
                     for agent_id, r in reward.items():
-                        agent_reward[agent_id] += (
-                            r[0]
-                            if isinstance(env, PettingZooVectorizationParallelWrapper)
-                            else r
-                        )
+                        agent_reward[agent_id] += r[0] if is_vectorised else r
                     score = sum(agent_reward.values())
-                    if not isinstance(env, PettingZooVectorizationParallelWrapper):
-                        if any(done.values()) or all(trunc.values()):
+                    if is_vectorised:
+                        if (
+                            any(list(done.values())[0])
+                            or all(list(trunc.values())[0])
+                            or (max_steps is not None and idx_step == max_steps)
+                        ):
                             finished = True
-                    if idx_step == max_steps:
-                        finished = True
+                    else:
+                        if (
+                            any(done.values())
+                            or all(trunc.values())
+                            or (max_steps is not None and idx_step == max_steps)
+                        ):
+                            finished = True
                 rewards.append(score)
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
