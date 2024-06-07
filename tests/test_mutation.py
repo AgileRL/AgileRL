@@ -127,6 +127,7 @@ def test_constructor_initializes_attributes():
     rl_hp = 0.6
     rl_hp_selection = ["batch_size", "lr", "learn_step"]
     mutation_sd = 0.7
+    activation_selection = ["ReLU", "Sigmoid"]
     min_lr = 0.0001
     max_lr = 0.01
     min_learn_step = 1
@@ -150,6 +151,7 @@ def test_constructor_initializes_attributes():
         rl_hp,
         rl_hp_selection,
         mutation_sd,
+        activation_selection,
         min_lr,
         max_lr,
         min_learn_step,
@@ -174,6 +176,7 @@ def test_constructor_initializes_attributes():
     assert mutations.rl_hp_mut == rl_hp
     assert mutations.rl_hp_selection == rl_hp_selection
     assert mutations.mutation_sd == mutation_sd
+    assert mutations.activation_selection == activation_selection
     assert mutations.mutate_elite == mutate_elite
     assert mutations.device == device
     assert mutations.accelerator == accelerator
@@ -218,6 +221,7 @@ def test_constructor_initializes_attributes_multi_agent():
     rl_hp = 0.6
     rl_hp_selection = ["batch_size", "lr", "learn_step"]
     mutation_sd = 0.7
+    activation_selection = ["ReLU", "Sigmoid"]
     min_lr = 0.0001
     max_lr = 0.01
     min_learn_step = 1
@@ -241,6 +245,7 @@ def test_constructor_initializes_attributes_multi_agent():
         rl_hp,
         rl_hp_selection,
         mutation_sd,
+        activation_selection,
         min_lr,
         max_lr,
         min_learn_step,
@@ -265,6 +270,7 @@ def test_constructor_initializes_attributes_multi_agent():
     assert mutations.rl_hp_mut == rl_hp
     assert mutations.rl_hp_selection == rl_hp_selection
     assert mutations.mutation_sd == mutation_sd
+    assert mutations.activation_selection == activation_selection
     assert mutations.mutate_elite == mutate_elite
     assert mutations.device == device
     assert mutations.accelerator == accelerator
@@ -1620,6 +1626,7 @@ def test_mutation_applies_activation_mutations(
         0,
         ["batch_size", "lr", "learn_step"],
         0.1,
+        activation_selection=["Tanh", "ReLU", "ELU", "GELU"],
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -1632,7 +1639,7 @@ def test_mutation_applies_activation_mutations(
         assert individual.mut in ["None", "act"]
         if individual.mut == "act":
             assert old.actor.mlp_activation != individual.actor.mlp_activation
-            assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
+            assert individual.actor.mlp_activation in ["Tanh", "ReLU", "ELU", "GELU"]
         assert old.index == individual.index
 
 
