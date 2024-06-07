@@ -1620,6 +1620,7 @@ def test_mutation_applies_activation_mutations(
         0,
         ["batch_size", "lr", "learn_step"],
         0.1,
+        activation_selection=["Tanh", "ReLU", "ELU", "GELU"],
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -1632,7 +1633,7 @@ def test_mutation_applies_activation_mutations(
         assert individual.mut in ["None", "act"]
         if individual.mut == "act":
             assert old.actor.mlp_activation != individual.actor.mlp_activation
-            assert individual.actor.mlp_activation in ["ReLU", "ELU", "GELU"]
+            assert individual.actor.mlp_activation in ["Tanh", "ReLU", "ELU", "GELU"]
         assert old.index == individual.index
 
 

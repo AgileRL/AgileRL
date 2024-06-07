@@ -28,6 +28,8 @@ class Mutations:
     :type rl_hp_selection: list[str]
     :param mutation_sd: Mutation strength
     :type mutation_sd: float
+    :param activation_selection: Activation functions to choose from, defaults to ["ReLU", "ELU", "GELU"]
+    :type activation_selection: list[str], optional
     :param min_lr: Minimum learning rate in the hyperparameter search space
     :type min_lr: float, optional
     :param max_lr: Maximum learning rate in the hyperparameter search space
@@ -63,8 +65,9 @@ class Mutations:
         parameters,
         activation,
         rl_hp,
-        rl_hp_selection,
-        mutation_sd,
+        rl_hp_selection=["lr", "batch_size", "learn_step"],
+        mutation_sd=0.1,
+        activation_selection=["ReLU", "ELU", "GELU"],
         min_lr=0.0001,
         max_lr=0.01,
         min_learn_step=1,
@@ -180,6 +183,7 @@ class Mutations:
         self.parameters_mut = parameters  # Network parameters mutation
         self.activation_mut = activation  # Activation layer mutation
         self.rl_hp_mut = rl_hp  # Learning HP mutation
+        self.activation_selection = activation_selection  # Learning HPs to choose from
         self.rl_hp_selection = rl_hp_selection  # Learning HPs to choose from
         self.mutation_sd = mutation_sd  # Mutation strength
         self.mutate_elite = mutate_elite
@@ -576,11 +580,12 @@ class Mutations:
 
     def _permutate_activation(self, network):
         # Function to change network activation layer
-        possible_activations = ["ReLU", "ELU", "GELU"]
+        possible_activations = copy.deepcopy(self.activation_selection)
         current_activation = network.mlp_activation
         # Remove current activation from options to ensure different new
         # activation layer
-        possible_activations.remove(current_activation)
+        if len(possible_activations) > 1 and current_activation in possible_activations:
+            possible_activations.remove(current_activation)
         new_activation = self.rng.choice(possible_activations, size=1)[
             0
         ]  # Select new activation
