@@ -196,6 +196,7 @@ def test_initialize_ddpg_with_cnn_accelerator():
         action_dim=action_dim,
         one_hot=one_hot,
         index=index,
+        min_action=0,
         net_config=net_config_cnn,
         batch_size=batch_size,
         lr_actor=lr_actor,
@@ -377,6 +378,7 @@ def test_initialize_ddpg_with_incorrect_actor_net():
             state_dim,
             action_dim,
             one_hot,
+            expl_noise=np.zeros(action_dim),
             actor_network=actor_network,
             critic_network=critic_network,
         )
@@ -431,7 +433,7 @@ def test_initialize_ddpg_with_actor_network_no_critic(
 
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
-def test_returns_expected_action_epsilon_greedy():
+def test_returns_expected_action_training():
     accelerator = Accelerator()
     state_dim = [4]
     action_dim = 2
@@ -439,8 +441,8 @@ def test_returns_expected_action_epsilon_greedy():
     ddpg = DDPG(state_dim, action_dim, one_hot=False)
     state = np.array([1, 2, 3, 4])
 
-    epsilon = 0
-    action = ddpg.getAction(state, epsilon)[0]
+    training = False
+    action = ddpg.getAction(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -449,8 +451,20 @@ def test_returns_expected_action_epsilon_greedy():
 
     ddpg = DDPG(state_dim, action_dim, one_hot=True, accelerator=accelerator)
     state = np.array([1])
-    epsilon = 1
-    action = ddpg.getAction(state, epsilon)[0]
+    training = True
+    action = ddpg.getAction(state, training)[0]
+
+    assert len(action) == action_dim
+    for act in action:
+        assert isinstance(act, np.float32)
+        assert -1 <= act <= 1
+
+    ddpg = DDPG(
+        state_dim, action_dim, one_hot=True, O_U_noise=False, accelerator=accelerator
+    )
+    state = np.array([1])
+    training = True
+    action = ddpg.getAction(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
