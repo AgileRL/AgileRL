@@ -1,6 +1,5 @@
 import copy
 import inspect
-import random
 import warnings
 
 import dill
@@ -28,8 +27,16 @@ class DDPG:
     :type max_action: float, optional
     :param min_action: Lower bound of the action space, defaults to -1
     :type min_action: float, optional
-    :param expl_noise: Standard deviation for Gaussian exploration noise
-    :param expl_noise: float, optional
+    :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
+    :type O_U_noise: bool, optional
+    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
+    :type expl_noise: float, optional
+    :param mean_noise: Mean of exploration noise, defaults to 0.0
+    :type mean_noise: float, optional
+    :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
+    :type theta: float, optional
+    :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
+    :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -69,7 +76,11 @@ class DDPG:
         one_hot,
         max_action=1,
         min_action=-1,
+        O_U_noise=True,
         expl_noise=0.1,
+        mean_noise=0.0,
+        theta=0.15,
+        dt=1e-2,
         index=0,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
@@ -104,12 +115,17 @@ class DDPG:
         assert max_action > min_action, "Max action must be greater than min action."
         assert max_action > 0, "Max action must be greater than zero."
         assert min_action <= 0, "Min action must be less than or equal to zero."
-        assert isinstance(
-            expl_noise, (float, int)
-        ), "Exploration noise rate must be a float."
-        assert (
-            expl_noise >= 0
-        ), "Exploration noise must be greater than or equal to zero."
+        assert (isinstance(expl_noise, (float, int))) or (
+            isinstance(expl_noise, np.ndarray) and expl_noise.shape == (action_dim,)
+        ), "Exploration action noise rate must be a float, or an array of size action_dim"
+        if isinstance(expl_noise, (float, int)):
+            assert (
+                expl_noise >= 0
+            ), "Exploration noise must be greater than or equal to zero."
+        else:
+            assert (
+                expl_noise.all() >= 0
+            ), "Exploration noise must be greater than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -150,9 +166,16 @@ class DDPG:
         self.tau = tau
         self.mut = mut
         self.policy_freq = policy_freq
-        self.expl_noise = expl_noise
-        # self.actor_network = actor_network
-        # self.critic_network = critic_network
+        self.O_U_noise = O_U_noise
+        self.expl_noise = (
+            expl_noise
+            if isinstance(expl_noise, np.ndarray)
+            else expl_noise * np.ones(action_dim)
+        )
+        self.mean_noise = mean_noise * np.ones(action_dim)
+        self.current_noise = np.zeros(action_dim)
+        self.theta = theta
+        self.dt = dt
         self.device = device
         self.accelerator = accelerator
 
@@ -298,15 +321,15 @@ class DDPG:
         """
         return np.where(action > 0, action * self.max_action, action * -self.min_action)
 
-    def getAction(self, state, epsilon=0):
+    def getAction(self, state, training=True):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
         :type state: numpy.ndarray[float]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
-        :type epsilon: float, optional
+        :param training: Agent is training, use exploration noise, defaults to True
+        :type training: bool, optional
         """
         state = torch.from_numpy(state).float()
         if self.accelerator is None:
@@ -326,26 +349,41 @@ class DDPG:
         ):
             state = state.unsqueeze(0)
 
-        # epsilon-greedy
-        if random.random() < epsilon:
-            action = (
-                (self.max_action - self.min_action)
-                * np.random.rand(state.size()[0], self.action_dim).astype("float32")
-            ) + self.min_action
-        else:
-            self.actor.eval()
-            with torch.no_grad():
-                action_values = self.actor(state)
-            self.actor.train()
+        self.actor.eval()
+        with torch.no_grad():
+            action_values = self.actor(state)
+        self.actor.train()
 
-            action = self.scale_to_action_space(action_values.cpu().data.numpy())
-            action = (
-                action
-                + np.random.normal(0, self.expl_noise, size=self.action_dim).astype(
-                    np.float32
-                )
-            ).clip(self.min_action, self.max_action)
+        action = self.scale_to_action_space(action_values.cpu().data.numpy())
+
+        if training:
+            action = (action + self.action_noise()).clip(
+                self.min_action, self.max_action
+            )
+
         return action
+
+    def action_noise(self):
+        """Create action noise for exploration, either Ornstein Uhlenbeck or
+            from a normal distribution.
+
+        :return: Action noise
+        :rtype: np.ndArray
+        """
+        if self.O_U_noise:
+            noise = (
+                self.current_noise
+                + self.theta * (self.mean_noise - self.current_noise) * self.dt
+                + self.expl_noise
+                * np.sqrt(self.dt)
+                * np.random.normal(size=self.action_dim)
+            )
+            self.current_noise = noise
+        else:
+            noise = np.random.normal(
+                self.mean_noise, self.expl_noise, size=self.action_dim
+            )
+        return noise.astype(np.float32)
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
@@ -479,7 +517,7 @@ class DDPG:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state, epsilon=0)
+                    action = self.getAction(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -563,6 +601,11 @@ class DDPG:
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )

@@ -586,7 +586,11 @@ def check_policy_q_learning_with_probe_env(
 
     state, _ = env.reset()
     for _ in range(5000):
-        action = agent.getAction(np.expand_dims(state, 0), epsilon=1)[0]
+        action = (
+            (agent.max_action - agent.min_action)
+            * np.random.rand(1, agent.action_dim).astype("float32")
+        ) + agent.min_action
+        action = action[0]
         next_state, reward, done, _, _ = env.step(action)
         memory.save2memory(state, action, reward, next_state, done)
         state = next_state
