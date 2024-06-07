@@ -62,7 +62,7 @@ Example
   while True:
       if channels_last:
           state = np.moveaxis(state, [3], [1])
-      action = agent.getAction(state, epsilon)    # Get next action from agent
+      action = agent.getAction(state, training=True)    # Get next action from agent
       next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer

@@ -304,7 +304,7 @@ function and is an example of how we might choose to make use of a population of
                 if INIT_HP["CHANNELS_LAST"]:
                     state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
-                action = agent.getAction(state)
+                action = agent.getAction(state, training=True)
                 next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
 
                 if INIT_HP["CHANNELS_LAST"]:
@@ -427,7 +427,7 @@ Test loop for inference
                     state = np.moveaxis(state, [-1], [-3])
 
                 # Get next action from agent
-                action, *_ = td3.getAction(state)
+                action, *_ = td3.getAction(state, training=False)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()
