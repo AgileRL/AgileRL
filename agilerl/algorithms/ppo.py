@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
+from torch.nn.utils import clip_grad_norm_
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
@@ -527,6 +528,7 @@ class PPO:
                     self.accelerator.backward(loss)
                 else:
                     loss.backward()
+                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
                 mean_loss += loss.item()
