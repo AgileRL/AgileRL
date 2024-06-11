@@ -2,25 +2,29 @@
 # Define initial hyperparameters
 INIT_HP:
     ENV_NAME: LunarLanderContinuous-v2   # Gym environment name
-    ALGO: DDPG                                         # Algorithm
-  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+    ALGO: DDPG                           # Algorithm
+    # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
+    NUM_ENVS: 16               # No. parallel environments for training
     MAX_ACTION: 1              # Maximum action
     MIN_ACTION: -1             # Minimum action
-    BATCH_SIZE: 128           # Batch size
+    BATCH_SIZE: 128            # Batch size
     LR_ACTOR: 0.0001           # Actor learning rate
     LR_CRITIC: 0.001           # Critic learning rate
-    EPISODES: 1000             # Max no. episodes
-    TARGET_SCORE: 200.          # Early training stop at avg score of last 100 episodes
+    MAX_STEPS: 1_000_000       # Max no. steps
+    TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
-    MEMORY_SIZE: 100000        # Max memory buffer size
+    MEMORY_SIZE: 100_000       # Max memory buffer size
     POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
-    TAU: 0.005                  # For soft update of target parameters
+    TAU: 0.005                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 6                # Population size
-    EVO_EPOCHS: 20             # Evolution frequency
+    POP_SIZE: 4                # Population size
+    EVO_STEPS: 10_000          # Evolution frequency
+    EVAL_STEPS:                # Evaluation steps
+    EVAL_LOOP: 1               # Evaluation episodes
+    LEARNING_DELAY: 1000       # Steps before learning
     WANDB: false               # Log with Weights and Biases
 
 MUTATION_PARAMS:
@@ -30,15 +34,24 @@ MUTATION_PARAMS:
     PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0                             # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
-  # Learning HPs to choose from
-    RL_HP_SELECTION: [lr, batch_size]
+    # Learning HPs to choose from
+    RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
-    MIN_LR: 0.0001                         # Define max and min limits for mutating RL hyperparams
+    # Define max and min limits for mutating RL hyperparams
     MAX_LR: 0.01
+    MIN_LR: 0.0001
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 512
+    MIN_LEARN_STEP: 1
+    MAX_LEARN_STEP: 16
 
-
-NET_CONFIG: {arch: mlp, hidden_size: [64, 64], mlp_activation: ReLU, mlp_output_activation: Tanh, min_hidden_layers: 1, max_hidden_layers: 3, min_mlp_nodes: 64,
-    max_mlp_nodes: 500}
+NET_CONFIG:
+    arch: mlp
+    hidden_size: [64, 64]
+    mlp_activation: ReLU
+    mlp_output_activation: Tanh
+    min_hidden_layers: 1
+    max_hidden_layers: 3
+    min_mlp_nodes: 64
+    max_mlp_nodes: 500
