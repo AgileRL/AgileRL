@@ -176,7 +176,7 @@ def train_on_policy(
     if accelerator is not None:
         pbar = trange(
             max_steps,
-            unit="ep",
+            unit="step",
             bar_format=bar_format,
             ascii=True,
             dynamic_ncols=True,
@@ -184,7 +184,11 @@ def train_on_policy(
         )
     else:
         pbar = trange(
-            max_steps, unit="ep", bar_format=bar_format, ascii=True, dynamic_ncols=True
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            dynamic_ncols=True,
         )
 
     pop_loss = [[] for _ in pop]
