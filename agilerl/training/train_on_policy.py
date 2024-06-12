@@ -157,7 +157,7 @@ def train_on_policy(
         num_envs = env.num_envs
     else:
         is_vectorised = False
-        num_envs = 0
+        num_envs = 1
 
     save_path = (
         checkpoint_path.split(".pt")[0]

@@ -191,7 +191,7 @@ def train_off_policy(
         num_envs = env.num_envs
     else:
         is_vectorised = False
-        num_envs = 0
+        num_envs = 1
 
     save_path = (
         checkpoint_path.split(".pt")[0]
@@ -237,7 +237,6 @@ def train_off_policy(
     pop_fitnesses = []
     total_steps = 0
     loss = None
-    scores = np.zeros(num_envs)
     checkpoint_count = 0
 
     # Pre-training mutation
@@ -252,6 +251,7 @@ def train_off_policy(
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
+            scores = np.zeros(num_envs)
             completed_episode_scores, losses = [], []
 
             if algo in ["DQN", "Rainbow DQN"]:
