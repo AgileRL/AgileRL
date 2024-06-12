@@ -8,6 +8,11 @@ INIT_HP:
     NUM_ENVS: 16               # No. parallel environments for training
     MAX_ACTION: 1              # Maximum action
     MIN_ACTION: -1             # Minimum action
+    O_U_NOISE: true            # Ornstein-Uhlenbeck action noise
+    EXPL_NOISE: 0.1            # Action noise scale
+    MEAN_NOISE: 0.             # Mean action noise
+    THETA: 0.15                # Rate of mean reversion in OU noise
+    DT: 0.01                   # Timestep for OU noise
     BATCH_SIZE: 128            # Batch size
     LR_ACTOR: 0.0001           # Actor learning rate
     LR_CRITIC: 0.001           # Critic learning rate
