@@ -72,7 +72,7 @@ def train_off_policy(
     :type eval_steps: int, optional
     :param eval_loop: Number of evaluation episodes, defaults to 1
     :type eval_loop: int, optional
-    :param learning_delay: Steps in environment before starting learning, defaults to 0
+    :param learning_delay: Steps in environment before starting learning, defaults to 10000
     :type learning_delay: int, optional
     :param eps_start: Maximum exploration - initial epsilon value, defaults to 1.0
     :type eps_start: float, optional
