@@ -176,7 +176,11 @@ class DDPG:
             if isinstance(expl_noise, np.ndarray)
             else expl_noise * np.ones((vect_noise_dim, action_dim))
         )
-        self.mean_noise = mean_noise * np.ones((vect_noise_dim, action_dim))
+        self.mean_noise = (
+            mean_noise
+            if isinstance(mean_noise, np.ndarray)
+            else mean_noise * np.ones((vect_noise_dim, action_dim))
+        )
         self.current_noise = np.zeros((vect_noise_dim, action_dim))
         self.theta = theta
         self.dt = dt
