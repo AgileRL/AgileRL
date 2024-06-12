@@ -29,6 +29,8 @@ class TD3:
     :type min_action: float, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
+    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
+    :type vect_noise_dim: int, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
     :type expl_noise: float, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
@@ -77,6 +79,7 @@ class TD3:
         max_action=1,
         min_action=-1,
         O_U_noise=True,
+        vect_noise_dim=1,
         expl_noise=0.1,
         mean_noise=0.0,
         theta=0.15,
@@ -168,13 +171,14 @@ class TD3:
         self.mut = mut
         self.policy_freq = policy_freq
         self.O_U_noise = O_U_noise
+        self.vect_noise_dim = vect_noise_dim
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
-            else expl_noise * np.ones(action_dim)
+            else expl_noise * np.ones((vect_noise_dim, action_dim))
         )
-        self.mean_noise = mean_noise * np.ones(action_dim)
-        self.current_noise = np.zeros(action_dim)
+        self.mean_noise = mean_noise * np.ones((vect_noise_dim, action_dim))
+        self.current_noise = np.zeros((vect_noise_dim, action_dim))
         self.theta = theta
         self.dt = dt
         self.actor_network = actor_network
@@ -407,12 +411,14 @@ class TD3:
                 + self.theta * (self.mean_noise - self.current_noise) * self.dt
                 + self.expl_noise
                 * np.sqrt(self.dt)
-                * np.random.normal(size=self.action_dim)
+                * np.random.normal(size=(self.vect_noise_dim, self.action_dim))
             )
             self.current_noise = noise
         else:
             noise = np.random.normal(
-                self.mean_noise, self.expl_noise, size=self.action_dim
+                self.mean_noise,
+                self.expl_noise,
+                size=(self.vect_noise_dim, self.action_dim),
             )
         return noise.astype(np.float32)
 
