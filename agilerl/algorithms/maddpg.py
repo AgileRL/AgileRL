@@ -1,6 +1,5 @@
 import copy
 import inspect
-import random
 import warnings
 
 import dill
@@ -35,8 +34,18 @@ class MADDPG:
     :type min_action: list[float]
     :param discrete_actions: Boolean flag to indicate a discrete action space
     :type discrete_actions: bool, optional
-    :param expl_noise: Standard deviation for Gaussian exploration noise, defaults to 0.1
+    :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
+    :type O_U_noise: bool, optional
+    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
+    :type vect_noise_dim: int, optional
+    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
     :type expl_noise: float, optional
+    :param mean_noise: Mean of exploration noise, defaults to 0.0
+    :type mean_noise: float, optional
+    :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
+    :type theta: float, optional
+    :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
+    :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -77,7 +86,12 @@ class MADDPG:
         max_action,
         min_action,
         discrete_actions,
+        O_U_noise=True,
         expl_noise=0.1,
+        vect_noise_dim=1,
+        mean_noise=0.0,
+        theta=0.15,
+        dt=1e-2,
         index=0,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
@@ -166,10 +180,38 @@ class MADDPG:
         self.fitness = []
         self.steps = [0]
         self.max_action = max_action
-        self.expl_noise = expl_noise
         self.min_action = min_action
         self.discrete_actions = discrete_actions
         self.total_actions = sum(self.action_dims)
+
+        self.O_U_noise = O_U_noise
+        self.vect_noise_dim = vect_noise_dim
+        self.expl_noise = (
+            expl_noise
+            if isinstance(expl_noise, np.ndarray)
+            else np.array(
+                [
+                    expl_noise * np.ones((vect_noise_dim, action_dim))
+                    for action_dim in self.action_dims
+                ]
+            )
+        )
+        self.mean_noise = (
+            mean_noise
+            if isinstance(mean_noise, np.ndarray)
+            else np.array(
+                [
+                    mean_noise * np.ones((vect_noise_dim, action_dim))
+                    for action_dim in self.action_dims
+                ]
+            )
+        )
+        self.current_noise = np.array(
+            [np.zeros((vect_noise_dim, action_dim)) for action_dim in self.action_dims]
+        )
+        self.theta = theta
+        self.dt = dt
+
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
 
@@ -333,15 +375,17 @@ class MADDPG:
             action * -self.min_action[idx][0],
         )
 
-    def getAction(self, states, epsilon=0, agent_mask=None, env_defined_actions=None):
+    def getAction(
+        self, states, training=True, agent_mask=None, env_defined_actions=None
+    ):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type state: Dict[str, numpy.Array]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
-        :type epsilon: float, optional
+        :param training: Agent is training, use exploration noise, defaults to True
+        :type training: bool, optional
         :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
         :type agent_mask: Dict[str, bool]
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
@@ -402,41 +446,26 @@ class MADDPG:
         for idx, (agent_id, state, actor, action_dim) in enumerate(
             zip(agent_ids, states, actors, self.action_dims)
         ):
-            if random.random() < epsilon:
-                if self.discrete_actions:
-                    action = (
-                        np.random.dirichlet(np.ones(action_dim), size=state.size()[0])
-                        .astype("float32")
-                        .squeeze()
-                    )
-                else:
-                    action = (
-                        (self.max_action[idx][0] - self.min_action[idx][0])
-                        * np.random.rand(state.size()[0], self.action_dims[idx])
-                        .astype("float32")
-                        .squeeze()
-                    ) + self.min_action[idx][0]
+            actor.eval()
+            if self.accelerator is not None:
+                with actor.no_sync(), torch.no_grad():
+                    action_values = actor(state)
             else:
-                actor.eval()
-                if self.accelerator is not None:
-                    with actor.no_sync(), torch.no_grad():
-                        action_values = actor(state)
-                else:
-                    with torch.no_grad():
-                        action_values = actor(state)
-                actor.train()
-                if self.discrete_actions:
-                    action = action_values.cpu().data.numpy().squeeze()
-                else:
-                    action = self.scale_to_action_space(
-                        action_values.cpu().data.numpy().squeeze(), idx
+                with torch.no_grad():
+                    action_values = actor(state)
+            actor.train()
+            if self.discrete_actions:
+                action = action_values.cpu().data.numpy().squeeze()
+                if training:
+                    action = (action + self.action_noise(idx)).clip(0, 1)
+            else:
+                action = self.scale_to_action_space(
+                    action_values.cpu().data.numpy().squeeze(), idx
+                )
+                if training:
+                    action = (action + self.action_noise(idx)).clip(
+                        self.min_action[idx][0], self.max_action[idx][0]
                     )
-                    action = (
-                        action
-                        + np.random.normal(
-                            0, self.expl_noise, size=self.action_dims[idx]
-                        ).astype(np.float32)
-                    ).clip(self.min_action[idx][0], self.max_action[idx][0])
             action_dict[agent_id] = action
 
         if self.discrete_actions:
@@ -471,6 +500,41 @@ class MADDPG:
             action_dict,
             discrete_action_dict,
         )
+
+    def action_noise(self, idx):
+        """Create action noise for exploration, either Ornstein Uhlenbeck or
+            from a normal distribution.
+
+        :param idx: Agent index for action dims
+        :type idx: int
+        :return: Action noise
+        :rtype: np.ndArray
+        """
+        if self.O_U_noise:
+            noise = (
+                self.current_noise[idx]
+                + self.theta
+                * (self.mean_noise[idx] - self.current_noise[idx])
+                * self.dt
+                + self.expl_noise[idx]
+                * np.sqrt(self.dt)
+                * np.random.normal(size=(self.vect_noise_dim, self.action_dims[idx]))
+            )
+            self.current_noise = noise
+        else:
+            noise = np.random.normal(
+                self.mean_noise[idx],
+                self.expl_noise[idx],
+                size=(self.vect_noise_dim, self.action_dims[idx]),
+            )
+        return noise.astype(np.float32)
+
+    def reset_action_noise(self, indices):
+        """Reset action noise."""
+        for idx in indices:
+            self.current_noise[idx] = np.zeros(
+                (self.vect_noise_dim, self.action_dims[idx])
+            )
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
@@ -682,14 +746,14 @@ class MADDPG:
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=500, loop=3):
+    def test(self, env, swap_channels=False, max_steps=None, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
         :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
-        :param max_steps: Maximum number of testing steps, defaults to 500
+        :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
@@ -697,14 +761,15 @@ class MADDPG:
         is_vectorised = isinstance(env, PettingZooVectorizationParallelWrapper)
         with torch.no_grad():
             rewards = []
+            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
                 state, info = env.reset()
-                agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
-                score = 0
-                finished = False
-                idx_step = 0
-                while not finished:
-                    idx_step += 1
+                scores = np.zeros(num_envs)
+                completed_episode_scores = np.zeros(num_envs)
+                finished = np.zeros(num_envs)
+                step = 0
+                while not np.all(finished):
+                    step += 1
                     if swap_channels:
                         if is_vectorised:
                             state = {
@@ -726,7 +791,7 @@ class MADDPG:
                     )
                     cont_actions, discrete_action = self.getAction(
                         state,
-                        epsilon=0,
+                        training=False,
                         agent_mask=agent_mask,
                         env_defined_actions=env_defined_actions,
                     )
@@ -735,24 +800,20 @@ class MADDPG:
                     else:
                         action = cont_actions
                     state, reward, done, trunc, info = env.step(action)
-                    for agent_id, r in reward.items():
-                        agent_reward[agent_id] += r[0] if is_vectorised else r
-                    score = sum(agent_reward.values())
-                    if is_vectorised:
+                    for idx, (d, t) in enumerate(
+                        zip(
+                            np.array(list(done.values())).transpose(),
+                            np.array(list(trunc.values())).transpose(),
+                        )
+                    ):
                         if (
-                            any(list(done.values())[0])
-                            or all(list(trunc.values())[0])
-                            or (max_steps is not None and idx_step == max_steps)
-                        ):
-                            finished = True
-                    else:
-                        if (
-                            any(done.values())
-                            or all(trunc.values())
-                            or (max_steps is not None and idx_step == max_steps)
-                        ):
-                            finished = True
-                rewards.append(score)
+                            np.any(d)
+                            or np.any(t)
+                            or (max_steps is not None and step == max_steps)
+                        ) and not finished[idx]:
+                            completed_episode_scores[idx] = scores[idx]
+                            finished[idx] = 1
+                rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
@@ -851,6 +912,11 @@ class MADDPG:
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
