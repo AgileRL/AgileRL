@@ -367,8 +367,8 @@ def train_on_policy(
 
         if verbose:
             fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
+            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
@@ -379,8 +379,8 @@ def train_on_policy(
                 --- Global Steps {total_steps} ---
                 Fitness:\t\t{fitness}
                 Score:\t\t{mean_scores}
-                100 fitness avgs:\t{avg_fitness}
-                100 score avgs:\t{avg_score}
+                5 fitness avgs:\t{avg_fitness}
+                10 score avgs:\t{avg_score}
                 Agents:\t\t{agents}
                 Steps:\t\t{num_steps}
                 Mutations:\t\t{muts}
@@ -410,6 +410,7 @@ def train_on_policy(
                     for i, agent in enumerate(pop):
                         agent.saveCheckpoint(f"{save_path}_{i}_{agent.steps[-1]}.pt")
                     print("Saved checkpoint.")
+                checkpoint_count += 1
 
     if wb:
         if accelerator is not None:
