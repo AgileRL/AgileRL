@@ -96,8 +96,7 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
     import torch
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
-                          memory_size=10000,        # Max replay buffer size
+    memory = ReplayBuffer(memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
 

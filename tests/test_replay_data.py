@@ -8,7 +8,6 @@ from agilerl.components.replay_data import ReplayDataset
 # The dataset can be initialized with a buffer and batch size
 def test_initialization_with_buffer_and_batch_size():
     buffer = ReplayBuffer(
-        action_dim=4,
         memory_size=1000,
         field_names=["state", "action", "reward", "next_state", "done"],
     )
@@ -22,7 +21,6 @@ def test_initialization_with_buffer_and_batch_size():
 def test_sampling_batch_from_buffer():
     field_names = ["state", "action", "reward", "next_state", "done"]
     buffer = ReplayBuffer(
-        action_dim=4,
         memory_size=1000,
         field_names=field_names,
     )

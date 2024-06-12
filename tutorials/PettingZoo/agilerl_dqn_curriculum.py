@@ -578,7 +578,6 @@ if __name__ == "__main__":
         # Configure the replay buffer
         field_names = ["state", "action", "reward", "next_state", "done"]
         memory = ReplayBuffer(
-            action_dim=action_dim,  # Number of agent actions
             memory_size=INIT_HP["MEMORY_SIZE"],  # Max replay buffer size
             field_names=field_names,  # Field names to store in memory
             device=device,

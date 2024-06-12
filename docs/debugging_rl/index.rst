@@ -50,7 +50,6 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
             field_names = ["state", "action", "reward", "next_state", "done"]
             memory = ReplayBuffer(
-                action_dim=algo_args["action_dim"],  # Number of agent actions
                 memory_size=1000,  # Max replay buffer size
                 field_names=field_names,  # Field names to store in memory
                 device=device,
@@ -92,7 +91,6 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
             field_names = ["state", "action", "reward", "next_state", "done"]
             memory = ReplayBuffer(
-                action_dim=algo_args["action_dim"],  # Number of agent actions
                 memory_size=1000,  # Max replay buffer size
                 field_names=field_names,  # Field names to store in memory
                 device=device,

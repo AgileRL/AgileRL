@@ -187,7 +187,6 @@ by the class ``ReplayBuffer()``. During training it can be added to using the ``
 
     field_names = ["state", "action", "reward", "next_state", "terminated"]
     memory = ReplayBuffer(
-        action_dim=action_dim,  # Number of agent actions
         memory_size=10_000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=device,

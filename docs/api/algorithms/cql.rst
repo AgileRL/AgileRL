@@ -58,7 +58,7 @@ Example
       state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
   field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(memory_size=10000, field_names=field_names)
   dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
 
   # Save transitions to replay buffer

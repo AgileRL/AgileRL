@@ -39,7 +39,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
     field_names = ["context", "action"]
     memory = ReplayBuffer(
-        action_dim, INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
+        INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
     )
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],

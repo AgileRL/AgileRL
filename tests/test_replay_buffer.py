@@ -16,14 +16,12 @@ from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 ##### ReplayBuffer class tests #####
 # Can create an instance of ReplayBuffer with valid arguments
 def test_create_instance_with_valid_arguments():
-    action_dim = 2
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
-    assert buffer.action_dim == action_dim
     assert buffer.memory_size == memory_size
     assert buffer.field_names == field_names
     assert buffer.device == device
@@ -31,12 +29,11 @@ def test_create_instance_with_valid_arguments():
 
 # Can get length of memory with __len__ method
 def test_get_length_of_memory():
-    action_dim = 2
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
     buffer.save2memorySingleEnv(1, 2, 3)
@@ -49,7 +46,6 @@ def test_get_length_of_memory():
 # Can add experiences to memory and appends to end of deque
 def test_append_to_memory_deque():
     buffer = ReplayBuffer(
-        action_dim=4,
         memory_size=1000,
         field_names=["state", "action", "reward", "next_state", "done"],
     )
@@ -71,7 +67,6 @@ def test_append_to_memory_deque():
 # Can add an experience when memory is full and maxlen is reached
 def test_add_experience_when_memory_full():
     buffer = ReplayBuffer(
-        action_dim=4,
         memory_size=2,
         field_names=["state", "action", "reward", "next_state", "done"],
     )
@@ -93,12 +88,11 @@ def test_add_experience_when_memory_full():
 
 # Can add single experiences to memory with save2memorySingleEnv method
 def test_add_single_experiences_to_memory():
-    action_dim = 2
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     state = np.array([1, 2])
     action = np.array([0])
@@ -114,12 +108,11 @@ def test_add_single_experiences_to_memory():
 
 # Can add multiple experiences to memory with save2memoryVectEnvs method
 def test_add_multiple_experiences_to_memory():
-    action_dim = 2
     memory_size = 100
     field_names = ["state", "action", "reward", "next_state", "done"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     states = np.array([[1, 2], [3, 4]])
     actions = np.array([[0], [1]])
@@ -144,12 +137,11 @@ def test_add_multiple_experiences_to_memory():
 
 # Can handle vectorized and un-vectorized experiences from environment
 def test_add_any_experiences_to_memory():
-    action_dim = 2
     memory_size = 100
     field_names = ["state", "action", "reward", "next_state", "done"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     states = np.array([[1, 2], [3, 4]])
     actions = np.array([[0], [1]])
@@ -196,7 +188,7 @@ def test_sample_experiences_from_memory():
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
     buffer.save2memorySingleEnv(np.array([1, 1]), 2, 3)
@@ -225,7 +217,7 @@ def test_sample_experiences_from_memory_images():
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
     buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 2, 3)
@@ -253,7 +245,7 @@ def test_sample_experiences_from_memory_return_idx():
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
     buffer.save2memorySingleEnv(np.array([1, 1]), 2, 3)
@@ -286,7 +278,7 @@ def test_process_transition_from_experiences():
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Create experiences
     experience1 = buffer.experience(1, 2, 3)
@@ -311,7 +303,7 @@ def test_process_single_transition_from_experiences():
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Create experiences
     experience1 = buffer.experience(np.array([1, 1]), 2, 3)
@@ -335,7 +327,7 @@ def test_process_transition_from_experiences_images():
     field_names = ["state", "action", "reward"]
     device = "cpu"
 
-    buffer = ReplayBuffer(action_dim, memory_size, field_names, device)
+    buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Create experiences
     experience1 = buffer.experience(np.random.rand(3, 128, 128), 2, 3)
@@ -356,7 +348,6 @@ def test_process_transition_from_experiences_images():
 ##### MultiStepReplayBuffer class tests #####
 # Initializes the MultiStepReplayBuffer class with the given parameters.
 def test_initializes_nstep_replay_buffer_with_given_parameters():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 2
@@ -365,10 +356,9 @@ def test_initializes_nstep_replay_buffer_with_given_parameters():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     replay_buffer = MultiStepReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, n_step, gamma, device
+        memory_size, field_names, num_envs, n_step, gamma, device
     )
 
-    assert replay_buffer.action_dim == action_dim
     assert replay_buffer.memory_size == memory_size
     assert replay_buffer.field_names == field_names
     assert replay_buffer.num_envs == num_envs
@@ -379,7 +369,6 @@ def test_initializes_nstep_replay_buffer_with_given_parameters():
 
 # Can save a single environment transition to memory
 def test_save_single_env_transition():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -387,7 +376,7 @@ def test_save_single_env_transition():
     gamma = 0.99
 
     replay_buffer = MultiStepReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, n_step, gamma
+        memory_size, field_names, num_envs, n_step, gamma
     )
 
     state = np.array([1, 2, 3, 4])
@@ -414,7 +403,6 @@ def test_save_single_env_transition():
 
 # Can save vectorized environment transitions to memory
 def test_save_multiple_env_transitions():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 2
@@ -422,7 +410,7 @@ def test_save_multiple_env_transitions():
     gamma = 0.99
 
     replay_buffer = MultiStepReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, n_step, gamma
+        memory_size, field_names, num_envs, n_step, gamma
     )
 
     state = np.array([[1, 2, 3, 4], [9, 10, 11, 12]])
@@ -456,7 +444,6 @@ def test_save_multiple_env_transitions():
 
 # Can save vectorized environment transitions to memory
 def test_save_multiple_env_image_transitions():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 2
@@ -464,7 +451,7 @@ def test_save_multiple_env_image_transitions():
     gamma = 0.99
 
     replay_buffer = MultiStepReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, n_step, gamma
+        memory_size, field_names, num_envs, n_step, gamma
     )
 
     state = np.random.rand(num_envs, 3, 128, 128)
@@ -498,7 +485,6 @@ def test_save_multiple_env_image_transitions():
 
 # Can sample experiences from memory
 def test_sample_nstep_experiences_from_memory():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -506,7 +492,7 @@ def test_sample_nstep_experiences_from_memory():
     gamma = 0.99
 
     replay_buffer = MultiStepReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, n_step, gamma
+        memory_size, field_names, num_envs, n_step, gamma
     )
 
     state = np.array([1, 2, 3, 4])
@@ -534,7 +520,6 @@ def test_sample_nstep_experiences_from_memory():
 
 # Can sample experiences from memory using provided indices
 def test_sample_experiences_from_memory_with_indices():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -542,7 +527,7 @@ def test_sample_experiences_from_memory_with_indices():
     gamma = 0.99
 
     replay_buffer = MultiStepReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, n_step, gamma
+        memory_size, field_names, num_envs, n_step, gamma
     )
 
     state = np.array([1, 2, 3, 4])
@@ -584,7 +569,7 @@ def test_returns_tuple_of_n_step_reward_next_state_and_done():
 
     # Create an instance of the MultiStepReplayBuffer class
     replay_buffer = MultiStepReplayBuffer(
-        action_dim=1, memory_size=100, field_names=field_names, num_envs=1
+        memory_size=100, field_names=field_names, num_envs=1
     )
 
     # Invoke the _get_n_step_info method
@@ -612,7 +597,7 @@ def test_calculates_n_step_reward():
 
     # Create an instance of the MultiStepReplayBuffer class
     replay_buffer = MultiStepReplayBuffer(
-        action_dim=3, memory_size=100, field_names=field_names, num_envs=1
+        memory_size=100, field_names=field_names, num_envs=1
     )
 
     # Invoke the _get_n_step_info method
@@ -627,7 +612,6 @@ def test_calculates_n_step_reward():
 ##### PrioritizedReplayBuffer class tests #####
 # Can initialize object with given parameters
 def test_initializes_pe_replay_buffer_with_given_parameters():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -637,10 +621,9 @@ def test_initializes_pe_replay_buffer_with_given_parameters():
     device = "cpu"
 
     replay_buffer = PrioritizedReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+        memory_size, field_names, num_envs, alpha, n_step, gamma, device
     )
 
-    assert replay_buffer.action_dim == action_dim
     assert replay_buffer.memory_size == memory_size
     assert replay_buffer.field_names == field_names
     assert replay_buffer.num_envs == num_envs
@@ -652,7 +635,6 @@ def test_initializes_pe_replay_buffer_with_given_parameters():
 
 # Can add experience to replay buffer
 def test_add_experience_to_per_memory():
-    action_dim = 4
     memory_size = 1000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -662,7 +644,7 @@ def test_add_experience_to_per_memory():
     device = "cpu"
 
     buffer = PrioritizedReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+        memory_size, field_names, num_envs, alpha, n_step, gamma, device
     )
     buffer._add(1, 2, 3, 4, 5)
 
@@ -672,7 +654,6 @@ def test_add_experience_to_per_memory():
 
 # Save experience to memory and retrieve it
 def test_save_and_sample_experience():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -682,11 +663,11 @@ def test_save_and_sample_experience():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     replay_buffer = PrioritizedReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+        memory_size, field_names, num_envs, alpha, n_step, gamma, device
     )
 
     state = np.random.rand(4)
-    action = np.random.randint(0, action_dim)
+    action = np.random.randint(0, 2)
     reward = np.random.rand()
     next_state = np.random.rand(4)
     done = False
@@ -709,7 +690,6 @@ def test_save_and_sample_experience():
 
 # Update priorities of sampled transitions
 def test_update_priorities():
-    action_dim = 4
     memory_size = 10000
     field_names = ["state", "action", "reward", "next_state", "done"]
     num_envs = 1
@@ -719,7 +699,7 @@ def test_update_priorities():
     device = "cpu"
 
     replay_buffer = PrioritizedReplayBuffer(
-        action_dim, memory_size, field_names, num_envs, alpha, n_step, gamma, device
+        memory_size, field_names, num_envs, alpha, n_step, gamma, device
     )
 
     state = np.array([1, 2, 3, 4])
@@ -755,7 +735,6 @@ def test_update_priorities():
 # Proportions are calculated based on sum_tree
 def test_proportions_calculated_based_on_sum_tree():
     buffer = PrioritizedReplayBuffer(
-        action_dim=4,
         memory_size=1000,
         field_names=["state", "action", "reward", "next_state", "done"],
         num_envs=1,
@@ -774,7 +753,6 @@ def test_proportions_calculated_based_on_sum_tree():
 # Calculates the weight of the experience at idx
 def test_calculate_weight_normal_case():
     buffer = PrioritizedReplayBuffer(
-        action_dim=4,
         memory_size=1000,
         field_names=["state", "action", "reward", "next_state", "done"],
         num_envs=1,
@@ -801,7 +779,6 @@ def test_calculate_weight_normal_case():
 # Calculates weight from pre-set values
 def test_calculate_weight_parameterized():
     buffer = PrioritizedReplayBuffer(
-        action_dim=4,
         memory_size=1000,
         field_names=["state", "action", "reward", "next_state", "done"],
         num_envs=1,

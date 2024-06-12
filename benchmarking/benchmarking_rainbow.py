@@ -46,7 +46,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     n_step = True if INIT_HP["N_STEP"] > 1 else False
     if per:
         memory = PrioritizedReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             num_envs=INIT_HP["NUM_ENVS"],
@@ -56,7 +55,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         )
         if n_step:
             n_step_memory = MultiStepReplayBuffer(
-                action_dim,
                 memory_size=INIT_HP["MEMORY_SIZE"],
                 field_names=field_names,
                 num_envs=INIT_HP["NUM_ENVS"],
@@ -66,13 +64,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             )
     elif n_step:
         memory = ReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             device=device,
         )
         n_step_memory = MultiStepReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             num_envs=INIT_HP["NUM_ENVS"],
@@ -82,7 +78,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         )
     else:
         memory = ReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             device=device,

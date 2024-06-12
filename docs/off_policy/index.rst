@@ -103,8 +103,7 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
     import torch
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
-                          memory_size=10000,        # Max replay buffer size
+    memory = ReplayBuffer(memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
 
@@ -252,8 +251,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                             device=torch.device("cuda"))
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
-                          memory_size=10000,        # Max replay buffer size
+    memory = ReplayBuffer(memory_size=10000,        # Max replay buffer size
                           field_names=field_names,  # Field names to store in memory
                           device=torch.device("cuda"))
 

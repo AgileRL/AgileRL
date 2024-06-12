@@ -174,7 +174,6 @@ you would define your memory and n_step_memory.
 
     field_names = ["state", "action", "reward", "next_state", "termination"]
     memory = PrioritizedReplayBuffer(
-        action_dim,
         memory_size=INIT_HP["MEMORY_SIZE"],
         field_names=field_names,
         num_envs=16,
@@ -183,7 +182,6 @@ you would define your memory and n_step_memory.
         device=device,
     )
     n_step_memory = MultiStepReplayBuffer(
-        action_dim,
         memory_size=INIT_HP["MEMORY_SIZE"],
         field_names=field_names,
         num_envs=16,

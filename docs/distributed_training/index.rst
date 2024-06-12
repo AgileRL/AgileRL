@@ -82,9 +82,8 @@ Example distributed training loop:
                                 accelerator=accelerator)    # Accelerator
 
         field_names = ["state", "action", "reward", "next_state", "done"]
-        memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
-                            memory_size=10000,        # Max replay buffer size
-                            field_names=field_names)  # Field names to store in memory
+        memory = ReplayBuffer(memory_size=10000,        # Max replay buffer size
+                              field_names=field_names)  # Field names to store in memory
         replay_dataset = ReplayDataset(memory, INIT_HP['BATCH_SIZE'])
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)

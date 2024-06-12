@@ -102,7 +102,6 @@ During training it can be added to using the ``ReplayBuffer.save2memory()`` meth
 
     field_names = ["context", "reward"]
     memory = ReplayBuffer(
-        action_dim=action_dim,  # Number of agent actions
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -255,7 +254,6 @@ Alternatively, use a custom bandit training loop:
 
         field_names = ["context", "reward"]
         memory = ReplayBuffer(
-            action_dim=action_dim,  # Number of agent actions
             memory_size=10000,  # Max replay buffer size
             field_names=field_names,  # Field names to store in memory
             device=device,

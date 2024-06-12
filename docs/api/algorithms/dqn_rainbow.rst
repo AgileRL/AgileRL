@@ -62,7 +62,7 @@ Example
       state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
   field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(memory_size=10000, field_names=field_names)
 
   agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create agent
 

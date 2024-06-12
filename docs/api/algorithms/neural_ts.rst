@@ -31,7 +31,7 @@ Example
     action_dim = env.arms
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+    memory = ReplayBuffer(memory_size=10000, field_names=field_names)
 
     bandit = NeuralTS(state_dim=context_dim, action_dim=action_dim)
 

@@ -67,7 +67,6 @@ if __name__ == "__main__":
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        action_dim=action_dim,  # Number of agent actions
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=device,

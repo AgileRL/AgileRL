@@ -11,8 +11,6 @@ class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param action_dim: Action dimension
-    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -21,12 +19,10 @@ class ReplayBuffer:
     :type device: str, optional
     """
 
-    def __init__(self, action_dim, memory_size, field_names, device=None):
-        assert action_dim > 0, "Action dimension must be greater than zero."
+    def __init__(self, memory_size, field_names, device=None):
         assert memory_size > 0, "Mmeory size must be greater than zero."
         assert len(field_names) > 0, "Field names must contain at least one field name."
 
-        self.action_dim = action_dim
         self.memory_size = memory_size
         self.memory = deque(maxlen=memory_size)
         self.field_names = field_names
@@ -131,8 +127,6 @@ class MultiStepReplayBuffer(ReplayBuffer):
     """The Multi-step Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param action_dim: Action dimension
-    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -149,7 +143,6 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
     def __init__(
         self,
-        action_dim,
         memory_size,
         field_names,
         num_envs,
@@ -157,7 +150,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
         gamma=0.99,
         device=None,
     ):
-        super().__init__(action_dim, memory_size, field_names, device)
+        super().__init__(memory_size, field_names, device)
         assert (
             "reward" in field_names
         ), "Reward must be saved in replay buffer under the field name 'reward'."
@@ -278,8 +271,6 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
     """The Prioritized Experience Replay Buffer class. Used to store experiences and allow
     off-policy learning.
 
-    :param action_dim: Action dimension
-    :type action_dim: int
     :param memory_size: Maximum length of replay buffer
     :type memory_size: int
     :param field_names: Field names for experience named tuple, e.g. ['state', 'action', 'reward']
@@ -298,7 +289,6 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
 
     def __init__(
         self,
-        action_dim,
         memory_size,
         field_names,
         num_envs,
@@ -307,9 +297,7 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         gamma=0.99,
         device=None,
     ):
-        super().__init__(
-            action_dim, memory_size, field_names, num_envs, n_step, gamma, device
-        )
+        super().__init__(memory_size, field_names, num_envs, n_step, gamma, device)
         self.max_priority, self.tree_ptr = 1.0, 0
         self.alpha = alpha
 
