@@ -28,7 +28,7 @@ def train_off_policy(
     eps_start=1.0,
     eps_end=0.1,
     eps_decay=0.995,
-    target=200.0,
+    target=None,
     n_step=False,
     per=False,
     noisy=False,
@@ -78,7 +78,7 @@ def train_off_policy(
     :type eps_end: float, optional
     :param eps_decay: Epsilon decay per episode, defaults to 0.995
     :type eps_decay: float, optional
-    :param target: Target score for early stopping, defaults to 200.
+    :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param n_step: Use multi-step experience replay buffer, defaults to False
     :type n_step: bool, optional
@@ -456,15 +456,18 @@ def train_off_policy(
                 agent.steps.append(agent.steps[-1])
 
             # Early stop if consistently reaches target
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-100:]) for agent in pop], target)
-                )
-                and idx_epi >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+            if target is not None:
+                if (
+                    np.all(
+                        np.greater(
+                            [np.mean(agent.fitness[-100:]) for agent in pop], target
+                        )
+                    )
+                    and idx_epi >= 100
+                ):
+                    if wb:
+                        wandb.finish()
+                    return pop, pop_fitnesses
 
             # Tournament selection and population mutation
             if tournament and mutation is not None:

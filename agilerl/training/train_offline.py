@@ -26,7 +26,7 @@ def train_offline(
     evo_steps=10000,
     eval_steps=None,
     eval_loop=1,
-    target=200.0,
+    target=None,
     tournament=None,
     mutation=None,
     checkpoint=None,
@@ -70,7 +70,7 @@ def train_offline(
     :type eval_steps: int, optional
     :param eval_loop: Number of evaluation episodes, defaults to 1
     :type eval_loop: int, optional
-    :param target: Target score for early stopping, defaults to 200.
+    :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
@@ -312,13 +312,16 @@ def train_offline(
             agent.steps.append(agent.steps[-1])
 
         # Early stop if consistently reaches target
-        if (
-            np.all(np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target))
-            and len(pop[0].steps) >= 100
-        ):
-            if wb:
-                wandb.finish()
-            return pop, pop_fitnesses
+        if target is not None:
+            if (
+                np.all(
+                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
+                )
+                and len(pop[0].steps) >= 100
+            ):
+                if wb:
+                    wandb.finish()
+                return pop, pop_fitnesses
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:

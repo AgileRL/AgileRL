@@ -23,7 +23,7 @@ def train_on_policy(
     max_steps=500,
     evo_epochs=5,
     evo_loop=1,
-    target=200.0,
+    target=None,
     tournament=None,
     mutation=None,
     checkpoint=None,
@@ -62,7 +62,7 @@ def train_on_policy(
     :type evo_epochs: int, optional
     :param evo_loop: Number of evaluation episodes, defaults to 1
     :type evo_loop: int, optional
-    :param target: Target score for early stopping, defaults to 200.
+    :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
     :type tournament: object, optional
@@ -314,15 +314,18 @@ def train_on_policy(
                 agent.steps.append(agent.steps[-1])
 
             # Early stop if consistently reaches target
-            if (
-                np.all(
-                    np.greater([np.mean(agent.fitness[-100:]) for agent in pop], target)
-                )
-                and idx_epi >= 100
-            ):
-                if wb:
-                    wandb.finish()
-                return pop, pop_fitnesses
+            if target is not None:
+                if (
+                    np.all(
+                        np.greater(
+                            [np.mean(agent.fitness[-100:]) for agent in pop], target
+                        )
+                    )
+                    and idx_epi >= 100
+                ):
+                    if wb:
+                        wandb.finish()
+                    return pop, pop_fitnesses
 
             # Tournament selection and population mutation
             if tournament and mutation is not None:
