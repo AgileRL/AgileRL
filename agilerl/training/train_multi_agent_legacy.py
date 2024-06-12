@@ -145,6 +145,8 @@ def train_multi_agent(
             config_dict.update(INIT_HP)
         if MUT_P is not None:
             config_dict.update(MUT_P)
+        if net_config is not None:
+            config_dict.update(net_config)
 
         if accelerator is not None:
             accelerator.wait_for_everyone()
