@@ -326,6 +326,7 @@ def train_multi_agent(
 
                 state = next_state
 
+                reset_noise_indices = []
                 for idx, (d, t) in enumerate(
                     zip(
                         np.array(list(done.values())).transpose(),
@@ -336,9 +337,11 @@ def train_multi_agent(
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
                         scores[idx] = 0
+                        reset_noise_indices.append(idx)
 
                         if not is_vectorised:
                             state, info = env.reset()
+                agent.reset_action_noise(reset_noise_indices)
 
             pbar.update(evo_steps // len(pop))
 
