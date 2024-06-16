@@ -325,14 +325,14 @@ class RainbowDQN:
         # Calculate delta z - i.e. the distance between each atom
         delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
 
-        # self.actor.eval()
-        # self.actor_target.eval()
         with torch.no_grad():
 
             # Predict next actions from next_states
+            self.actor.reset_noise()
             next_actions = self.actor(next_states).argmax(1)
 
             # Predict the next distribution for the same next states
+            self.actor_target.reset_noise()
             next_dist = self.actor_target(next_states, q=False)
             torch.set_printoptions(linewidth=200)
 
@@ -342,6 +342,7 @@ class RainbowDQN:
             # Determine the target z values
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
+
             # Finds closest support element index value 
             b = (t_z - self.v_min) / delta_z 
 
@@ -438,16 +439,15 @@ class RainbowDQN:
                     next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
-            # elementwise_loss = self._dqn_loss(
-            #     states, actions, rewards, next_states, dones, self.gamma
-            # )
-            # if n_step:
-            n_gamma = self.gamma**self.n_step
-            # print(n_gamma)
+            elementwise_loss = self._dqn_loss(
+                states, actions, rewards, next_states, dones, self.gamma
+            )
+            if n_step:
+                n_gamma = self.gamma**self.n_step
             elementwise_loss = self._dqn_loss(
                 n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
             )
-            #elementwise_loss += n_step_elementwise_loss
+            elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss * weights)
 
         else:
@@ -500,7 +500,7 @@ class RainbowDQN:
                 n_step_elementwise_loss = self._dqn_loss(
                     n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
                 )
-                elementwise_loss += n_step_elementwise_loss
+            elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
@@ -513,9 +513,6 @@ class RainbowDQN:
 
         # soft update target network
         self.softUpdate()
-
-        self.actor.reset_noise()
-        # self.actor_target.reset_noise()
 
         if per:
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
