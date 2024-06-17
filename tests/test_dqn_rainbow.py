@@ -355,6 +355,7 @@ def test_returns_expected_action_one_hot(accelerator):
 )
 # learns from experiences and updates network parameters
 def test_learns_from_experiences(accelerator):
+    torch.autograd.set_detect_anomaly(True)
     state_dim = [4]
     action_dim = 2
     one_hot = False

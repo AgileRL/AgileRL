@@ -13,9 +13,8 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
 ### delete
-import random
+
 
 class RainbowDQN:
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -328,11 +327,9 @@ class RainbowDQN:
         with torch.no_grad():
 
             # Predict next actions from next_states
-            self.actor.reset_noise()
             next_actions = self.actor(next_states).argmax(1)
 
             # Predict the next distribution for the same next states
-            self.actor_target.reset_noise()
             next_dist = self.actor_target(next_states, q=False)
             torch.set_printoptions(linewidth=200)
 
@@ -343,10 +340,10 @@ class RainbowDQN:
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
 
-            # Finds closest support element index value 
-            b = (t_z - self.v_min) / delta_z 
+            # Finds closest support element index value
+            b = (t_z - self.v_min) / delta_z
 
-            # Find the neighbouring indices of b 
+            # Find the neighbouring indices of b
             L = b.floor().long()
             u = b.ceil().long()
 
@@ -381,7 +378,6 @@ class RainbowDQN:
         # loss
         elementwise_loss = -(proj_dist * log_p).sum(1)
         return elementwise_loss
-    
 
     def learn(self, experiences, n_step=False, per=False):
         """Updates agent network parameters to learn from experiences.
@@ -393,6 +389,9 @@ class RainbowDQN:
         :param per: Use prioritized experience replay buffer, defaults to True
         :type per: bool, optional
         """
+        # Reset the noise
+        self.actor.reset_noise()
+        self.actor_target.reset_noise()
         if per:
             if n_step:
                 (
@@ -408,7 +407,6 @@ class RainbowDQN:
                     n_rewards,
                     n_next_states,
                     n_dones,
-                    n_steps
                 ) = experiences
                 if self.accelerator is not None:
                     states = states.to(self.accelerator.device)
@@ -444,10 +442,10 @@ class RainbowDQN:
             )
             if n_step:
                 n_gamma = self.gamma**self.n_step
-            elementwise_loss = self._dqn_loss(
-                n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
-            )
-            elementwise_loss += n_step_elementwise_loss
+                n_step_elementwise_loss = self._dqn_loss(
+                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                )
+                elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss * weights)
 
         else:
@@ -500,7 +498,7 @@ class RainbowDQN:
                 n_step_elementwise_loss = self._dqn_loss(
                     n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
                 )
-            elementwise_loss += n_step_elementwise_loss
+                elementwise_loss += n_step_elementwise_loss
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
