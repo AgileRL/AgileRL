@@ -10,10 +10,10 @@ import torch
 from accelerate import Accelerator
 
 import agilerl.training.train_bandits
-import agilerl.training.train_multi_agent
-import agilerl.training.train_off_policy
-import agilerl.training.train_offline
-import agilerl.training.train_on_policy
+import agilerl.training.train_multi_agent_legacy
+import agilerl.training.train_off_policy_legacy
+import agilerl.training.train_offline_legacy
+import agilerl.training.train_on_policy_legacy
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -25,10 +25,10 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.training.train_bandits import train_bandits
-from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.training.train_off_policy import train_off_policy
-from agilerl.training.train_offline import train_offline
-from agilerl.training.train_on_policy import train_on_policy
+from agilerl.training.train_multi_agent_legacy import train_multi_agent
+from agilerl.training.train_off_policy_legacy import train_off_policy
+from agilerl.training.train_offline_legacy import train_offline
+from agilerl.training.train_on_policy_legacy import train_on_policy
 from agilerl.utils.utils import makeMultiAgentVectEnvs
 
 
@@ -75,8 +75,7 @@ class DummyBanditEnv:
 
 
 class DummyAgentOffPolicy:
-    def __init__(self, batch_size, env, beta=None, algo="DQN"):
-        self.algo = algo
+    def __init__(self, batch_size, env, beta=None):
         self.state_size = env.state_size
         self.action_size = env.action_size
         self.action_dim = env.action_size
@@ -119,14 +118,10 @@ class DummyAgentOffPolicy:
     def unwrap_models(self, *args):
         return
 
-    def reset_action_noise(self, *args, **kwargs):
-        return
-
 
 class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def __init__(self, batch_size, env):
         super().__init__(batch_size, env)
-        self.learn_step = 128
 
     def learn(self, *args, **kwargs):
         return random.random()
@@ -228,7 +223,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr_critic = 0.01
         self.discrete_actions = False
 
-    def getAction(self, *args, **kwargs):
+    def getAction(self, *args):
         return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
 
     def learn(self, experiences):
@@ -250,9 +245,6 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         return
 
     def unwrap_models(self, *args):
-        return
-
-    def reset_action_noise(self, *args, **kwargs):
         return
 
 
@@ -546,14 +538,6 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    if algo in [DDPG, TD3]:
-        mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = {
-        DQN: "DQN",
-        RainbowDQN: "Rainbow DQN",
-        DDPG: "DDPG",
-        TD3: "TD3",
-    }[algo]
 
     return mock_agent
 
@@ -580,7 +564,6 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = "PPO"
 
     return mock_agent
 
@@ -645,11 +628,6 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = {
-        MADDPG: "MADDPG",
-        MATD3: "MATD3",
-    }[algo]
 
     return mock_agent
 
@@ -1069,11 +1047,13 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1123,11 +1103,13 @@ def test_train_off_policy_agent_calls_made(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             n_step=n_step,
             per=per,
+            noisy=True,
             n_step_memory=n_step_memory,
             tournament=tournament,
             mutation=mutations,
@@ -1160,11 +1142,13 @@ def test_train_off_policy_save_elite_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1190,11 +1174,13 @@ def test_train_off_policy_checkpoint_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1215,11 +1201,13 @@ def test_actions_histogram(env, population_off_policy, tournament, mutations, me
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1242,11 +1230,13 @@ def test_train_off_policy_replay_buffer_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1278,11 +1268,13 @@ def test_train_off_policy_alternate_buffer_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=True,
         per=per,
+        noisy=False,
         n_step_memory=mocked_n_step_memory,
         tournament=tournament,
         mutation=mutations,
@@ -1315,11 +1307,13 @@ def test_train_off_policy_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1347,11 +1341,13 @@ def test_train_off_policy_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
@@ -1374,11 +1370,13 @@ def test_train_off_policy_rgb_input(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=False,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1404,11 +1402,13 @@ def test_train_off_policy_using_alternate_buffers(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=True,
         per=per,
+        noisy=False,
         n_step_memory=n_step_memory,
         tournament=tournament,
         mutation=mutations,
@@ -1431,11 +1431,13 @@ def test_train_off_policy_using_alternate_buffers_rgb(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=True,
         per=True,
+        noisy=False,
         n_step_memory=n_step_memory,
         tournament=tournament,
         mutation=mutations,
@@ -1461,11 +1463,13 @@ def test_train_off_policy_distributed(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1495,15 +1499,15 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
+    with patch("agilerl.training.train_off_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_off_policy.wandb.log"
+        "agilerl.training.train_off_policy_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
+        "agilerl.training.train_off_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_off_policy.train_off_policy(
+        agilerl.training.train_off_policy_legacy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1512,11 +1516,13 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1574,15 +1580,15 @@ def test_wandb_init_log_distributed(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
+    with patch("agilerl.training.train_off_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_off_policy.wandb.log"
+        "agilerl.training.train_off_policy_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
+        "agilerl.training.train_off_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_off_policy.train_off_policy(
+        agilerl.training.train_off_policy_legacy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1591,11 +1597,13 @@ def test_wandb_init_log_distributed(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1642,13 +1650,13 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_off_policy.wandb.log") as _, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
+    with patch("agilerl.training.train_off_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.init"
+    ) as _, patch("agilerl.training.train_off_policy_legacy.wandb.log") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_off_policy.train_off_policy(
+        agilerl.training.train_off_policy_legacy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1658,11 +1666,13 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
             MUT_P=MUT_P,
             target=-10000,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1687,11 +1697,13 @@ def test_train_off_policy_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1724,11 +1736,13 @@ def test_train_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1738,8 +1752,8 @@ def test_train_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size, vect, algo", [((6,), 2, True, PPO)])
@@ -1760,9 +1774,10 @@ def test_train_on_policy_agent_calls_made(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1795,9 +1810,10 @@ def test_train_on_policy_save_elite_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1824,9 +1840,10 @@ def test_train_on_policy_checkpoint_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1852,9 +1869,10 @@ def test_train_on_policy_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1880,9 +1898,10 @@ def test_train_on_policy_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
         wb=False,
@@ -1903,9 +1922,10 @@ def test_train_on_policy(env, population_on_policy, tournament, mutations):
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1924,9 +1944,10 @@ def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutati
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1948,9 +1969,10 @@ def test_train_on_policy_distributed(env, population_on_policy, tournament, muta
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1987,15 +2009,15 @@ def test_wandb_init_log_on_policy(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_on_policy.wandb.init"
+    with patch("agilerl.training.train_on_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_on_policy_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_on_policy.wandb.log"
+        "agilerl.training.train_on_policy_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_on_policy.wandb.finish"
+        "agilerl.training.train_on_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_on_policy.train_on_policy(
+        agilerl.training.train_on_policy_legacy.train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2003,9 +2025,10 @@ def test_wandb_init_log_on_policy(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2044,13 +2067,13 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_on_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_on_policy.wandb.log") as _, patch(
-        "agilerl.training.train_on_policy.wandb.finish"
+    with patch("agilerl.training.train_on_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_on_policy_legacy.wandb.init"
+    ) as _, patch("agilerl.training.train_on_policy_legacy.wandb.log") as _, patch(
+        "agilerl.training.train_on_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_on_policy.train_on_policy(
+        agilerl.training.train_on_policy_legacy.train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2059,9 +2082,10 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
             MUT_P=MUT_P,
             target=-10000,
             swap_channels=False,
-            max_steps=500,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2091,9 +2115,10 @@ def test_train_on_policy_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2125,9 +2150,10 @@ def test_train_on_policy_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=500,
-        evo_steps=500,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2136,8 +2162,8 @@ def test_train_on_policy_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{512}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{512}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
@@ -2154,9 +2180,10 @@ def test_train_multi_agent(
         MUT_P=None,
         net_config=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
@@ -2179,9 +2206,10 @@ def test_train_multi_agent_distributed(
         MUT_P=None,
         net_config=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         accelerator=accelerator,
@@ -2208,9 +2236,10 @@ def test_train_multi_agent_rgb(
         MUT_P=None,
         net_config=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
@@ -2234,9 +2263,10 @@ def test_train_multi_agent_rgb_vectorized(
         MUT_P=None,
         net_config=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
@@ -2261,9 +2291,10 @@ def test_train_multi_save_elite_warning(
             MUT_P=None,
             net_config=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             save_elite=False,
@@ -2288,9 +2319,10 @@ def test_train_multi_checkpoint_warning(
             MUT_P=None,
             net_config=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             checkpoint=None,
@@ -2327,19 +2359,19 @@ def test_train_multi_wandb_init_log(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.init"
+    with patch("agilerl.training.train_multi_agent_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_multi_agent_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_multi_agent.wandb.log"
+        "agilerl.training.train_multi_agent_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_multi_agent.wandb.finish"
+        "agilerl.training.train_multi_agent_legacy.wandb.finish"
     ) as mock_wandb_finish:
         if accelerator_flag:
             accelerator = Accelerator()
         else:
             accelerator = None
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent.train_multi_agent(
+        agilerl.training.train_multi_agent_legacy.train_multi_agent(
             multi_env,
             "env_name",
             "algo",
@@ -2349,9 +2381,10 @@ def test_train_multi_wandb_init_log(
             MUT_P=MUT_P,
             net_config=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2398,13 +2431,13 @@ def test_multi_agent_early_stop(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.init"
-    ) as _, patch("agilerl.training.train_multi_agent.wandb.log") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.finish"
+    with patch("agilerl.training.train_multi_agent_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_multi_agent_legacy.wandb.init"
+    ) as _, patch("agilerl.training.train_multi_agent_legacy.wandb.log") as _, patch(
+        "agilerl.training.train_multi_agent_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent.train_multi_agent(
+        agilerl.training.train_multi_agent_legacy.train_multi_agent(
             multi_env,
             "env_name",
             "algo",
@@ -2415,9 +2448,10 @@ def test_multi_agent_early_stop(
             net_config=None,
             swap_channels=False,
             target=-10000,
-            max_steps=500,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2455,9 +2489,10 @@ def test_train_multi_agent_calls(
             MUT_P=None,
             net_config=None,
             swap_channels=False,
+            n_episodes=10,
             max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2491,9 +2526,10 @@ def test_train_multi_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2520,9 +2556,10 @@ def test_train_multi_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
         wb=False,
@@ -2549,9 +2586,10 @@ def test_train_multi_memory_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2585,9 +2623,10 @@ def test_train_multi_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2624,9 +2663,10 @@ def test_train_multi_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2635,8 +2675,8 @@ def test_train_multi_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 @pytest.mark.parametrize(
@@ -2672,9 +2712,10 @@ def test_train_offline(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=swap_channels,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2711,9 +2752,10 @@ def test_train_offline_save_elite_warning(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2749,9 +2791,10 @@ def test_train_offline_save_checkpoint_warning(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2787,15 +2830,15 @@ def test_train_offline_wandb_calls(
             "ACT_MUT": 0.2,
             "RL_HP_MUT": 0.2,
         }
-        with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-            "agilerl.training.train_offline.wandb.init"
+        with patch("agilerl.training.train_offline_legacy.wandb.login") as _, patch(
+            "agilerl.training.train_offline_legacy.wandb.init"
         ) as mock_wandb_init, patch(
-            "agilerl.training.train_offline.wandb.log"
+            "agilerl.training.train_offline_legacy.wandb.log"
         ) as mock_wandb_log, patch(
-            "agilerl.training.train_offline.wandb.finish"
+            "agilerl.training.train_offline_legacy.wandb.finish"
         ) as mock_wandb_finish:
             # Call the function that should trigger wandb.init
-            agilerl.training.train_offline.train_offline(
+            agilerl.training.train_offline_legacy.train_offline(
                 env,
                 "env_name",
                 dummy_h5py_data,
@@ -2805,9 +2848,10 @@ def test_train_offline_wandb_calls(
                 INIT_HP=offline_init_hp,
                 MUT_P=MUT_P,
                 swap_channels=False,
-                max_steps=50,
-                evo_steps=10,
-                eval_loop=1,
+                n_episodes=10,
+                max_steps=5,
+                evo_epochs=1,
+                evo_loop=1,
                 tournament=tournament,
                 mutation=mutations,
                 wb=True,
@@ -2854,13 +2898,13 @@ def test_train_offline_early_stop(
             "ACT_MUT": 0.2,
             "RL_HP_MUT": 0.2,
         }
-        with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-            "agilerl.training.train_offline.wandb.init"
-        ) as _, patch("agilerl.training.train_offline.wandb.log") as _, patch(
-            "agilerl.training.train_offline.wandb.finish"
+        with patch("agilerl.training.train_offline_legacy.wandb.login") as _, patch(
+            "agilerl.training.train_offline_legacy.wandb.init"
+        ) as _, patch("agilerl.training.train_offline_legacy.wandb.log") as _, patch(
+            "agilerl.training.train_offline_legacy.wandb.finish"
         ) as mock_wandb_finish:
             # Call the function that should trigger wandb.init
-            agilerl.training.train_offline.train_offline(
+            agilerl.training.train_offline_legacy.train_offline(
                 env,
                 "env_name",
                 dummy_h5py_data,
@@ -2870,10 +2914,11 @@ def test_train_offline_early_stop(
                 INIT_HP=offline_init_hp,
                 MUT_P=MUT_P,
                 swap_channels=False,
+                n_episodes=110,
                 target=-10000,
-                max_steps=50,
-                evo_steps=10,
-                eval_loop=1,
+                max_steps=5,
+                evo_epochs=1,
+                evo_loop=1,
                 tournament=tournament,
                 mutation=mutations,
                 wb=True,
@@ -2917,9 +2962,10 @@ def test_offline_agent_calls(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2964,9 +3010,10 @@ def test_offline_memory_calls(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -3007,9 +3054,10 @@ def test_offline_mut_tourn_calls(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
@@ -3048,9 +3096,10 @@ def test_train_offline_save_elite(
         INIT_HP=offline_init_hp,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3091,9 +3140,10 @@ def test_train_offline_save_checkpoint(
         INIT_HP=offline_init_hp,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3102,18 +3152,16 @@ def test_train_offline_save_checkpoint(
         checkpoint_path=checkpoint_path,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
-pytest.mark.parametrize(
+@pytest.mark.parametrize(
     "state_size, action_size",
     [
         ((6,), 2),
     ],
 )
-
-
 def test_train_bandit(
     bandit_env, population_bandit, tournament, mutations, bandit_memory
 ):
