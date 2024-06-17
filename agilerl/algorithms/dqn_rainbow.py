@@ -13,6 +13,8 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+### delete
+
 
 class RainbowDQN:
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -256,6 +258,13 @@ class RainbowDQN:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
 
+        # Put the nets into training mode
+        self.actor.train()
+        self.actor_target.train()
+
+        # delete this
+        print(self.actor, self.actor_target)
+
     def getAction(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
 
@@ -295,6 +304,8 @@ class RainbowDQN:
             )
             action = np.argmax(masked_action_values, axis=-1)
 
+        self.actor.train()
+
         return action
 
     def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
@@ -309,21 +320,36 @@ class RainbowDQN:
                 .float()
                 .squeeze()
             )
+
+        # Calculate delta z - i.e. the distance between each atom
         delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
 
-        self.actor.eval()
-        self.actor_target.eval()
         with torch.no_grad():
+
+            # Predict next actions from next_states
             next_actions = self.actor(next_states).argmax(1)
+
+            # Predict the next distribution for the same next states
             next_dist = self.actor_target(next_states, q=False)
+            torch.set_printoptions(linewidth=200)
+
+            # Select the probabilities for the predicted next actions
             next_dist = next_dist[range(self.batch_size), next_actions]
 
+            # Determine the target z values
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
+
+            # Finds closest support element index value
             b = (t_z - self.v_min) / delta_z
+
+            # Find the neighbouring indices of b
             L = b.floor().long()
             u = b.ceil().long()
 
+            # Fix disappearing probability mass
+            L[(u > 0) * (L == u)] -= 1
+            u[(L < (self.num_atoms - 1)) * (L == u)] += 1
             offset = (
                 torch.linspace(
                     0, (self.batch_size - 1) * self.num_atoms, self.batch_size
@@ -332,16 +358,13 @@ class RainbowDQN:
                 .unsqueeze(1)
                 .expand(self.batch_size, self.num_atoms)
             )
-
             proj_dist = torch.zeros(next_dist.size())
-
             if self.accelerator is None:
                 offset = offset.to(self.device)
                 proj_dist = proj_dist.to(self.device)
             else:
                 offset = offset.to(self.accelerator.device)
                 proj_dist = proj_dist.to(self.accelerator.device)
-
             proj_dist.view(-1).index_add_(
                 0, (L + offset).view(-1), (next_dist * (u.float() - b)).view(-1)
             )
@@ -366,6 +389,9 @@ class RainbowDQN:
         :param per: Use prioritized experience replay buffer, defaults to True
         :type per: bool, optional
         """
+        # Reset the noise
+        self.actor.reset_noise()
+        self.actor_target.reset_noise()
         if per:
             if n_step:
                 (
@@ -485,9 +511,6 @@ class RainbowDQN:
 
         # soft update target network
         self.softUpdate()
-
-        self.actor.reset_noise()
-        self.actor_target.reset_noise()
 
         if per:
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
