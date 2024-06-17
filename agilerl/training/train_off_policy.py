@@ -24,7 +24,7 @@ def train_off_policy(
     evo_steps=10000,
     eval_steps=None,
     eval_loop=1,
-    learning_delay=10000,
+    learning_delay=0,
     eps_start=1.0,
     eps_end=0.1,
     eps_decay=0.995,
@@ -72,7 +72,7 @@ def train_off_policy(
     :type eval_steps: int, optional
     :param eval_loop: Number of evaluation episodes, defaults to 1
     :type eval_loop: int, optional
-    :param learning_delay: Steps in environment before starting learning, defaults to 10000
+    :param learning_delay: Steps in environment before starting learning, defaults to 0
     :type learning_delay: int, optional
     :param eps_start: Maximum exploration - initial epsilon value, defaults to 1.0
     :type eps_start: float, optional
@@ -389,15 +389,16 @@ def train_off_policy(
 
             pop_episode_scores.append(completed_episode_scores)
 
-            if isinstance(losses[-1], tuple):
-                actor_losses, critic_losses = list(zip(*losses))
-                mean_loss = np.mean(
-                    [loss for loss in actor_losses if loss is not None]
-                ), np.mean(critic_losses)
-            else:
-                mean_loss = np.mean(losses)
-            pop_loss[agent_idx].append(mean_loss)
-            agent.steps[-1] += (idx_step + 1) * num_envs
+            if len(losses) > 0:
+                if isinstance(losses[-1], tuple):
+                    actor_losses, critic_losses = list(zip(*losses))
+                    mean_loss = np.mean(
+                        [loss for loss in actor_losses if loss is not None]
+                    ), np.mean(critic_losses)
+                else:
+                    mean_loss = np.mean(losses)
+                pop_loss[agent_idx].append(mean_loss)
+                agent.steps[-1] += (idx_step + 1) * num_envs
 
         if algo in ["DQN"]:
             # Reset epsilon start to final epsilon value of this epoch
@@ -411,7 +412,11 @@ def train_off_policy(
             for agent in pop
         ]
         pop_fitnesses.append(fitnesses)
-        mean_scores = np.mean([episode_scores for episode_scores in pop_episode_scores])
+        mean_scores = [
+            np.mean(episode_scores)
+            for episode_scores in pop_episode_scores
+            if len(episode_scores) > 0
+        ]
 
         wandb_dict = {
             "global_step": (
@@ -419,7 +424,9 @@ def train_off_policy(
                 if accelerator is not None and accelerator.is_main_process
                 else total_steps
             ),
-            "train/mean_score": np.mean(mean_scores),
+            "train/mean_score": np.mean(
+                [mean_score for mean_score in mean_scores if mean_score is not np.nan]
+            ),
             "eval/mean_fitness": np.mean(fitnesses),
             "eval/best_fitness": np.max(fitnesses),
         }

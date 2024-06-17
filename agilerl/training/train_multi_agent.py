@@ -26,7 +26,7 @@ def train_multi_agent(
     evo_steps=25,
     eval_steps=None,
     eval_loop=1,
-    learning_delay=1000,
+    learning_delay=0,
     target=None,
     tournament=None,
     mutation=None,
@@ -70,7 +70,7 @@ def train_multi_agent(
     :type eval_steps: int, optional
     :param eval_loop: Number of evaluation episodes, defaults to 1
     :type eval_loop: int, optional
-    :param learning_delay: Steps in environment before starting learning, defaults to 1000
+    :param learning_delay: Steps in environment before starting learning, defaults to 0
     :type learning_delay: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
@@ -347,15 +347,20 @@ def train_multi_agent(
 
             pop_episode_scores.append(completed_episode_scores)
 
-            if all([losses[a_id] for a_id in agent_ids]):
-                for agent_id in agent_ids:
-                    actor_losses, critic_losses = list(zip(*losses[agent_id]))
-                    actor_losses = [loss for loss in actor_losses if loss is not None]
-                    if actor_losses:
-                        pop_actor_loss[agent_idx][agent_id].append(
-                            np.mean(actor_losses)
+            if len(losses[0]) > 0:
+                if all([losses[a_id] for a_id in agent_ids]):
+                    for agent_id in agent_ids:
+                        actor_losses, critic_losses = list(zip(*losses[agent_id]))
+                        actor_losses = [
+                            loss for loss in actor_losses if loss is not None
+                        ]
+                        if actor_losses:
+                            pop_actor_loss[agent_idx][agent_id].append(
+                                np.mean(actor_losses)
+                            )
+                        pop_critic_loss[agent_idx][agent_id].append(
+                            np.mean(critic_losses)
                         )
-                    pop_critic_loss[agent_idx][agent_id].append(np.mean(critic_losses))
 
             agent.steps[-1] += (idx_step + 1) * num_envs
 

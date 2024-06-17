@@ -196,7 +196,7 @@ def train_on_policy(
     loss = None
 
     # Pre-training mutation
-    if accelerator is not None:
+    if accelerator is None:
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
 

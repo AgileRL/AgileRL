@@ -199,7 +199,7 @@ def train_on_policy(
     checkpoint_count = 0
 
     # Pre-training mutation
-    if accelerator is not None:
+    if accelerator is None:
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
 
@@ -289,7 +289,11 @@ def train_on_policy(
             for agent in pop
         ]
         pop_fitnesses.append(fitnesses)
-        mean_scores = np.mean([episode_scores for episode_scores in pop_episode_scores])
+        mean_scores = [
+            np.mean(episode_scores)
+            for episode_scores in pop_episode_scores
+            if len(episode_scores) > 0
+        ]
 
         wandb_dict = {
             "global_step": (
@@ -297,7 +301,9 @@ def train_on_policy(
                 if accelerator is not None and accelerator.is_main_process
                 else total_steps
             ),
-            "train/mean_score": np.mean(mean_scores),
+            "train/mean_score": np.mean(
+                [mean_score for mean_score in mean_scores if mean_score is not np.nan]
+            ),
             "eval/mean_fitness": np.mean(fitnesses),
             "eval/best_fitness": np.max(fitnesses),
         }
