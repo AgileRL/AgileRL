@@ -426,6 +426,10 @@ class TD3:
             )
         return noise.astype(np.float32)
 
+    def reset_action_noise(self, indices):
+        """Reset action noise."""
+        self.current_noise[indices] = 0
+
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
 
