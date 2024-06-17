@@ -260,10 +260,10 @@ def train_off_policy(
                 if swap_channels:
                     state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
-                if noisy:
-                    action = agent.getAction(state)
-                else:
+                if algo in ["DQN"]:
                     action = agent.getAction(state, epsilon)
+                else:
+                    action = agent.getAction(state)
 
                 if algo in ["DQN", "Rainbow DQN"]:
                     for a in action:

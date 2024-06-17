@@ -202,6 +202,7 @@ def test_initialize_td3_with_cnn_accelerator():
         action_dim=action_dim,
         one_hot=one_hot,
         max_action=max_action,
+        min_action=0,
         index=index,
         net_config=net_config_cnn,
         batch_size=batch_size,
@@ -285,6 +286,7 @@ def test_initialize_td3_with_actor_network(
         action_dim,
         one_hot,
         max_action,
+        expl_noise=np.zeros(action_dim),
         actor_network=actor_network,
         critic_networks=[critic_1_network, critic_2_network],
     )
@@ -449,7 +451,7 @@ def test_initialize_td3_with_actor_network_cnn(
 
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
-def test_returns_expected_action_epsilon_greedy():
+def test_returns_expected_action_training():
     accelerator = Accelerator()
     state_dim = [4]
     action_dim = 2
@@ -457,8 +459,8 @@ def test_returns_expected_action_epsilon_greedy():
 
     td3 = TD3(state_dim, action_dim, one_hot=False, max_action=max_action)
     state = np.array([1, 2, 3, 4])
-    epsilon = 0
-    action = td3.getAction(state, epsilon)[0]
+    training = False
+    action = td3.getAction(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -473,8 +475,25 @@ def test_returns_expected_action_epsilon_greedy():
         accelerator=accelerator,
     )
     state = np.array([1])
-    epsilon = 1
-    action = td3.getAction(state, epsilon)[0]
+    training = True
+    action = td3.getAction(state, training)[0]
+
+    assert len(action) == action_dim
+    for act in action:
+        assert isinstance(act, np.float32)
+        assert -max_action <= act <= max_action
+
+    td3 = TD3(
+        state_dim,
+        action_dim,
+        one_hot=True,
+        O_U_noise=False,
+        max_action=max_action,
+        accelerator=accelerator,
+    )
+    state = np.array([1])
+    training = True
+    action = td3.getAction(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
