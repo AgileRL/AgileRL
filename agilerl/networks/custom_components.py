@@ -102,5 +102,4 @@ class NoisyLinear(nn.Module):
         :type size: torch.Tensor()
         """
         x = torch.randn(size)
-        x = x.sign().mul(x.abs().sqrt())
-        return x
+        return x.sign().mul_(x.abs().sqrt_())
