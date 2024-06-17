@@ -13,8 +13,6 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-### delete
-
 
 class RainbowDQN:
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -542,7 +540,7 @@ class RainbowDQN:
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _ in range(loop):
                 state, _ = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
