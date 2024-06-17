@@ -253,6 +253,7 @@ def train_off_policy(
             state = env.reset()[0]  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores, losses = [], []
+            steps = 0
 
             if algo in ["DQN", "Rainbow DQN"]:
                 train_actions_hist = [0] * agent.action_dim
@@ -301,6 +302,7 @@ def train_off_policy(
                     agent.reset_action_noise(reset_noise_indices)
 
                 total_steps += num_envs
+                steps += num_envs
 
                 # Save experience to replay buffer
                 if n_step_memory is not None:
@@ -385,6 +387,7 @@ def train_off_policy(
 
                 state = next_state
 
+            agent.steps[-1] += steps
             pbar.update(evo_steps // len(pop))
 
             pop_episode_scores.append(completed_episode_scores)
@@ -398,7 +401,6 @@ def train_off_policy(
                 else:
                     mean_loss = np.mean(losses)
                 pop_loss[agent_idx].append(mean_loss)
-                agent.steps[-1] += (idx_step + 1) * num_envs
 
         if algo in ["DQN"]:
             # Reset epsilon start to final epsilon value of this epoch

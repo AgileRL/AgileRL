@@ -232,6 +232,7 @@ def train_multi_agent(
             scores = np.zeros(num_envs)
             losses = {agent_id: [] for agent_id in agent_ids}
             completed_episode_scores = []
+            steps = 0
 
             if swap_channels:
                 if is_vectorised:
@@ -269,6 +270,7 @@ def train_multi_agent(
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 total_steps += num_envs
+                steps += num_envs
 
                 # Save experience to replay buffer
                 if swap_channels:
@@ -345,6 +347,7 @@ def train_multi_agent(
 
             pbar.update(evo_steps // len(pop))
 
+            agent.steps[-1] += steps
             pop_episode_scores.append(completed_episode_scores)
 
             if len(losses[0]) > 0:
@@ -361,8 +364,6 @@ def train_multi_agent(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
-
-            agent.steps[-1] += (idx_step + 1) * num_envs
 
         # Evaluate population
         fitnesses = [

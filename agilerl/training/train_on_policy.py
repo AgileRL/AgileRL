@@ -211,8 +211,9 @@ def train_on_policy(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             completed_episode_scores = []
+            steps = 0
 
-            for _ in range(evo_steps // agent.learn_step):
+            for _ in range(-(evo_steps // -agent.learn_step)):
 
                 states = []
                 actions = []
@@ -222,7 +223,7 @@ def train_on_policy(
                 values = []
                 truncs = []
 
-                for idx_step in range(agent.learn_step // num_envs):
+                for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
@@ -238,6 +239,7 @@ def train_on_policy(
                     )  # Act in environment
 
                     total_steps += num_envs
+                    steps += num_envs
 
                     states.append(state)
                     actions.append(action)
@@ -277,8 +279,8 @@ def train_on_policy(
                 # Learn according to agent's RL algorithm
                 loss = agent.learn(experiences)
                 pop_loss[agent_idx].append(loss)
-                agent.steps[-1] += agent.learn_step * num_envs
 
+            agent.steps[-1] += steps
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population
