@@ -62,14 +62,14 @@ def test_initialization_with_given_parameters():
     tournament_size = 5
     elitism = True
     population_size = 100
-    evo_step = 10
+    eval_loop = 10
 
-    ts = TournamentSelection(tournament_size, elitism, population_size, evo_step)
+    ts = TournamentSelection(tournament_size, elitism, population_size, eval_loop)
 
     assert ts.tournament_size == tournament_size
     assert ts.elitism == elitism
     assert ts.population_size == population_size
-    assert ts.evo_step == evo_step
+    assert ts.eval_loop == eval_loop
 
 
 ### Single-agent algorithms ###
