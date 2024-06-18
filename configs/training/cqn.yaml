@@ -14,7 +14,6 @@ INIT_HP:
     TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100000        # Max memory buffer size
-    POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
     TAU: 0.001                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size

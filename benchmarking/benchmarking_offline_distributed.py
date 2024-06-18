@@ -22,7 +22,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         print("============ AgileRL Distributed ============")
     accelerator.wait_for_everyone()
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -45,7 +45,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -70,6 +70,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         accelerator=accelerator,
     )
 
@@ -83,9 +84,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -107,9 +109,10 @@ if __name__ == "__main__":
         "DOUBLE": True,  # Use double Q-learning
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
+        "NUM_ENVS": 16,
         "BATCH_SIZE": 256,  # Batch size
         "LR": 1e-3,  # Learning rate
-        "EPISODES": 2000,  # Max no. episodes
+        "MAX_STEPS": 1_000_000,  # Max no. steps
         "TARGET_SCORE": 200.0,  # Early training stop at avg score of last 100 episodes
         "GAMMA": 0.99,  # Discount factor
         "MEMORY_SIZE": 10000,  # Max memory buffer size
@@ -118,8 +121,9 @@ if __name__ == "__main__":
         "TOURN_SIZE": 2,  # Tournament size
         "ELITISM": True,  # Elitism in tournament selection
         "POP_SIZE": 6,  # Population size
-        "EVO_EPOCHS": 20,  # Evolution frequency
-        "POLICY_FREQ": 2,  # Policy network update frequency
+        "EVO_STEPS": 10_000,  # Evolution frequency
+        "EVAL_STEPS": None,  # Evaluation steps
+        "EVAL_LOOP": 1,  # Evaluation episodes
         "WANDB": True,  # Log with Weights and Biases
     }
 

@@ -19,7 +19,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
         state_dim = env.single_observation_space.n
@@ -39,7 +39,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -86,6 +86,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
 
@@ -97,9 +98,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -115,7 +117,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/ppo.yaml") as file:
+    with open("configs/training/ppo.yaml") as file:
         ppo_config = yaml.safe_load(file)
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]

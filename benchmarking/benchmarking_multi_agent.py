@@ -87,7 +87,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
 
     mutations = Mutations(
@@ -158,6 +158,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         device=device,
         accelerator=accelerator,
     )
@@ -191,7 +192,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
 
 
 if __name__ == "__main__":
-    with open("../configs/training/matd3.yaml") as file:
+    with open("configs/training/matd3.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

@@ -87,7 +87,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -132,6 +132,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP=INIT_HP,
         actor_network=actor,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
 
@@ -144,13 +145,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         n_step_memory=n_step_memory,
         n_step=n_step,
         per=per,
-        noisy=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=INIT_HP["EVO_LOOP"],
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+        learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -168,7 +170,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/dqn_rainbow.yaml") as file:
+    with open("configs/training/dqn_rainbow.yaml") as file:
         rainbow_dqn_config = yaml.safe_load(file)
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]

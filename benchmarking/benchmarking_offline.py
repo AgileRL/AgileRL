@@ -42,12 +42,12 @@ class BasicNetActor(nn.Module):
         return self.model(x)
 
 
-def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
+def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -77,7 +77,7 @@ def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -99,10 +99,11 @@ def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
         state_dim=state_dim,
         action_dim=action_dim,
         one_hot=one_hot,
-        net_config=None,
+        net_config=NET_CONFIG,
         actor_network=actor_network,
         INIT_HP=INIT_HP,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
 
@@ -116,9 +117,10 @@ def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -135,10 +137,10 @@ def main(INIT_HP, MUTATION_PARAMS):  # , NET_CONFIG):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/cqn.yaml") as file:
+    with open("configs/training/cqn.yaml") as file:
         cqn_config = yaml.safe_load(file)
     INIT_HP = cqn_config["INIT_HP"]
     MUTATION_PARAMS = cqn_config["MUTATION_PARAMS"]
-    # NET_CONFIG = cqn_config["NET_CONFIG"]
+    NET_CONFIG = cqn_config["NET_CONFIG"]
     # DISTRIBUTED_TRAINING = cqn_config["DISTRIBUTED_TRAINING"]
-    main(INIT_HP, MUTATION_PARAMS)  # , NET_CONFIG)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

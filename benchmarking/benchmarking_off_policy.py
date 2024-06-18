@@ -20,7 +20,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=16)
+    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
         state_dim = (env.single_observation_space.n,)
@@ -42,13 +42,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
+        memory_size=INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
     )
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -106,6 +106,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
 
@@ -118,10 +119,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        max_steps=500,
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+        learning_delay=INIT_HP["LEARNING_DELAY"],
+        eps_start=INIT_HP["EPS_START"] if "EPS_START" in INIT_HP else 1.0,
+        eps_end=INIT_HP["EPS_END"] if "EPS_END" in INIT_HP else 0.01,
+        eps_decay=INIT_HP["EPS_DECAY"] if "EPS_DECAY" in INIT_HP else 0.999,
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -138,7 +143,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/dqn.yaml") as file:
+    with open("configs/training/dqn.yaml") as file:
         td3_config = yaml.safe_load(file)
     INIT_HP = td3_config["INIT_HP"]
     MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]

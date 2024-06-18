@@ -1,11 +1,11 @@
 ---
 # Define initial hyperparameters
 INIT_HP:
-    ENV_NAME: MinAtar/Breakout-v1   # Gym environment name
+    ENV_NAME: LunarLander-v2   # Gym environment name
     ALGO: DQN                  # Algorithm
     DOUBLE: false
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    CHANNELS_LAST: true
+    CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 64             # Batch size
     LR: 0.001                  # Learning rate
@@ -13,7 +13,6 @@ INIT_HP:
     TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
     MEMORY_SIZE: 100000        # Max memory buffer size
-    POLICY_FREQ: 2             # Policy update frequency
     LEARN_STEP: 1              # Learning frequency
     TAU: 0.001                 # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
@@ -45,9 +44,5 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    arch: cnn
-    hidden_size: [16]
-    channel_size: [16, 32]
-    kernel_size: [5, 3]
-    stride_size: [1, 1]
-    normalize: false
+    arch: mlp
+    hidden_size: [64, 64]

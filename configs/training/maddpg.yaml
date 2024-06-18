@@ -15,7 +15,7 @@ INIT_HP:
     BATCH_SIZE: 1024           # Batch size
     LR_ACTOR: 0.001            # Actor learning rate
     LR_CRITIC: 0.01            # Critic earning rate
-    MAX_STEPS: 1_000_000       # Max no. steps
+    MAX_STEPS: 10_000          # Max no. steps
     TARGET_SCORE: 100          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.95                # Discount factor
     MEMORY_SIZE: 1_000_000     # Max memory buffer size
@@ -24,7 +24,7 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 10_000          # Evolution frequency
+    EVO_STEPS: 25              # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     WANDB: true                # Log with Weights and Biases

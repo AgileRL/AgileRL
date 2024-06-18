@@ -45,7 +45,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -112,7 +112,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/neural_ts.yaml") as file:
+    with open("configs/training/neural_ts.yaml") as file:
         bandit_config = yaml.safe_load(file)
     INIT_HP = bandit_config["INIT_HP"]
     MUTATION_PARAMS = bandit_config["MUTATION_PARAMS"]
