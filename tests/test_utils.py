@@ -58,6 +58,11 @@ SHARED_INIT_HP = {
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
+    "O_U_NOISE": True,
+    "EXPL_NOISE": 0.1,
+    "MEAN_NOISE": 0.0,
+    "THETA": 0.15,
+    "DT": 0.01,
 }
 
 

@@ -64,6 +64,7 @@ def initialPopulation(
     actor_network=None,
     critic_network=None,
     population_size=1,
+    num_envs=1,
     device="cpu",
     accelerator=None,
 ):
@@ -85,6 +86,8 @@ def initialPopulation(
     :type critic_network: nn.Module, optional
     :param population_size: Number of agents in population, defaults to 1
     :type population_size: int, optional
+    :param num_envs: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -145,6 +148,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -217,6 +226,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -241,6 +256,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
@@ -267,6 +288,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
