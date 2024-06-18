@@ -118,16 +118,14 @@ class DDPG:
         assert max_action > min_action, "Max action must be greater than min action."
         assert max_action > 0, "Max action must be greater than zero."
         assert min_action <= 0, "Min action must be less than or equal to zero."
+        print(expl_noise)
         assert (isinstance(expl_noise, (float, int))) or (
-            isinstance(expl_noise, np.ndarray) and expl_noise.shape == (action_dim,)
+            isinstance(expl_noise, np.ndarray)
+            and expl_noise.shape == (vect_noise_dim, action_dim)
         ), "Exploration action noise rate must be a float, or an array of size action_dim"
         if isinstance(expl_noise, (float, int)):
             assert (
                 expl_noise >= 0
-            ), "Exploration noise must be greater than or equal to zero."
-        else:
-            assert (
-                expl_noise.all() >= 0
             ), "Exploration noise must be greater than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
