@@ -553,6 +553,7 @@ def mocked_agent_off_policy(env, algo):
         RainbowDQN: "Rainbow DQN",
         DDPG: "DDPG",
         TD3: "TD3",
+        CQN: "CQN",
     }[algo]
 
     return mock_agent
@@ -629,7 +630,7 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.index = 1
     mock_agent.discrete_actions = False
 
-    def getAction(*args):
+    def getAction(*args, **kwargs):
         return {
             agent: np.random.randn(mock_agent.action_size)
             for agent in mock_agent.agents
@@ -2428,49 +2429,48 @@ def test_multi_agent_early_stop(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, algo",
+    "state_size, action_size, algo, accelerator_flag",
     [
-        ((6,), 2, MADDPG),
-        ((6,), 2, MATD3),
+        ((6,), 2, MADDPG, False),
+        ((6,), 2, MATD3, True),
     ],
 )
 def test_train_multi_agent_calls(
-    multi_env, mocked_multi_agent, multi_memory, tournament, mutations, algo
+    multi_env, mocked_multi_agent, multi_memory, tournament, mutations, accelerator_flag
 ):
-    for accelerator_flag in [False, True]:
-        if accelerator_flag:
-            accelerator = Accelerator()
-        else:
-            accelerator = None
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
 
-        mock_population = [mocked_multi_agent for _ in range(6)]
+    mock_population = [mocked_multi_agent for _ in range(6)]
 
-        pop, pop_fitnesses = train_multi_agent(
-            multi_env,
-            "env_name",
-            "algo",
-            mock_population,
-            multi_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            net_config=None,
-            swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=False,
-            accelerator=accelerator,
-        )
+    pop, pop_fitnesses = train_multi_agent(
+        multi_env,
+        "env_name",
+        "algo",
+        mock_population,
+        multi_memory,
+        INIT_HP=None,
+        MUT_P=None,
+        net_config=None,
+        swap_channels=False,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        accelerator=accelerator,
+    )
 
-        for agent in mock_population:
-            agent.getAction.assert_called()
-            agent.learn.assert_called()
-            agent.test.assert_called()
-            if accelerator is not None:
-                agent.wrap_models.assert_called()
-                agent.unwrap_models.assert_called()
+    for agent in mock_population:
+        agent.getAction.assert_called()
+        agent.learn.assert_called()
+        agent.test.assert_called()
+        if accelerator is not None:
+            agent.wrap_models.assert_called()
+            agent.unwrap_models.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -2761,9 +2761,10 @@ def test_train_offline_save_checkpoint_warning(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect",
+    "state_size, action_size, vect, accelerator_flag",
     [
-        ((6,), 2, True),
+        ((6,), 2, True, False),
+        ((6,), 2, True, True),
     ],
 )
 def test_train_offline_wandb_calls(
@@ -2774,57 +2775,57 @@ def test_train_offline_wandb_calls(
     mutations,
     offline_init_hp,
     dummy_h5py_data,
+    accelerator_flag,
 ):
-    for accelerator_flag in [True, False]:
-        if accelerator_flag:
-            accelerator = Accelerator()
-        else:
-            accelerator = None
-        MUT_P = {
-            "NO_MUT": 0.4,
-            "ARCH_MUT": 0.2,
-            "PARAMS_MUT": 0.2,
-            "ACT_MUT": 0.2,
-            "RL_HP_MUT": 0.2,
-        }
-        with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-            "agilerl.training.train_offline.wandb.init"
-        ) as mock_wandb_init, patch(
-            "agilerl.training.train_offline.wandb.log"
-        ) as mock_wandb_log, patch(
-            "agilerl.training.train_offline.wandb.finish"
-        ) as mock_wandb_finish:
-            # Call the function that should trigger wandb.init
-            agilerl.training.train_offline.train_offline(
-                env,
-                "env_name",
-                dummy_h5py_data,
-                "algo",
-                population_off_policy,
-                memory,
-                INIT_HP=offline_init_hp,
-                MUT_P=MUT_P,
-                swap_channels=False,
-                max_steps=50,
-                evo_steps=10,
-                eval_loop=1,
-                tournament=tournament,
-                mutation=mutations,
-                wb=True,
-                accelerator=accelerator,
-                wandb_api_key="testing",
-            )
+    if accelerator_flag:
+        accelerator = Accelerator()
+    else:
+        accelerator = None
+    MUT_P = {
+        "NO_MUT": 0.4,
+        "ARCH_MUT": 0.2,
+        "PARAMS_MUT": 0.2,
+        "ACT_MUT": 0.2,
+        "RL_HP_MUT": 0.2,
+    }
+    with patch("agilerl.training.train_offline.wandb.login") as _, patch(
+        "agilerl.training.train_offline.wandb.init"
+    ) as mock_wandb_init, patch(
+        "agilerl.training.train_offline.wandb.log"
+    ) as mock_wandb_log, patch(
+        "agilerl.training.train_offline.wandb.finish"
+    ) as mock_wandb_finish:
+        # Call the function that should trigger wandb.init
+        agilerl.training.train_offline.train_offline(
+            env,
+            "env_name",
+            dummy_h5py_data,
+            "algo",
+            population_off_policy,
+            memory,
+            INIT_HP=offline_init_hp,
+            MUT_P=MUT_P,
+            swap_channels=False,
+            max_steps=50,
+            evo_steps=10,
+            eval_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=True,
+            accelerator=accelerator,
+            wandb_api_key="testing",
+        )
 
-            # Assert that wandb.init was called with expected arguments
-            mock_wandb_init.assert_called_once_with(
-                project=ANY,
-                name=ANY,
-                config=ANY,
-            )
-            # Assert that wandb.log was called with expected log parameters
-            mock_wandb_log.assert_called()
-            # Assert that wandb.finish was called
-            mock_wandb_finish.assert_called()
+        # Assert that wandb.init was called with expected arguments
+        mock_wandb_init.assert_called_once_with(
+            project=ANY,
+            name=ANY,
+            config=ANY,
+        )
+        # Assert that wandb.log was called with expected log parameters
+        mock_wandb_log.assert_called()
+        # Assert that wandb.finish was called
+        mock_wandb_finish.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -3106,14 +3107,12 @@ def test_train_offline_save_checkpoint(
         os.remove(f"{checkpoint_path}_{i}_{50}.pt")
 
 
-pytest.mark.parametrize(
+@pytest.mark.parametrize(
     "state_size, action_size",
     [
         ((6,), 2),
     ],
 )
-
-
 def test_train_bandit(
     bandit_env, population_bandit, tournament, mutations, bandit_memory
 ):

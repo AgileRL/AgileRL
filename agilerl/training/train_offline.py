@@ -187,7 +187,6 @@ def train_offline(
 
     else:
         print("Loading buffer...")
-        print(dataset["rewards"])
         dataset_length = dataset["rewards"].shape[0]
         # for i in range(dataset_length):
         #     state = dataset['observations'][i]

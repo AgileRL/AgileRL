@@ -894,12 +894,12 @@ class MATD3:
                     else:
                         action = cont_actions
                     state, reward, done, trunc, info = env.step(action)
-                    for idx, (d, t) in enumerate(
-                        zip(
-                            np.array(list(done.values())).transpose(),
-                            np.array(list(trunc.values())).transpose(),
-                        )
-                    ):
+                    done_array = np.array(list(done.values())).transpose()
+                    trunc_array = np.array(list(trunc.values())).transpose()
+                    if not is_vectorised:
+                        done_array = np.expand_dims(done_array, 0)
+                        trunc_array = np.expand_dims(trunc_array, 0)
+                    for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
                         if (
                             np.any(d)
                             or np.any(t)

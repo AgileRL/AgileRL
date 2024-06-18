@@ -168,6 +168,7 @@ def train_multi_agent(
                 os.makedirs(accel_temp_models_path)
 
     if isinstance(env, PettingZooVectorizationParallelWrapper):
+        is_vectorised = True
         num_envs = env.num_envs
     else:
         is_vectorised = False
@@ -329,12 +330,12 @@ def train_multi_agent(
                 state = next_state
 
                 reset_noise_indices = []
-                for idx, (d, t) in enumerate(
-                    zip(
-                        np.array(list(done.values())).transpose(),
-                        np.array(list(truncation.values())).transpose(),
-                    )
-                ):
+                done_array = np.array(list(done.values())).transpose()
+                trunc_array = np.array(list(truncation.values())).transpose()
+                if not is_vectorised:
+                    done_array = np.expand_dims(done_array, 0)
+                    trunc_array = np.expand_dims(trunc_array, 0)
+                for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])
@@ -350,7 +351,7 @@ def train_multi_agent(
             agent.steps[-1] += steps
             pop_episode_scores.append(completed_episode_scores)
 
-            if len(losses[0]) > 0:
+            if len(losses[agent_ids[0]]) > 0:
                 if all([losses[a_id] for a_id in agent_ids]):
                     for agent_id in agent_ids:
                         actor_losses, critic_losses = list(zip(*losses[agent_id]))
@@ -373,7 +374,11 @@ def train_multi_agent(
             for agent in pop
         ]
         pop_fitnesses.append(fitnesses)
-        mean_scores = np.mean([episode_scores for episode_scores in pop_episode_scores])
+        mean_scores = [
+            np.mean(episode_scores)
+            for episode_scores in pop_episode_scores
+            if len(episode_scores) > 0
+        ]
 
         wandb_dict = {
             "global_step": (
@@ -381,7 +386,9 @@ def train_multi_agent(
                 if accelerator is not None and accelerator.is_main_process
                 else total_steps
             ),
-            "train/mean_score": np.mean(mean_scores),
+            "train/mean_score": np.mean(
+                [mean_score for mean_score in mean_scores if mean_score is not np.nan]
+            ),
             "train/best_score": np.max([agent.scores[-1] for agent in pop]),
             "eval/mean_fitness": np.mean(fitnesses),
             "eval/best_fitness": np.max(fitnesses),
@@ -397,15 +404,14 @@ def train_multi_agent(
                 pop_critic_loss[agent_idx].values(),
             ):
                 if actor_loss:
-
                     actor_loss_dict[
                         f"train/agent_{agent_idx}_{agent_id}_actor_loss"
                     ] = np.mean(actor_loss[-10:])
-
+                    wandb_dict.update(actor_loss_dict)
+                if critic_loss:
                     critic_loss_dict[
                         f"train/agent_{agent_idx}_{agent_id}_critic_loss"
                     ] = np.mean(critic_loss[-10:])
-                    wandb_dict.update(actor_loss_dict)
                     wandb_dict.update(critic_loss_dict)
 
         if wb:
