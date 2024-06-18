@@ -94,7 +94,7 @@ def test_initialize_bandit_with_minimum_parameters():
     assert bandit.net_config == {"arch": "mlp", "hidden_size": [128]}
     assert bandit.batch_size == 64
     assert bandit.lr == 0.001
-    assert bandit.learn_step == 1
+    assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625
@@ -197,7 +197,7 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.net_config is None
     assert bandit.batch_size == 64
     assert bandit.lr == 0.001
-    assert bandit.learn_step == 1
+    assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625
@@ -243,7 +243,7 @@ def test_initialize_bandit_with_evo_nets():  #
     assert bandit.net_config is not None
     assert bandit.batch_size == 64
     assert bandit.lr == 0.001
-    assert bandit.learn_step == 1
+    assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625
@@ -683,7 +683,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert isinstance(bandit.actor, EvolvableMLP)
     assert bandit.lr == 1e-3
     assert bandit.batch_size == 64
-    assert bandit.learn_step == 1
+    assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625
@@ -748,7 +748,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert isinstance(bandit.actor, EvolvableCNN)
     assert bandit.lr == 1e-3
     assert bandit.batch_size == 64
-    assert bandit.learn_step == 1
+    assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625
@@ -817,7 +817,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert isinstance(bandit.actor, nn.Module)
     assert bandit.lr == 1e-3
     assert bandit.batch_size == 64
-    assert bandit.learn_step == 1
+    assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
     assert bandit.reg == 0.000625

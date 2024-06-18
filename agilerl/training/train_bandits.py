@@ -20,10 +20,11 @@ def train_bandits(
     INIT_HP=None,
     MUT_P=None,
     swap_channels=False,
-    n_episodes=200,
-    max_steps=100,
-    evo_epochs=5,
-    evo_loop=1,
+    max_steps=20000,
+    episode_steps=500,
+    evo_steps=2500,
+    eval_steps=500,
+    eval_loop=1,
     target=None,
     tournament=None,
     mutation=None,
@@ -56,14 +57,16 @@ def train_bandits(
     :param swap_channels: Swap image channels dimension from last to first
         [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional
-    :param n_episodes: Maximum number of training episodes, defaults to 200
-    :type n_episodes: int, optional
-    :param max_steps: Maximum number of steps in environment per episode, defaults to 100
+    :param max_steps: Maximum number of steps in environment, defaults to 20000
     :type max_steps: int, optional
-    :param evo_epochs: Evolution frequency (episodes), defaults to 5
-    :type evo_epochs: int, optional
-    :param evo_loop: Number of evaluation episodes, defaults to 1
-    :type evo_loop: int, optional
+    :param episode_steps: Number of steps in environment per episode, defaults to 500
+    :type episode_steps: int, optional
+    :param evo_steps: Evolution frequency (steps), defaults to 2500
+    :type evo_steps: int, optional
+    :param eval_steps: Number of evaluation steps per episode, defaults to 500
+    :type eval_steps: int, optional
+    :param eval_loop: Number of evaluation episodes, defaults to 1
+    :type eval_loop: int, optional
     :param target: Target score for early stopping, defaults to None
     :type target: float, optional
     :param tournament: Tournament selection object, defaults to None
@@ -91,9 +94,8 @@ def train_bandits(
     assert isinstance(
         algo, str
     ), "'algo' must be the name of the algorithm as a string."
-    assert isinstance(n_episodes, int), "Number of episodes must be an integer."
     assert isinstance(max_steps, int), "Number of steps must be an integer."
-    assert isinstance(evo_epochs, int), "Evolution frequency must be an integer."
+    assert isinstance(evo_steps, int), "Evolution frequency must be an integer."
     if target is not None:
         assert isinstance(
             target, (float, int)
@@ -190,28 +192,31 @@ def train_bandits(
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
     if accelerator is not None:
         pbar = trange(
-            n_episodes,
-            unit="ep",
+            max_steps,
+            unit="step",
             bar_format=bar_format,
             ascii=True,
             disable=not accelerator.is_local_main_process,
         )
     else:
-        pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
+        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
 
     pop_loss = [[] for _ in pop]
     pop_fitnesses = []
     total_steps = 0
+    checkpoint_count = 0
+    evo_count = 0
 
     # RL training loop
-    for idx_epi in pbar:
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
+        pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             score = 0
             losses = []
             state = env.reset()  # Reset environment at start of episode
-            for idx_step in range(max_steps):
+            for idx_step in range(episode_steps):
                 if swap_channels:
                     state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
@@ -236,67 +241,65 @@ def train_bandits(
                 state = next_state
 
             agent.scores.append(score)
+            pop_episode_scores.append(score)
             pop_loss[agent_idx].append(np.mean(losses))
-            agent.steps[-1] += max_steps
-            total_steps += max_steps
+            agent.steps[-1] += episode_steps
+            total_steps += episode_steps
 
-        # Now evolve if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env, swap_channels=swap_channels, max_steps=max_steps, loop=evo_loop
-                )
-                for agent in pop
-            ]
-            pop_fitnesses.append(fitnesses)
-            mean_scores = np.mean([agent.scores[-evo_epochs:] for agent in pop], axis=1)
-            regrets = [agent.regret[-1] for agent in pop]
-            mean_losses = np.mean([losses[-evo_epochs:] for losses in pop_loss], axis=1)
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+            )
+            for agent in pop
+        ]
+        pop_fitnesses.append(fitnesses)
+        mean_scores = np.mean(pop_episode_scores)
+        regrets = [agent.regret[-1] for agent in pop]
+        mean_losses = np.mean([losses[-10:] for losses in pop_loss], axis=1)
 
-            if wb:
-                wandb_dict = {
-                    "global_step": (
-                        total_steps * accelerator.state.num_processes
-                        if accelerator is not None and accelerator.is_main_process
-                        else total_steps
-                    ),
-                    "steps_per_agent": total_steps / len(pop),
-                    "train/mean_score": np.mean(mean_scores),
-                    "train/mean_regret": np.mean(regrets),
-                    "train/best_regret": np.min(regrets),
-                    "train/mean_loss": np.mean(mean_losses),
-                    "eval/mean_fitness": np.mean(fitnesses),
-                    "eval/best_fitness": np.max(fitnesses),
-                }
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        wandb.log(wandb_dict)
-                    accelerator.wait_for_everyone()
-                else:
+        if wb:
+            wandb_dict = {
+                "global_step": (
+                    total_steps * accelerator.state.num_processes
+                    if accelerator is not None and accelerator.is_main_process
+                    else total_steps
+                ),
+                "steps_per_agent": total_steps / len(pop),
+                "train/mean_score": np.mean(mean_scores),
+                "train/mean_regret": np.mean(regrets),
+                "train/best_regret": np.min(regrets),
+                "train/mean_loss": np.mean(mean_losses),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+            if accelerator is not None:
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
                     wandb.log(wandb_dict)
+                accelerator.wait_for_everyone()
+            else:
+                wandb.log(wandb_dict)
 
-            # Update step counter
-            for agent in pop:
-                agent.steps.append(agent.steps[-1])
+        # Update step counter
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
 
-            # Early stop if consistently reaches target
-            if target is not None:
-                if (
-                    np.all(
-                        np.greater(
-                            [np.mean(agent.fitness[-100:]) for agent in pop], target
-                        )
-                    )
-                    and idx_epi >= 100
-                ):
-                    if wb:
-                        wandb.finish()
-                    return pop, pop_fitnesses
+        # Early stop if consistently reaches target
+        if target is not None:
+            if (
+                np.all(
+                    np.greater([np.mean(agent.fitness[-10:]) for agent in pop], target)
+                )
+                and len(pop[0].steps) >= 100
+            ):
+                if wb:
+                    wandb.finish()
+                return pop, pop_fitnesses
 
-            # Tournament selection and population mutation
-            if tournament and mutation is not None:
+        # Tournament selection and population mutation
+        if tournament and mutation is not None:
+            if pop[0].steps[-1] // evo_steps > evo_count:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -322,45 +325,44 @@ def train_bandits(
                     elite, pop = tournament.select(pop)
                     pop = mutation.mutation(pop)
 
-                if save_elite and (idx_epi + 1 == n_episodes):
+                if save_elite:
                     elite_save_path = (
                         elite_path.split(".pt")[0]
                         if elite_path is not None
-                        else "{}-elite_{}-{}".format(
-                            env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                        )
+                        else f"{env_name}-elite_{algo}-{elite.steps[-1]}"
                     )
                     elite.saveCheckpoint(f"{elite_save_path}.pt")
+                evo_count += 1
 
-            if verbose:
-                regret = ["%.2f" % regret for regret in regrets]
-                avg_regret = "%.2f" % np.mean(np.array(regrets))
-                fitness = ["%.2f" % fitness for fitness in fitnesses]
-                avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
-                avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
-                agents = [agent.index for agent in pop]
-                num_steps = [agent.steps[-1] for agent in pop]
-                muts = [agent.mut for agent in pop]
-                pbar.update(0)
+        if verbose:
+            regret = ["%.2f" % regret for regret in regrets]
+            avg_regret = "%.2f" % np.mean(np.array(regrets))
+            fitness = ["%.2f" % fitness for fitness in fitnesses]
+            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            agents = [agent.index for agent in pop]
+            num_steps = [agent.steps[-1] for agent in pop]
+            muts = [agent.mut for agent in pop]
+            pbar.update(0)
 
-                print(
-                    f"""
-                    --- Epoch {idx_epi + 1} ---
-                    Regret:\t\t{regret}
-                    Mean regret:\t{avg_regret}
-                    Fitness:\t\t{fitness}
-                    100 fitness avgs:\t{avg_fitness}
-                    100 score avgs:\t{avg_score}
-                    Agents:\t\t{agents}
-                    Steps:\t\t{num_steps}
-                    Mutations:\t\t{muts}
-                    """,
-                    end="\r",
-                )
+            print(
+                f"""
+                --- Global Steps {total_steps} ---
+                Regret:\t\t{regret}
+                Mean regret:\t{avg_regret}
+                Fitness:\t\t{fitness}
+                5 fitness avgs:\t{avg_fitness}
+                10 score avgs:\t{avg_score}
+                Agents:\t\t{agents}
+                Steps:\t\t{num_steps}
+                Mutations:\t\t{muts}
+                """,
+                end="\r",
+            )
 
         # Save model checkpoint
         if checkpoint is not None:
-            if (idx_epi + 1) % checkpoint == 0:
+            if pop[0].steps[-1] // checkpoint > checkpoint_count:
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -368,7 +370,9 @@ def train_bandits(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                            agent.saveCheckpoint(
+                                f"{save_path}_{i}_{agent.steps[-1]}.pt"
+                            )
                         print("Saved checkpoint.")
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -376,8 +380,9 @@ def train_bandits(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                        agent.saveCheckpoint(f"{save_path}_{i}_{agent.steps[-1]}.pt")
                     print("Saved checkpoint.")
+                checkpoint_count += 1
 
     if wb:
         if accelerator is not None:

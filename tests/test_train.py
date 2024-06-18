@@ -1,6 +1,7 @@
 import os
 import random
 import shutil
+from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
@@ -1709,13 +1710,13 @@ def test_train_off_policy_save_elite(
     [((6,), 2, True, True), ((6,), 2, True, False)],
 )
 def test_train_save_checkpoint(
-    env, population_off_policy, tournament, mutations, memory, accelerator_flag
+    env, population_off_policy, tournament, mutations, memory, accelerator_flag, tmpdir
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = "checkpoint"
+    checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
@@ -2111,13 +2112,13 @@ def test_train_on_policy_save_elite(
     [((6,), 2, True, True), ((6,), 2, True, False)],
 )
 def test_train_on_policy_save_checkpoint(
-    env, population_on_policy, tournament, mutations, accelerator_flag
+    env, population_on_policy, tournament, mutations, accelerator_flag, tmpdir
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = "checkpoint"
+    checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",
@@ -2609,12 +2610,13 @@ def test_train_multi_save_checkpoint(
     mutations,
     multi_memory,
     accelerator_flag,
+    tmpdir,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = "checkpoint"
+    checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_multi_agent(
         multi_env,
         "env_name",
@@ -3076,12 +3078,13 @@ def test_train_offline_save_checkpoint(
     offline_init_hp,
     dummy_h5py_data,
     accelerator_flag,
+    tmpdir,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = "checkpoint"
+    checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_offline(
         env,
         "env_name",
@@ -3125,10 +3128,11 @@ def test_train_bandit(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3167,10 +3171,11 @@ def test_train_bandit_agent_calls_made(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=5,
-            evo_loop=1,
+            max_steps=50,
+            episode_steps=5,
+            evo_steps=25,
+            eval_steps=5,
+            eval_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -3202,10 +3207,11 @@ def test_train_bandit_save_elite_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=5,
-            evo_loop=1,
+            max_steps=50,
+            episode_steps=5,
+            evo_steps=25,
+            eval_steps=5,
+            eval_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -3230,10 +3236,11 @@ def test_train_bandit_checkpoint_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=5,
-            evo_loop=1,
+            max_steps=50,
+            episode_steps=5,
+            evo_steps=25,
+            eval_steps=5,
+            eval_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -3255,10 +3262,11 @@ def test_bandit_actions_histogram(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3280,10 +3288,11 @@ def test_train_bandit_replay_buffer_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3310,10 +3319,11 @@ def test_train_bandit_bandit_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3340,10 +3350,11 @@ def test_train_bandit_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
         wb=False,
@@ -3365,10 +3376,11 @@ def test_train_bandit_rgb_input(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3397,10 +3409,11 @@ def test_train_bandit_using_alternate_buffers(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3422,10 +3435,11 @@ def test_train_bandit_using_alternate_buffers_rgb(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3448,10 +3462,11 @@ def test_train_bandit_distributed(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3500,10 +3515,11 @@ def test_bandit_wandb_init_log(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=1,
-            evo_loop=1,
+            max_steps=50,
+            episode_steps=5,
+            evo_steps=25,
+            eval_steps=5,
+            eval_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -3582,10 +3598,11 @@ def test_bandit_wandb_init_log_distributed(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            n_episodes=10,
-            max_steps=5,
-            evo_epochs=1,
-            evo_loop=1,
+            max_steps=50,
+            episode_steps=5,
+            evo_steps=25,
+            eval_steps=5,
+            eval_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -3654,10 +3671,11 @@ def test_bandit_early_stop_wandb(
             MUT_P=MUT_P,
             target=-10000,
             swap_channels=False,
-            n_episodes=110,
-            max_steps=5,
-            evo_epochs=1,
-            evo_loop=1,
+            max_steps=550,
+            episode_steps=5,
+            evo_steps=25,
+            eval_steps=5,
+            eval_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -3681,10 +3699,11 @@ def test_train_bandit_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3706,12 +3725,13 @@ def test_bandit_train_save_checkpoint(
     mutations,
     bandit_memory,
     accelerator_flag,
+    tmpdir,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = "checkpoint"
+    checkpoint_path = str(Path(tmpdir) / "checkpoint")
     pop, pop_fitnesses = train_bandits(
         bandit_env,
         "bandit_env_name",
@@ -3721,10 +3741,11 @@ def test_bandit_train_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        n_episodes=10,
-        max_steps=5,
-        evo_epochs=5,
-        evo_loop=1,
+        max_steps=50,
+        episode_steps=5,
+        evo_steps=25,
+        eval_steps=5,
+        eval_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3733,8 +3754,9 @@ def test_bandit_train_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
+        for s in range(5):
+            assert os.path.isfile(f"{checkpoint_path}_{i}_{10*(s+1)}.pt")
+            os.remove(f"{checkpoint_path}_{i}_{10*(s+1)}.pt")
 
 
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS
