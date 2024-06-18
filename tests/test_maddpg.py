@@ -305,7 +305,7 @@ def test_initialize_maddpg_with_net_config(
     assert maddpg.max_action == max_action
     assert maddpg.min_action == min_action
     assert maddpg.discrete_actions == discrete_actions
-    assert maddpg.expl_noise == expl_noise
+    assert np.all(maddpg.expl_noise == expl_noise)
     assert maddpg.net_config == net_config, maddpg.net_config
     assert maddpg.batch_size == batch_size
     assert maddpg.multi
@@ -673,29 +673,33 @@ def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device):
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions, one_hot",
+    "training, state_dims, action_dims, discrete_actions, one_hot",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),  #
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),  #
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
     ],
 )
-def test_maddpg_getAction_epsilon_greedy_mlp(
-    epsilon, state_dims, action_dims, discrete_actions, one_hot, device
+def test_maddpg_getAction_mlp(
+    training, state_dims, action_dims, discrete_actions, one_hot, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     if one_hot:
         state = {
-            agent: np.random.randint(0, state_dims[0], *state_dims[0])
-            for agent in agent_ids
+            agent: np.random.randint(0, state_dims[idx], 1)
+            for idx, agent in enumerate(agent_ids)
         }
     else:
-        state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+        state = {
+            agent: np.random.randn(*state_dims[idx])
+            for idx, agent in enumerate(agent_ids)
+        }
+
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -708,36 +712,30 @@ def test_maddpg_getAction_epsilon_greedy_mlp(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.getAction(state, epsilon)
-    for idx, action in enumerate(list(cont_actions.values())):
-        if one_hot:
-            assert len(action[0]) == action_dims[idx]
-            assert len(action) == state_dims[idx][0]
+    cont_actions, discrete_action = maddpg.getAction(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
             if discrete_actions:
                 torch.testing.assert_close(
-                    sum(np.sum(action, 0)), float(state_dims[idx][0])
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
                 )
             act = action[idx]
             assert act.dtype == np.float32
             assert -1 <= act.all() <= 1
-        else:
-            assert len(action) == action_dims[idx]
-            if discrete_actions:
-                torch.testing.assert_close(sum(action), 1.0)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(discrete_action.values())):
-            if one_hot:
-                assert action.all() <= action_dims[idx] - 1
-            else:
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
                 assert action <= action_dims[idx] - 1
     maddpg = None
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
@@ -745,8 +743,8 @@ def test_maddpg_getAction_epsilon_greedy_mlp(
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_maddpg_getAction_epsilon_greedy_cnn(
-    epsilon, state_dims, action_dims, discrete_actions, device
+def test_maddpg_getAction_cnn(
+    training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
@@ -757,7 +755,9 @@ def test_maddpg_getAction_epsilon_greedy_cnn(
         "stride_size": [1],
         "normalize": False,
     }
-    state = {agent: np.random.randn(1, *state_dims[0]) for agent in agent_ids}
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -770,26 +770,29 @@ def test_maddpg_getAction_epsilon_greedy_cnn(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.getAction(state, epsilon)
+    cont_actions, discrete_action = maddpg.getAction(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
+            if discrete_actions:
+                torch.testing.assert_close(
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
+                )
+            act = action[idx]
+            assert act.dtype == np.float32
+            assert -1 <= act.all() <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            torch.testing.assert_close(sum(action), 1.00)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
-        for idx, action in enumerate(list(discrete_action.values())):
-            assert action <= action_dims[idx] - 1
-    else:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
+                assert action <= action_dims[idx] - 1
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True),  #
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True),
@@ -797,12 +800,12 @@ def test_maddpg_getAction_epsilon_greedy_cnn(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
     ],
 )
-def test_getAction_epsilon_greedy_distributed(
-    epsilon, state_dims, action_dims, discrete_actions
-):
+def test_getAction_distributed(training, state_dims, action_dims, discrete_actions):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
-    state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
     from agilerl.algorithms.maddpg import MADDPG
 
     maddpg = MADDPG(
@@ -827,26 +830,29 @@ def test_getAction_epsilon_greedy_distributed(
         for actor in maddpg.actors
     ]
     maddpg.actors = new_actors
-    cont_actions, discrete_action = maddpg.getAction(state, epsilon)
+    cont_actions, discrete_action = maddpg.getAction(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
+            if discrete_actions:
+                torch.testing.assert_close(
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
+                )
+            act = action[idx]
+            assert act.dtype == np.float32
+            assert -1 <= act.all() <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            torch.testing.assert_close(sum(action), 1.00)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
-        for idx, action in enumerate(list(discrete_action.values())):
-            assert action <= action_dims[idx] - 1
-    else:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
+                assert action <= action_dims[idx] - 1
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
@@ -854,8 +860,8 @@ def test_getAction_epsilon_greedy_distributed(
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
     ],
 )
-def test_maddpg_getAction_epsilon_greedy_distributed_cnn(
-    epsilon, state_dims, action_dims, discrete_actions
+def test_maddpg_getAction_distributed_cnn(
+    training, state_dims, action_dims, discrete_actions
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
@@ -867,7 +873,9 @@ def test_maddpg_getAction_epsilon_greedy_distributed_cnn(
         "stride_size": [1],
         "normalize": False,
     }
-    state = {agent: np.random.randn(1, *state_dims[0]) for agent in agent_ids}
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -897,26 +905,29 @@ def test_maddpg_getAction_epsilon_greedy_distributed_cnn(
         for actor in maddpg.actors
     ]
     maddpg.actors = new_actors
-    cont_actions, discrete_action = maddpg.getAction(state, epsilon)
+    cont_actions, discrete_action = maddpg.getAction(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
+            if discrete_actions:
+                torch.testing.assert_close(
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
+                )
+            act = action[idx]
+            assert act.dtype == np.float32
+            assert -1 <= act.all() <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            torch.testing.assert_close(sum(action), 1.00)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
-        for idx, action in enumerate(list(discrete_action.values())):
-            assert action <= action_dims[idx] - 1
-    else:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
+                assert action <= action_dims[idx] - 1
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
@@ -925,7 +936,7 @@ def test_maddpg_getAction_epsilon_greedy_distributed_cnn(
     ],
 )
 def test_maddpg_getAction_agent_masking(
-    epsilon, state_dims, action_dims, discrete_actions, device
+    training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
@@ -946,7 +957,7 @@ def test_maddpg_getAction_agent_masking(
         device=device,
     )
     cont_actions, discrete_action = maddpg.getAction(
-        state, epsilon, agent_mask=agent_mask, env_defined_actions=env_defined_actions
+        state, training, agent_mask=agent_mask, env_defined_actions=env_defined_actions
     )
     if discrete_actions:
         assert np.array_equal(discrete_action["agent_0"], 1), discrete_action["agent_0"]
@@ -1447,21 +1458,21 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
         max_action,
         min_action,
         discrete_actions,
-        expl_noise,
-        index,
-        net_config,
-        batch_size,
-        lr_actor,
-        lr_critic,
-        learn_step,
-        gamma,
-        tau,
-        mut,
-        actor_networks,
-        critic_networks,
-        device,
-        accelerator,
-        wrap,
+        expl_noise=expl_noise,
+        index=index,
+        net_config=net_config,
+        batch_size=batch_size,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
+        learn_step=learn_step,
+        gamma=gamma,
+        tau=tau,
+        mut=mut,
+        actor_networks=actor_networks,
+        critic_networks=critic_networks,
+        device=device,
+        accelerator=accelerator,
+        wrap=wrap,
     )
 
     clone_agent = maddpg.clone(wrap=wrap)
@@ -1474,7 +1485,7 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.agent_ids == maddpg.agent_ids
     assert clone_agent.max_action == maddpg.max_action
     assert clone_agent.min_action == maddpg.min_action
-    assert clone_agent.expl_noise == maddpg.expl_noise
+    assert np.array_equal(clone_agent.expl_noise, maddpg.expl_noise)
     assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
     assert clone_agent.net_config == maddpg.net_config
@@ -1576,7 +1587,7 @@ def test_clone_after_learning():
     assert clone_agent.agent_ids == maddpg.agent_ids
     assert clone_agent.max_action == maddpg.max_action
     assert clone_agent.min_action == maddpg.min_action
-    assert clone_agent.expl_noise == maddpg.expl_noise
+    assert np.array_equal(clone_agent.expl_noise, maddpg.expl_noise)
     assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
     assert clone_agent.net_config == maddpg.net_config

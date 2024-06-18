@@ -463,8 +463,6 @@ class MATD3:
                 if agent_mask[agent]
             ]
 
-        # states = {key: np.vstack(value) for key, value in states.items()}
-
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
 
@@ -486,7 +484,14 @@ class MATD3:
                 for state in states
             ]
         elif self.arch == "cnn":
-            states = [state.unsqueeze(2) for state in states]
+            states = [
+                (
+                    state.unsqueeze(0).unsqueeze(2)
+                    if len(state.size()) < 4
+                    else state.unsqueeze(2)
+                )
+                for state in states
+            ]
 
         action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
@@ -498,13 +503,14 @@ class MATD3:
                 with torch.no_grad():
                     action_values = actor(state)
             actor.train()
+
             if self.discrete_actions:
-                action = action_values.cpu().data.numpy().squeeze()
+                action = action_values.cpu().data.numpy()
                 if training:
                     action = (action + self.action_noise(idx)).clip(0, 1)
             else:
                 action = self.scale_to_action_space(
-                    action_values.cpu().data.numpy().squeeze(), idx
+                    action_values.cpu().data.numpy(), idx
                 )
                 if training:
                     action = (action + self.action_noise(idx)).clip(
@@ -564,7 +570,7 @@ class MATD3:
                 * np.sqrt(self.dt)
                 * np.random.normal(size=(self.vect_noise_dim, self.action_dims[idx]))
             )
-            self.current_noise = noise
+            self.current_noise[idx] = noise
         else:
             noise = np.random.normal(
                 self.mean_noise[idx],
@@ -893,7 +899,12 @@ class MATD3:
                         action = discrete_action
                     else:
                         action = cont_actions
+                    if not is_vectorised:
+                        action = {agent: act[0] for agent, act in action.items()}
                     state, reward, done, trunc, info = env.step(action)
+                    scores += np.sum(
+                        np.array(list(reward.values())).transpose(), axis=-1
+                    )
                     done_array = np.array(list(done.values())).transpose()
                     trunc_array = np.array(list(trunc.values())).transpose()
                     if not is_vectorised:

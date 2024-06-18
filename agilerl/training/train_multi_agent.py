@@ -265,6 +265,9 @@ def train_multi_agent(
                     action = discrete_action
                 else:
                     action = cont_actions
+
+                if not is_vectorised:
+                    action = {agent: act[0] for agent, act in action.items()}
                 next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
