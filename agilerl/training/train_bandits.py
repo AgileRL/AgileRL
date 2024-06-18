@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
@@ -122,6 +122,12 @@ def train_bandits(
             else:
                 warnings.warn("Must login to wandb with API key.")
 
+        config_dict = {}
+        if INIT_HP is not None:
+            config_dict.update(INIT_HP)
+        if MUT_P is not None:
+            config_dict.update(MUT_P)
+
         if accelerator is not None:
             accelerator.wait_for_everyone()
             if accelerator.is_main_process:
@@ -132,23 +138,7 @@ def train_bandits(
                         env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                     ),
                     # track hyperparameters and run metadata
-                    config={
-                        "algo": f"Evo HPO {algo}",
-                        "env": env_name,
-                        "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                        "lr": INIT_HP["LR"] if INIT_HP else None,
-                        "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
-                        "lambda": INIT_HP["LAMBDA"] if INIT_HP else None,
-                        "reg": INIT_HP["REG"] if INIT_HP else None,
-                        "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
-                        "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
-                        "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
-                        "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
-                        "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
-                        "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
-                        "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
-                        "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
-                    },
+                    config=config_dict,
                 )
             accelerator.wait_for_everyone()
         else:
@@ -159,23 +149,7 @@ def train_bandits(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
                 # track hyperparameters and run metadata
-                config={
-                    "algo": f"Evo HPO {algo}",
-                    "env": env_name,
-                    "batch_size": INIT_HP["BATCH_SIZE"] if INIT_HP else None,
-                    "lr": INIT_HP["LR"] if INIT_HP else None,
-                    "gamma": INIT_HP["GAMMA"] if INIT_HP else None,
-                    "lambda": INIT_HP["LAMBDA"] if INIT_HP else None,
-                    "reg": INIT_HP["REG"] if INIT_HP else None,
-                    "memory_size": INIT_HP["MEMORY_SIZE"] if INIT_HP else None,
-                    "learn_step": INIT_HP["LEARN_STEP"] if INIT_HP else None,
-                    "pop_size": INIT_HP["POP_SIZE"] if INIT_HP else None,
-                    "no_mut": MUT_P["NO_MUT"] if MUT_P else None,
-                    "arch_mut": MUT_P["ARCH_MUT"] if MUT_P else None,
-                    "params_mut": MUT_P["PARAMS_MUT"] if MUT_P else None,
-                    "act_mut": MUT_P["ACT_MUT"] if MUT_P else None,
-                    "rl_hp_mut": MUT_P["RL_HP_MUT"] if MUT_P else None,
-                },
+                config=config_dict,
             )
 
     if accelerator is not None:
@@ -248,11 +222,8 @@ def train_bandits(
                 memory.save2memory(state[action], reward, is_vectorised=False)
 
                 # Learn according to learning frequency
-                if (
-                    memory.counter % agent.learn_step == 0
-                    and len(memory) >= agent.batch_size
-                ):
-                    for _ in range(2):
+                if len(memory) >= agent.batch_size:
+                    for _ in range(agent.learn_step):
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm
                         experiences = sampler.sample(agent.batch_size)

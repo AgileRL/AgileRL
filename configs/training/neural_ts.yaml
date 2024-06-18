@@ -14,7 +14,7 @@ INIT_HP:
     LAMBDA: 1.0               # Regularization parameter
     REG: 0.00625              # Loss regularization parameter
     MEMORY_SIZE: 10000        # Max memory buffer size
-    LEARN_STEP: 1             # Learning frequency
+    LEARN_STEP: 2             # Learning frequency
     TOURN_SIZE: 2             # Tournament size
     ELITISM: true             # Elitism in tournament selection
     POP_SIZE: 4               # Population size

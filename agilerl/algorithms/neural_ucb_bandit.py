@@ -35,7 +35,7 @@ class NeuralUCB:
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 1
+    :param learn_step: Learning frequency, defaults to 2
     :type learn_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
@@ -60,7 +60,7 @@ class NeuralUCB:
         reg=0.000625,
         batch_size=64,
         lr=1e-3,
-        learn_step=1,
+        learn_step=2,
         mut=None,
         actor_network=None,
         device="cpu",
