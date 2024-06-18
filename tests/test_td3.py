@@ -286,7 +286,7 @@ def test_initialize_td3_with_actor_network(
         action_dim,
         one_hot,
         max_action,
-        expl_noise=np.zeros(action_dim),
+        expl_noise=np.zeros((1, action_dim)),
         actor_network=actor_network,
         critic_networks=[critic_1_network, critic_2_network],
     )
