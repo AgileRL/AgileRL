@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
@@ -415,9 +415,12 @@ def train_off_policy(
         ]
         pop_fitnesses.append(fitnesses)
         mean_scores = [
-            np.mean(episode_scores)
+            (
+                np.mean(episode_scores)
+                if len(episode_scores) > 0
+                else "0 completed episodes"
+            )
             for episode_scores in pop_episode_scores
-            if len(episode_scores) > 0
         ]
 
         wandb_dict = {
@@ -427,7 +430,11 @@ def train_off_policy(
                 else total_steps
             ),
             "train/mean_score": np.mean(
-                [mean_score for mean_score in mean_scores if mean_score is not np.nan]
+                [
+                    mean_score
+                    for mean_score in mean_scores
+                    if not isinstance(mean_score, str)
+                ]
             ),
             "eval/mean_fitness": np.mean(fitnesses),
             "eval/best_fitness": np.max(fitnesses),
