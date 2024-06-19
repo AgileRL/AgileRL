@@ -9,7 +9,7 @@ INIT_HP:
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
-    LEARN_STEP: 128            # Learning frequency
+    LEARN_STEP: 2048           # Learning frequency
     MAX_STEPS: 1_000_000       # Max no. steps
     TARGET_SCORE: 190.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
@@ -24,7 +24,7 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 10_000          # Evolution frequency
+    EVO_STEPS: 20_480          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     WANDB: true                # Log with Weights and Biases
@@ -44,8 +44,8 @@ MUTATION_PARAMS:
     MAX_LR: 0.01
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
-    MIN_LEARN_STEP: 32
-    MAX_LEARN_STEP: 1024
+    MIN_LEARN_STEP: 256
+    MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
     arch: mlp

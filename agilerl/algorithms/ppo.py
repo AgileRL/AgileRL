@@ -34,7 +34,7 @@ class PPO:
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 128
+    :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
@@ -78,7 +78,7 @@ class PPO:
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
-        learn_step=128,
+        learn_step=2048,
         gamma=0.99,
         gae_lambda=0.95,
         mut=None,
