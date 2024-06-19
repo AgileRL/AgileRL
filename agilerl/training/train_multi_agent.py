@@ -551,4 +551,5 @@ def train_multi_agent(
         else:
             wandb.finish()
 
+    pbar.close()
     return pop, pop_fitnesses

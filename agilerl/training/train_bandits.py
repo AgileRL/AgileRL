@@ -393,4 +393,5 @@ def train_bandits(
         else:
             wandb.finish()
 
+    pbar.close()
     return pop, pop_fitnesses

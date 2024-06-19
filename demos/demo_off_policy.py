@@ -216,4 +216,5 @@ if __name__ == "__main__":
         for agent in pop:
             agent.steps.append(agent.steps[-1])
 
+    pbar.close()
     env.close()

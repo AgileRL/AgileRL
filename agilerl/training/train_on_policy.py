@@ -443,4 +443,5 @@ def train_on_policy(
         else:
             wandb.finish()
 
+    pbar.close()
     return pop, pop_fitnesses

@@ -1216,6 +1216,7 @@ At regular intervals, we evaluate the performance, or 'fitness',  of the agents 
       elite.saveCheckpoint(save_path)
       print(f"Elite agent saved to '{save_path}'.")
 
+      pbar.close()
 
 Trained model weights
 ^^^^^^^^^^^^^^^^^^^^^

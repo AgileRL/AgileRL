@@ -423,4 +423,5 @@ Alternatively, use a custom training loop. Combining all of the above:
         for agent in pop:
             agent.steps.append(agent.steps[-1])
 
+    pbar.close()
     env.close()

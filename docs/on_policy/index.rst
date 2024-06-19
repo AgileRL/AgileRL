@@ -389,4 +389,5 @@ Alternatively, use a custom on-policy training loop:
         for agent in pop:
             agent.steps.append(agent.steps[-1])
 
+    pbar.close()
     env.close()

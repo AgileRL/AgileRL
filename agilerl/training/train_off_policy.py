@@ -589,4 +589,5 @@ def train_off_policy(
         else:
             wandb.finish()
 
+    pbar.close()
     return pop, pop_fitnesses
