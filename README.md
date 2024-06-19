@@ -83,18 +83,7 @@ that make use of PettingZoo environments such as training DQN to play Connect Fo
 
 Our demo files in ``demos`` also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
 
-## Evolvable algorithms implemented (more coming soon!)
-  * DQN
-  * Rainbow DQN
-  * DDPG
-  * TD3
-  * PPO
-  * CQL
-  * ILQL
-  * MADDPG
-  * MATD3
-  * NeuralUCB
-  * NeuralTS
+## Evolvable algorithms (more coming soon!)
 
   ### Single-agent algorithms
 
