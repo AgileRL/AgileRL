@@ -3,8 +3,9 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from tqdm import trange
+
+import wandb
 
 
 def train_on_policy(
@@ -223,6 +224,8 @@ def train_on_policy(
                 values = []
                 truncs = []
 
+                learn_steps = 0
+
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
@@ -240,6 +243,7 @@ def train_on_policy(
 
                     total_steps += num_envs
                     steps += num_envs
+                    learn_steps += num_envs
 
                     states.append(state)
                     actions.append(action)
@@ -262,7 +266,7 @@ def train_on_policy(
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
-                pbar.update((evo_steps // agent.learn_step) // len(pop))
+                pbar.update(learn_steps // len(pop))
 
                 if swap_channels:
                     next_state = np.moveaxis(next_state, [-1], [-3])
