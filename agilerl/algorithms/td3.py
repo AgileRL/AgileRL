@@ -118,7 +118,6 @@ class TD3:
         assert max_action > min_action, "Max action must be greater than min action."
         assert max_action > 0, "Max action must be greater than zero."
         assert min_action <= 0, "Min action must be less than or equal to zero."
-        print(expl_noise)
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, action_dim)
