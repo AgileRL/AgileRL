@@ -108,10 +108,9 @@ if __name__ == "__main__":
 
     total_steps = 0
 
-    pbar = trange(max_steps, unit="step")
-
     # TRAINING LOOP
     print("Training...")
+    pbar = trange(max_steps, unit="step")
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population

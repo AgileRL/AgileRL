@@ -196,7 +196,6 @@ def train_on_policy(
     pop_fitnesses = []
     total_steps = 0
     loss = None
-    scores = np.zeros(num_envs)
     checkpoint_count = 0
 
     # Pre-training mutation
@@ -211,6 +210,7 @@ def train_on_policy(
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
+            scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
 

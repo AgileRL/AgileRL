@@ -41,7 +41,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils.utils import makeVectEnvs, initialPopulation
+    from agilerl.utils.utils import initialPopulation, makeVectEnvs
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -315,10 +315,9 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     total_steps = 0
 
-    pbar = trange(max_steps, unit="step")
-
     # TRAINING LOOP
     print("Training...")
+    pbar = trange(max_steps, unit="step")
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         pop_episode_scores = []
         for agent in pop:  # Loop through population
