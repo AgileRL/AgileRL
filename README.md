@@ -116,7 +116,7 @@ INIT_HP = {
     'CHANNELS_LAST': False,         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     'BATCH_SIZE': 256,              # Batch size
     'LR': 1e-3,                     # Learning rate
-    'EPISODES': 2000,               # Max no. episodes
+    'MAX_STEPS': 1_000_000,         # Max no. steps
     'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
     'GAMMA': 0.99,                  # Discount factor
     'MEMORY_SIZE': 10000,           # Max memory buffer size
@@ -125,9 +125,11 @@ INIT_HP = {
     'TOURN_SIZE': 2,                # Tournament size
     'ELITISM': True,                # Elitism in tournament selection
     'POP_SIZE': 6,                  # Population size
-    'EVO_EPOCHS': 20,               # Evolution frequency
-    'POLICY_FREQ': 2,               # Policy network update frequency
-    'WANDB': True                   # Log with Weights and Biases
+    'EVO_STEPS': 10_000,            # Evolution frequency
+    'EVAL_STEPS': None,             # Evaluation steps
+    'EVAL_LOOP': 1,                 # Evaluation episodes
+    'LEARNING_DELAY': 1000,         # Steps before starting learning
+    'WANDB': True,                  # Log with Weights and Biases
 }
 ```
 ```python
@@ -157,7 +159,8 @@ import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=16)
+num_envs = 16
+env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
 try:
     state_dim = env.single_observation_space.n          # Discrete observation space
     one_hot = True                                      # Requires one-hot encoding
@@ -172,14 +175,17 @@ except Exception:
 if INIT_HP['CHANNELS_LAST']:
     state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-agent_pop = initialPopulation(algo=INIT_HP['ALGO'],                 # Algorithm
-                              state_dim=state_dim,                  # State dimension
-                              action_dim=action_dim,                # Action dimension
-                              one_hot=one_hot,                      # One-hot encoding
-                              net_config=NET_CONFIG,                # Network configuration
-                              INIT_HP=INIT_HP,                      # Initial hyperparameters
-                              population_size=INIT_HP['POP_SIZE'],  # Population size
-                              device=device)
+agent_pop = initialPopulation(
+    algo=INIT_HP['ALGO'],                 # Algorithm
+    state_dim=state_dim,                  # State dimension
+    action_dim=action_dim,                # Action dimension
+    one_hot=one_hot,                      # One-hot encoding
+    net_config=NET_CONFIG,                # Network configuration
+    INIT_HP=INIT_HP,                      # Initial hyperparameters
+    population_size=INIT_HP['POP_SIZE'],  # Population size
+    num_envs=num_envs,                    # Number of vectorized environments
+    device=device,
+)
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
 ```python
@@ -188,45 +194,55 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 
 field_names = ["state", "action", "reward", "next_state", "done"]
-memory = ReplayBuffer(memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
-                      field_names=field_names,              # Field names to store in memory
-                      device=device)
+memory = ReplayBuffer(
+    memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
+    field_names=field_names,              # Field names to store in memory
+    device=device,
+)
 
-tournament = TournamentSelection(tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
-                                 elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
-                                 population_size=INIT_HP['POP_SIZE'],   # Population size
-                                 evo_step=INIT_HP['EVO_EPOCHS'])        # Evaluate using last N fitness scores
+tournament = TournamentSelection(
+    tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
+    elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
+    population_size=INIT_HP['POP_SIZE'],   # Population size
+    eval_loop=INIT_HP['EVAL_LOOP'],        # Evaluate using last N fitness scores
+)
 
-mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Algorithm
-                      no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
-                      architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
-                      new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
-                      parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
-                      activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
-                      rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
-                      rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'],   # Learning HPs to choose from
-                      mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
-                      arch=NET_CONFIG['arch'],                              # Network architecture
-                      rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
-                      device=device)
+mutations = Mutations(
+    algo=INIT_HP['ALGO'],                                 # Algorithm
+    no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
+    architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
+    new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
+    parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
+    activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
+    rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
+    rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'],   # Learning HPs to choose from
+    mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
+    arch=NET_CONFIG['arch'],                              # Network architecture
+    rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
+    device=device,
+)
 ```
-The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have functions <code>getAction()</code> and <code>learn().</code>
+The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have methods <code>getAction()</code> and <code>learn().</code>
 ```python
 from agilerl.training.train_off_policy import train_off_policy
 
-trained_pop, pop_fitnesses = train_off_policy(env=env,                                 # Gym-style environment
-                                   env_name=INIT_HP['ENV_NAME'],            # Environment name
-                                   algo=INIT_HP['ALGO'],                    # Algorithm
-                                   pop=agent_pop,                           # Population of agents
-                                   memory=memory,                           # Replay buffer
-                                   swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                   n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
-                                   evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
-                                   evo_loop=1,                              # Number of evaluation episodes per agent
-                                   target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
-                                   tournament=tournament,                   # Tournament selection object
-                                   mutation=mutations,                      # Mutations object
-                                   wb=INIT_HP['WANDB'])                     # Weights and Biases tracking
+trained_pop, pop_fitnesses = train_off_policy(
+    env=env,                                   # Gym-style environment
+    env_name=INIT_HP['ENV_NAME'],              # Environment name
+    algo=INIT_HP['ALGO'],                      # Algorithm
+    pop=agent_pop,                             # Population of agents
+    memory=memory,                             # Replay buffer
+    swap_channels=INIT_HP['CHANNELS_LAST'],    # Swap image channel from last to first
+    max_steps=INIT_HP["MAX_STEPS"],            # Max number of training steps
+    evo_steps=INIT_HP['EVO_STEPS'],            # Evolution frequency
+    eval_steps=INIT_HP["EVAL_STEPS"],          # Number of steps in evaluation episode
+    eval_loop=INIT_HP["EVAL_LOOP"],            # Number of evaluation episodes
+    learning_delay=INIT_HP['LEARNING_DELAY'],  # Steps before starting learning
+    target=INIT_HP['TARGET_SCORE'],            # Target score for early stopping
+    tournament=tournament,                     # Tournament selection object
+    mutation=mutations,                        # Mutations object
+    wb=INIT_HP['WANDB'],                       # Weights and Biases tracking
+)
 
 ```
 
