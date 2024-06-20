@@ -8,7 +8,7 @@ INIT_HP:
     CHANNELS_LAST: false
     BATCH_SIZE: 64            # Batch size
     LR: 0.001                 # Learning rate
-    MAX_STEPS: 200_000        # Max no. steps
+    MAX_STEPS: 10_000         # Max no. steps
     EPISODE_STEPS: 500        # Steps in episode
     TARGET_SCORE: 96.         # Early training stop at avg score of last 100 episodes
     GAMMA: 1.0                # Scaling factor
@@ -19,7 +19,7 @@ INIT_HP:
     TOURN_SIZE: 2             # Tournament size
     ELITISM: true             # Elitism in tournament selection
     POP_SIZE: 4               # Population size
-    EVO_STEPS: 2500           # Evolution frequency
+    EVO_STEPS: 500            # Evolution frequency
     EVAL_STEPS: 500           # Evaluation steps
     EVAL_LOOP: 1              # Evaluation episodes
     WANDB: true               # Log with Weights and Biases
