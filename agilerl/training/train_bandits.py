@@ -215,16 +215,16 @@ def train_bandits(
         for agent_idx, agent in enumerate(pop):  # Loop through population
             score = 0
             losses = []
-            state = env.reset()  # Reset environment at start of episode
+            context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
                 if swap_channels:
-                    state = np.moveaxis(state, [-1], [-3])
+                    context = np.moveaxis(context, [-1], [-3])
                 # Get next action from agent
-                action = agent.getAction(state)
-                next_state, reward = env.step(action)  # Act in environment
+                action = agent.getAction(context)
+                next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(state[action], reward, is_vectorised=False)
+                memory.save2memory(context[action], reward, is_vectorised=False)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
@@ -238,7 +238,7 @@ def train_bandits(
                 score += reward
                 agent.regret.append(agent.regret[-1] + 1 - reward)
 
-                state = next_state
+                context = next_context
 
             agent.scores.append(score)
             pop_episode_scores.append(score)

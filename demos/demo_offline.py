@@ -111,9 +111,9 @@ if __name__ == "__main__":
         device=device,
     )
 
-    max_steps = 200000  # Max steps
+    max_steps = 50000  # Max steps
 
-    evo_steps = 10000  # Evolution frequency
+    evo_steps = 5000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
 
@@ -124,11 +124,12 @@ if __name__ == "__main__":
     pbar = trange(max_steps, unit="step")
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
-            for idx_step in range(max_steps):
+            for idx_step in range(evo_steps):
                 experiences = memory.sample(agent.batch_size)  # Sample replay buffer
                 agent.learn(experiences)  # Learn according to agent's RL algorithm
-            total_steps += max_steps
-            agent.steps[-1] += max_steps
+            total_steps += evo_steps
+            agent.steps[-1] += evo_steps
+            pbar.update(evo_steps)
 
         # Evaluate population
         fitnesses = [
@@ -142,7 +143,6 @@ if __name__ == "__main__":
         ]
 
         print(f"--- Global Steps {total_steps} ---")
-        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
         print(f"Steps {[agent.steps[-1] for agent in pop]}")
         print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
         print(

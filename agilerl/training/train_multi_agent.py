@@ -236,14 +236,14 @@ def train_multi_agent(
             steps = 0
 
             if swap_channels:
-                if is_vectorised:
+                if not is_vectorised:
                     state = {
-                        agent_id: np.moveaxis(s, [-1], [-3])
+                        agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                         for agent_id, s in state.items()
                     }
                 else:
                     state = {
-                        agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                        agent_id: np.moveaxis(s, [-1], [-3])
                         for agent_id, s in state.items()
                     }
 
@@ -272,9 +272,8 @@ def train_multi_agent(
                         agent: act[0] for agent, act in cont_actions.items()
                     }
 
-                next_state, reward, done, truncation, info = env.step(
-                    action
-                )  # Act in environment
+                # Act in environment
+                next_state, reward, termination, truncation, info = env.step(action)
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 total_steps += num_envs
@@ -296,7 +295,7 @@ def train_multi_agent(
                     cont_actions,
                     reward,
                     next_state,
-                    done,
+                    termination,
                     is_vectorised=is_vectorised,
                 )
 
@@ -337,12 +336,12 @@ def train_multi_agent(
                 state = next_state
 
                 reset_noise_indices = []
-                done_array = np.array(list(done.values())).transpose()
+                term_array = np.array(list(termination.values())).transpose()
                 trunc_array = np.array(list(truncation.values())).transpose()
                 if not is_vectorised:
-                    done_array = np.expand_dims(done_array, 0)
+                    term_array = np.expand_dims(term_array, 0)
                     trunc_array = np.expand_dims(trunc_array, 0)
-                for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
+                for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
                     if np.any(d) or np.any(t):
                         completed_episode_scores.append(scores[idx])
                         agent.scores.append(scores[idx])

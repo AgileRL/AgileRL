@@ -34,19 +34,19 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "POPULATION_SIZE": 4,  # Population size
-        "DOUBLE": True,  # Use double Q-learning in DQN or CQN
+        "DOUBLE": True,  # Use double Q-learning
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
-        "POLICY_FREQ": 2,  # DDPG target network update frequency vs policy network
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
+        "POP_SIZE": 4,  # Population size
     }
 
-    env = makeVectEnvs("CartPole-v1", num_envs=1)  # Create environment
+    num_envs = 1
+    env = makeVectEnvs("CartPole-v1")  # Create environment
     dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
     try:
@@ -70,9 +70,10 @@ if __name__ == "__main__":
         one_hot=one_hot,  # One-hot encoding
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        accelerator=accelerator,
-    )  # Accelerator
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        num_envs=num_envs,  # Number of vectorized envs
+        accelerator=accelerator,  # Accelerator
+    )
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -110,9 +111,9 @@ if __name__ == "__main__":
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        evo_step=1,
-    )  # Evaluate using last N fitness scores
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
 
     mutations = Mutations(
         algo="CQN",  # Algorithm
@@ -126,14 +127,16 @@ if __name__ == "__main__":
         mutation_sd=0.1,  # Mutation strength
         arch=NET_CONFIG["arch"],  # Network architecture
         rand_seed=1,  # Random seed
-        accelerator=accelerator,
-    )  # Accelerator)
+        accelerator=accelerator,  # Accelerator
+    )
 
-    max_episodes = 1000  # Max training episodes
-    max_steps = 500  # Max steps per episode
+    max_steps = 50000  # Max steps
 
-    evo_epochs = 5  # Evolution frequency
-    evo_loop = 1  # Number of evaluation episodes
+    evo_steps = 5000  # Evolution frequency
+    eval_steps = None  # Evaluation steps per episode - go until done
+    eval_loop = 1  # Number of evaluation episodes
+
+    total_steps = 0
 
     accel_temp_models_path = "models/{}".format("CartPole-v1")
     if accelerator.is_main_process:
@@ -143,52 +146,57 @@ if __name__ == "__main__":
     print(f"\nDistributed training on {accelerator.device}...")
 
     # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
+    print("Training...")
+    pbar = trange(max_steps, unit="step")
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
         for agent in pop:  # Loop through population
-            for idx_step in range(max_steps):
+            for idx_step in range(evo_steps):
                 # Sample dataloader
                 experiences = sampler.sample(agent.batch_size)
                 # Learn according to agent's RL algorithm
                 agent.learn(experiences)
+            total_steps += evo_steps
+            agent.steps[-1] += evo_steps
+            pbar.update(evo_steps)
 
-        # Now evolve population if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=max_steps,
-                    loop=evo_loop,
-                )
-                for agent in pop
-            ]
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=eval_steps,
+                loop=eval_loop,
+            )
+            for agent in pop
+        ]
 
-            if accelerator.is_main_process:
-                print(f"Episode {idx_epi+1}/{max_episodes}")
-                print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-                print(
-                    f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
-                )
+        if accelerator.is_main_process:
+            print(f"--- Global Steps {total_steps} ---")
+            print(f"Steps {[agent.steps[-1] for agent in pop]}")
+            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+            print(
+                f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+            )
 
-            # Tournament selection and population mutation
-            accelerator.wait_for_everyone()
-            for model in pop:
-                model.unwrap_models()
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                elite, pop = tournament.select(pop)
-                pop = mutations.mutation(pop)
-                for pop_i, model in enumerate(pop):
-                    model.saveCheckpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")
-            accelerator.wait_for_everyone()
-            if not accelerator.is_main_process:
-                for pop_i, model in enumerate(pop):
-                    model.loadCheckpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")
-            accelerator.wait_for_everyone()
-            for model in pop:
-                model.wrap_models()
+        # Tournament selection and population mutation
+        accelerator.wait_for_everyone()
+        for model in pop:
+            model.unwrap_models()
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+            for pop_i, model in enumerate(pop):
+                model.saveCheckpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")
+        accelerator.wait_for_everyone()
+        if not accelerator.is_main_process:
+            for pop_i, model in enumerate(pop):
+                model.loadCheckpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")
+        accelerator.wait_for_everyone()
+        for model in pop:
+            model.wrap_models()
 
+    pbar.close()
     env.close()

@@ -315,6 +315,8 @@ class CQN:
         # soft update target network
         self.softUpdate()
 
+        return q1_loss.item()
+
     def softUpdate(self):
         """Soft updates target network."""
         for eval_param, target_param in zip(
