@@ -423,57 +423,57 @@ def train_off_policy(
             for episode_scores in pop_episode_scores
         ]
 
-        wandb_dict = {
-            "global_step": (
-                total_steps * accelerator.state.num_processes
-                if accelerator is not None and accelerator.is_main_process
-                else total_steps
-            ),
-            "train/mean_score": np.mean(
-                [
-                    mean_score
-                    for mean_score in mean_scores
-                    if not isinstance(mean_score, str)
-                ]
-            ),
-            "eval/mean_fitness": np.mean(fitnesses),
-            "eval/best_fitness": np.max(fitnesses),
-        }
-
-        # Create the loss dictionaries
-        if algo in ["RainbowDQN", "DQN"]:
-            actor_loss_dict = {
-                f"train/agent_{index}_actor_loss": np.mean(loss[-10:])
-                for index, loss in enumerate(pop_loss)
-            }
-            wandb_dict.update(actor_loss_dict)
-        elif algo in ["TD3", "DDPG"]:
-            actor_loss_dict = {
-                f"train/agent_{index}_actor_loss": np.mean(
-                    list(zip(*loss_list))[0][-10:]
-                )
-                for index, loss_list in enumerate(pop_loss)
-            }
-            critic_loss_dict = {
-                f"train/agent_{index}_critic_loss": np.mean(
-                    list(zip(*loss_list))[-1][-10:]
-                )
-                for index, loss_list in enumerate(pop_loss)
-            }
-            wandb_dict.update(actor_loss_dict)
-            wandb_dict.update(critic_loss_dict)
-
-        if algo in ["DQN", "Rainbow DQN"]:
-            train_actions_hist = [
-                freq / sum(train_actions_hist) for freq in train_actions_hist
-            ]
-            train_actions_dict = {
-                f"train/action_{index}": action
-                for index, action in enumerate(train_actions_hist)
-            }
-            wandb_dict.update(train_actions_dict)
-
         if wb:
+            wandb_dict = {
+                "global_step": (
+                    total_steps * accelerator.state.num_processes
+                    if accelerator is not None and accelerator.is_main_process
+                    else total_steps
+                ),
+                "train/mean_score": np.mean(
+                    [
+                        mean_score
+                        for mean_score in mean_scores
+                        if not isinstance(mean_score, str)
+                    ]
+                ),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+
+            # Create the loss dictionaries
+            if algo in ["RainbowDQN", "DQN"]:
+                actor_loss_dict = {
+                    f"train/agent_{index}_actor_loss": np.mean(loss[-10:])
+                    for index, loss in enumerate(pop_loss)
+                }
+                wandb_dict.update(actor_loss_dict)
+            elif algo in ["TD3", "DDPG"]:
+                actor_loss_dict = {
+                    f"train/agent_{index}_actor_loss": np.mean(
+                        list(zip(*loss_list))[0][-10:]
+                    )
+                    for index, loss_list in enumerate(pop_loss)
+                }
+                critic_loss_dict = {
+                    f"train/agent_{index}_critic_loss": np.mean(
+                        list(zip(*loss_list))[-1][-10:]
+                    )
+                    for index, loss_list in enumerate(pop_loss)
+                }
+                wandb_dict.update(actor_loss_dict)
+                wandb_dict.update(critic_loss_dict)
+
+            if algo in ["DQN", "Rainbow DQN"]:
+                train_actions_hist = [
+                    freq / sum(train_actions_hist) for freq in train_actions_hist
+                ]
+                train_actions_dict = {
+                    f"train/action_{index}": action
+                    for index, action in enumerate(train_actions_hist)
+                }
+                wandb_dict.update(train_actions_dict)
+
             if accelerator is not None:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:

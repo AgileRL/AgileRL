@@ -304,30 +304,30 @@ def train_on_policy(
             for episode_scores in pop_episode_scores
         ]
 
-        wandb_dict = {
-            "global_step": (
-                total_steps * accelerator.state.num_processes
-                if accelerator is not None and accelerator.is_main_process
-                else total_steps
-            ),
-            "train/mean_score": np.mean(
-                [
-                    mean_score
-                    for mean_score in mean_scores
-                    if not isinstance(mean_score, str)
-                ]
-            ),
-            "eval/mean_fitness": np.mean(fitnesses),
-            "eval/best_fitness": np.max(fitnesses),
-        }
-
-        agent_loss_dict = {
-            f"train/agent_{index}_loss": np.mean(loss_[-10:])
-            for index, loss_ in enumerate(pop_loss)
-        }
-        wandb_dict.update(agent_loss_dict)
-
         if wb:
+            wandb_dict = {
+                "global_step": (
+                    total_steps * accelerator.state.num_processes
+                    if accelerator is not None and accelerator.is_main_process
+                    else total_steps
+                ),
+                "train/mean_score": np.mean(
+                    [
+                        mean_score
+                        for mean_score in mean_scores
+                        if not isinstance(mean_score, str)
+                    ]
+                ),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+
+            agent_loss_dict = {
+                f"train/agent_{index}_loss": np.mean(loss_[-10:])
+                for index, loss_ in enumerate(pop_loss)
+            }
+            wandb_dict.update(agent_loss_dict)
+
             if accelerator is not None:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
