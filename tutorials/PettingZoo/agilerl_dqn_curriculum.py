@@ -11,11 +11,11 @@ from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 import yaml
 from pettingzoo.classic import connect_four_v3
 from tqdm import tqdm, trange
 
+import wandb
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -588,8 +588,8 @@ if __name__ == "__main__":
             tournament_size=2,  # Tournament selection size
             elitism=True,  # Elitism in tournament selection
             population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-            evo_step=1,
-        )  # Evaluate using last N fitness scores
+            eval_loop=1,  # Evaluate using last N fitness scores
+        )
 
         # Instantiate a mutations object (used for HPO)
         mutations = Mutations(
