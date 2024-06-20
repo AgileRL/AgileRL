@@ -10,7 +10,8 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.utils.utils import initialPopulation, printHyperparams
+from agilerl.utils.utils import initialPopulation
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -21,7 +22,7 @@ from agilerl.utils.utils import initialPopulation, printHyperparams
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("============ AgileRL ============")
+    print("============ AgileRL Multi-agent benchmarking ============")
 
     if DISTRIBUTED_TRAINING:
         accelerator = Accelerator()
@@ -31,9 +32,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator.wait_for_everyone()
     else:
         accelerator = None
-        print(device)
-
-    print("Multi-agent benchmarking")
+    print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(
         max_cycles=25, continuous_actions=True
@@ -46,6 +45,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.color_reduction_v0(env, mode="B")
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
+
+    env = PettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
 
     env.reset()
 
@@ -163,7 +164,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator=accelerator,
     )
 
-    trained_pop, pop_fitnesses = train_multi_agent(
+    train_multi_agent(
         env,
         INIT_HP["ENV_NAME"],
         INIT_HP["ALGO"],
@@ -173,19 +174,17 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         MUT_P=MUTATION_PARAMS,
         net_config=NET_CONFIG,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
-        max_steps=25,
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+        learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
         wb=INIT_HP["WANDB"],
         accelerator=accelerator,
     )
-
-    printHyperparams(trained_pop)
-    # plotPopulationScore(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

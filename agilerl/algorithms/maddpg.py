@@ -188,27 +188,23 @@ class MADDPG:
         self.vect_noise_dim = vect_noise_dim
         self.expl_noise = (
             expl_noise
-            if isinstance(expl_noise, np.ndarray)
-            else np.array(
-                [
-                    expl_noise * np.ones((vect_noise_dim, action_dim))
-                    for action_dim in self.action_dims
-                ]
-            )
+            if isinstance(expl_noise, list)
+            else [
+                expl_noise * np.ones((vect_noise_dim, action_dim))
+                for action_dim in self.action_dims
+            ]
         )
         self.mean_noise = (
             mean_noise
-            if isinstance(mean_noise, np.ndarray)
-            else np.array(
-                [
-                    mean_noise * np.ones((vect_noise_dim, action_dim))
-                    for action_dim in self.action_dims
-                ]
-            )
+            if isinstance(mean_noise, list)
+            else [
+                mean_noise * np.ones((vect_noise_dim, action_dim))
+                for action_dim in self.action_dims
+            ]
         )
-        self.current_noise = np.array(
-            [np.zeros((vect_noise_dim, action_dim)) for action_dim in self.action_dims]
-        )
+        self.current_noise = [
+            np.zeros((vect_noise_dim, action_dim)) for action_dim in self.action_dims
+        ]
         self.theta = theta
         self.dt = dt
 
@@ -538,10 +534,9 @@ class MADDPG:
 
     def reset_action_noise(self, indices):
         """Reset action noise."""
-        for idx in indices:
-            self.current_noise[idx] = np.zeros(
-                (self.vect_noise_dim, self.action_dims[idx])
-            )
+        for i in range(len(self.current_noise)):
+            for idx in indices:
+                self.current_noise[i][idx, :] = 0
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
@@ -596,7 +591,8 @@ class MADDPG:
 
             if self.arch == "mlp":
                 action_values = list(actions.values())
-                input_combined = torch.cat(list(states.values()) + action_values, 1)
+                state_values = list(states.values())
+                input_combined = torch.cat(state_values + action_values, 1)
                 if self.accelerator is not None:
                     with critic.no_sync():
                         q_value = critic(input_combined)
@@ -932,6 +928,10 @@ class MADDPG:
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
+                elif isinstance(attr, list) or isinstance(clone_attr, list):
+                    setattr(clone, attribute, [])
+                    for el in attr:
+                        getattr(clone, attribute).append(copy.deepcopy(el))
                 else:
                     if attr != clone_attr:
                         setattr(

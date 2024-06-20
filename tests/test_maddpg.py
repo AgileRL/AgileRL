@@ -305,7 +305,8 @@ def test_initialize_maddpg_with_net_config(
     assert maddpg.max_action == max_action
     assert maddpg.min_action == min_action
     assert maddpg.discrete_actions == discrete_actions
-    assert np.all(maddpg.expl_noise == expl_noise)
+    for noise in maddpg.expl_noise:
+        assert np.all(noise == expl_noise)
     assert maddpg.net_config == net_config, maddpg.net_config
     assert maddpg.batch_size == batch_size
     assert maddpg.multi

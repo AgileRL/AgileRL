@@ -308,7 +308,8 @@ def test_initialize_matd3_with_net_config(
     assert matd3.max_action == max_action
     assert matd3.min_action == min_action
     assert matd3.discrete_actions == discrete_actions
-    assert np.all(matd3.expl_noise == expl_noise)
+    for noise in matd3.expl_noise:
+        assert np.all(noise == expl_noise)
     assert matd3.net_config == net_config, matd3.net_config
     assert matd3.batch_size == batch_size
     assert matd3.multi

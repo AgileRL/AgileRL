@@ -2,6 +2,7 @@ import warnings
 
 from torch.utils.data import DataLoader
 
+from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
@@ -51,8 +52,10 @@ class Sampler:
             self.sample = self.sample_n_step
 
         else:
-            if not isinstance(self.memory, ReplayBuffer):
-                warnings.warn("Memory is not an agilerl ReplayBuffer.")
+            if not isinstance(self.memory, (ReplayBuffer, MultiAgentReplayBuffer)):
+                warnings.warn(
+                    "Memory is not an agilerl ReplayBuffer or MultiAgentReplayBuffer."
+                )
             self.sample = self.sample_standard
 
     def sample_standard(self, batch_size, return_idx=False):

@@ -268,6 +268,10 @@ def train_multi_agent(
 
                 if not is_vectorised:
                     action = {agent: act[0] for agent, act in action.items()}
+                    cont_actions = {
+                        agent: act[0] for agent, act in cont_actions.items()
+                    }
+
                 next_state, reward, done, truncation, info = env.step(
                     action
                 )  # Act in environment
@@ -386,45 +390,44 @@ def train_multi_agent(
             for episode_scores in pop_episode_scores
         ]
 
-        wandb_dict = {
-            "global_step": (
-                total_steps * accelerator.state.num_processes
-                if accelerator is not None and accelerator.is_main_process
-                else total_steps
-            ),
-            "train/mean_score": np.mean(
-                [
-                    mean_score
-                    for mean_score in mean_scores
-                    if not isinstance(mean_score, str)
-                ]
-            ),
-            "train/best_score": np.max([agent.scores[-1] for agent in pop]),
-            "eval/mean_fitness": np.mean(fitnesses),
-            "eval/best_fitness": np.max(fitnesses),
-        }
-
-        actor_loss_dict = {}
-        critic_loss_dict = {}
-
-        for agent_idx, agent in enumerate(pop):
-            for agent_id, actor_loss, critic_loss in zip(
-                pop_actor_loss[agent_idx].keys(),
-                pop_actor_loss[agent_idx].values(),
-                pop_critic_loss[agent_idx].values(),
-            ):
-                if actor_loss:
-                    actor_loss_dict[
-                        f"train/agent_{agent_idx}_{agent_id}_actor_loss"
-                    ] = np.mean(actor_loss[-10:])
-                    wandb_dict.update(actor_loss_dict)
-                if critic_loss:
-                    critic_loss_dict[
-                        f"train/agent_{agent_idx}_{agent_id}_critic_loss"
-                    ] = np.mean(critic_loss[-10:])
-                    wandb_dict.update(critic_loss_dict)
-
         if wb:
+            wandb_dict = {
+                "global_step": (
+                    total_steps * accelerator.state.num_processes
+                    if accelerator is not None and accelerator.is_main_process
+                    else total_steps
+                ),
+                "train/mean_score": np.mean(
+                    [
+                        mean_score
+                        for mean_score in mean_scores
+                        if not isinstance(mean_score, str)
+                    ]
+                ),
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+
+            actor_loss_dict = {}
+            critic_loss_dict = {}
+
+            for agent_idx, agent in enumerate(pop):
+                for agent_id, actor_loss, critic_loss in zip(
+                    pop_actor_loss[agent_idx].keys(),
+                    pop_actor_loss[agent_idx].values(),
+                    pop_critic_loss[agent_idx].values(),
+                ):
+                    if actor_loss:
+                        actor_loss_dict[
+                            f"train/agent_{agent_idx}_{agent_id}_actor_loss"
+                        ] = np.mean(actor_loss[-10:])
+                        wandb_dict.update(actor_loss_dict)
+                    if critic_loss:
+                        critic_loss_dict[
+                            f"train/agent_{agent_idx}_{agent_id}_critic_loss"
+                        ] = np.mean(critic_loss[-10:])
+                        wandb_dict.update(critic_loss_dict)
+
             if accelerator is not None:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
@@ -507,13 +510,13 @@ def train_multi_agent(
             print(
                 f"""
                 --- Global Steps {total_steps} ---
-                Fitness:\t\t{fitness}
+                Fitness:\t{fitness}
                 Score:\t\t{mean_scores}
                 5 fitness avgs:\t{avg_fitness}
                 10 score avgs:\t{avg_score}
                 Agents:\t\t{agents}
                 Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
+                Mutations:\t{muts}
                 """,
                 end="\r",
             )
