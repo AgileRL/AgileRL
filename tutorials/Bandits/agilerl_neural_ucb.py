@@ -101,7 +101,7 @@ if __name__ == "__main__":
             total_steps += episode_steps
             agent.steps[-1] += episode_steps
 
-            # Evaluate population
+        # Evaluate population
         fitnesses = [
             agent.test(
                 env,
