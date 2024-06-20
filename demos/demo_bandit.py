@@ -173,9 +173,11 @@ if __name__ == "__main__":
             f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
         )
 
-        # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
+        if pop[0].steps[-1] // evo_steps > evo_count:
+            # Tournament selection and population mutation
+            elite, pop = tournament.select(pop)
+            pop = mutations.mutation(pop)
+            evo_count += 1
 
         # Update step counter
         for agent in pop:

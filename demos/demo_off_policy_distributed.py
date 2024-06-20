@@ -39,6 +39,8 @@ if __name__ == "__main__":
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
+        # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
+        "CHANNELS_LAST": False,
         "POP_SIZE": 4,  # Population size
     }
 

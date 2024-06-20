@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter1d
-from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -29,7 +28,7 @@ if __name__ == "__main__":
         "GAMMA": 1.0,  # Scaling factor
         "LAMBDA": 1.0,  # Regularization factor
         "REG": 0.000625,  # Loss regularization factor
-        "LEARN_STEP": 1,  # Learning frequency
+        "LEARN_STEP": 2,  # Learning frequency
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
     }
@@ -61,11 +60,11 @@ if __name__ == "__main__":
         device=device,
     )
 
-    max_episodes = 50  # Max training episodes
-    max_steps = 50  # Max steps per episode
-
-    evo_epochs = 2  # Evolution frequency
-    evo_loop = 1  # Number of evaluation episodes
+    max_steps = 2500  # Max steps per episode
+    episode_steps = 500  # Steps in episode
+    evo_steps = 500  # Evolution frequency
+    eval_steps = 500  # Evaluation steps per episode
+    eval_loop = 1  # Number of evaluation episodes
 
     print("Training...")
 
@@ -74,11 +73,11 @@ if __name__ == "__main__":
     total_steps = 0
 
     # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for idx_step in range(max_steps):
+            for idx_step in range(episode_steps):
                 # Get next action from agent
                 action = agent.getAction(context)
                 next_context, reward = env.step(action)  # Act in environment
@@ -87,15 +86,11 @@ if __name__ == "__main__":
                 memory.save2memory(context[action], reward)
 
                 # Learn according to learning frequency
-                if (
-                    memory.counter % agent.learn_step == 0
-                    and len(memory) >= agent.batch_size
-                ):
-                    for _ in range(2):
-                        experiences = memory.sample(
-                            agent.batch_size
-                        )  # Sample replay buffer
+                if len(memory) >= agent.batch_size:
+                    for _ in range(agent.learn_step):
+                        # Sample replay buffer
                         # Learn according to agent's RL algorithm
+                        experiences = memory.sample(agent.batch_size)
                         loss = agent.learn(experiences)
                         losses.append(loss)
 
@@ -103,23 +98,24 @@ if __name__ == "__main__":
                 score[i].append(reward)
                 regret[i].append(regret[i][-1] + 1 - reward)
 
-            total_steps += max_steps
+            total_steps += episode_steps
+            agent.steps[-1] += episode_steps
 
-        # Now evaluate population
-        if (idx_epi + 1) % evo_epochs == 0:
             # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=max_steps,
-                    loop=evo_loop,
-                )
-                for agent in pop
-            ]
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=eval_steps,
+                loop=eval_loop,
+            )
+            for agent in pop
+        ]
 
-            print(f"Episode {idx_epi+1}/{max_episodes}")
-            print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
+        print(f"--- Global steps {total_steps} ---")
+        print(f"Steps {[agent.steps[-1] for agent in pop]}")
+        print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
 
     # Plot the results
     plt.figure()
@@ -133,6 +129,7 @@ if __name__ == "__main__":
     plt.ylabel("Regret")
     plt.legend()
     plt.savefig("NeuralUCB-IRIS-regret.png")
+    plt.close()
 
     plt.figure()
     for i, agent_score in enumerate(score):
@@ -146,3 +143,4 @@ if __name__ == "__main__":
     plt.ylabel("Reward")
     plt.legend()
     plt.savefig("NeuralUCB-IRIS-reward.png")
+    plt.close()
