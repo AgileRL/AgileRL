@@ -2,7 +2,7 @@
 # Define initial hyperparameters
 INIT_HP:
     ENV_NAME: CartPole-v1      # Gym environment name
-    DATASET: /projects/2023/evo_wrappers/AgileRL/data/cartpole/cartpole_v1.1.0.h5 # Offline RL dataset
+    DATASET: data/cartpole/cartpole_v1.1.0.h5 # Offline RL dataset
     ALGO: CQN                  # Algorithm
     DOUBLE: true
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
@@ -22,7 +22,7 @@ INIT_HP:
     EVO_STEPS: 10_000          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
