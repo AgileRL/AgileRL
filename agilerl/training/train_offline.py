@@ -270,6 +270,7 @@ def train_offline(
             pop_loss[agent_idx].append(mean_loss)
             agent.steps[-1] += evo_steps
             total_steps += evo_steps
+            pbar.update(evo_steps // len(pop))
 
         # Evaluate population
         fitnesses = [

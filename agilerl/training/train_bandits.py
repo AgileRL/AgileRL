@@ -245,6 +245,7 @@ def train_bandits(
             pop_loss[agent_idx].append(np.mean(losses))
             agent.steps[-1] += episode_steps
             total_steps += episode_steps
+            pbar.update(episode_steps // len(pop))
 
         # Evaluate population
         fitnesses = [
