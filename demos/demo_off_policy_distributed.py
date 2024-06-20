@@ -128,10 +128,9 @@ if __name__ == "__main__":
 
     print(f"\nDistributed training on {accelerator.device}...")
 
-    pbar = trange(max_steps, unit="step")
-
     # TRAINING LOOP
     print("Training...")
+    pbar = trange(max_steps, unit="step", disable=not accelerator.is_local_main_process)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         accelerator.wait_for_everyone()
         pop_episode_scores = []
@@ -142,7 +141,7 @@ if __name__ == "__main__":
             steps = 0
             epsilon = eps_start
 
-            for idx_step in range(max_steps):
+            for idx_step in range(evo_steps):
                 # Get next action from agent
                 action = agent.getAction(state, epsilon)
                 epsilon = max(
