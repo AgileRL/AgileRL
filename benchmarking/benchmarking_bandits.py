@@ -102,9 +102,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=1,
+        max_steps=INIT_HP["MAX_STEPS"],
+        episode_steps=INIT_HP["EPISODE_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -118,7 +120,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("configs/training/neural_ts.yaml") as file:
+    with open("configs/training/neural_ucb.yaml") as file:
         bandit_config = yaml.safe_load(file)
     INIT_HP = bandit_config["INIT_HP"]
     MUTATION_PARAMS = bandit_config["MUTATION_PARAMS"]
