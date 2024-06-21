@@ -532,7 +532,7 @@ class RainbowDQN:
         self.optimizer.step()
 
         # soft update target network
-        self.softUpdate()
+        self.soft_update()
         self.actor.reset_noise()
         self.actor_target.reset_noise()
 
