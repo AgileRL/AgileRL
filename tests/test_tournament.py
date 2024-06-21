@@ -9,7 +9,7 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -45,6 +45,11 @@ SHARED_INIT_HP = {
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
+    "O_U_NOISE": True,
+    "EXPL_NOISE": 0.1,
+    "MEAN_NOISE": 0.0,
+    "THETA": 0.15,
+    "DT": 0.01,
 }
 
 SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
@@ -57,14 +62,14 @@ def test_initialization_with_given_parameters():
     tournament_size = 5
     elitism = True
     population_size = 100
-    evo_step = 10
+    eval_loop = 10
 
-    ts = TournamentSelection(tournament_size, elitism, population_size, evo_step)
+    ts = TournamentSelection(tournament_size, elitism, population_size, eval_loop)
 
     assert ts.tournament_size == tournament_size
     assert ts.elitism == elitism
     assert ts.population_size == population_size
-    assert ts.evo_step == evo_step
+    assert ts.eval_loop == eval_loop
 
 
 ### Single-agent algorithms ###
@@ -91,7 +96,7 @@ def test_returns_best_agent_and_new_population():
     }
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -144,7 +149,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
     }
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -189,7 +194,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -235,7 +240,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,

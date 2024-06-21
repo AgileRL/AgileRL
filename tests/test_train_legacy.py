@@ -1,7 +1,6 @@
 import os
 import random
 import shutil
-from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
 
 import dill
@@ -11,25 +10,22 @@ import torch
 from accelerate import Accelerator
 
 import agilerl.training.train_bandits
-import agilerl.training.train_multi_agent
-import agilerl.training.train_off_policy
-import agilerl.training.train_offline
-import agilerl.training.train_on_policy
+import agilerl.training.train_multi_agent_legacy
+import agilerl.training.train_off_policy_legacy
+import agilerl.training.train_offline_legacy
+import agilerl.training.train_on_policy_legacy
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.algorithms.matd3 import MATD3
-from agilerl.algorithms.neural_ts_bandit import NeuralTS
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
-from agilerl.training.train_bandits import train_bandits
-from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.training.train_off_policy import train_off_policy
-from agilerl.training.train_offline import train_offline
-from agilerl.training.train_on_policy import train_on_policy
+from agilerl.training.train_multi_agent_legacy import train_multi_agent
+from agilerl.training.train_off_policy_legacy import train_off_policy
+from agilerl.training.train_offline_legacy import train_offline
+from agilerl.training.train_on_policy_legacy import train_on_policy
 from agilerl.utils.utils import make_multi_agent_vect_envs
 
 
@@ -76,8 +72,7 @@ class DummyBanditEnv:
 
 
 class DummyAgentOffPolicy:
-    def __init__(self, batch_size, env, beta=None, algo="DQN"):
-        self.algo = algo
+    def __init__(self, batch_size, env, beta=None):
         self.state_size = env.state_size
         self.action_size = env.action_size
         self.action_dim = env.action_size
@@ -120,14 +115,10 @@ class DummyAgentOffPolicy:
     def unwrap_models(self, *args):
         return
 
-    def reset_action_noise(self, *args, **kwargs):
-        return
-
 
 class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def __init__(self, batch_size, env):
         super().__init__(batch_size, env)
-        self.learn_step = 128
 
     def learn(self, *args, **kwargs):
         return random.random()
@@ -140,47 +131,6 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
 
     def save_checkpoint(self, path):
         return super().save_checkpoint(path)
-
-    def load_checkpoint(self, *args):
-        return
-
-    def wrap_models(self, *args):
-        return
-
-    def unwrap_models(self, *args):
-        return
-
-
-class DummyBandit:
-    def __init__(self, batch_size, bandit_env, beta=None):
-        self.state_size = bandit_env.state_size
-        self.action_size = bandit_env.action_size
-        self.action_dim = bandit_env.action_size
-        self.batch_size = batch_size
-        self.beta = beta
-        self.learn_step = 1
-        self.scores = []
-        self.steps = [0]
-        self.regret = [0]
-        self.fitness = []
-        self.mut = "mutation"
-        self.index = 1
-
-    def get_action(self, *args):
-        return np.random.randint(self.action_size)
-
-    def learn(self, experiences):
-        return random.random()
-
-    def test(self, env, swap_channels, max_steps, loop):
-        rand_int = np.random.uniform(0, 400)
-        self.fitness.append(rand_int)
-        return rand_int
-
-    def save_checkpoint(self, path):
-        empty_dic = {}
-        torch.save(empty_dic, path, pickle_module=dill)
-        return True
 
     def load_checkpoint(self, *args):
         return
@@ -229,7 +179,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr_critic = 0.01
         self.discrete_actions = False
 
-    def get_action(self, *args, **kwargs):
+    def get_action(self, *args):
         return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
 
     def learn(self, experiences):
@@ -251,9 +201,6 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         return
 
     def unwrap_models(self, *args):
-        return
-
-    def reset_action_noise(self, *args, **kwargs):
         return
 
 
@@ -471,11 +418,6 @@ def env(state_size, action_size, vect):
 
 
 @pytest.fixture
-def bandit_env(state_size, action_size):
-    return DummyBanditEnv(state_size, action_size)
-
-
-@pytest.fixture
 def multi_env(state_size, action_size):
     return DummyMultiEnv(state_size, action_size)
 
@@ -488,11 +430,6 @@ def population_off_policy(env):
 @pytest.fixture
 def population_on_policy(env):
     return [DummyAgentOnPolicy(5, env) for _ in range(6)]
-
-
-@pytest.fixture
-def population_bandit(bandit_env):
-    return [DummyBandit(5, bandit_env) for _ in range(6)]
 
 
 @pytest.fixture
@@ -521,11 +458,6 @@ def n_step_memory():
 
 
 @pytest.fixture
-def bandit_memory():
-    return DummyBanditMemory()
-
-
-@pytest.fixture
 def multi_memory():
     return DummyMultiMemory()
 
@@ -551,15 +483,6 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    if algo in [DDPG, TD3]:
-        mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = {
-        DQN: "DQN",
-        RainbowDQN: "Rainbow DQN",
-        DDPG: "DDPG",
-        TD3: "TD3",
-        CQN: "CQN",
-    }[algo]
 
     return mock_agent
 
@@ -579,35 +502,6 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.index = 1
     mock_agent.get_action.side_effect = lambda state: tuple(
         np.random.randn(env.action_size) for _ in range(4)
-    )
-    mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
-    mock_agent.learn.side_effect = lambda experiences: random.random()
-    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = "PPO"
-
-    return mock_agent
-
-
-@pytest.fixture
-def mocked_bandit(bandit_env, algo):
-    mock_agent = MagicMock(spec=algo)
-    mock_agent.learn_step = 1
-    mock_agent.batch_size = 5
-    mock_agent.state_size = bandit_env.state_size
-    mock_agent.action_size = 2
-    mock_agent.action_dim = 2
-    mock_agent.beta = 0.4
-    mock_agent.scores = []
-    mock_agent.steps = [0]
-    mock_agent.regret = [0]
-    mock_agent.fitness = []
-    mock_agent.mut = "mutation"
-    mock_agent.index = 1
-    mock_agent.get_action.side_effect = lambda state: np.random.randint(
-        bandit_env.action_size
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
@@ -635,7 +529,7 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.index = 1
     mock_agent.discrete_actions = False
 
-    def get_action(*args, **kwargs):
+    def get_action(*args):
         return {
             agent: np.random.randn(mock_agent.action_size)
             for agent in mock_agent.agents
@@ -651,11 +545,6 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
-    mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
-    mock_agent.algo = {
-        MADDPG: "MADDPG",
-        MATD3: "MATD3",
-    }[algo]
 
     return mock_agent
 
@@ -836,48 +725,6 @@ def mocked_n_step_memory():
 
 
 @pytest.fixture
-def mocked_bandit_memory():
-    mock_memory = MagicMock()
-    mock_memory.counter = 0
-    mock_memory.state_size = None
-    mock_memory.__len__.return_value = 10
-
-    def save_to_memory_vect_envs(states, rewards):
-        if mock_memory.state_size is None:
-            mock_memory.state_size, *_ = (state.shape for state in states)
-            mock_memory.counter += 1
-
-    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
-
-    def save_to_memory(state, reward, is_vectorised=False):
-        if is_vectorised:
-            mock_memory.save_to_memory_vect_envs(state, reward)
-        else:
-            mock_memory.state_size = state.shape
-            mock_memory.counter += 1
-
-    # Assigning the save_to_memory function to the MagicMock
-    mock_memory.save_to_memory.side_effect = save_to_memory
-
-    def sample(batch_size, *args):
-        if batch_size == 1:
-            states = np.random.randn(*mock_memory.state_size)
-            rewards = np.random.uniform(0, 400)
-        else:
-            states = np.array(
-                [np.random.randn(*mock_memory.state_size) for _ in range(batch_size)]
-            )
-            rewards = np.array([np.random.uniform(0, 400) for _ in range(batch_size)])
-
-        return states, rewards
-
-    # Assigning the sample function to the MagicMock
-    mock_memory.sample.side_effect = sample
-
-    return mock_memory
-
-
-@pytest.fixture
 def mocked_multi_memory():
     mock_memory = MagicMock()
     mock_memory.counter = 0
@@ -961,29 +808,6 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
             np.random.randint(0, 2, mock_env.n_envs),
             np.random.randint(0, 2, mock_env.n_envs),
             "info_string",
-        )
-
-    mock_env.step.side_effect = step
-
-    return mock_env
-
-
-@pytest.fixture
-def mocked_bandit_env(state_size, action_size):
-    mock_env = MagicMock()
-    mock_env.state_size = (action_size,) + state_size
-    mock_env.action_size = 1
-    mock_env.n_envs = 1
-
-    def reset():
-        return np.random.rand(*mock_env.state_size)
-
-    mock_env.reset.side_effect = reset
-
-    def step(action):
-        return (
-            np.random.rand(*mock_env.state_size),
-            np.random.rand(mock_env.n_envs),
         )
 
     mock_env.step.side_effect = step
@@ -1079,11 +903,13 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1133,11 +959,13 @@ def test_train_off_policy_agent_calls_made(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             n_step=n_step,
             per=per,
+            noisy=True,
             n_step_memory=n_step_memory,
             tournament=tournament,
             mutation=mutations,
@@ -1170,11 +998,13 @@ def test_train_off_policy_save_elite_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1200,11 +1030,13 @@ def test_train_off_policy_checkpoint_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1225,11 +1057,13 @@ def test_actions_histogram(env, population_off_policy, tournament, mutations, me
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1252,11 +1086,13 @@ def test_train_off_policy_replay_buffer_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1288,11 +1124,13 @@ def test_train_off_policy_alternate_buffer_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=True,
         per=per,
+        noisy=False,
         n_step_memory=mocked_n_step_memory,
         tournament=tournament,
         mutation=mutations,
@@ -1325,11 +1163,13 @@ def test_train_off_policy_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1357,11 +1197,13 @@ def test_train_off_policy_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
@@ -1384,11 +1226,13 @@ def test_train_off_policy_rgb_input(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=False,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1414,11 +1258,13 @@ def test_train_off_policy_using_alternate_buffers(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=True,
         per=per,
+        noisy=False,
         n_step_memory=n_step_memory,
         tournament=tournament,
         mutation=mutations,
@@ -1441,11 +1287,13 @@ def test_train_off_policy_using_alternate_buffers_rgb(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=True,
         per=True,
+        noisy=False,
         n_step_memory=n_step_memory,
         tournament=tournament,
         mutation=mutations,
@@ -1471,11 +1319,13 @@ def test_train_off_policy_distributed(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1505,15 +1355,15 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
+    with patch("agilerl.training.train_off_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_off_policy.wandb.log"
+        "agilerl.training.train_off_policy_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
+        "agilerl.training.train_off_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_off_policy.train_off_policy(
+        agilerl.training.train_off_policy_legacy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1522,11 +1372,13 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1584,15 +1436,15 @@ def test_wandb_init_log_distributed(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
+    with patch("agilerl.training.train_off_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_off_policy.wandb.log"
+        "agilerl.training.train_off_policy_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
+        "agilerl.training.train_off_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_off_policy.train_off_policy(
+        agilerl.training.train_off_policy_legacy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1601,11 +1453,13 @@ def test_wandb_init_log_distributed(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1652,13 +1506,13 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_off_policy.wandb.login") as _, patch(
-        "agilerl.training.train_off_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_off_policy.wandb.log") as _, patch(
-        "agilerl.training.train_off_policy.wandb.finish"
+    with patch("agilerl.training.train_off_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.init"
+    ) as _, patch("agilerl.training.train_off_policy_legacy.wandb.log") as _, patch(
+        "agilerl.training.train_off_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_off_policy.train_off_policy(
+        agilerl.training.train_off_policy_legacy.train_off_policy(
             env,
             "env_name",
             "algo",
@@ -1668,11 +1522,13 @@ def test_early_stop_wandb(env, population_off_policy, tournament, mutations, mem
             MUT_P=MUT_P,
             target=-10000,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             n_step=False,
             per=False,
+            noisy=True,
             n_step_memory=None,
             tournament=tournament,
             mutation=mutations,
@@ -1697,11 +1553,13 @@ def test_train_off_policy_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1718,13 +1576,13 @@ def test_train_off_policy_save_elite(
     [((6,), 2, True, True), ((6,), 2, True, False)],
 )
 def test_train_save_checkpoint(
-    env, population_off_policy, tournament, mutations, memory, accelerator_flag, tmpdir
+    env, population_off_policy, tournament, mutations, memory, accelerator_flag
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = str(Path(tmpdir) / "checkpoint")
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_off_policy(
         env,
         "env_name",
@@ -1734,11 +1592,13 @@ def test_train_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         n_step=False,
         per=False,
+        noisy=True,
         n_step_memory=None,
         tournament=tournament,
         mutation=mutations,
@@ -1748,8 +1608,8 @@ def test_train_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size, vect, algo", [((6,), 2, True, PPO)])
@@ -1770,9 +1630,10 @@ def test_train_on_policy_agent_calls_made(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1805,9 +1666,10 @@ def test_train_on_policy_save_elite_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1834,9 +1696,10 @@ def test_train_on_policy_checkpoint_warning(
             INIT_HP=None,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -1862,9 +1725,10 @@ def test_train_on_policy_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1890,9 +1754,10 @@ def test_train_on_policy_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
         wb=False,
@@ -1913,9 +1778,10 @@ def test_train_on_policy(env, population_on_policy, tournament, mutations):
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1934,9 +1800,10 @@ def test_train_on_policy_rgb_input(env, population_on_policy, tournament, mutati
         INIT_HP=None,
         MUT_P=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1958,9 +1825,10 @@ def test_train_on_policy_distributed(env, population_on_policy, tournament, muta
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -1997,15 +1865,15 @@ def test_wandb_init_log_on_policy(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_on_policy.wandb.init"
+    with patch("agilerl.training.train_on_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_on_policy_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_on_policy.wandb.log"
+        "agilerl.training.train_on_policy_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_on_policy.wandb.finish"
+        "agilerl.training.train_on_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_on_policy.train_on_policy(
+        agilerl.training.train_on_policy_legacy.train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2013,9 +1881,10 @@ def test_wandb_init_log_on_policy(
             INIT_HP=INIT_HP,
             MUT_P=MUT_P,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2054,13 +1923,13 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_on_policy.wandb.login") as _, patch(
-        "agilerl.training.train_on_policy.wandb.init"
-    ) as _, patch("agilerl.training.train_on_policy.wandb.log") as _, patch(
-        "agilerl.training.train_on_policy.wandb.finish"
+    with patch("agilerl.training.train_on_policy_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_on_policy_legacy.wandb.init"
+    ) as _, patch("agilerl.training.train_on_policy_legacy.wandb.log") as _, patch(
+        "agilerl.training.train_on_policy_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_on_policy.train_on_policy(
+        agilerl.training.train_on_policy_legacy.train_on_policy(
             env,
             "env_name",
             "algo",
@@ -2069,9 +1938,10 @@ def test_early_stop_wandb_on_policy(env, population_on_policy, tournament, mutat
             MUT_P=MUT_P,
             target=-10000,
             swap_channels=False,
-            max_steps=500,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2101,9 +1971,10 @@ def test_train_on_policy_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2120,13 +1991,13 @@ def test_train_on_policy_save_elite(
     [((6,), 2, True, True), ((6,), 2, True, False)],
 )
 def test_train_on_policy_save_checkpoint(
-    env, population_on_policy, tournament, mutations, accelerator_flag, tmpdir
+    env, population_on_policy, tournament, mutations, accelerator_flag
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = str(Path(tmpdir) / "checkpoint")
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_on_policy(
         env,
         "env_name",
@@ -2135,9 +2006,10 @@ def test_train_on_policy_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=500,
-        evo_steps=500,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2146,8 +2018,8 @@ def test_train_on_policy_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{512}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{512}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 @pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
@@ -2164,9 +2036,10 @@ def test_train_multi_agent(
         MUT_P=None,
         net_config=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
@@ -2189,9 +2062,10 @@ def test_train_multi_agent_distributed(
         MUT_P=None,
         net_config=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         accelerator=accelerator,
@@ -2218,9 +2092,10 @@ def test_train_multi_agent_rgb(
         MUT_P=None,
         net_config=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
@@ -2244,9 +2119,10 @@ def test_train_multi_agent_rgb_vectorized(
         MUT_P=None,
         net_config=None,
         swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
@@ -2271,9 +2147,10 @@ def test_train_multi_save_elite_warning(
             MUT_P=None,
             net_config=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             save_elite=False,
@@ -2298,9 +2175,10 @@ def test_train_multi_checkpoint_warning(
             MUT_P=None,
             net_config=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             checkpoint=None,
@@ -2337,19 +2215,19 @@ def test_train_multi_wandb_init_log(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.init"
+    with patch("agilerl.training.train_multi_agent_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_multi_agent_legacy.wandb.init"
     ) as mock_wandb_init, patch(
-        "agilerl.training.train_multi_agent.wandb.log"
+        "agilerl.training.train_multi_agent_legacy.wandb.log"
     ) as mock_wandb_log, patch(
-        "agilerl.training.train_multi_agent.wandb.finish"
+        "agilerl.training.train_multi_agent_legacy.wandb.finish"
     ) as mock_wandb_finish:
         if accelerator_flag:
             accelerator = Accelerator()
         else:
             accelerator = None
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent.train_multi_agent(
+        agilerl.training.train_multi_agent_legacy.train_multi_agent(
             multi_env,
             "env_name",
             "algo",
@@ -2359,9 +2237,10 @@ def test_train_multi_wandb_init_log(
             MUT_P=MUT_P,
             net_config=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2408,13 +2287,13 @@ def test_multi_agent_early_stop(
         "ACT_MUT": 0.2,
         "RL_HP_MUT": 0.2,
     }
-    with patch("agilerl.training.train_multi_agent.wandb.login") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.init"
-    ) as _, patch("agilerl.training.train_multi_agent.wandb.log") as _, patch(
-        "agilerl.training.train_multi_agent.wandb.finish"
+    with patch("agilerl.training.train_multi_agent_legacy.wandb.login") as _, patch(
+        "agilerl.training.train_multi_agent_legacy.wandb.init"
+    ) as _, patch("agilerl.training.train_multi_agent_legacy.wandb.log") as _, patch(
+        "agilerl.training.train_multi_agent_legacy.wandb.finish"
     ) as mock_wandb_finish:
         # Call the function that should trigger wandb.init
-        agilerl.training.train_multi_agent.train_multi_agent(
+        agilerl.training.train_multi_agent_legacy.train_multi_agent(
             multi_env,
             "env_name",
             "algo",
@@ -2425,9 +2304,10 @@ def test_multi_agent_early_stop(
             net_config=None,
             swap_channels=False,
             target=-10000,
-            max_steps=500,
-            evo_steps=10,
-            eval_loop=1,
+            n_episodes=110,
+            max_steps=5,
+            evo_epochs=1,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=True,
@@ -2438,48 +2318,50 @@ def test_multi_agent_early_stop(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, algo, accelerator_flag",
+    "state_size, action_size, algo",
     [
-        ((6,), 2, MADDPG, False),
-        ((6,), 2, MATD3, True),
+        ((6,), 2, MADDPG),
+        ((6,), 2, MATD3),
     ],
 )
 def test_train_multi_agent_calls(
-    multi_env, mocked_multi_agent, multi_memory, tournament, mutations, accelerator_flag
+    multi_env, mocked_multi_agent, multi_memory, tournament, mutations, algo
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
+    for accelerator_flag in [False, True]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
 
-    mock_population = [mocked_multi_agent for _ in range(6)]
+        mock_population = [mocked_multi_agent for _ in range(6)]
 
-    pop, pop_fitnesses = train_multi_agent(
-        multi_env,
-        "env_name",
-        "algo",
-        mock_population,
-        multi_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        net_config=None,
-        swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-        accelerator=accelerator,
-    )
+        pop, pop_fitnesses = train_multi_agent(
+            multi_env,
+            "env_name",
+            "algo",
+            mock_population,
+            multi_memory,
+            INIT_HP=None,
+            MUT_P=None,
+            net_config=None,
+            swap_channels=False,
+            n_episodes=10,
+            max_steps=50,
+            evo_epochs=5,
+            evo_loop=1,
+            tournament=tournament,
+            mutation=mutations,
+            wb=False,
+            accelerator=accelerator,
+        )
 
-    for agent in mock_population:
-        agent.get_action.assert_called()
-        agent.learn.assert_called()
-        agent.test.assert_called()
-        if accelerator is not None:
-            agent.wrap_models.assert_called()
-            agent.unwrap_models.assert_called()
+        for agent in mock_population:
+            agent.get_action.assert_called()
+            agent.learn.assert_called()
+            agent.test.assert_called()
+            if accelerator is not None:
+                agent.wrap_models.assert_called()
+                agent.unwrap_models.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -2500,9 +2382,10 @@ def test_train_multi_env_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2529,9 +2412,10 @@ def test_train_multi_tourn_mut_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=mocked_tournament,
         mutation=mocked_mutations,
         wb=False,
@@ -2558,9 +2442,10 @@ def test_train_multi_memory_calls(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2594,9 +2479,10 @@ def test_train_multi_save_elite(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2618,13 +2504,12 @@ def test_train_multi_save_checkpoint(
     mutations,
     multi_memory,
     accelerator_flag,
-    tmpdir,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = str(Path(tmpdir) / "checkpoint")
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_multi_agent(
         multi_env,
         "env_name",
@@ -2634,9 +2519,10 @@ def test_train_multi_save_checkpoint(
         INIT_HP=None,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -2645,8 +2531,8 @@ def test_train_multi_save_checkpoint(
         accelerator=accelerator,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 @pytest.mark.parametrize(
@@ -2682,9 +2568,10 @@ def test_train_offline(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=swap_channels,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2721,9 +2608,10 @@ def test_train_offline_save_elite_warning(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2759,9 +2647,10 @@ def test_train_offline_save_checkpoint_warning(
             memory,
             INIT_HP=offline_init_hp,
             MUT_P=None,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2771,10 +2660,9 @@ def test_train_offline_save_checkpoint_warning(
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, accelerator_flag",
+    "state_size, action_size, vect",
     [
-        ((6,), 2, True, False),
-        ((6,), 2, True, True),
+        ((6,), 2, True),
     ],
 )
 def test_train_offline_wandb_calls(
@@ -2785,57 +2673,58 @@ def test_train_offline_wandb_calls(
     mutations,
     offline_init_hp,
     dummy_h5py_data,
-    accelerator_flag,
 ):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
-    MUT_P = {
-        "NO_MUT": 0.4,
-        "ARCH_MUT": 0.2,
-        "PARAMS_MUT": 0.2,
-        "ACT_MUT": 0.2,
-        "RL_HP_MUT": 0.2,
-    }
-    with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-        "agilerl.training.train_offline.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_offline.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_offline.wandb.finish"
-    ) as mock_wandb_finish:
-        # Call the function that should trigger wandb.init
-        agilerl.training.train_offline.train_offline(
-            env,
-            "env_name",
-            dummy_h5py_data,
-            "algo",
-            population_off_policy,
-            memory,
-            INIT_HP=offline_init_hp,
-            MUT_P=MUT_P,
-            swap_channels=False,
-            max_steps=50,
-            evo_steps=10,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=True,
-            accelerator=accelerator,
-            wandb_api_key="testing",
-        )
+    for accelerator_flag in [True, False]:
+        if accelerator_flag:
+            accelerator = Accelerator()
+        else:
+            accelerator = None
+        MUT_P = {
+            "NO_MUT": 0.4,
+            "ARCH_MUT": 0.2,
+            "PARAMS_MUT": 0.2,
+            "ACT_MUT": 0.2,
+            "RL_HP_MUT": 0.2,
+        }
+        with patch("agilerl.training.train_offline_legacy.wandb.login") as _, patch(
+            "agilerl.training.train_offline_legacy.wandb.init"
+        ) as mock_wandb_init, patch(
+            "agilerl.training.train_offline_legacy.wandb.log"
+        ) as mock_wandb_log, patch(
+            "agilerl.training.train_offline_legacy.wandb.finish"
+        ) as mock_wandb_finish:
+            # Call the function that should trigger wandb.init
+            agilerl.training.train_offline_legacy.train_offline(
+                env,
+                "env_name",
+                dummy_h5py_data,
+                "algo",
+                population_off_policy,
+                memory,
+                INIT_HP=offline_init_hp,
+                MUT_P=MUT_P,
+                swap_channels=False,
+                n_episodes=10,
+                max_steps=5,
+                evo_epochs=1,
+                evo_loop=1,
+                tournament=tournament,
+                mutation=mutations,
+                wb=True,
+                accelerator=accelerator,
+                wandb_api_key="testing",
+            )
 
-        # Assert that wandb.init was called with expected arguments
-        mock_wandb_init.assert_called_once_with(
-            project=ANY,
-            name=ANY,
-            config=ANY,
-        )
-        # Assert that wandb.log was called with expected log parameters
-        mock_wandb_log.assert_called()
-        # Assert that wandb.finish was called
-        mock_wandb_finish.assert_called()
+            # Assert that wandb.init was called with expected arguments
+            mock_wandb_init.assert_called_once_with(
+                project=ANY,
+                name=ANY,
+                config=ANY,
+            )
+            # Assert that wandb.log was called with expected log parameters
+            mock_wandb_log.assert_called()
+            # Assert that wandb.finish was called
+            mock_wandb_finish.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -2865,13 +2754,13 @@ def test_train_offline_early_stop(
             "ACT_MUT": 0.2,
             "RL_HP_MUT": 0.2,
         }
-        with patch("agilerl.training.train_offline.wandb.login") as _, patch(
-            "agilerl.training.train_offline.wandb.init"
-        ) as _, patch("agilerl.training.train_offline.wandb.log") as _, patch(
-            "agilerl.training.train_offline.wandb.finish"
+        with patch("agilerl.training.train_offline_legacy.wandb.login") as _, patch(
+            "agilerl.training.train_offline_legacy.wandb.init"
+        ) as _, patch("agilerl.training.train_offline_legacy.wandb.log") as _, patch(
+            "agilerl.training.train_offline_legacy.wandb.finish"
         ) as mock_wandb_finish:
             # Call the function that should trigger wandb.init
-            agilerl.training.train_offline.train_offline(
+            agilerl.training.train_offline_legacy.train_offline(
                 env,
                 "env_name",
                 dummy_h5py_data,
@@ -2881,10 +2770,11 @@ def test_train_offline_early_stop(
                 INIT_HP=offline_init_hp,
                 MUT_P=MUT_P,
                 swap_channels=False,
+                n_episodes=110,
                 target=-10000,
-                max_steps=50,
-                evo_steps=10,
-                eval_loop=1,
+                max_steps=5,
+                evo_epochs=1,
+                evo_loop=1,
                 tournament=tournament,
                 mutation=mutations,
                 wb=True,
@@ -2928,9 +2818,10 @@ def test_offline_agent_calls(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -2975,9 +2866,10 @@ def test_offline_memory_calls(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=tournament,
             mutation=mutations,
             wb=False,
@@ -3018,9 +2910,10 @@ def test_offline_mut_tourn_calls(
             INIT_HP=offline_init_hp,
             MUT_P=None,
             swap_channels=False,
-            max_steps=50,
-            evo_steps=50,
-            eval_loop=1,
+            n_episodes=10,
+            max_steps=5,
+            evo_epochs=5,
+            evo_loop=1,
             tournament=mocked_tournament,
             mutation=mocked_mutations,
             wb=False,
@@ -3059,9 +2952,10 @@ def test_train_offline_save_elite(
         INIT_HP=offline_init_hp,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3086,13 +2980,12 @@ def test_train_offline_save_checkpoint(
     offline_init_hp,
     dummy_h5py_data,
     accelerator_flag,
-    tmpdir,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
     else:
         accelerator = None
-    checkpoint_path = str(Path(tmpdir) / "checkpoint")
+    checkpoint_path = "checkpoint"
     pop, pop_fitnesses = train_offline(
         env,
         "env_name",
@@ -3103,9 +2996,10 @@ def test_train_offline_save_checkpoint(
         INIT_HP=offline_init_hp,
         MUT_P=None,
         swap_channels=False,
-        max_steps=50,
-        evo_steps=50,
-        eval_loop=1,
+        n_episodes=10,
+        max_steps=5,
+        evo_epochs=5,
+        evo_loop=1,
         tournament=tournament,
         mutation=mutations,
         wb=False,
@@ -3114,657 +3008,8 @@ def test_train_offline_save_checkpoint(
         checkpoint_path=checkpoint_path,
     )
     for i in range(6):  # iterate through the population indices
-        assert os.path.isfile(f"{checkpoint_path}_{i}_{50}.pt")
-        os.remove(f"{checkpoint_path}_{i}_{50}.pt")
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size",
-    [
-        ((6,), 2),
-    ],
-)
-def test_train_bandit(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-
-    assert len(pop) == len(population_bandit)
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size, algo",
-    [
-        ((6,), 2, NeuralTS),
-        ((6,), 2, NeuralUCB),
-    ],
-)
-def test_train_bandit_agent_calls_made(
-    bandit_env,
-    mocked_bandit,
-    tournament,
-    mutations,
-    bandit_memory,
-):
-    for accelerator_flag in [True, False]:
-        if accelerator_flag:
-            accelerator = Accelerator()
-        else:
-            accelerator = None
-        mock_population = [mocked_bandit for _ in range(6)]
-
-        pop, pop_fitnesses = train_bandits(
-            bandit_env,
-            "bandit_env_name",
-            "algo",
-            mock_population,
-            bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
-            max_steps=50,
-            episode_steps=5,
-            evo_steps=25,
-            eval_steps=5,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=False,
-            accelerator=accelerator,
-            save_elite=True,
-        )
-
-        mocked_bandit.get_action.assert_called()
-        mocked_bandit.learn.assert_called()
-        mocked_bandit.test.assert_called()
-        if accelerator is not None:
-            mocked_bandit.wrap_models.assert_called()
-            mocked_bandit.unwrap_models.assert_called()
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_train_bandit_save_elite_warning(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    warning_string = "'save_elite' set to False but 'elite_path' has been defined, elite will not\
-                      be saved unless 'save_elite' is set to True."
-    with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_bandits(
-            bandit_env,
-            "bandit_env_name",
-            "algo",
-            population_bandit,
-            bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
-            max_steps=50,
-            episode_steps=5,
-            evo_steps=25,
-            eval_steps=5,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=False,
-            save_elite=False,
-            elite_path="path",
-        )
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_train_bandit_checkpoint_warning(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    warning_string = "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
-                      be saved unless 'checkpoint' is defined."
-    with pytest.warns(match=warning_string):
-        pop, pop_fitnesses = train_bandits(
-            bandit_env,
-            "bandit_env_name",
-            "algo",
-            population_bandit,
-            bandit_memory,
-            INIT_HP=None,
-            MUT_P=None,
-            swap_channels=False,
-            max_steps=50,
-            episode_steps=5,
-            evo_steps=25,
-            eval_steps=5,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=False,
-            checkpoint=None,
-            checkpoint_path="path",
-        )
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_bandit_actions_histogram(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "DQN",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-
-    assert len(pop) == len(population_bandit)
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_train_bandit_replay_buffer_calls(
-    mocked_bandit_memory, bandit_env, population_bandit, tournament, mutations
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        mocked_bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-    mocked_bandit_memory.save_to_memory.assert_called()
-    mocked_bandit_memory.sample.assert_called()
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size",
-    [
-        ((6,), 2),
-    ],
-)
-def test_train_bandit_bandit_env_calls(
-    mocked_bandit_env, bandit_memory, population_bandit, tournament, mutations
-):
-    pop, pop_fitnesses = train_bandits(
-        mocked_bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-    mocked_bandit_env.step.assert_called()
-    mocked_bandit_env.reset.assert_called()
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size",
-    [
-        ((6,), 2),
-    ],
-)
-def test_train_bandit_tourn_mut_calls(
-    bandit_env, bandit_memory, population_bandit, mocked_tournament, mocked_mutations
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=mocked_tournament,
-        mutation=mocked_mutations,
-        wb=False,
-    )
-    mocked_mutations.mutation.assert_called()
-    mocked_tournament.select.assert_called()
-
-
-@pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
-def test_train_bandit_rgb_input(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=True,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-
-    assert len(pop) == len(population_bandit)
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size",
-    [((6,), 2)],
-)
-def test_train_bandit_using_alternate_buffers(
-    bandit_env,
-    bandit_memory,
-    population_bandit,
-    tournament,
-    mutations,
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        memory=bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-
-    assert len(pop) == len(population_bandit)
-
-
-@pytest.mark.parametrize("state_size, action_size", [((3, 64, 64), 2)])
-def test_train_bandit_using_alternate_buffers_rgb(
-    bandit_env, bandit_memory, population_bandit, tournament, mutations
-):
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        memory=bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=True,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-    )
-
-    assert len(pop) == len(population_bandit)
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_train_bandit_distributed(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    accelerator = Accelerator()
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-        accelerator=accelerator,
-    )
-
-    assert len(pop) == len(population_bandit)
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_bandit_wandb_init_log(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    INIT_HP = {
-        "BATCH_SIZE": 128,
-        "LR": 1e-3,
-        "GAMMA": 1,
-        "LAMBDA": 1,
-        "REG": 0.000625,
-        "LEARN_STEP": 1,
-        "CHANNELS_LAST": False,
-        "POP_SIZE": 6,
-        "MEMORY_SIZE": 20000,
-    }
-    MUT_P = {
-        "NO_MUT": 0.4,
-        "ARCH_MUT": 0.2,
-        "PARAMS_MUT": 0.2,
-        "ACT_MUT": 0.2,
-        "RL_HP_MUT": 0.2,
-    }
-    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
-        "agilerl.training.train_bandits.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_bandits.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_bandits.wandb.finish"
-    ) as mock_wandb_finish:
-        # Call the function that should trigger wandb.init
-        agilerl.training.train_bandits.train_bandits(
-            bandit_env,
-            "bandit_env_name",
-            "algo",
-            population_bandit,
-            bandit_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
-            swap_channels=False,
-            max_steps=50,
-            episode_steps=5,
-            evo_steps=25,
-            eval_steps=5,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=True,
-            wandb_api_key="testing",
-        )
-
-        # Assert that wandb.init was called with expected arguments
-        mock_wandb_init.assert_called_once_with(
-            project=ANY,
-            name=ANY,
-            config=ANY,
-        )
-        # Assert that wandb.log was called with expected log parameters
-        mock_wandb_log.assert_called_with(
-            {
-                "global_step": ANY,
-                "steps_per_agent": ANY,
-                "train/mean_score": ANY,
-                "train/mean_regret": ANY,
-                "train/best_regret": ANY,
-                "train/mean_loss": ANY,
-                "eval/mean_fitness": ANY,
-                "eval/best_fitness": ANY,
-            }
-        )
-        # Assert that wandb.finish was called
-        mock_wandb_finish.assert_called()
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size, accelerator",
-    [
-        ((6,), 2, True),
-        ((6,), 2, False),
-    ],
-)
-def test_bandit_wandb_init_log_distributed(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory, accelerator
-):
-    if accelerator:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
-    INIT_HP = {
-        "BATCH_SIZE": 128,
-        "LR": 1e-3,
-        "GAMMA": 1,
-        "LAMBDA": 1,
-        "REG": 0.000625,
-        "LEARN_STEP": 1,
-        "CHANNELS_LAST": False,
-        "POP_SIZE": 6,
-        "MEMORY_SIZE": 20000,
-    }
-    MUT_P = {
-        "NO_MUT": 0.4,
-        "ARCH_MUT": 0.2,
-        "PARAMS_MUT": 0.2,
-        "ACT_MUT": 0.2,
-        "RL_HP_MUT": 0.2,
-    }
-    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
-        "agilerl.training.train_bandits.wandb.init"
-    ) as mock_wandb_init, patch(
-        "agilerl.training.train_bandits.wandb.log"
-    ) as mock_wandb_log, patch(
-        "agilerl.training.train_bandits.wandb.finish"
-    ) as mock_wandb_finish:
-        # Call the function that should trigger wandb.init
-        agilerl.training.train_bandits.train_bandits(
-            bandit_env,
-            "bandit_env_name",
-            "algo",
-            population_bandit,
-            bandit_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
-            swap_channels=False,
-            max_steps=50,
-            episode_steps=5,
-            evo_steps=25,
-            eval_steps=5,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=True,
-            accelerator=accelerator,
-            wandb_api_key="testing",
-        )
-
-        # Assert that wandb.init was called with expected arguments
-        mock_wandb_init.assert_called_once_with(
-            project=ANY,
-            name=ANY,
-            config=ANY,
-        )
-        # Assert that wandb.log was called with expected log parameters
-        mock_wandb_log.assert_called_with(
-            {
-                "global_step": ANY,
-                "steps_per_agent": ANY,
-                "train/mean_score": ANY,
-                "train/mean_regret": ANY,
-                "train/best_regret": ANY,
-                "train/mean_loss": ANY,
-                "eval/mean_fitness": ANY,
-                "eval/best_fitness": ANY,
-            }
-        )
-        # Assert that wandb.finish was called
-        mock_wandb_finish.assert_called()
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_bandit_early_stop_wandb(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    INIT_HP = {
-        "BATCH_SIZE": 128,
-        "LR": 1e-3,
-        "GAMMA": 1,
-        "LAMBDA": 1,
-        "REG": 0.000625,
-        "LEARN_STEP": 1,
-        "CHANNELS_LAST": False,
-        "POP_SIZE": 6,
-        "MEMORY_SIZE": 20000,
-    }
-    MUT_P = {
-        "NO_MUT": 0.4,
-        "ARCH_MUT": 0.2,
-        "PARAMS_MUT": 0.2,
-        "ACT_MUT": 0.2,
-        "RL_HP_MUT": 0.2,
-    }
-    with patch("agilerl.training.train_bandits.wandb.login") as _, patch(
-        "agilerl.training.train_bandits.wandb.init"
-    ) as _, patch("agilerl.training.train_bandits.wandb.log") as _, patch(
-        "agilerl.training.train_bandits.wandb.finish"
-    ) as mock_wandb_finish:
-        # Call the function that should trigger wandb.init
-        agilerl.training.train_bandits.train_bandits(
-            bandit_env,
-            "bandit_env_name",
-            "algo",
-            population_bandit,
-            bandit_memory,
-            INIT_HP=INIT_HP,
-            MUT_P=MUT_P,
-            target=-10000,
-            swap_channels=False,
-            max_steps=550,
-            episode_steps=5,
-            evo_steps=25,
-            eval_steps=5,
-            eval_loop=1,
-            tournament=tournament,
-            mutation=mutations,
-            wb=True,
-            wandb_api_key="testing",
-        )
-        # Assert that wandb.finish was called
-        mock_wandb_finish.assert_called()
-
-
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
-def test_train_bandit_save_elite(
-    bandit_env, population_bandit, tournament, mutations, bandit_memory
-):
-    elite_path = "checkpoint.pt"
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-        save_elite=True,
-        elite_path=elite_path,
-    )
-    assert os.path.isfile(elite_path)
-    os.remove(elite_path)
-
-
-@pytest.mark.parametrize(
-    "state_size, action_size, accelerator_flag",
-    [((6,), 2, True), ((6,), 2, False)],
-)
-def test_bandit_train_save_checkpoint(
-    bandit_env,
-    population_bandit,
-    tournament,
-    mutations,
-    bandit_memory,
-    accelerator_flag,
-    tmpdir,
-):
-    if accelerator_flag:
-        accelerator = Accelerator()
-    else:
-        accelerator = None
-    checkpoint_path = str(Path(tmpdir) / "checkpoint")
-    pop, pop_fitnesses = train_bandits(
-        bandit_env,
-        "bandit_env_name",
-        "algo",
-        population_bandit,
-        bandit_memory,
-        INIT_HP=None,
-        MUT_P=None,
-        swap_channels=False,
-        max_steps=50,
-        episode_steps=5,
-        evo_steps=25,
-        eval_steps=5,
-        eval_loop=1,
-        tournament=tournament,
-        mutation=mutations,
-        wb=False,
-        checkpoint=10,
-        checkpoint_path=checkpoint_path,
-        accelerator=accelerator,
-    )
-    for i in range(6):  # iterate through the population indices
-        for s in range(5):
-            assert os.path.isfile(f"{checkpoint_path}_{i}_{10*(s+1)}.pt")
-            os.remove(f"{checkpoint_path}_{i}_{10*(s+1)}.pt")
+        assert os.path.isfile(f"{checkpoint_path}_{i}_{10}.pt")
+        os.remove(f"{checkpoint_path}_{i}_{10}.pt")
 
 
 # LEAVE LAST, TEMPORARY TO DELETE SAVED MODELS

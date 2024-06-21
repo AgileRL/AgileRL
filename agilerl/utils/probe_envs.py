@@ -559,9 +559,9 @@ def check_q_learning_with_probe_env(
 
     state, _ = env.reset()
     for _ in range(500):
-        action = agent.getAction(np.expand_dims(state, 0), epsilon=1)
+        action = agent.get_action(np.expand_dims(state, 0), epsilon=1)
         next_state, reward, done, _, _ = env.step(action)
-        memory.save2memory(state, action, reward, next_state, done)
+        memory.save_to_memory(state, action, reward, next_state, done)
         state = next_state
         if done:
             state, _ = env.reset()
@@ -592,7 +592,7 @@ def check_policy_q_learning_with_probe_env(
         ) + agent.min_action
         action = action[0]
         next_state, reward, done, _, _ = env.step(action)
-        memory.save2memory(state, action, reward, next_state, done)
+        memory.save_to_memory(state, action, reward, next_state, done)
         state = next_state
         if done:
             state, _ = env.reset()
@@ -642,7 +642,7 @@ def check_policy_on_policy_with_probe_env(
         truncs = []
 
         for _ in range(100):
-            action, log_prob, _, value = agent.getAction(np.expand_dims(state, 0))
+            action, log_prob, _, value = agent.get_action(np.expand_dims(state, 0))
             action = action[0]
             log_prob = log_prob[0]
             value = value[0]
@@ -715,7 +715,6 @@ def check_policy_on_policy_with_probe_env(
 
 #         field_names = ["state", "action", "reward", "next_state", "done"]
 #         memory = ReplayBuffer(
-#             action_dim=algo_args["action_dim"],  # Number of agent actions
 #             memory_size=1000,  # Max replay buffer size
 #             field_names=field_names,  # Field names to store in memory
 #             device=device,
@@ -749,7 +748,6 @@ def check_policy_on_policy_with_probe_env(
 
 #         field_names = ["state", "action", "reward", "next_state", "done"]
 #         memory = ReplayBuffer(
-#             action_dim=algo_args["action_dim"],  # Number of agent actions
 #             memory_size=1000,  # Max replay buffer size
 #             field_names=field_names,  # Field names to store in memory
 #             device=device,
@@ -778,7 +776,6 @@ def check_policy_on_policy_with_probe_env(
 
 #         field_names = ["state", "action", "reward", "next_state", "done"]
 #         memory = ReplayBuffer(
-#             action_dim=algo_args["action_dim"],  # Number of agent actions
 #             memory_size=1000,  # Max replay buffer size
 #             field_names=field_names,  # Field names to store in memory
 #             device=device,
@@ -817,7 +814,6 @@ def check_policy_on_policy_with_probe_env(
 
 #         field_names = ["state", "action", "reward", "next_state", "done"]
 #         memory = ReplayBuffer(
-#             action_dim=algo_args["action_dim"],  # Number of agent actions
 #             memory_size=1000,  # Max replay buffer size
 #             field_names=field_names,  # Field names to store in memory
 #             device=device,

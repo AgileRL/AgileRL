@@ -85,7 +85,7 @@ if __name__ == "__main__":
         steps = 0
         for idx_step in range(max_steps):
             # Get next action from agent
-            action, log_prob, _, value = agent.getAction(state)
+            action, log_prob, _, value = agent.get_action(state)
 
             # Internal loop to execute trained skill
             skill_name = trained_skills[action[0]]["skill"]
@@ -96,7 +96,7 @@ if __name__ == "__main__":
                 if state[6] or state[7]:
                     next_state, skill_reward, termination, truncation, _ = env.step(0)
                 else:
-                    skill_action, _, _, _ = skill_agent.getAction(state)
+                    skill_action, _, _, _ = skill_agent.get_action(state)
                     next_state, skill_reward, termination, truncation, _ = env.step(
                         skill_action[0]
                     )  # Act in environment

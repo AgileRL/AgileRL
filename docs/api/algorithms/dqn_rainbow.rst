@@ -39,12 +39,13 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.utils import makeVectEnvs
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.algorithms.dqn_rainbow import RainbowDQN
 
   # Create environment and Experience Replay Buffer
-  env = makeVectEnvs('LunarLander-v2', num_envs=1)
+  num_envs = 8
+  env = make_vect_envs('LunarLander-v2', num_envs=num_envs
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
@@ -62,29 +63,36 @@ Example
       state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
   field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(memory_size=10000, field_names=field_names)
 
   agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create agent
 
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
       if channels_last:
-          state = np.moveaxis(state, [3], [1])
-      action = agent.getAction(state, epsilon)    # Get next action from agent
+          state = np.moveaxis(state, [-1], [-3])
+      action = agent.get_action(state, epsilon)    # Get next action from agent
       next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
       if channels_last:
-          memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+          memory.save_to_memory_vect_envs(state, action, reward, np.moveaxis(next_state, [-1], [-3]), done)
       else:
-          memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+          memory.save_to_memory_vect_envs(state, action, reward, next_state, done)
 
       # Learn according to learning frequency
-      if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-          experiences = memory.sample(agent.batch_size) # Sample replay buffer
-          agent.learn(experiences)    # Learn according to agent's RL algorithm
+      if len(memory) >= agent.batch_size:
+          for _ in range(num_envs // agent.learn_step):
+              experiences = memory.sample(agent.batch_size) # Sample replay buffer
+              agent.learn(experiences)    # Learn according to agent's RL algorithm
 
-To configure the network architecture, pass a dict to the DQN ``net_config`` field. For an MLP, this can be as simple as:
+
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a kwargs dict to the RainbowDQN ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -113,7 +121,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -122,7 +130,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create Rainbow DQN agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

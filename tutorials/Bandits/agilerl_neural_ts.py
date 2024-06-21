@@ -7,13 +7,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter1d
-from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
 
 if __name__ == "__main__":
@@ -31,7 +30,7 @@ if __name__ == "__main__":
         "GAMMA": 1.0,  # Scaling factor
         "LAMBDA": 1.0,  # Regularization factor
         "REG": 0.0625,  # Loss regularization factor
-        "LEARN_STEP": 1,  # Learning frequency
+        "LEARN_STEP": 2,  # Learning frequency
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
     }
@@ -45,7 +44,7 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="NeuralTS",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -58,7 +57,6 @@ if __name__ == "__main__":
 
     field_names = ["context", "reward"]
     memory = ReplayBuffer(
-        action_dim=action_dim,  # Number of agent actions
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=device,
@@ -68,8 +66,8 @@ if __name__ == "__main__":
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
         population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        evo_step=1,
-    )  # Evaluate using last N fitness scores
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
 
     mutations = Mutations(
         algo="NeuralTS",  # Algorithm
@@ -87,41 +85,37 @@ if __name__ == "__main__":
         device=device,
     )
 
-    max_episodes = 50  # Max training episodes
-    max_steps = 50  # Max steps per episode
-
-    evo_epochs = 2  # Evolution frequency
-    evo_loop = 1  # Number of evaluation episodes
-
+    max_steps = 2500  # Max steps per episode
+    episode_steps = 500  # Steps in episode
+    evo_steps = 1000  # Evolution frequency
+    eval_steps = 500  # Evaluation steps per episode
+    eval_loop = 1  # Number of evaluation episodes
     print("Training...")
 
     regret = [[0] for _ in pop]
     score = [[0] for _ in pop]
     total_steps = 0
+    evo_count = 0
 
     # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for i, agent in enumerate(pop):  # Loop through population
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for idx_step in range(max_steps):
+            for idx_step in range(episode_steps):
                 # Get next action from agent
-                action = agent.getAction(context)
+                action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(context[action], reward)
+                memory.save_to_memory(context[action], reward)
 
                 # Learn according to learning frequency
-                if (
-                    memory.counter % agent.learn_step == 0
-                    and len(memory) >= agent.batch_size
-                ):
-                    for _ in range(2):
-                        experiences = memory.sample(
-                            agent.batch_size
-                        )  # Sample replay buffer
+                if len(memory) >= agent.batch_size:
+                    for _ in range(agent.learn_step):
+                        # Sample replay buffer
                         # Learn according to agent's RL algorithm
+                        experiences = memory.sample(agent.batch_size)
                         loss = agent.learn(experiences)
                         losses.append(loss)
 
@@ -129,27 +123,29 @@ if __name__ == "__main__":
                 score[i].append(reward)
                 regret[i].append(regret[i][-1] + 1 - reward)
 
-            total_steps += max_steps
+            total_steps += episode_steps
+            agent.steps[-1] += episode_steps
 
-        # Now evaluate and evolve population if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=max_steps,
-                    loop=evo_loop,
-                )
-                for agent in pop
-            ]
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=eval_steps,
+                loop=eval_loop,
+            )
+            for agent in pop
+        ]
 
-            print(f"Episode {idx_epi+1}/{max_episodes}")
-            print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
+        print(f"--- Global steps {total_steps} ---")
+        print(f"Steps {[agent.steps[-1] for agent in pop]}")
+        print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
 
+        if pop[0].steps[-1] // evo_steps > evo_count:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+            evo_count += 1
 
     # Plot the results
     plt.figure()

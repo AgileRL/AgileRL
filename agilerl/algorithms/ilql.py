@@ -1018,7 +1018,7 @@ class ILQL(nn.Module):
             action_mask,
         )
 
-    def softUpdate(self):
+    def soft_update(self):
         """Soft updates target networks."""
         for target_param, local_param in zip(
             self.target_q.parameters(), self.q.parameters()
@@ -1114,7 +1114,7 @@ class ILQL(nn.Module):
 
         return clone
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -1175,7 +1175,7 @@ class ILQL(nn.Module):
             path,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

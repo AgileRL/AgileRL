@@ -1,6 +1,5 @@
 import os
 
-import h5py
 import numpy as np
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
@@ -25,7 +24,7 @@ if __name__ == "__main__":
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        print("===== AgileRL Offline Distributed Demo =====")
+        print("===== AgileRL Online Distributed Demo =====")
     accelerator.wait_for_everyone()
 
     NET_CONFIG = {
@@ -34,21 +33,19 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "DOUBLE": True,  # Use double Q-learning
+        "DOUBLE": True,  # Use double Q-learning in DQN or CQN
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 0.99,  # Discount factor
         "LEARN_STEP": 1,  # Learning frequency
         "TAU": 1e-3,  # For soft update of target network parameters
-        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        # Swap image channels dimension last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
         "POP_SIZE": 4,  # Population size
     }
 
-    num_envs = 1
-    env = make_vect_envs("CartPole-v1")  # Create environment
-    dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
-
+    num_envs = 8
+    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -64,14 +61,14 @@ if __name__ == "__main__":
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
     pop = create_population(
-        algo="CQN",  # Algorithm
+        algo="DQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=one_hot,  # One-hot encoding
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
-        num_envs=num_envs,  # Number of vectorized envs
+        num_envs=num_envs,  # No. vectorized envs
         accelerator=accelerator,  # Accelerator
     )
 
@@ -80,27 +77,6 @@ if __name__ == "__main__":
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,
     )  # Field names to store in memory
-
-    if accelerator.is_main_process:
-        print("Filling replay buffer with dataset...")
-    accelerator.wait_for_everyone()
-
-    # Save transitions to replay buffer
-    dataset_length = dataset["rewards"].shape[0]
-
-    for i in trange(dataset_length - 1):
-        state = dataset["observations"][i]
-        next_state = dataset["observations"][i + 1]
-        if INIT_HP["CHANNELS_LAST"]:
-            state = np.moveaxis(state, [-1], [-3])
-            next_state = np.moveaxis(next_state, [-1], [-3])
-        action = dataset["actions"][i]
-        reward = dataset["rewards"][i]
-        done = bool(dataset["terminals"][i])
-        # Save experience to replay buffer
-        memory.save_to_memory(state, action, reward, next_state, done)
-
-    # Create dataloader from replay buffer
     replay_dataset = ReplayDataset(memory, INIT_HP["BATCH_SIZE"])
     replay_dataloader = DataLoader(replay_dataset, batch_size=None)
     replay_dataloader = accelerator.prepare(replay_dataloader)
@@ -116,7 +92,7 @@ if __name__ == "__main__":
     )
 
     mutations = Mutations(
-        algo="CQN",  # Algorithm
+        algo="DQN",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
@@ -127,18 +103,25 @@ if __name__ == "__main__":
         mutation_sd=0.1,  # Mutation strength
         arch=NET_CONFIG["arch"],  # Network architecture
         rand_seed=1,  # Random seed
-        accelerator=accelerator,  # Accelerator
-    )
+        accelerator=accelerator,
+    )  # Accelerator)
 
-    max_steps = 50000  # Max steps
+    max_steps = 200000  # Max steps
+    learning_delay = 1000  # Steps before starting learning
 
-    evo_steps = 5000  # Evolution frequency
+    # Exploration params
+    eps_start = 1.0  # Max exploration
+    eps_end = 0.1  # Min exploration
+    eps_decay = 0.995  # Decay per episode
+    epsilon = eps_start
+
+    evo_steps = 10000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
 
     total_steps = 0
 
-    accel_temp_models_path = "models/{}".format("CartPole-v1")
+    accel_temp_models_path = "models/{}".format("LunarLander-v2")
     if accelerator.is_main_process:
         if not os.path.exists(accel_temp_models_path):
             os.makedirs(accel_temp_models_path)
@@ -147,19 +130,58 @@ if __name__ == "__main__":
 
     # TRAINING LOOP
     print("Training...")
-    pbar = trange(max_steps, unit="step")
+    pbar = trange(max_steps, unit="step", disable=not accelerator.is_local_main_process)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        accelerator.wait_for_everyone()
+        pop_episode_scores = []
         for agent in pop:  # Loop through population
+            state, info = env.reset()  # Reset environment at start of episode
+            scores = np.zeros(num_envs)
+            completed_episode_scores, losses = [], []
+            steps = 0
+            epsilon = eps_start
+
             for idx_step in range(evo_steps):
-                # Sample dataloader
-                experiences = sampler.sample(agent.batch_size)
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
-            total_steps += evo_steps
-            agent.steps[-1] += evo_steps
-            pbar.update(evo_steps)
+                # Get next action from agent
+                action = agent.get_action(state, epsilon)
+                epsilon = max(
+                    eps_end, epsilon * eps_decay
+                )  # Decay epsilon for exploration
+
+                # Act in environment
+                next_state, reward, terminated, truncated, info = env.step(action)
+                scores += np.array(reward)
+                steps += num_envs
+                total_steps += num_envs
+
+                # Collect scores for completed episodes
+                for idx, (d, t) in enumerate(zip(terminated, truncated)):
+                    if d or t:
+                        completed_episode_scores.append(scores[idx])
+                        agent.scores.append(scores[idx])
+                        scores[idx] = 0
+
+                # Save experience to replay buffer
+                memory.save_to_memory_vect_envs(
+                    state, action, reward, next_state, terminated
+                )
+
+                # Learn according to learning frequency
+                if memory.counter > learning_delay and len(memory) >= agent.batch_size:
+                    for _ in range(num_envs // agent.learn_step):
+                        # Sample dataloader
+                        experiences = sampler.sample(agent.batch_size)
+                        # Learn according to agent's RL algorithm
+                        agent.learn(experiences)
+
+                state = next_state
+
+            pbar.update(evo_steps // len(pop))
+            agent.steps[-1] += steps
+            pop_episode_scores.append(completed_episode_scores)
+
+        # Reset epsilon start to latest decayed value for next round of population training
+        eps_start = epsilon
 
         # Evaluate population
         fitnesses = [
@@ -171,10 +193,19 @@ if __name__ == "__main__":
             )
             for agent in pop
         ]
+        mean_scores = [
+            (
+                np.mean(episode_scores)
+                if len(episode_scores) > 0
+                else "0 completed episodes"
+            )
+            for episode_scores in pop_episode_scores
+        ]
 
         if accelerator.is_main_process:
-            print(f"--- Global Steps {total_steps} ---")
+            print(f"--- Global steps {total_steps} ---")
             print(f"Steps {[agent.steps[-1] for agent in pop]}")
+            print(f"Scores: {mean_scores}")
             print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
             print(
                 f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
@@ -189,14 +220,18 @@ if __name__ == "__main__":
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             for pop_i, model in enumerate(pop):
-                model.save_checkpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")
+                model.save_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")
         accelerator.wait_for_everyone()
         if not accelerator.is_main_process:
             for pop_i, model in enumerate(pop):
-                model.load_checkpoint(f"{accel_temp_models_path}/CQN_{pop_i}.pt")
+                model.load_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")
         accelerator.wait_for_everyone()
         for model in pop:
             model.wrap_models()
+
+        # Update step counter
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
 
     pbar.close()
     env.close()

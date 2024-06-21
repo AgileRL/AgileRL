@@ -301,13 +301,13 @@ def test_returns_expected_action_epsilon_greedy():
     action_mask = None
 
     epsilon = 0
-    action = cqn.getAction(state, epsilon, action_mask)[0]
+    action = cqn.get_action(state, epsilon, action_mask)[0]
 
     assert action.is_integer()
     assert action >= 0 and action < action_dim
 
     epsilon = 1
-    action = cqn.getAction(state, epsilon, action_mask)[0]
+    action = cqn.get_action(state, epsilon, action_mask)[0]
 
     assert action.is_integer()
     assert action >= 0 and action < action_dim
@@ -326,13 +326,13 @@ def test_returns_expected_action_mask():
     action_mask = np.array([0, 1])
 
     epsilon = 0
-    action = cqn.getAction(state, epsilon, action_mask)[0]
+    action = cqn.get_action(state, epsilon, action_mask)[0]
 
     assert action.is_integer()
     assert action == 1
 
     epsilon = 1
-    action = cqn.getAction(state, epsilon, action_mask)[0]
+    action = cqn.get_action(state, epsilon, action_mask)[0]
 
     assert action.is_integer()
     assert action == 1
@@ -451,7 +451,7 @@ def test_soft_update():
         wrap=wrap,
     )
 
-    cqn.softUpdate()
+    cqn.soft_update()
 
     eval_params = list(cqn.actor.parameters())
     target_params = list(cqn.actor_target.parameters())
@@ -474,7 +474,7 @@ def test_algorithm_test_loop():
 
     env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -657,7 +657,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.saveCheckpoint(checkpoint_path)
+    cqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -682,7 +682,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
-    cqn.loadCheckpoint(checkpoint_path)
+    cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert cqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
@@ -718,7 +718,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.saveCheckpoint(checkpoint_path)
+    cqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -743,7 +743,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
-    cqn.loadCheckpoint(checkpoint_path)
+    cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert cqn.net_config == net_config_cnn
@@ -782,7 +782,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.saveCheckpoint(checkpoint_path)
+    cqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -807,7 +807,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     cqn = CQN(state_dim=[4], action_dim=2, one_hot=False)
     # Load checkpoint
-    cqn.loadCheckpoint(checkpoint_path)
+    cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert cqn.net_config is None
@@ -840,7 +840,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.saveCheckpoint(checkpoint_path)
+    cqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_cqn = CQN.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -894,7 +894,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.saveCheckpoint(checkpoint_path)
+    cqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_cqn = CQN.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -948,7 +948,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    cqn.saveCheckpoint(checkpoint_path)
+    cqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_cqn = CQN.load(checkpoint_path)

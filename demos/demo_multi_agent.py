@@ -1,10 +1,3 @@
-"""This tutorial shows how to train an MATD3 agent on the simple speaker listener multi-particle environment.
-
-Authors: Michael (https://github.com/mikepratt1), Nickua (https://github.com/nicku-a)
-"""
-
-import os
-
 import numpy as np
 import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
@@ -15,6 +8,13 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
+
+# import sys
+# sys.path.append('../')
+
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -28,8 +28,6 @@ if __name__ == "__main__":
 
     # Define the initial hyperparameters
     INIT_HP = {
-        "POPULATION_SIZE": 4,
-        "ALGO": "MATD3",  # Algorithm
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
         "BATCH_SIZE": 32,  # Batch size
@@ -45,6 +43,7 @@ if __name__ == "__main__":
         "LEARN_STEP": 100,  # Learning frequency
         "TAU": 0.01,  # For soft update of target parameters
         "POLICY_FREQ": 2,  # Policy frequnecy
+        "POP_SIZE": 4,  # Population size
     }
 
     num_envs = 8
@@ -83,13 +82,13 @@ if __name__ == "__main__":
 
     # Create a population ready for evolutionary hyper-parameter optimisation
     pop = create_population(
-        INIT_HP["ALGO"],
+        "MADDPG",
         state_dim,
         action_dim,
         one_hot,
         NET_CONFIG,
         INIT_HP,
-        population_size=INIT_HP["POPULATION_SIZE"],
+        population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,
     )
@@ -107,13 +106,13 @@ if __name__ == "__main__":
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        population_size=INIT_HP["POP_SIZE"],  # Population size
         eval_loop=1,  # Evaluate using last N fitness scores
     )
 
     # Instantiate a mutations object (used for HPO)
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
+        algo="MADDPG",
         no_mutation=0.2,  # Probability of no mutation
         architecture=0.2,  # Probability of architecture mutation
         new_layer_prob=0.2,  # Probability of new layer mutation
@@ -133,12 +132,12 @@ if __name__ == "__main__":
     )
 
     # Define training loop parameters
-    max_steps = 13000  # Max steps (default: 2000000)
+    max_steps = 1000000  # Max steps
     learning_delay = 0  # Steps before starting learning
-    evo_steps = 1000  # Evolution frequency
+
+    evo_steps = 10000  # Evolution frequency
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
-    elite = pop[0]  # Assign a placeholder "elite" agent
 
     total_steps = 0
 
@@ -278,13 +277,6 @@ if __name__ == "__main__":
         # Update step counter
         for agent in pop:
             agent.steps.append(agent.steps[-1])
-
-    # Save the trained algorithm
-    path = "./models/MATD3"
-    filename = "MATD3_trained_agent.pt"
-    os.makedirs(path, exist_ok=True)
-    save_path = os.path.join(path, filename)
-    elite.save_checkpoint(save_path)
 
     pbar.close()
     env.close()

@@ -10,7 +10,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -24,7 +24,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
         state_dim = (env.single_observation_space.n,)
@@ -46,7 +46,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     n_step = True if INIT_HP["N_STEP"] > 1 else False
     if per:
         memory = PrioritizedReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             num_envs=INIT_HP["NUM_ENVS"],
@@ -56,7 +55,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         )
         if n_step:
             n_step_memory = MultiStepReplayBuffer(
-                action_dim,
                 memory_size=INIT_HP["MEMORY_SIZE"],
                 field_names=field_names,
                 num_envs=INIT_HP["NUM_ENVS"],
@@ -66,13 +64,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             )
     elif n_step:
         memory = ReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             device=device,
         )
         n_step_memory = MultiStepReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             num_envs=INIT_HP["NUM_ENVS"],
@@ -82,7 +78,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         )
     else:
         memory = ReplayBuffer(
-            action_dim,
             memory_size=INIT_HP["MEMORY_SIZE"],
             field_names=field_names,
             device=device,
@@ -92,7 +87,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
         algo=INIT_HP["ALGO"],
@@ -104,6 +99,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
         rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
+        min_lr=MUTATION_PARAMS["MIN_LR"],
+        max_lr=MUTATION_PARAMS["MAX_LR"],
+        min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+        min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
+        max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
         arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
@@ -128,7 +129,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     else:
         actor = None
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         state_dim=state_dim,
         action_dim=action_dim,
@@ -137,6 +138,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP=INIT_HP,
         actor_network=actor,
         population_size=INIT_HP["POP_SIZE"],
+        num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
 
@@ -149,13 +151,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         n_step_memory=n_step_memory,
         n_step=n_step,
         per=per,
-        noisy=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=INIT_HP["EVO_LOOP"],
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+        learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
         mutation=mutations,
@@ -164,7 +167,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         elite_path="elite_rainbow.pt",
     )
 
-    printHyperparams(trained_pop)
+    print_hyperparams(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()
@@ -173,7 +176,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
 
 if __name__ == "__main__":
-    with open("../configs/training/dqn_rainbow.yaml") as file:
+    with open("configs/training/dqn_rainbow.yaml") as file:
         rainbow_dqn_config = yaml.safe_load(file)
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]

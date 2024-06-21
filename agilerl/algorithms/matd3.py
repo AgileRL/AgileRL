@@ -1,6 +1,5 @@
 import copy
 import inspect
-import random
 import warnings
 
 import dill
@@ -35,8 +34,18 @@ class MATD3:
     :type min_action: list[float]
     :param discrete_actions: Boolean flag to indicate a discrete action space
     :type discrete_actions: bool, optional
-    :param expl_noise: Standard deviation for Gaussian exploration noise, defaults to 0.1
+    :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
+    :type O_U_noise: bool, optional
+    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
+    :type vect_noise_dim: int, optional
+    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
     :type expl_noise: float, optional
+    :param mean_noise: Mean of exploration noise, defaults to 0.0
+    :type mean_noise: float, optional
+    :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
+    :type theta: float, optional
+    :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
+    :type dt: float, optional
     :param policy_freq: Policy update frequency, defaults to 2
     :type policy_freq: int, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
@@ -79,7 +88,12 @@ class MATD3:
         max_action,
         min_action,
         discrete_actions,
+        O_U_noise=True,
         expl_noise=0.1,
+        vect_noise_dim=1,
+        mean_noise=0.0,
+        theta=0.15,
+        dt=1e-2,
         index=0,
         policy_freq=2,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
@@ -173,10 +187,34 @@ class MATD3:
         self.steps = [0]
         self.learn_counter = {agent: 0 for agent in self.agent_ids}
         self.max_action = max_action
-        self.expl_noise = expl_noise
         self.min_action = min_action
         self.discrete_actions = discrete_actions
         self.total_actions = sum(self.action_dims)
+
+        self.O_U_noise = O_U_noise
+        self.vect_noise_dim = vect_noise_dim
+        self.expl_noise = (
+            expl_noise
+            if isinstance(expl_noise, list)
+            else [
+                expl_noise * np.ones((vect_noise_dim, action_dim))
+                for action_dim in self.action_dims
+            ]
+        )
+        self.mean_noise = (
+            mean_noise
+            if isinstance(mean_noise, list)
+            else [
+                mean_noise * np.ones((vect_noise_dim, action_dim))
+                for action_dim in self.action_dims
+            ]
+        )
+        self.current_noise = [
+            np.zeros((vect_noise_dim, action_dim)) for action_dim in self.action_dims
+        ]
+        self.theta = theta
+        self.dt = dt
+
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
 
@@ -380,15 +418,17 @@ class MATD3:
             action * -self.min_action[idx][0],
         )
 
-    def getAction(self, states, epsilon=0, agent_mask=None, env_defined_actions=None):
+    def get_action(
+        self, states, training=True, agent_mask=None, env_defined_actions=None
+    ):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observations: {'agent_0': state_dim_0, ..., 'agent_n': state_dim_n}
         :type state: Dict[str, numpy.Array]
-        :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
-        :type epsilon: float, optional
+        :param training: Agent is training, use exploration noise, defaults to True
+        :type training: bool, optional
         :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
         :type agent_mask: Dict[str, bool]
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
@@ -419,8 +459,6 @@ class MATD3:
                 if agent_mask[agent]
             ]
 
-        # states = {key: np.vstack(value) for key, value in states.items()}
-
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
 
@@ -442,47 +480,38 @@ class MATD3:
                 for state in states
             ]
         elif self.arch == "cnn":
-            states = [state.unsqueeze(2) for state in states]
+            states = [
+                (
+                    state.unsqueeze(0).unsqueeze(2)
+                    if len(state.size()) < 4
+                    else state.unsqueeze(2)
+                )
+                for state in states
+            ]
 
         action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
-            if random.random() < epsilon:
-                if self.discrete_actions:
-                    action = (
-                        np.random.dirichlet(
-                            np.ones(self.action_dims[idx]), state.size()[0]
-                        )
-                        .astype("float32")
-                        .squeeze()
-                    )
-                else:
-                    action = (
-                        (self.max_action[idx][0] - self.min_action[idx][0])
-                        * np.random.rand(state.size()[0], self.action_dims[idx])
-                        .astype("float32")
-                        .squeeze()
-                    ) + self.min_action[idx][0]
+            actor.eval()
+            if self.accelerator is not None:
+                with actor.no_sync(), torch.no_grad():
+                    action_values = actor(state)
             else:
-                actor.eval()
-                if self.accelerator is not None:
-                    with actor.no_sync(), torch.no_grad():
-                        action_values = actor(state)
-                else:
-                    with torch.no_grad():
-                        action_values = actor(state)
-                actor.train()
-                if self.discrete_actions:
-                    action = action_values.cpu().data.numpy().squeeze()
-                else:
-                    action = self.scale_to_action_space(
-                        action_values.cpu().data.numpy().squeeze(), idx
+                with torch.no_grad():
+                    action_values = actor(state)
+            actor.train()
+
+            if self.discrete_actions:
+                action = action_values.cpu().data.numpy()
+                if training:
+                    action = (action + self.action_noise(idx)).clip(0, 1)
+            else:
+                action = self.scale_to_action_space(
+                    action_values.cpu().data.numpy(), idx
+                )
+                if training:
+                    action = (action + self.action_noise(idx)).clip(
+                        self.min_action[idx][0], self.max_action[idx][0]
                     )
-                    action = (
-                        action
-                        + np.random.normal(
-                            0, self.expl_noise, size=self.action_dims[idx]
-                        ).astype(np.float32)
-                    ).clip(self.min_action[idx][0], self.max_action[idx][0])
             action_dict[agent_id] = action
 
         if self.discrete_actions:
@@ -517,6 +546,40 @@ class MATD3:
             action_dict,
             discrete_action_dict,
         )
+
+    def action_noise(self, idx):
+        """Create action noise for exploration, either Ornstein Uhlenbeck or
+            from a normal distribution.
+
+        :param idx: Agent index for action dims
+        :type idx: int
+        :return: Action noise
+        :rtype: np.ndArray
+        """
+        if self.O_U_noise:
+            noise = (
+                self.current_noise[idx]
+                + self.theta
+                * (self.mean_noise[idx] - self.current_noise[idx])
+                * self.dt
+                + self.expl_noise[idx]
+                * np.sqrt(self.dt)
+                * np.random.normal(size=(self.vect_noise_dim, self.action_dims[idx]))
+            )
+            self.current_noise[idx] = noise
+        else:
+            noise = np.random.normal(
+                self.mean_noise[idx],
+                self.expl_noise[idx],
+                size=(self.vect_noise_dim, self.action_dims[idx]),
+            )
+        return noise.astype(np.float32)
+
+    def reset_action_noise(self, indices):
+        """Reset action noise."""
+        for i in range(len(self.current_noise)):
+            for idx in indices:
+                self.current_noise[i][idx, :] = 0
 
     def learn(self, experiences):
         """Updates agent network parameters to learn from experiences.
@@ -577,7 +640,8 @@ class MATD3:
 
             if self.arch == "mlp":
                 action_values = list(actions.values())
-                input_combined = torch.cat(list(states.values()) + action_values, 1)
+                state_values = list(states.values())
+                input_combined = torch.cat(state_values + action_values, 1)
                 if self.accelerator is not None:
                     with critic_1.no_sync():
                         q_value_1 = critic_1(input_combined)
@@ -765,27 +829,27 @@ class MATD3:
                 self.critics_2,
                 self.critic_targets_2,
             ):
-                self.softUpdate(actor, actor_target)
-                self.softUpdate(critic_1, critic_target_1)
-                self.softUpdate(critic_2, critic_target_2)
+                self.soft_update(actor, actor_target)
+                self.soft_update(critic_1, critic_target_1)
+                self.soft_update(critic_2, critic_target_2)
 
         return loss_dict
 
-    def softUpdate(self, net, target):
+    def soft_update(self, net, target):
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=500, loop=3):
+    def test(self, env, swap_channels=False, max_steps=None, loop=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
         :type env: Gym-style environment
         :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
-        :param max_steps: Maximum number of testing steps, defaults to 500
+        :param max_steps: Maximum number of testing steps, defaults to None
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
@@ -793,14 +857,15 @@ class MATD3:
         is_vectorised = isinstance(env, PettingZooVectorizationParallelWrapper)
         with torch.no_grad():
             rewards = []
+            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
                 state, info = env.reset()
-                agent_reward = {agent_id: 0 for agent_id in self.agent_ids}
-                score = 0
-                finished = False
-                idx_step = 0
-                while not finished:
-                    idx_step += 1
+                scores = np.zeros(num_envs)
+                completed_episode_scores = np.zeros(num_envs)
+                finished = np.zeros(num_envs)
+                step = 0
+                while not np.all(finished):
+                    step += 1
                     if swap_channels:
                         if is_vectorised:
                             state = {
@@ -820,9 +885,9 @@ class MATD3:
                         if "env_defined_actions" in info.keys()
                         else None
                     )
-                    cont_actions, discrete_action = self.getAction(
+                    cont_actions, discrete_action = self.get_action(
                         state,
-                        epsilon=0,
+                        training=False,
                         agent_mask=agent_mask,
                         env_defined_actions=env_defined_actions,
                     )
@@ -830,25 +895,26 @@ class MATD3:
                         action = discrete_action
                     else:
                         action = cont_actions
+                    if not is_vectorised:
+                        action = {agent: act[0] for agent, act in action.items()}
                     state, reward, done, trunc, info = env.step(action)
-                    for agent_id, r in reward.items():
-                        agent_reward[agent_id] += r[0] if is_vectorised else r
-                    score = sum(agent_reward.values())
-                    if is_vectorised:
+                    scores += np.sum(
+                        np.array(list(reward.values())).transpose(), axis=-1
+                    )
+                    done_array = np.array(list(done.values())).transpose()
+                    trunc_array = np.array(list(trunc.values())).transpose()
+                    if not is_vectorised:
+                        done_array = np.expand_dims(done_array, 0)
+                        trunc_array = np.expand_dims(trunc_array, 0)
+                    for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
                         if (
-                            any(list(done.values())[0])
-                            or all(list(trunc.values())[0])
-                            or (max_steps is not None and idx_step == max_steps)
-                        ):
-                            finished = True
-                    else:
-                        if (
-                            any(done.values())
-                            or all(trunc.values())
-                            or (max_steps is not None and idx_step == max_steps)
-                        ):
-                            finished = True
-                rewards.append(score)
+                            np.any(d)
+                            or np.any(t)
+                            or (max_steps is not None and step == max_steps)
+                        ) and not finished[idx]:
+                            completed_episode_scores[idx] = scores[idx]
+                            finished[idx] = 1
+                rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
@@ -986,6 +1052,15 @@ class MATD3:
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                elif isinstance(attr, list) or isinstance(clone_attr, list):
+                    setattr(clone, attribute, [])
+                    for el in attr:
+                        getattr(clone, attribute).append(copy.deepcopy(el))
                 else:
                     if attr != clone_attr:
                         setattr(
@@ -1106,7 +1181,7 @@ class MATD3:
                 )
             ]
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -1167,7 +1242,7 @@ class MATD3:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

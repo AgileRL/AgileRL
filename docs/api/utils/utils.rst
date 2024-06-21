@@ -1,14 +1,14 @@
 General Utils
 =============
 
-.. autofunction:: agilerl.utils.utils.makeVectEnvs
+.. autofunction:: agilerl.utils.utils.make_vect_envs
 
-.. autofunction:: agilerl.utils.utils.makeMultiAgentVectEnvs
+.. autofunction:: agilerl.utils.utils.make_multi_agent_vect_envs
 
-.. autofunction:: agilerl.utils.utils.makeSkillVectEnvs
+.. autofunction:: agilerl.utils.utils.make_skill_vect_envs
 
-.. autofunction:: agilerl.utils.utils.initialPopulation
+.. autofunction:: agilerl.utils.utils.create_population
 
-.. autofunction:: agilerl.utils.utils.printHyperparams
+.. autofunction:: agilerl.utils.utils.print_hyperparams
 
-.. autofunction:: agilerl.utils.utils.plotPopulationScore
+.. autofunction:: agilerl.utils.utils.plot_population_score

@@ -1,44 +1,28 @@
 import numpy as np
 import torch
-import torch.nn as nn
 from tqdm import trange
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population, make_vect_envs
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+# !Note: If you are running this demo without having installed agilerl,
+# uncomment and place the following above agilerl imports:
 
-class MLPActor(nn.Module):
-    def __init__(self, input_size, hidden_sizes, output_size):
-        super().__init__()
-        layers = []
-
-        # Add input layer
-        layers.append(nn.Linear(input_size, hidden_sizes[0]))
-        layers.append(nn.ReLU())  # Activation function
-
-        # Add hidden layers
-        for i in range(len(hidden_sizes) - 1):
-            layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
-            layers.append(nn.ReLU())  # Activation function
-
-        # Add output layer with a sigmoid activation
-        layers.append(nn.Linear(hidden_sizes[-1], output_size))
-
-        # Combine all layers into a sequential model
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.model(x)
+# import sys
+# sys.path.append('../')
 
 
 if __name__ == "__main__":
-    print("===== AgileRL Off-policy Custom Network Demo =====")
+    print("===== AgileRL Off-policy Demo =====")
 
-    # Device agnostic code
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    NET_CONFIG = {
+        "arch": "mlp",  # Network architecture
+        "hidden_size": [32, 32],  # Actor hidden size
+    }
 
     INIT_HP = {
         "DOUBLE": True,  # Use double Q-learning
@@ -55,39 +39,31 @@ if __name__ == "__main__":
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
+        state_dim = env.single_observation_space.n  # Discrete observation space
+        one_hot = True  # Requires one-hot encoding
     except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
+        state_dim = env.single_observation_space.shape  # Continuous observation space
+        one_hot = False  # Does not require one-hot encoding
     try:
-        action_dim = env.single_action_space.n
+        action_dim = env.single_action_space.n  # Discrete action space
     except Exception:
-        action_dim = env.single_action_space.shape[0]
+        action_dim = env.single_action_space.shape[0]  # Continuous action space
 
-    # Instantiate mlp and then make it evolvable
-    mlp = MLPActor(state_dim[0], [32, 32], action_dim)
-    evolvable_mlp = MakeEvolvable(
-        mlp,
-        input_tensor=torch.ones(state_dim),  # Example input tensor to the network
-        device=device,
-    )
+    if INIT_HP["CHANNELS_LAST"]:
+        state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    # Create a population of DQN agents
     pop = create_population(
         algo="DQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=one_hot,  # One-hot encoding
-        net_config=None,  # Network configuration set as None
-        actor_network=evolvable_mlp,  # Custom evolvable actor
+        net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
         num_envs=num_envs,  # Number of vectorized envs
         device=device,
     )
 
-    # Create the replay buffer
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
         memory_size=10000,  # Max replay buffer size
@@ -112,7 +88,7 @@ if __name__ == "__main__":
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength
-        arch="mlp",  # Network architecture
+        arch=NET_CONFIG["arch"],  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -140,7 +116,7 @@ if __name__ == "__main__":
         for agent in pop:  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
-            completed_episode_scores, losses = [], []
+            completed_episode_scores = []
             steps = 0
             epsilon = eps_start
 

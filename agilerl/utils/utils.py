@@ -15,7 +15,7 @@ from agilerl.algorithms.td3 import TD3
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
-def makeVectEnvs(env_name, num_envs=1):
+def make_vect_envs(env_name, num_envs=1):
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -28,7 +28,7 @@ def makeVectEnvs(env_name, num_envs=1):
     )
 
 
-def makeMultiAgentVectEnvs(env, num_envs=1):
+def make_multi_agent_vect_envs(env, num_envs=1):
     """Returns async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
@@ -39,7 +39,7 @@ def makeMultiAgentVectEnvs(env, num_envs=1):
     return PettingZooVectorizationParallelWrapper(env, num_envs)
 
 
-def makeSkillVectEnvs(env_name, skill, num_envs=1):
+def make_skill_vect_envs(env_name, skill, num_envs=1):
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -54,7 +54,7 @@ def makeSkillVectEnvs(env_name, skill, num_envs=1):
     )
 
 
-def initialPopulation(
+def create_population(
     algo,
     state_dim,
     action_dim,
@@ -64,6 +64,7 @@ def initialPopulation(
     actor_network=None,
     critic_network=None,
     population_size=1,
+    num_envs=1,
     device="cpu",
     accelerator=None,
 ):
@@ -85,6 +86,8 @@ def initialPopulation(
     :type critic_network: nn.Module, optional
     :param population_size: Number of agents in population, defaults to 1
     :type population_size: int, optional
+    :param num_envs: Number of vectorized environments, defaults to 1
+    :type num_envs: int, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -145,6 +148,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -217,6 +226,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -241,6 +256,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
@@ -267,6 +288,12 @@ def initialPopulation(
                 one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
+                O_U_noise=INIT_HP["O_U_NOISE"],
+                expl_noise=INIT_HP["EXPL_NOISE"],
+                vect_noise_dim=num_envs,
+                mean_noise=INIT_HP["MEAN_NOISE"],
+                theta=INIT_HP["THETA"],
+                dt=INIT_HP["DT"],
                 index=idx,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
@@ -374,7 +401,7 @@ def calculate_vectorized_scores(
     return episode_rewards
 
 
-def printHyperparams(pop):
+def print_hyperparams(pop):
     """Prints current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
@@ -383,13 +410,13 @@ def printHyperparams(pop):
 
     for agent in pop:
         print(
-            "Agent ID: {}    Mean 100 fitness: {:.2f}    lr: {}    Batch Size: {}".format(
-                agent.index, np.mean(agent.fitness[-100:]), agent.lr, agent.batch_size
+            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
+                agent.index, np.mean(agent.fitness[-5:]), agent.inspect_attributes()
             )
         )
 
 
-def plotPopulationScore(pop):
+def plot_population_score(pop):
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents

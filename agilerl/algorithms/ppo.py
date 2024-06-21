@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
+from torch.nn.utils import clip_grad_norm_
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
@@ -33,7 +34,7 @@ class PPO:
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 128
+    :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
@@ -77,7 +78,7 @@ class PPO:
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
         lr=1e-4,
-        learn_step=128,
+        learn_step=2048,
         gamma=0.99,
         gae_lambda=0.95,
         mut=None,
@@ -347,7 +348,7 @@ class PPO:
 
         return state.float()
 
-    def getAction(self, state, action=None, grad=False):
+    def get_action(self, state, action=None, grad=False):
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -482,7 +483,7 @@ class PPO:
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                _, log_prob, entropy, value = self.getAction(
+                _, log_prob, entropy, value = self.get_action(
                     state=states[minibatch_idxs],
                     action=actions[minibatch_idxs],
                     grad=True,
@@ -527,6 +528,7 @@ class PPO:
                     self.accelerator.backward(loss)
                 else:
                     loss.backward()
+                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
                 mean_loss += loss.item()
@@ -562,7 +564,7 @@ class PPO:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action, _, _, _ = self.getAction(state)
+                    action, _, _, _ = self.get_action(state)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -681,7 +683,7 @@ class PPO:
                 self.optimizer, [self.actor, self.critic], self.lr
             )
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -706,7 +708,7 @@ class PPO:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

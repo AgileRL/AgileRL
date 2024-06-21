@@ -346,7 +346,7 @@ def test_soft_update():
 
     algo = ILQL(rl_ds, net_config=net_config, double_q=True)
 
-    algo.softUpdate()
+    algo.soft_update()
 
     eval_params = list(algo.q.parameters())
     target_params = list(algo.target_q.parameters())
@@ -502,7 +502,7 @@ def test_save_load_checkpoint(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    algo.saveCheckpoint(checkpoint_path)
+    algo.save_checkpoint(checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path)
 
@@ -553,7 +553,7 @@ def test_save_load_checkpoint(tmpdir):
     assert "steps" in checkpoint
 
     algo = ILQL(rl_ds, net_config=net_config, double_q=True)
-    algo.loadCheckpoint(checkpoint_path)
+    algo.load_checkpoint(checkpoint_path)
 
     assert algo.algo == "ILQL"
     assert algo.index == 0

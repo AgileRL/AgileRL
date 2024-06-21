@@ -33,11 +33,12 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.utils import makeVectEnvs
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.algorithms.ppo import PPO
 
   # Create environment
-  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=1)
+  num_envs = 1
+  env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
@@ -57,15 +58,12 @@ Example
 
   agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions)   # Create PPO agent
 
-  num_episodes = 10  # Number of episodes
-  max_steps = 100  # Max steps per episode
-
-  for episode in range(num_episodes):
-      for step in range(max_steps):
+  while True:
+      for step in range(agent.learn_step):
           if channels_last:
-              state = np.moveaxis(state, [3], [1])
+              state = np.moveaxis(state, [-1], [-3])
           # Get next action from agent
-          action, log_prob, _, value = agent.getAction(state)
+          action, log_prob, _, value = agent.get_action(state)
           next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
 
           states.append(state)
@@ -89,7 +87,12 @@ Example
       # Learn according to agent's RL algorithm
       agent.learn(experiences)
 
-To configure the network architecture, pass a dict to the PPO ``net_config`` field. For an MLP, this can be as simple as:
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a kwargs dict to the PPO ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -118,7 +121,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -127,7 +130,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions)   # Create PPO agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

@@ -33,9 +33,9 @@ def test_get_length_of_memory():
     reward = {"agent1": np.array([6]), "agent2": np.array([7])}
 
     # Add experiences to memory
-    buffer.save2memory(state, action, reward)
-    buffer.save2memory(state, action, reward)
-    buffer.save2memory(state, action, reward)
+    buffer.save_to_memory(state, action, reward)
+    buffer.save_to_memory(state, action, reward)
+    buffer.save_to_memory(state, action, reward)
 
     assert len(buffer) == 3
 
@@ -98,7 +98,7 @@ def test_add_experience_when_memory_full():
     assert buffer.memory[1].reward == reward3
 
 
-# Can add experiences to memory using save2memory method
+# Can add experiences to memory using save_to_memory method
 def test_add_experiences_to_memory():
     memory_size = 100
     field_names = ["state", "action", "reward"]
@@ -110,7 +110,7 @@ def test_add_experiences_to_memory():
     action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
     reward = {"agent1": np.array([6]), "agent2": np.array([7])}
 
-    buffer.save2memory(state, action, reward)
+    buffer.save_to_memory(state, action, reward)
 
     assert len(buffer) == 1
     assert buffer.memory[0].state == state
@@ -118,7 +118,7 @@ def test_add_experiences_to_memory():
     assert buffer.memory[0].reward == reward
 
 
-# Can add single experiences to memory with save2memorySingleEnv method
+# Can add single experiences to memory with save_to_memory_single_env method
 def test_add_single_experiences_to_memory():
     memory_size = 100
     field_names = ["state", "action", "reward"]
@@ -131,7 +131,7 @@ def test_add_single_experiences_to_memory():
     action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
     reward = {"agent1": np.array([6]), "agent2": np.array([7])}
 
-    buffer.save2memorySingleEnv(state, action, reward)
+    buffer.save_to_memory_single_env(state, action, reward)
 
     assert len(buffer.memory) == 1
     assert buffer.memory[0].state == state
@@ -139,7 +139,7 @@ def test_add_single_experiences_to_memory():
     assert buffer.memory[0].reward == reward
 
 
-# Can add multiple experiences to memory with save2memoryVectEnvs method
+# Can add multiple experiences to memory with save_to_memory_vect_envs method
 def test_add_multiple_experiences_to_memory():
     memory_size = 100
     field_names = ["state", "action", "reward"]
@@ -155,7 +155,7 @@ def test_add_multiple_experiences_to_memory():
     actions = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
     rewards = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
 
-    buffer.save2memoryVectEnvs(states, actions, rewards)
+    buffer.save_to_memory_vect_envs(states, actions, rewards)
 
     state1 = {"agent1": np.array([1, 2]), "agent2": np.array([1, 2])}
     action1 = {"agent1": np.array([0]), "agent2": np.array([0])}
@@ -190,7 +190,7 @@ def test_add_any_experiences_to_memory():
     actions = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
     rewards = {"agent1": np.array([[0], [1]]), "agent2": np.array([[0], [1]])}
 
-    buffer.save2memory(states, actions, rewards, is_vectorised=True)
+    buffer.save_to_memory(states, actions, rewards, is_vectorised=True)
 
     state1 = {"agent1": np.array([1, 2]), "agent2": np.array([1, 2])}
     action1 = {"agent1": np.array([0]), "agent2": np.array([0])}
@@ -212,7 +212,7 @@ def test_add_any_experiences_to_memory():
     new_action = {"agent1": np.array([0]), "agent2": np.array([0])}
     new_reward = {"agent1": np.array([0]), "agent2": np.array([0])}
 
-    buffer.save2memory(new_state, new_action, new_reward, is_vectorised=False)
+    buffer.save_to_memory(new_state, new_action, new_reward, is_vectorised=False)
 
     assert len(buffer.memory) == 3
     assert str(buffer.memory[2].state) == str(new_state)
@@ -232,7 +232,7 @@ def test_sample_experiences_from_memory():
     action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
     reward = {"agent1": np.array([6]), "agent2": np.array([7])}
 
-    buffer.save2memory(state, action, reward)
+    buffer.save_to_memory(state, action, reward)
 
     batch_size = 1
     transition = buffer.sample(batch_size)
@@ -258,7 +258,7 @@ def test_sample_experiences_from_memory_images():
     action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
     reward = {"agent1": np.array([6]), "agent2": np.array([7])}
 
-    buffer.save2memory(state, action, reward)
+    buffer.save_to_memory(state, action, reward)
 
     batch_size = 1
     transition = buffer.sample(batch_size)

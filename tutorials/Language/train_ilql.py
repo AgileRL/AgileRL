@@ -136,7 +136,7 @@ def train(cfg):
                     train_cfg["loss"]["q_loss_weight"] != 0.0
                     or train_cfg["loss"]["v_loss_weight"] != 0.0
                 ):
-                    accelerator.unwrap_model(model).softUpdate()
+                    accelerator.unwrap_model(model).soft_update()
             if (train_cfg["hard_update_every"] is not None) and (
                 (step + 1) % train_cfg["hard_update_every"] == 0
             ):

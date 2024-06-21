@@ -15,7 +15,7 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.utils import makeMultiAgentVectEnvs
+from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -308,7 +308,8 @@ def test_initialize_matd3_with_net_config(
     assert matd3.max_action == max_action
     assert matd3.min_action == min_action
     assert matd3.discrete_actions == discrete_actions
-    assert matd3.expl_noise == expl_noise
+    for noise in matd3.expl_noise:
+        assert np.all(noise == expl_noise)
     assert matd3.net_config == net_config, matd3.net_config
     assert matd3.batch_size == batch_size
     assert matd3.multi
@@ -741,34 +742,38 @@ def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device):
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions, one_hot",
+    "training, state_dims, action_dims, discrete_actions, one_hot",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),  #
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),  #
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
     ],
 )
-def test_matd3_getAction_epsilon_greedy_mlp(
-    epsilon, state_dims, action_dims, discrete_actions, one_hot, device
+def test_matd3_get_action_mlp(
+    training, state_dims, action_dims, discrete_actions, one_hot, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     if one_hot:
         state = {
-            agent: np.random.randint(0, state_dims[0], *state_dims[0])
-            for agent in agent_ids
+            agent: np.random.randint(0, state_dims[idx], 1)
+            for idx, agent in enumerate(agent_ids)
         }
     else:
-        state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+        state = {
+            agent: np.random.randn(*state_dims[idx])
+            for idx, agent in enumerate(agent_ids)
+        }
+
     matd3 = MATD3(
         state_dims,
         action_dims,
         one_hot=one_hot,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        net_config={"arch": "mlp", "hidden_size": [8, 8]},
         n_agents=2,
         agent_ids=agent_ids,
         max_action=[[1], [1]],
@@ -776,35 +781,29 @@ def test_matd3_getAction_epsilon_greedy_mlp(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = matd3.getAction(state, epsilon)
-    for idx, action in enumerate(list(cont_actions.values())):
-        if one_hot:
-            assert len(action[0]) == action_dims[idx]
-            assert len(action) == state_dims[idx][0]
+    cont_actions, discrete_action = matd3.get_action(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
             if discrete_actions:
                 torch.testing.assert_close(
-                    sum(np.sum(action, 0)), float(state_dims[idx][0])
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
                 )
             act = action[idx]
             assert act.dtype == np.float32
             assert -1 <= act.all() <= 1
-        else:
-            assert len(action) == action_dims[idx]
-            if discrete_actions:
-                torch.testing.assert_close(sum(action), 1.0)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(discrete_action.values())):
-            if one_hot:
-                assert action.all() <= action_dims[idx] - 1
-            else:
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
                 assert action <= action_dims[idx] - 1
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
@@ -812,8 +811,8 @@ def test_matd3_getAction_epsilon_greedy_mlp(
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_matd3_getAction_epsilon_greedy_cnn(
-    epsilon, state_dims, action_dims, discrete_actions, device
+def test_matd3_get_action_cnn(
+    training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
@@ -824,7 +823,9 @@ def test_matd3_getAction_epsilon_greedy_cnn(
         "stride_size": [1],
         "normalize": False,
     }
-    state = {agent: np.random.randn(1, *state_dims[0]) for agent in agent_ids}
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
     matd3 = MATD3(
         state_dims,
         action_dims,
@@ -837,26 +838,29 @@ def test_matd3_getAction_epsilon_greedy_cnn(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = matd3.getAction(state, epsilon)
+    cont_actions, discrete_action = matd3.get_action(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
+            if discrete_actions:
+                torch.testing.assert_close(
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
+                )
+            act = action[idx]
+            assert act.dtype == np.float32
+            assert -1 <= act.all() <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            torch.testing.assert_close(sum(action), 1.00)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
-        for idx, action in enumerate(list(discrete_action.values())):
-            assert action <= action_dims[idx] - 1
-    else:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
+                assert action <= action_dims[idx] - 1
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True),  #
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True),
@@ -864,12 +868,14 @@ def test_matd3_getAction_epsilon_greedy_cnn(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
     ],
 )
-def test_matd3_getAction_epsilon_greedy_distributed(
-    epsilon, state_dims, action_dims, discrete_actions
+def test_matd3_get_action_distributed(
+    training, state_dims, action_dims, discrete_actions
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
-    state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
     matd3 = MATD3(
         state_dims,
         action_dims,
@@ -892,26 +898,29 @@ def test_matd3_getAction_epsilon_greedy_distributed(
         for actor in matd3.actors
     ]
     matd3.actors = new_actors
-    cont_actions, discrete_action = matd3.getAction(state, epsilon)
+    cont_actions, discrete_action = matd3.get_action(state, training)
+    for idx, env_actions in enumerate(list(cont_actions.values())):
+        for action in env_actions:
+            assert len(action) == action_dims[idx]
+            if discrete_actions:
+                torch.testing.assert_close(
+                    sum(action),
+                    1.0,
+                    atol=0.1,
+                    rtol=1e-3,
+                )
+            act = action[idx]
+            assert act.dtype == np.float32
+            assert -1 <= act.all() <= 1
+
     if discrete_actions:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            torch.testing.assert_close(sum(action), 1.00)
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
-        for idx, action in enumerate(list(discrete_action.values())):
-            assert action <= action_dims[idx] - 1
-    else:
-        for idx, action in enumerate(list(cont_actions.values())):
-            assert len(action) == action_dims[idx]
-            act = action[idx]
-            assert isinstance(act, np.float32)
-            assert -1 <= act <= 1
+        for idx, env_action in enumerate(list(discrete_action.values())):
+            for action in env_action:
+                assert action <= action_dims[idx] - 1
 
 
 @pytest.mark.parametrize(
-    "epsilon, state_dims, action_dims, discrete_actions",
+    "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
@@ -919,11 +928,13 @@ def test_matd3_getAction_epsilon_greedy_distributed(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_matd3_getAction_agent_masking(
-    epsilon, state_dims, action_dims, discrete_actions, device
+def test_matd3_get_action_agent_masking(
+    training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
-    state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
     agent_mask = {"agent_0": False, "agent_1": True}
     if discrete_actions:
         env_defined_actions = {"agent_0": 1, "agent_1": None}
@@ -940,8 +951,8 @@ def test_matd3_getAction_agent_masking(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = matd3.getAction(
-        state, epsilon, agent_mask=agent_mask, env_defined_actions=env_defined_actions
+    cont_actions, discrete_action = matd3.get_action(
+        state, training, agent_mask=agent_mask, env_defined_actions=env_defined_actions
     )
     if discrete_actions:
         assert np.array_equal(discrete_action["agent_0"], 1), discrete_action["agent_0"]
@@ -1401,7 +1412,7 @@ def test_matd3_soft_update(device):
         matd3.critic_targets_2,
     ):
         # Check actors
-        matd3.softUpdate(actor, actor_target)
+        matd3.soft_update(actor, actor_target)
         eval_params = list(actor.parameters())
         target_params = list(actor_target.parameters())
         expected_params = [
@@ -1412,7 +1423,7 @@ def test_matd3_soft_update(device):
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
-        matd3.softUpdate(critic_1, critic_target_1)
+        matd3.soft_update(critic_1, critic_target_1)
         eval_params = list(critic_1.parameters())
         target_params = list(critic_target_1.parameters())
         expected_params = [
@@ -1424,7 +1435,7 @@ def test_matd3_soft_update(device):
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
-        matd3.softUpdate(critic_2, critic_target_2)
+        matd3.soft_update(critic_2, critic_target_2)
         eval_params = list(critic_2.parameters())
         target_params = list(critic_target_2.parameters())
         expected_params = [
@@ -1445,7 +1456,7 @@ def test_matd3_algorithm_test_loop(device):
 
     env = DummyMultiEnv(state_dims[0], action_dims)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     matd3 = MATD3(
         state_dims,
         action_dims,
@@ -1506,7 +1517,7 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device):
     }
     action_dims = [2, 2]
     accelerator = None
-    env = makeMultiAgentVectEnvs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
+    env = make_multi_agent_vect_envs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
     matd3 = MATD3(
         agent_state_dims,
         action_dims,
@@ -1565,22 +1576,22 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
         max_action,
         min_action,
         discrete_actions,
-        expl_noise,
-        index,
-        policy_freq,
-        net_config,
-        batch_size,
-        lr_actor,
-        lr_critic,
-        learn_step,
-        gamma,
-        tau,
-        mut,
-        actor_networks,
-        critic_networks,
-        device,
-        accelerator,
-        wrap,
+        expl_noise=expl_noise,
+        index=index,
+        policy_freq=policy_freq,
+        net_config=net_config,
+        batch_size=batch_size,
+        lr_actor=lr_actor,
+        lr_critic=lr_critic,
+        learn_step=learn_step,
+        gamma=gamma,
+        tau=tau,
+        mut=mut,
+        actor_networks=actor_networks,
+        critic_networks=critic_networks,
+        device=device,
+        accelerator=accelerator,
+        wrap=wrap,
     )
 
     clone_agent = matd3.clone(wrap=wrap)
@@ -1593,7 +1604,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap):
     assert clone_agent.agent_ids == matd3.agent_ids
     assert clone_agent.max_action == matd3.max_action
     assert clone_agent.min_action == matd3.min_action
-    assert clone_agent.expl_noise == matd3.expl_noise
+    assert np.array_equal(clone_agent.expl_noise, matd3.expl_noise)
     assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
     assert clone_agent.net_config == matd3.net_config
@@ -1708,7 +1719,7 @@ def test_clone_after_learning():
     assert clone_agent.agent_ids == matd3.agent_ids
     assert clone_agent.max_action == matd3.max_action
     assert clone_agent.min_action == matd3.min_action
-    assert clone_agent.expl_noise == matd3.expl_noise
+    assert np.array_equal(clone_agent.expl_noise, matd3.expl_noise)
     assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
     assert clone_agent.net_config == matd3.net_config
@@ -1784,7 +1795,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1834,7 +1845,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_matd3.loadCheckpoint(checkpoint_path)
+    loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_matd3.net_config == net_config
@@ -1911,7 +1922,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1957,7 +1968,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_matd3.loadCheckpoint(checkpoint_path)
+    loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_matd3.net_config == net_config_cnn
@@ -2052,7 +2063,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     )
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -2098,7 +2109,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_matd3.loadCheckpoint(checkpoint_path)
+    loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert all(isinstance(actor, MakeEvolvable) for actor in loaded_matd3.actors)
@@ -2247,7 +2258,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -2350,7 +2361,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -2491,7 +2502,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_matd3 = MATD3.load(checkpoint_path)

@@ -84,7 +84,7 @@ class MultiAgentReplayBuffer:
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 
-    def save2memorySingleEnv(self, *args):
+    def save_to_memory_single_env(self, *args):
         """Saves experience to memory.
 
         :param *args: Variable length argument list. Contains transition elements in consistent order,
@@ -116,7 +116,7 @@ class MultiAgentReplayBuffer:
                 results[j].append(new_dict)
         return tuple(results)
 
-    def save2memoryVectEnvs(self, *args):
+    def save_to_memory_vect_envs(self, *args):
         """Saves multiple experiences to memory.
 
         :param *args: Variable length argument list. Contains batched transition elements in consistent order,
@@ -127,8 +127,8 @@ class MultiAgentReplayBuffer:
             self._add(*transition)
             self.counter += 1
 
-    def save2memory(self, *args, is_vectorised=False):
-        """Applies appropriate save2memory function depending on whether
+    def save_to_memory(self, *args, is_vectorised=False):
+        """Applies appropriate save_to_memory function depending on whether
         the environment is vectorised or not.
 
         :param *args: Variable length argument list. Contains batched or unbatched transition elements in consistent order,
@@ -137,6 +137,6 @@ class MultiAgentReplayBuffer:
         :type is_vectorised: bool
         """
         if is_vectorised:
-            self.save2memoryVectEnvs(*args)
+            self.save_to_memory_vect_envs(*args)
         else:
-            self.save2memorySingleEnv(*args)
+            self.save_to_memory_single_env(*args)

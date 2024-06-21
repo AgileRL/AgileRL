@@ -52,7 +52,7 @@ can be implemented in a custom loop as follows:
 .. code-block:: python
 
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.getAction(state, epsilon, info['agent_mask'], info['env_defined_actions'])
+    cont_actions, discrete_action = agent.get_action(state, epsilon, info['agent_mask'], info['env_defined_actions'])
     if agent.discrete_actions:
         action = discrete_action
     else:
@@ -63,14 +63,18 @@ Example
 
 .. code-block:: python
 
+    import numpy as np
     import torch
     from pettingzoo.mpe import simple_speaker_listener_v4
-    from agilerl.algorithms.matd3 import MATD3
+    from tqdm import trange
+
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    import numpy as np
+    from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_envs = 8
     env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
+    env = PettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -95,34 +99,38 @@ Example
     n_agents = env.num_agents
     agent_ids = [agent_id for agent_id in env.agents]
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = MultiAgentReplayBuffer(memory_size=1_000_000,
-                                    field_names=field_names,
-                                    agent_ids=agent_ids,
-                                    device=device)
+    memory = MultiAgentReplayBuffer(
+        memory_size=1_000_000,
+        field_names=field_names,
+        agent_ids=agent_ids,
+        device=device,
+    )
 
-    agent = MATD3(state_dims=state_dim,
-                    action_dims=action_dim,
-                    one_hot=one_hot,
-                    n_agents=n_agents,
-                    agent_ids=agent_ids,
-                    max_action=max_action,
-                    min_action=min_action,
-                    discrete_actions=discrete_actions,
-                    device=device)
+    agent = MATD3(
+        state_dims=state_dim,
+        action_dims=action_dim,
+        one_hot=one_hot,
+        n_agents=n_agents,
+        agent_ids=agent_ids,
+        max_action=max_action,
+        min_action=min_action,
+        vect_noise_dim=num_envs,
+        discrete_actions=discrete_actions,
+        device=device,
+    )
 
-    episodes = 1000
-    max_steps = 25 # For atari environments it is recommended to use a value of 500
-    epsilon = 1.0
-    eps_end = 0.1
-    eps_decay = 0.995
+    # Define training loop parameters
+    max_steps = 100000  # Max steps
+    total_steps = 0
 
-    for ep in range(episodes):
+    while agent.steps[-1] < max_steps:
         state, info  = env.reset() # Reset environment at start of episode
-        agent_reward = {agent_id: 0 for agent_id in env.agents}
+        scores = np.zeros(num_envs)
+        completed_episode_scores = []
         if channels_last:
-            state = {agent_id: np.moveaxis(np.expand_dims(s, 0), [3], [1]) for agent_id, s in state.items()}
+            state = {agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in state.items()}
 
-        for _ in range(max_steps):
+        for _ in range(1000):
             agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
             env_defined_actions = (
                 info["env_defined_actions"]
@@ -131,48 +139,61 @@ Example
             )
 
             # Get next action from agent
-            cont_actions, discrete_action = agent.getAction(
-                state, epsilon, agent_mask, env_defined_actions
+            cont_actions, discrete_action = agent.get_action(
+                states=state,
+                training=True,
+                agent_mask=agent_mask,
+                env_defined_actions=env_defined_actions,
             )
             if agent.discrete_actions:
                 action = discrete_action
             else:
                 action = cont_actions
 
-            next_state, reward, termination, truncation, info = env.step(
-                action
-            )  # Act in environment
+            # Act in environment
+            next_state, reward, termination, truncation, info = env.step(action)
+
+            scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+            total_steps += num_envs
+            steps += num_envs
 
             # Save experiences to replay buffer
             if channels_last:
-                state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
-                next_state = {agent_id: np.moveaxis(ns, [2], [0]) for agent_id, ns in next_state.items()}
-            memory.save2memory(state, cont_actions, reward, next_state, done)
-
-            for agent_id, r in reward.items():
-                    agent_reward[agent_id] += r
+                next_state = {
+                    agent_id: np.moveaxis(ns, [-1], [-3])
+                    for agent_id, ns in next_state.items()
+                }
+            memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
 
             # Learn according to learning frequency
-            if (memory.counter % agent.learn_step == 0) and (len(
-                    memory) >= agent.batch_size):
-                experiences = memory.sample(agent.batch_size) # Sample replay buffer
-                agent.learn(experiences) # Learn according to agent's RL algorithm
+            if len(memory) >= agent.batch_size:
+                for _ in range(num_envs // agent.learn_step):
+                    experiences = memory.sample(agent.batch_size) # Sample replay buffer
+                    agent.learn(experiences) # Learn according to agent's RL algorithm
 
             # Update the state
-            if channels_last:
-                next_state = {agent_id: np.expand_dims(ns,0) for agent_id, ns in next_state.items()}
             state = next_state
 
-            # Stop episode if any agents have terminated
-            if any(truncation.values()) or any(termination.values()):
-                break
+            # Calculate scores and reset noise for finished episodes
+            reset_noise_indices = []
+            term_array = np.array(list(termination.values())).transpose()
+            trunc_array = np.array(list(truncation.values())).transpose()
+            for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
+                if np.any(d) or np.any(t):
+                    completed_episode_scores.append(scores[idx])
+                    agent.scores.append(scores[idx])
+                    scores[idx] = 0
+                    reset_noise_indices.append(idx)
+            agent.reset_action_noise(reset_noise_indices)
 
-        # Save the total episode reward
-        score = sum(agent_reward.values())
-        agent.scores.append(score)
+        agent.steps[-1] += steps
 
-        # Update epsilon for exploration
-        epsilon = max(eps_end, epsilon * eps_decay)
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a kwargs dict to the MATD3 ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -209,7 +230,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -225,7 +246,7 @@ To save an agent, use the ``saveCheckpoint`` method:
                  discrete_actions=discrete_actions)   # Create MATD3 agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

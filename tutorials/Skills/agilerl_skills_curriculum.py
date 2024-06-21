@@ -8,7 +8,7 @@ from tqdm import trange
 
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import initialPopulation, makeSkillVectEnvs, makeVectEnvs
+from agilerl.utils.utils import create_population, make_skill_vect_envs, make_vect_envs
 from agilerl.wrappers.learning import Skill
 
 
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     }
 
     for skill in skills.keys():
-        env = makeSkillVectEnvs(
+        env = make_skill_vect_envs(
             INIT_HP["ENV_NAME"], skills[skill], num_envs=1
         )  # Create environment
 
@@ -187,7 +187,7 @@ if __name__ == "__main__":
         if INIT_HP["CHANNELS_LAST"]:
             state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-        pop = initialPopulation(
+        pop = create_population(
             algo="PPO",  # Algorithm
             state_dim=state_dim,  # State dimension
             action_dim=action_dim,  # Action dimension
@@ -218,7 +218,7 @@ if __name__ == "__main__":
         # Save the trained algorithm
         filename = f"PPO_trained_agent_{skill}.pt"
         save_path = os.path.join(save_dir, filename)
-        trained_pop[0].saveCheckpoint(save_path)
+        trained_pop[0].save_checkpoint(save_path)
 
         env.close()
 
@@ -234,7 +234,7 @@ if __name__ == "__main__":
         2: {"skill": "landing", "agent": landing_agent, "skill_duration": 40},
     }
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
+    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
@@ -250,7 +250,7 @@ if __name__ == "__main__":
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="PPO",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -304,7 +304,7 @@ if __name__ == "__main__":
 
             for idx_step in range(500):
                 # Get next action from agent
-                action, log_prob, _, value = agent.getAction(state)
+                action, log_prob, _, value = agent.get_action(state)
 
                 # Internal loop to execute trained skill
                 skill_agent = trained_skills[action[0]]["agent"]
@@ -317,7 +317,7 @@ if __name__ == "__main__":
                             [0]
                         )
                     else:
-                        skill_action, _, _, _ = skill_agent.getAction(state)
+                        skill_action, _, _, _ = skill_agent.get_action(state)
                         next_state, skill_reward, termination, truncation, _ = env.step(
                             skill_action
                         )  # Act in environment
@@ -377,4 +377,4 @@ if __name__ == "__main__":
     # Save the trained selector
     filename = "PPO_trained_agent_selector.pt"
     save_path = os.path.join(save_dir, filename)
-    pop[0].saveCheckpoint(save_path)
+    pop[0].save_checkpoint(save_path)

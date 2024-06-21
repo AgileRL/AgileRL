@@ -31,28 +31,34 @@ Example
     action_dim = env.arms
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+    memory = ReplayBuffer(memory_size=10000, field_names=field_names)
 
     bandit = NeuralTS(state_dim=context_dim, action_dim=action_dim)
 
     context = env.reset()  # Reset environment at start of episode
     for _ in range(500):
         # Get next action from agent
-        action = agent.getAction(context)
+        action = agent.get_action(context)
         next_context, reward = env.step(action)  # Act in environment
 
         # Save experience to replay buffer
-        memory.save2memory(context[action], reward)
+        memory.save_to_memory(context[action], reward)
 
         # Learn according to learning frequency
-        if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-            experiences = memory.sample(agent.batch_size) # Sample replay buffer
-            agent.learn(experiences)    # Learn according to agent's RL algorithm
+        if len(memory) >= agent.batch_size:
+            for _ in range(agent.learn_step):
+                experiences = memory.sample(agent.batch_size) # Sample replay buffer
+                agent.learn(experiences)    # Learn according to agent's RL algorithm
 
         context = next_context
 
 
-To configure the network architecture, pass a dict to the NeuralTS ``net_config`` field. For an MLP, this can be as simple as:
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a kwargs dict to the NeuralTS ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -81,7 +87,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -90,7 +96,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = NeuralTS(state_dim=state_dim, action_dim=action_dim)   # Create NeuralTS agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

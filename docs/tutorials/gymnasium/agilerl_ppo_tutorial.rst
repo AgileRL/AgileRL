@@ -35,24 +35,18 @@ Dependencies
 .. code-block:: python
 
     # Author: Michael Pratt
-    # License: MIT License
     import os
 
     import imageio
+    import gymnasium as gym
     import numpy as np
     import torch
     from agilerl.algorithms.ppo import PPO
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_on_policy import train_on_policy
-    from agilerl.utils.utils import (
-        calculate_vectorized_scores,
-        initialPopulation,
-        makeVectEnvs,
-    )
+    from agilerl.utils.utils import create_population, make_vect_envs
     from tqdm import trange
-
-    import gymnasium as gym
 
 
 Defining Hyperparameters
@@ -70,7 +64,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 0.001,  # Learning rate
-        "LEARN_STEP": 128,  # Learning frequency
+        "LEARN_STEP": 1024,  # Learning frequency
         "GAMMA": 0.99,  # Discount factor
         "GAE_LAMBDA": 0.95,  # Lambda for general advantage estimation
         "ACTION_STD_INIT": 0.6,  # Initial action standard deviation
@@ -82,11 +76,11 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "UPDATE_EPOCHS": 4,  # Number of policy update epochs
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,  # Use with RGB states
-        "EPISODES": 300,  # Number of episodes to train for
-        "EVO_EPOCHS": 20,  # Evolution frequency, i.e. evolve after every 20 episodes
         "TARGET_SCORE": 200.0,  # Target score that will beat the environment
-        "EVO_LOOP": 3,  # Number of evaluation episodes
-        "MAX_STEPS": 500,  # Maximum number of steps an agent takes in an environment
+        "MAX_STEPS": 150000,  # Maximum number of steps an agent takes in an environment
+        "EVO_STEPS": 10000,  # Evolution frequency
+        "EVAL_STEPS": None,  # Number of evaluation steps per episode
+        "EVAL_LOOP": 3,  # Number of evaluation episodes
         "TOURN_SIZE": 2,  # Tournament size
         "ELITISM": True,  # Elitism in tournament selection
     }
@@ -100,7 +94,8 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "PARAMS_MUT": 0.2,  # Network parameters mutation
         "ACT_MUT": 0.2,  # Activation layer mutation
         "RL_HP_MUT": 0.2,  # Learning HP mutation
-        "RL_HP_SELECTION": ["lr", "batch_size"],  # Learning HPs to choose from
+        # Learning HPs to choose from
+        "RL_HP_SELECTION": ["lr", "batch_size", "learn_step"],
         "MUT_SD": 0.1,  # Mutation strength
         "RAND_SEED": 42,  # Random seed
         # Define max and min limits for mutating RL hyperparams
@@ -108,6 +103,8 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "MAX_LR": 0.01,
         "MIN_BATCH_SIZE": 8,
         "MAX_BATCH_SIZE": 1024,
+        "MIN_LEARN_STEP": 256,
+        "MAX_LEARN_STEP": 8192,
     }
 
 Create the Environment
@@ -119,7 +116,8 @@ or continuous.
 
 .. code-block:: python
 
-    env = makeVectEnvs("Acrobot-v1", num_envs=8)  # Create environment
+    num_envs=8
+    env = make_vect_envs("Acrobot-v1", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -131,9 +129,8 @@ or continuous.
     except Exception:
         action_dim = env.single_action_space.shape[0]  # Continuous action space
 
-    if INIT_HP[
-        "CHANNELS_LAST"
-    ]:  # Adjusts dimensions to be in accordance with PyTorch API (C, H, W), used with envs with RGB image states
+    if INIT_HP["CHANNELS_LAST"]:
+        # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
 Create a Population of Agents
@@ -154,7 +151,7 @@ followed by mutations) is detailed further below.
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
 
     # Define a population
-    pop = initialPopulation(
+    pop = create_population(
         algo="PPO",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -162,6 +159,7 @@ followed by mutations) is detailed further below.
         net_config=net_config,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameter
         population_size=INIT_HP["POP_SIZE"],  # Population size
+        num_envs=num_envs,
         device=device,
     )
 
@@ -181,7 +179,7 @@ returns the best agent, and the new generation of agents.
         INIT_HP["TOURN_SIZE"],
         INIT_HP["ELITISM"],
         INIT_HP["POP_SIZE"],
-        INIT_HP["EVO_EPOCHS"],
+        INIT_HP["EVAL_LOOP"],
     )
 
 Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be
@@ -210,14 +208,17 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         activation=MUT_P["ACT_MUT"],
         rl_hp=MUT_P["RL_HP_MUT"],
         rl_hp_selection=MUT_P["RL_HP_SELECTION"],
+        min_lr=MUT_P["MIN_LR"],
+        max_lr=MUT_P["MAX_LR"],
+        min_batch_size=MUT_P["MAX_BATCH_SIZE"],
+        max_batch_size=MUT_P["MAX_BATCH_SIZE"],
+        min_learn_step=MUT_P["MIN_LEARN_STEP"],
+        max_learn_step=MUT_P["MAX_LEARN_STEP"],
         mutation_sd=MUT_P["MUT_SD"],
         arch=net_config["arch"],
         rand_seed=MUT_P["RAND_SEED"],
         device=device,
     )
-
-# Define a save path for our trained agent
-save_path = "PPO_trained_agent.pt"
 
 Training and Saving an Agent
 ----------------------------
@@ -232,6 +233,9 @@ fitnesses (fitness is each agents test scores on the environment).
 
 .. code-block:: python
 
+    # Define a save path for our trained agent
+    save_path = "PPO_trained_agent.pt"
+
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,
         env_name="Acrobot-v1",
@@ -240,10 +244,10 @@ fitnesses (fitness is each agents test scores on the environment).
         INIT_HP=INIT_HP,
         MUT_P=MUT_P,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_epochs=INIT_HP["EVO_EPOCHS"],
-        evo_loop=INIT_HP["EVO_LOOP"],
-        target=INIT_HP["TARGET_SCORE"],
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
         tournament=tournament,
         mutation=mutations,
         wb=False,  # Boolean flag to record run with Weights & Biases
@@ -260,103 +264,119 @@ function and is an example of how we might choose to make use of a population of
 .. code-block:: python
 
     total_steps = 0
-    elite = pop[0]  # elite variable placeholder
-    step = 0  # step variable placeholder
-    next_state = None  # next_step variable placeholder
 
-    for episode in trange(INIT_HP["EPISODES"]):
+    # TRAINING LOOP
+    print("Training...")
+    pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
+    while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
+        pop_episode_scores = []
         for agent in pop:  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
-            score = 0
+            state, info = env.reset()  # Reset environment at start of episode
+            scores = np.zeros(num_envs)
+            completed_episode_scores = []
+            steps = 0
 
-            states = []
-            actions = []
-            log_probs = []
-            rewards = []
-            dones = []
-            values = []
+            for _ in range(-(INIT_HP["EVO_STEPS"] // -agent.learn_step)):
 
-            for step in range(INIT_HP["MAX_STEPS"]):
+                states = []
+                actions = []
+                log_probs = []
+                rewards = []
+                dones = []
+                values = []
+
+                learn_steps = 0
+
+                for idx_step in range(-(agent.learn_step // -num_envs)):
+                    if INIT_HP["CHANNELS_LAST"]:
+                        state = np.moveaxis(state, [-1], [-3])
+
+                    # Get next action from agent
+                    action, log_prob, _, value = agent.get_action(state)
+
+                    # Act in environment
+                    next_state, reward, terminated, truncated, info = env.step(action)
+
+                    total_steps += num_envs
+                    steps += num_envs
+                    learn_steps += num_envs
+
+                    states.append(state)
+                    actions.append(action)
+                    log_probs.append(log_prob)
+                    rewards.append(reward)
+                    dones.append(terminated)
+                    values.append(value)
+
+                    state = next_state
+                    scores += np.array(reward)
+
+                    for idx, (d, t) in enumerate(zip(terminated, truncated)):
+                        if d or t:
+                            completed_episode_scores.append(scores[idx])
+                            agent.scores.append(scores[idx])
+                            scores[idx] = 0
+
+                pbar.update(learn_steps // len(pop))
+
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    next_state = np.moveaxis(next_state, [-1], [-3])
 
-                # Get next action from agent
-                action, log_prob, _, value = agent.getAction(state)
-                next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
-
-                states.append(state)
-                actions.append(action)
-                log_probs.append(log_prob)
-                rewards.append(reward)
-                dones.append(done)
-                values.append(value)
-
-                state = next_state
-
-            if INIT_HP["CHANNELS_LAST"]:
-                next_state = np.moveaxis(next_state, [-1], [-3])
-
-            scores = calculate_vectorized_scores(
-                np.array(rewards).transpose((1, 0)), np.array(dones).transpose((1, 0))
-            )
-            score = np.mean(scores)
-
-            agent.scores.append(score)
-
-            experiences = (
-                states,
-                actions,
-                log_probs,
-                rewards,
-                dones,
-                values,
-                next_state,
-            )
-            # Learn according to agent's RL algorithm
-            agent.learn(experiences)
-
-            agent.steps[-1] += step + 1
-            total_steps += step + 1
-
-        # Now evolve population if necessary
-        if (episode + 1) % INIT_HP["EVO_EPOCHS"] == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=INIT_HP["MAX_STEPS"],
-                    loop=INIT_HP["EVO_LOOP"],
+                experiences = (
+                    states,
+                    actions,
+                    log_probs,
+                    rewards,
+                    dones,
+                    values,
+                    next_state,
                 )
-                for agent in pop
-            ]
+                # Learn according to agent's RL algorithm
+                agent.learn(experiences)
 
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-100:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-100:]) for agent in pop]
-            agents = [agent.index for agent in pop]
-            num_steps = [agent.steps[-1] for agent in pop]
-            muts = [agent.mut for agent in pop]
+            agent.steps[-1] += steps
+            pop_episode_scores.append(completed_episode_scores)
 
-            print(
-                f"""
-                --- Epoch {episode + 1} ---
-                Fitness:\t\t{fitness}
-                100 fitness avgs:\t{avg_fitness}
-                100 score avgs:\t{avg_score}
-                Agents:\t\t{agents}
-                Steps:\t\t{num_steps}
-                Mutations:\t\t{muts}
-                """,
-                end="\r",
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=INIT_HP["EVAL_STEPS"],
+                loop=INIT_HP["EVAL_LOOP"],
             )
+            for agent in pop
+        ]
+        mean_scores = [
+            (
+                np.mean(episode_scores)
+                if len(episode_scores) > 0
+                else "0 completed episodes"
+            )
+            for episode_scores in pop_episode_scores
+        ]
 
-            # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
+        print(f"--- Global steps {total_steps} ---")
+        print(f"Steps {[agent.steps[-1] for agent in pop]}")
+        print(f"Scores: {mean_scores}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(
+            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        )
+
+        # Tournament selection and population mutation
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
+
+        # Update step counter
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
 
     # Save the trained algorithm
-    elite.saveCheckpoint(save_path)
+    elite.save_checkpoint(save_path)
+
+    pbar.close()
+    env.close()
 
 
 Loading an Agent for Inference and Rendering your Solved Environment
@@ -379,18 +399,19 @@ Test loop for inference
     rewards = []
     frames = []
     testing_eps = 7
+    max_testing_steps = 1000
     with torch.no_grad():
         for ep in range(testing_eps):
             state = test_env.reset()[0]  # Reset environment at start of episode
             score = 0
 
-            for step in range(INIT_HP["MAX_STEPS"]):
+            for step in range(max_testing_steps):
                 # If your state is an RGB image
                 if INIT_HP["CHANNELS_LAST"]:
                     state = np.moveaxis(state, [-1], [-3])
 
                 # Get next action from agent
-                action, *_ = ppo.getAction(state)
+                action, *_ = ppo.get_action(state)
                 action = action.squeeze()
 
                 # Save the frame for this step and append to frames list
@@ -398,9 +419,8 @@ Test loop for inference
                 frames.append(frame)
 
                 # Take the action in the environment
-                state, reward, terminated, truncated, _ = test_env.step(
-                    action
-                )  # Act in environment
+                state, reward, terminated, truncated, _ = test_env.step(action)
+
                 # Collect the score
                 score += reward
 

@@ -7,7 +7,7 @@ from accelerate import Accelerator
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 
 # from pytest_mock import mocker
 
@@ -46,6 +46,11 @@ SHARED_INIT_HP = {
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
+    "O_U_NOISE": True,
+    "EXPL_NOISE": 0.1,
+    "MEAN_NOISE": 0.0,
+    "THETA": 0.15,
+    "DT": 0.01,
 }
 
 SHARED_INIT_HP_MA = {
@@ -81,6 +86,11 @@ SHARED_INIT_HP_MA = {
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
+    "O_U_NOISE": True,
+    "EXPL_NOISE": 0.1,
+    "MEAN_NOISE": 0.0,
+    "THETA": 0.15,
+    "DT": 0.01,
 }
 
 
@@ -96,7 +106,7 @@ def init_pop(
     device,
     accelerator,
 ):
-    yield initialPopulation(
+    yield create_population(
         algo=algo,
         state_dim=state_dim,
         action_dim=action_dim,

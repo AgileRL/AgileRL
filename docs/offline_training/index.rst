@@ -29,63 +29,54 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils.utils import makeVectEnvs, initialPopulation
+    from agilerl.utils.utils import create_population, make_vect_envs
     import gymnasium as gym
     import h5py
     import torch
 
-    NET_CONFIG = {
-        'arch': 'mlp',          # Network architecture
-        'hidden_size': [32, 32],     # Actor hidden size
-    }
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     INIT_HP = {
-        'ENV_NAME': 'CartPole-v1',      # Gym environment name
-        'DATASET': 'data/cartpole/cartpole_random_v1.1.0.h5', # Offline RL dataset
-        'DOUBLE': True,                 # Use double Q-learning
+        "DOUBLE": True,  # Use double Q-learning
+        "BATCH_SIZE": 128,  # Batch size
+        "LR": 1e-3,  # Learning rate
+        "GAMMA": 0.99,  # Discount factor
+        "LEARN_STEP": 1,  # Learning frequency
+        "TAU": 1e-3,  # For soft update of target network parameters
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-        'CHANNELS_LAST': False,
-        'BATCH_SIZE': 256,              # Batch size
-        'LR': 1e-3,                     # Learning rate
-        'EPISODES': 2000,               # Max no. episodes
-        'TARGET_SCORE': 200.,           # Early training stop at avg score of last 100 episodes
-        'GAMMA': 0.99,                  # Discount factor
-        'LEARN_STEP': 1,                # Learning frequency
-        'TAU': 1e-3,                    # For soft update of target parameters
-        'TOURN_SIZE': 2,                # Tournament size
-        'ELITISM': True,                # Elitism in tournament selection
-        'POP_SIZE': 6,                  # Population size
-        'EVO_EPOCHS': 20,               # Evolution frequency
-        'POLICY_FREQ': 2,               # Policy network update frequency
-        'WANDB': True                   # Log with Weights and Biases
-        }
+        "CHANNELS_LAST": False,
+        "POP_SIZE": 4,  # Population size
+    }
 
-    env = makeVectEnvs(INIT_HP['ENV_NAME'], num_envs=1)
-    try:
-        state_dim = env.single_observation_space.n          # Discrete observation space
-        one_hot = True                                      # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape      # Continuous observation space
-        one_hot = False                                     # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n             # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]      # Continuous action space
+    num_envs = 1
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
+    dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
-    if INIT_HP['CHANNELS_LAST']:
+    try:
+        state_dim = env.single_observation_space.n  # Discrete observation space
+        one_hot = True  # Requires one-hot encoding
+    except Exception:
+        state_dim = env.single_observation_space.shape  # Continuous observation space
+        one_hot = False  # Does not require one-hot encoding
+    try:
+        action_dim = env.single_action_space.n  # Discrete action space
+    except Exception:
+        action_dim = env.single_action_space.shape[0]  # Continuous action space
+
+    if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    dataset = h5py.File(INIT_HP['DATASET'], 'r')
-
-    agent_pop = initialPopulation(algo=INIT_HP['ALGO'],                 # Algorithm
-                                  state_dim=state_dim,                  # State dimension
-                                  action_dim=action_dim,                # Action dimension
-                                  one_hot=one_hot,                      # One-hot encoding
-                                  net_config=NET_CONFIG,                # Network configuration
-                                  INIT_HP=INIT_HP,                      # Initial hyperparameters
-                                  population_size=INIT_HP['POP_SIZE'],  # Population size
-                                  device=torch.device("cuda"))
-
+    pop = create_population(
+        algo="CQN",  # Algorithm
+        state_dim=state_dim,  # State dimension
+        action_dim=action_dim,  # Action dimension
+        one_hot=one_hot,  # One-hot encoding
+        net_config=NET_CONFIG,  # Network configuration
+        INIT_HP=INIT_HP,  # Initial hyperparameters
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        num_envs=num_envs,  # Number of vectorized envs
+        device=device,
+    )
 
 .. _memory_offline:
 
@@ -97,19 +88,36 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
-During training it can be added to using the ``ReplayBuffer.save2memory()`` function, or ``ReplayBuffer.save2memoryVectEnvs()`` for vectorized environments (recommended).
+During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or ``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended).
 To sample from the replay buffer, call ``ReplayBuffer.sample()``.
+
+We must fill the replay buffer with our offline data so that we can sample and learn.
 
 .. code-block:: python
 
     from agilerl.components.replay_buffer import ReplayBuffer
-    import torch
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim,                # Number of agent actions
-                          memory_size=INIT_HP['MEMORY_SIZE'],   # Max replay buffer size
-                          field_names=field_names,              # Field names to store in memory
-                          device=torch.device("cuda"))
+    memory = ReplayBuffer(
+        memory_size=10000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
+        device=device,
+    )
+
+    print("Filling replay buffer with dataset...")
+    # Save transitions to replay buffer
+    dataset_length = dataset["rewards"].shape[0]
+    for i in trange(dataset_length - 1):
+        state = dataset["observations"][i]
+        next_state = dataset["observations"][i + 1]
+        if INIT_HP["CHANNELS_LAST"]:
+            state = np.moveaxis(state, [-1], [-3])
+            next_state = np.moveaxis(next_state, [-1], [-3])
+        action = dataset["actions"][i]
+        reward = dataset["rewards"][i]
+        done = bool(dataset["terminals"][i])
+        # Save experience to replay buffer
+        memory.save_to_memory(state, action, reward, next_state, done)
 
 
 
@@ -129,10 +137,12 @@ of agents.
 
     from agilerl.hpo.tournament import TournamentSelection
 
-    tournament = TournamentSelection(tournament_size=INIT_HP['TOURN_SIZE'], # Tournament selection size
-                                     elitism=INIT_HP['ELITISM'],            # Elitism in tournament selection
-                                     population_size=INIT_HP['POP_SIZE'],   # Population size
-                                     evo_step=INIT_HP['EVO_EPOCHS'])        # Evaluate using last N fitness scores
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
 
 
 .. _mutate_offline:
@@ -158,20 +168,21 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. code-block:: python
 
     from agilerl.hpo.mutation import Mutations
-    import torch
 
-    mutations = Mutations(algo=INIT_HP['ALGO'],                                 # Algorithm
-                          no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
-                          architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
-                          new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
-                          parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
-                          activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
-                          rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
-                          rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'],   # Learning HPs to choose from
-                          mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
-                          arch=NET_CONFIG['arch'],                              # Network architecture
-                          rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
-                          device=torch.device("cuda"))
+    mutations = Mutations(
+        algo="CQN",  # Algorithm
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
+        mutation_sd=0.1,  # Mutation strength
+        arch=NET_CONFIG["arch"],  # Network architecture
+        rand_seed=1,  # Random seed
+        device=device,
+    )
 
 
 .. _trainloop_offline:
@@ -187,141 +198,175 @@ easiest to use our training function, which returns a population of trained agen
     from agilerl.training.train_offline import train_offline
 
     trained_pop, pop_fitnesses = train_offline(
-                                                env=env,                                 # Gym-style environment
-                                                env_name=INIT_HP['ENV_NAME'],            # Environment name
-                                                dataset=dataset,                         # Offline dataset
-                                                algo=INIT_HP['ALGO'],                    # Algorithm
-                                                pop=agent_pop,                           # Population of agents
-                                                memory=memory,                           # Replay buffer
-                                                swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
-                                                n_episodes=INIT_HP['EPISODES'],          # Max number of training episodes
-                                                evo_epochs=INIT_HP['EVO_EPOCHS'],        # Evolution frequency
-                                                evo_loop=1,                              # Number of evaluation episodes per agent
-                                                target=INIT_HP['TARGET_SCORE'],          # Target score for early stopping
-                                                tournament=tournament,                   # Tournament selection object
-                                                mutation=mutations,                      # Mutations object
-                                                wb=INIT_HP['WANDB'],                     # Weights and Biases tracking
-                                              )
+        env=env,  # Gym-style environment
+        env_name="CartPole-v1",  # Environment name
+        dataset=dataset,  # Offline dataset
+        algo="CQN",  # Algorithm
+        pop=pop,  # Population of agents
+        memory=memory,  # Replay buffer
+        swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
+        max_steps=500000,  # Max number of training steps
+        evo_steps=10000,  # Evolution frequency
+        eval_steps=None,  # Evaluation steps
+        eval_loop=1,  # Number of evaluation episodes per agent
+        target=200.,  # Target score for early stopping
+        tournament=tournament,  # Tournament selection object
+        mutation=mutations,  # Mutations object
+        wb=True,  # Weights and Biases tracking
+    )
 
 
 Alternatively, use a custom training loop. Combining all of the above:
 
 .. code-block:: python
 
-    from agilerl.utils.utils import makeVectEnvs, initialPopulation
     from agilerl.components.replay_buffer import ReplayBuffer
-    from agilerl.hpo.tournament import TournamentSelection
     from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.utils.utils import create_population, make_vect_envs
     import h5py
     import numpy as np
     import torch
     from tqdm import trange
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     NET_CONFIG = {
-                    'arch': 'mlp',       # Network architecture
-                    'hidden_size': [32, 32],  # Actor hidden size
-                }
+        "arch": "mlp",  # Network architecture
+        "hidden_size": [32, 32],  # Actor hidden size
+    }
 
     INIT_HP = {
-                'DOUBLE': True,         # Use double Q-learning
-                'BATCH_SIZE': 128,      # Batch size
-                'LR': 1e-3,             # Learning rate
-                'GAMMA': 0.99,          # Discount factor
-                'LEARN_STEP': 1,        # Learning frequency
-                'TAU': 1e-3,            # For soft update of target network parameters
-                'CHANNELS_LAST': False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-            }
+        "DOUBLE": True,  # Use double Q-learning
+        "BATCH_SIZE": 128,  # Batch size
+        "LR": 1e-3,  # Learning rate
+        "GAMMA": 0.99,  # Discount factor
+        "LEARN_STEP": 1,  # Learning frequency
+        "TAU": 1e-3,  # For soft update of target network parameters
+        # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        "CHANNELS_LAST": False,
+        "POP_SIZE": 4,  # Population size
+    }
 
-    env = makeVectEnvs('CartPole-v1', num_envs=1)   # Create environment
-    dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
+    num_envs = 1
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
+    dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
     try:
-        state_dim = env.single_observation_space.n          # Discrete observation space
-        one_hot = True                                      # Requires one-hot encoding
+        state_dim = env.single_observation_space.n  # Discrete observation space
+        one_hot = True  # Requires one-hot encoding
     except Exception:
-        state_dim = env.single_observation_space.shape      # Continuous observation space
-        one_hot = False                                     # Does not require one-hot encoding
+        state_dim = env.single_observation_space.shape  # Continuous observation space
+        one_hot = False  # Does not require one-hot encoding
     try:
-        action_dim = env.single_action_space.n             # Discrete action space
+        action_dim = env.single_action_space.n  # Discrete action space
     except Exception:
-        action_dim = env.single_action_space.shape[0]      # Continuous action space
+        action_dim = env.single_action_space.shape[0]  # Continuous action space
 
-    if INIT_HP['CHANNELS_LAST']:
+    if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(algo='CQN',             # Algorithm
-                            state_dim=state_dim,    # State dimension
-                            action_dim=action_dim,  # Action dimension
-                            one_hot=one_hot,        # One-hot encoding
-                            net_config=NET_CONFIG,  # Network configuration
-                            INIT_HP=INIT_HP,        # Initial hyperparameters
-                            population_size=6,      # Population size
-                            device=torch.device("cuda"))
+    pop = create_population(
+        algo="CQN",  # Algorithm
+        state_dim=state_dim,  # State dimension
+        action_dim=action_dim,  # Action dimension
+        one_hot=one_hot,  # One-hot encoding
+        net_config=NET_CONFIG,  # Network configuration
+        INIT_HP=INIT_HP,  # Initial hyperparameters
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        num_envs=num_envs,  # Number of vectorized envs
+        device=device,
+    )
 
     field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(action_dim=action_dim,    # Number of agent actions
-                          memory_size=10000,        # Max replay buffer size
-                          field_names=field_names,  # Field names to store in memory
-                          device=torch.device("cuda"))
+    memory = ReplayBuffer(
+        memory_size=10000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
+        device=device,
+    )
 
-    tournament = TournamentSelection(tournament_size=2, # Tournament selection size
-                                     elitism=True,      # Elitism in tournament selection
-                                     population_size=6, # Population size
-                                     evo_step=1)        # Evaluate using last N fitness scores
-
-    mutations = Mutations(algo='CQN',                           # Algorithm
-                          no_mutation=0.4,                      # No mutation
-                          architecture=0.2,                     # Architecture mutation
-                          new_layer_prob=0.2,                   # New layer mutation
-                          parameters=0.2,                       # Network parameters mutation
-                          activation=0,                         # Activation layer mutation
-                          rl_hp=0.2,                            # Learning HP mutation
-                          rl_hp_selection=['lr', 'batch_size'], # Learning HPs to choose from
-                          mutation_sd=0.1,                      # Mutation strength
-                          arch=NET_CONFIG['arch'],              # Network architecture
-                          rand_seed=1,                          # Random seed
-                          device=torch.device("cuda"))
-
-    max_episodes = 1000 # Max training episodes
-    max_steps = 500     # Max steps per episode
-
-    evo_epochs = 5      # Evolution frequency
-    evo_loop = 1        # Number of evaluation episodes
-
+    print("Filling replay buffer with dataset...")
     # Save transitions to replay buffer
-    dataset_length = dataset['rewards'].shape[0]
-    for i in trange(dataset_length-1):
-        state = dataset['observations'][i]
-        next_state = dataset['observations'][i+1]
-        if INIT_HP['CHANNELS_LAST']:
-            state = np.moveaxis(state, [3], [1])
-            next_state = np.moveaxis(next_state, [3], [1])
-        action = dataset['actions'][i]
-        reward = dataset['rewards'][i]
-        done = bool(dataset['terminals'][i])
+    dataset_length = dataset["rewards"].shape[0]
+    for i in trange(dataset_length - 1):
+        state = dataset["observations"][i]
+        next_state = dataset["observations"][i + 1]
+        if INIT_HP["CHANNELS_LAST"]:
+            state = np.moveaxis(state, [-1], [-3])
+            next_state = np.moveaxis(next_state, [-1], [-3])
+        action = dataset["actions"][i]
+        reward = dataset["rewards"][i]
+        done = bool(dataset["terminals"][i])
         # Save experience to replay buffer
-        memory.save2memory(state, action, reward, next_state, done)
+        memory.save_to_memory(state, action, reward, next_state, done)
+
+    tournament = TournamentSelection(
+        tournament_size=2,  # Tournament selection size
+        elitism=True,  # Elitism in tournament selection
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
+
+    mutations = Mutations(
+        algo="CQN",  # Algorithm
+        no_mutation=0.4,  # No mutation
+        architecture=0.2,  # Architecture mutation
+        new_layer_prob=0.2,  # New layer mutation
+        parameters=0.2,  # Network parameters mutation
+        activation=0,  # Activation layer mutation
+        rl_hp=0.2,  # Learning HP mutation
+        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
+        mutation_sd=0.1,  # Mutation strength
+        arch=NET_CONFIG["arch"],  # Network architecture
+        rand_seed=1,  # Random seed
+        device=device,
+    )
+
+    max_steps = 200000  # Max steps
+
+    evo_steps = 10000  # Evolution frequency
+    eval_steps = None  # Evaluation steps per episode - go until done
+    eval_loop = 1  # Number of evaluation episodes
+
+    total_steps = 0
 
     # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
-        for agent in pop:   # Loop through population
+    print("Training...")
+    pbar = trange(max_steps, unit="step")
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        for agent in pop:  # Loop through population
             for idx_step in range(max_steps):
-                experiences = memory.sample(agent.batch_size)   # Sample replay buffer
-                # Learn according to agent's RL algorithm
-                agent.learn(experiences)
+                experiences = memory.sample(agent.batch_size)  # Sample replay buffer
+                agent.learn(experiences)  # Learn according to agent's RL algorithm
+            total_steps += max_steps
+            agent.steps[-1] += max_steps
 
-        # Now evolve population if necessary
-        if (idx_epi+1) % evo_epochs == 0:
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=eval_steps,
+                loop=eval_loop,
+            )
+            for agent in pop
+        ]
 
-            # Evaluate population
-            fitnesses = [agent.test(env, swap_channels=INIT_HP['CHANNELS_LAST'], max_steps=max_steps, loop=evo_loop) for agent in pop]
+        print(f"--- Global Steps {total_steps} ---")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(f"Steps {[agent.steps[-1] for agent in pop]}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(
+            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        )
 
-            print(f'Episode {idx_epi+1}/{max_episodes}')
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}')
+        # Tournament selection and population mutation
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
 
-            # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
+        # Update step counter
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
 
+    pbar.close()
     env.close()

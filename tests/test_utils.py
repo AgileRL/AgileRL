@@ -14,12 +14,12 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.utils.utils import (
     calculate_vectorized_scores,
-    initialPopulation,
-    makeMultiAgentVectEnvs,
-    makeSkillVectEnvs,
-    makeVectEnvs,
-    plotPopulationScore,
-    printHyperparams,
+    create_population,
+    make_multi_agent_vect_envs,
+    make_skill_vect_envs,
+    make_vect_envs,
+    plot_population_score,
+    print_hyperparams,
 )
 from agilerl.wrappers.learning import Skill
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
@@ -58,6 +58,11 @@ SHARED_INIT_HP = {
     "LAMBDA": 1.0,
     "REG": 0.000625,
     "CHANNELS_LAST": False,
+    "O_U_NOISE": True,
+    "EXPL_NOISE": 0.1,
+    "MEAN_NOISE": 0.0,
+    "THETA": 0.15,
+    "DT": 0.01,
 }
 
 
@@ -96,7 +101,7 @@ class DummyMultiEnv:
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
 def test_returns_asyncvectorenv_object():
     num_envs = 3
-    env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     assert isinstance(env, gym.vector.AsyncVectorEnv)
     assert env.num_envs == num_envs
 
@@ -105,7 +110,7 @@ def test_returns_asyncvectorenv_object():
 def test_returns_asyncvectorenv_object_multiagent():
     num_envs = 3
     env = DummyMultiEnv(4, 4)
-    env = makeMultiAgentVectEnvs(env, num_envs=num_envs)
+    env = make_multi_agent_vect_envs(env, num_envs=num_envs)
     assert isinstance(env, PettingZooVectorizationParallelWrapper)
     assert env.num_envs == num_envs
     env.close()
@@ -115,7 +120,7 @@ def test_returns_asyncvectorenv_object_multiagent():
 def test_returns_asyncvectorenv_object_skill():
     num_envs = 3
     skill = Skill
-    env = makeSkillVectEnvs("CartPole-v1", skill=skill, num_envs=num_envs)
+    env = make_skill_vect_envs("CartPole-v1", skill=skill, num_envs=num_envs)
     assert isinstance(env, gym.vector.AsyncVectorEnv)
     assert env.num_envs == num_envs
 
@@ -140,7 +145,7 @@ def test_create_initial_population_single_agent():
     }
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -178,7 +183,7 @@ def test_create_initial_population_multi_agent():
     }
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -277,7 +282,7 @@ def test_prints_hyperparams():
     accelerator = None
     algo = "DQN"
 
-    pop = initialPopulation(
+    pop = create_population(
         algo=algo,
         state_dim=state_dim,
         action_dim=action_dim,
@@ -294,12 +299,12 @@ def test_prints_hyperparams():
     pop[0].lr = 0.01
     pop[0].batch_size = 32
 
-    expected_output = (
-        "Agent ID: 0    Mean 100 fitness: 2.00    lr: 0.01    Batch Size: 32"
+    expected_output = "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
+        pop[0].index, np.mean(pop[0].fitness[-5:]), pop[0].inspect_attributes()
     )
 
     with patch("builtins.print") as mock_print:
-        printHyperparams(pop)
+        print_hyperparams(pop)
         mock_print.assert_called_once_with(expected_output)
 
 
@@ -315,7 +320,7 @@ def test_plot_fitness_scores_all_agents(mock_plt):
     pop = [Agent([1, 2, 3]), Agent([4, 5, 6]), Agent([7, 8, 9])]
 
     # Call the function under test
-    plotPopulationScore(pop)
+    plot_population_score(pop)
 
     # Assert plotting functions have been called with expected args
     mock_plt.title.assert_called_once_with("Score History - Mutations")

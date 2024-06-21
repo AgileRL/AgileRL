@@ -13,8 +13,6 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-### delete
-
 
 class RainbowDQN:
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -285,7 +283,7 @@ class RainbowDQN:
         self.actor.train()
         self.actor_target.train()
 
-    def getAction(self, state, action_mask=None, training=True):
+    def get_action(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -534,7 +532,7 @@ class RainbowDQN:
         self.optimizer.step()
 
         # soft update target network
-        self.softUpdate()
+        self.soft_update()
         self.actor.reset_noise()
         self.actor_target.reset_noise()
 
@@ -544,7 +542,7 @@ class RainbowDQN:
 
         return loss.item(), idxs, new_priorities
 
-    def softUpdate(self):
+    def soft_update(self):
         """Soft updates target network."""
         for eval_param, target_param in zip(
             self.actor.parameters(), self.actor_target.parameters()
@@ -568,7 +566,7 @@ class RainbowDQN:
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            for _ in range(loop):
                 state, _ = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
@@ -577,7 +575,7 @@ class RainbowDQN:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state, training=False)
+                    action = self.get_action(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -683,7 +681,7 @@ class RainbowDQN:
             self.actor_target = self.accelerator.unwrap_model(self.actor_target)
             self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -707,7 +705,7 @@ class RainbowDQN:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

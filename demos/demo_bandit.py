@@ -9,7 +9,7 @@ from ucimlrepo import fetch_ucirepo
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -20,6 +20,8 @@ from agilerl.wrappers.learning import BanditEnv
 
 
 if __name__ == "__main__":
+    print("===== AgileRL Bandit Demo =====")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
@@ -28,15 +30,15 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "POPULATION_SIZE": 4,  # Population size
         "BATCH_SIZE": 64,  # Batch size
         "LR": 1e-3,  # Learning rate
         "GAMMA": 1.0,  # Scaling factor
         "LAMBDA": 1.0,  # Regularization factor
         "REG": 0.000625,  # Loss regularization factor
-        "LEARN_STEP": 1,  # Learning frequency
+        "LEARN_STEP": 2,  # Learning frequency
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
+        "POP_SIZE": 4,  # Population size
     }
 
     # Fetch data  https://archive.ics.uci.edu/
@@ -48,20 +50,19 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="NeuralUCB",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=None,  # One-hot encoding
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        population_size=INIT_HP["POP_SIZE"],  # Population size
         device=device,
     )
 
     field_names = ["context", "reward"]
     memory = ReplayBuffer(
-        action_dim=action_dim,  # Number of agent actions
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=device,
@@ -70,10 +71,9 @@ if __name__ == "__main__":
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        evo_step=1,
-    )  # Evaluate using last N fitness scores
-
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
     mutations = Mutations(
         algo="NeuralUCB",  # Algorithm
         no_mutation=0.4,  # No mutation
@@ -89,15 +89,13 @@ if __name__ == "__main__":
         device=device,
     )
 
-    max_episodes = 50  # Max training episodes
-    max_steps = 100  # Max steps per episode
-
-    evo_epochs = 2  # Evolution frequency
-    evo_loop = 1  # Number of evaluation episodes
+    max_steps = 10000  # Max steps per episode
+    episode_steps = 500  # Steps in episode
+    evo_steps = 500  # Evolution frequency
+    eval_steps = 500  # Evaluation steps per episode
+    eval_loop = 1  # Number of evaluation episodes
 
     print("Training...")
-
-    regret = [[0] for _ in pop]
 
     wandb.init(
         # set the wandb project where this run will be logged
@@ -108,64 +106,82 @@ if __name__ == "__main__":
     )
 
     total_steps = 0
+    evo_count = 0
 
     # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
-        for i, agent in enumerate(pop):  # Loop through population
+    print("Training...")
+    pbar = trange(max_steps, unit="step")
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+        pop_episode_scores = []
+        for agent_idx, agent in enumerate(pop):  # Loop through population
             score = 0
             losses = []
             context = env.reset()  # Reset environment at start of episode
-            for idx_step in range(max_steps):
+            for idx_step in range(episode_steps):
+                if INIT_HP["CHANNELS_LAST"]:
+                    context = np.moveaxis(context, [-1], [-3])
                 # Get next action from agent
-                action = agent.getAction(context)
+                action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(context[action], reward)
+                memory.save_to_memory(context[action], reward)
 
                 # Learn according to learning frequency
-                if (
-                    memory.counter % agent.learn_step == 0
-                    and len(memory) >= agent.batch_size
-                ):
-                    for _ in range(2):
-                        experiences = memory.sample(
-                            agent.batch_size
-                        )  # Sample replay buffer
+                if len(memory) >= agent.batch_size:
+                    for _ in range(agent.learn_step):
+                        # Sample replay buffer
                         # Learn according to agent's RL algorithm
+                        experiences = memory.sample(agent.batch_size)
                         loss = agent.learn(experiences)
                         losses.append(loss)
 
                 context = next_context
                 score += reward
-                regret[i].append(regret[i][-1] + 1 - reward)
+                agent.regret.append(agent.regret[-1] + 1 - reward)
 
-            total_steps += max_steps
+            agent.scores.append(score)
+            pop_episode_scores.append(score)
+            agent.steps[-1] += episode_steps
+            total_steps += episode_steps
+            pbar.update(episode_steps // len(pop))
 
             wandb_dict = {
                 "global_step": total_steps,
                 "train/loss": np.mean(losses),
                 "train/score": score,
-                "train/regret": regret[0][-1],
+                "train/mean_regret": np.mean([agent.regret[-1] for agent in pop]),
             }
             wandb.log(wandb_dict)
 
-        # Now evolve population if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(
-                    env,
-                    swap_channels=INIT_HP["CHANNELS_LAST"],
-                    max_steps=max_steps,
-                    loop=evo_loop,
-                )
-                for agent in pop
-            ]
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=eval_steps,
+                loop=eval_loop,
+            )
+            for agent in pop
+        ]
 
-            print(f"Episode {idx_epi+1}/{max_episodes}")
-            print(f"Regret: {[regret[i][-1] for i in range(len(pop))]}")
+        print(f"--- Global steps {total_steps} ---")
+        print(f"Steps {[agent.steps[-1] for agent in pop]}")
+        print(f"Regret: {[agent.regret[-1] for agent in pop]}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(
+            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        )
 
+        if pop[0].steps[-1] // evo_steps > evo_count:
             # Tournament selection and population mutation
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
+            evo_count += 1
+
+        # Update step counter
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
+
+    pbar.close()
+    env.close()

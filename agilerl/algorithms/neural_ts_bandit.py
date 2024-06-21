@@ -35,7 +35,7 @@ class NeuralTS:
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
     :type lr: float, optional
-    :param learn_step: Learning frequency, defaults to 1
+    :param learn_step: Learning frequency, defaults to 2
     :type learn_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
@@ -60,7 +60,7 @@ class NeuralTS:
         reg=0.000625,
         batch_size=64,
         lr=3e-3,
-        learn_step=1,
+        learn_step=2,
         mut=None,
         actor_network=None,
         device="cpu",
@@ -236,7 +236,7 @@ class NeuralTS:
             if m.bias is not None:
                 init.constant_(m.bias, 0)
 
-    def getAction(self, state, action_mask=None):
+    def get_action(self, state, action_mask=None):
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -472,7 +472,7 @@ class NeuralTS:
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -495,7 +495,7 @@ class NeuralTS:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

@@ -303,14 +303,14 @@ def test_returns_expected_action(accelerator):
 
     action_mask = None
 
-    action = dqn.getAction(state, action_mask)[0]
+    action = dqn.get_action(state, action_mask)[0]
 
     assert action.is_integer()
     assert action >= 0 and action < action_dim
 
     action_mask = np.array([0, 1])
 
-    action = dqn.getAction(state, action_mask)[0]
+    action = dqn.get_action(state, action_mask)[0]
 
     assert action.is_integer()
     assert action == 1
@@ -334,14 +334,14 @@ def test_returns_expected_action_one_hot(accelerator):
 
     action_mask = None
 
-    action = dqn.getAction(state, action_mask)[0]
+    action = dqn.get_action(state, action_mask)[0]
 
     assert action.is_integer()
     assert action >= 0 and action < action_dim
 
     action_mask = np.array([0, 1])
 
-    action = dqn.getAction(state, action_mask)[0]
+    action = dqn.get_action(state, action_mask)[0]
 
     assert action.is_integer()
     assert action == 1
@@ -676,7 +676,7 @@ def test_soft_update():
         wrap=wrap,
     )
 
-    dqn.softUpdate()
+    dqn.soft_update()
 
     eval_params = list(dqn.actor.parameters())
     target_params = list(dqn.actor_target.parameters())
@@ -699,7 +699,7 @@ def test_algorithm_test_loop():
 
     env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = RainbowDQN(state_dim=state_dim, action_dim=action_dim, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -933,7 +933,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.saveCheckpoint(checkpoint_path)
+    dqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -957,7 +957,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "steps" in checkpoint
 
     # Load checkpoint
-    dqn.loadCheckpoint(checkpoint_path)
+    dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert dqn.net_config == {
@@ -1002,7 +1002,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.saveCheckpoint(checkpoint_path)
+    dqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1026,7 +1026,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "steps" in checkpoint
 
     # Load checkpoint
-    dqn.loadCheckpoint(checkpoint_path)
+    dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert dqn.net_config == net_config_cnn
@@ -1070,7 +1070,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.saveCheckpoint(checkpoint_path)
+    dqn.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1094,7 +1094,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "steps" in checkpoint
 
     # Load checkpoint
-    dqn.loadCheckpoint(checkpoint_path)
+    dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert dqn.net_config is None
@@ -1129,7 +1129,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.saveCheckpoint(checkpoint_path)
+    dqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_dqn = RainbowDQN.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1183,7 +1183,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.saveCheckpoint(checkpoint_path)
+    dqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_dqn = RainbowDQN.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1237,7 +1237,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    dqn.saveCheckpoint(checkpoint_path)
+    dqn.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_dqn = RainbowDQN.load(checkpoint_path)

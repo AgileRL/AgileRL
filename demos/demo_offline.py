@@ -6,7 +6,7 @@ from tqdm import trange
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation, makeVectEnvs
+from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -26,7 +26,6 @@ if __name__ == "__main__":
     }
 
     INIT_HP = {
-        "POPULATION_SIZE": 6,  # Population size
         "DOUBLE": True,  # Use double Q-learning
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
@@ -35,9 +34,11 @@ if __name__ == "__main__":
         "TAU": 1e-3,  # For soft update of target network parameters
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": False,
+        "POP_SIZE": 4,  # Population size
     }
 
-    env = makeVectEnvs("CartPole-v1", num_envs=1)  # Create environment
+    num_envs = 1
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
     dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
     try:
@@ -54,20 +55,20 @@ if __name__ == "__main__":
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="CQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=one_hot,  # One-hot encoding
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        num_envs=num_envs,  # Number of vectorized envs
         device=device,
     )
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
-        action_dim=action_dim,  # Number of agent actions
         memory_size=10000,  # Max replay buffer size
         field_names=field_names,  # Field names to store in memory
         device=device,
@@ -80,20 +81,20 @@ if __name__ == "__main__":
         state = dataset["observations"][i]
         next_state = dataset["observations"][i + 1]
         if INIT_HP["CHANNELS_LAST"]:
-            state = np.moveaxis(state, [3], [1])
-            next_state = np.moveaxis(next_state, [3], [1])
+            state = np.moveaxis(state, [-1], [-3])
+            next_state = np.moveaxis(next_state, [-1], [-3])
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
         # Save experience to replay buffer
-        memory.save2memory(state, action, reward, next_state, done)
+        memory.save_to_memory(state, action, reward, next_state, done)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size
         elitism=True,  # Elitism in tournament selection
-        population_size=6,  # Population size
-        evo_step=1,
-    )  # Evaluate using last N fitness scores
+        population_size=INIT_HP["POP_SIZE"],  # Population size
+        eval_loop=1,  # Evaluate using last N fitness scores
+    )
 
     mutations = Mutations(
         algo="CQN",  # Algorithm
@@ -110,37 +111,51 @@ if __name__ == "__main__":
         device=device,
     )
 
-    max_episodes = 1000  # Max training episodes
-    max_steps = 500  # Max steps per episode
+    max_steps = 50000  # Max steps
 
-    evo_epochs = 5  # Evolution frequency
-    evo_loop = 1  # Number of evaluation episodes
+    evo_steps = 5000  # Evolution frequency
+    eval_steps = None  # Evaluation steps per episode - go until done
+    eval_loop = 1  # Number of evaluation episodes
 
-    print("Training...")
+    total_steps = 0
 
     # TRAINING LOOP
-    for idx_epi in trange(max_episodes):
+    print("Training...")
+    pbar = trange(max_steps, unit="step")
+    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         for agent in pop:  # Loop through population
-            for idx_step in range(max_steps):
+            for idx_step in range(evo_steps):
                 experiences = memory.sample(agent.batch_size)  # Sample replay buffer
                 agent.learn(experiences)  # Learn according to agent's RL algorithm
+            total_steps += evo_steps
+            agent.steps[-1] += evo_steps
+            pbar.update(evo_steps)
 
-        # Now evolve population if necessary
-        if (idx_epi + 1) % evo_epochs == 0:
-            # Evaluate population
-            fitnesses = [
-                agent.test(env, swap_channels=False, max_steps=max_steps, loop=evo_loop)
-                for agent in pop
-            ]
-
-            print(f"Episode {idx_epi+1}/{max_episodes}")
-            print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
-            print(
-                f'100 fitness avgs: {["%.2f"%np.mean(agent.fitness[-100:]) for agent in pop]}'
+        # Evaluate population
+        fitnesses = [
+            agent.test(
+                env,
+                swap_channels=INIT_HP["CHANNELS_LAST"],
+                max_steps=eval_steps,
+                loop=eval_loop,
             )
+            for agent in pop
+        ]
 
-            # Tournament selection and population mutation
-            elite, pop = tournament.select(pop)
-            pop = mutations.mutation(pop)
+        print(f"--- Global Steps {total_steps} ---")
+        print(f"Steps {[agent.steps[-1] for agent in pop]}")
+        print(f'Fitnesses: {["%.2f"%fitness for fitness in fitnesses]}')
+        print(
+            f'5 fitness avgs: {["%.2f"%np.mean(agent.fitness[-5:]) for agent in pop]}'
+        )
 
+        # Tournament selection and population mutation
+        elite, pop = tournament.select(pop)
+        pop = mutations.mutation(pop)
+
+        # Update step counter
+        for agent in pop:
+            agent.steps.append(agent.steps[-1])
+
+    pbar.close()
     env.close()

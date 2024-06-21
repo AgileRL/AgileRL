@@ -29,6 +29,8 @@ class DDPG:
     :type min_action: float, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
+    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
+    :type vect_noise_dim: int, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
     :type expl_noise: float, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
@@ -78,6 +80,7 @@ class DDPG:
         min_action=-1,
         O_U_noise=True,
         expl_noise=0.1,
+        vect_noise_dim=1,
         mean_noise=0.0,
         theta=0.15,
         dt=1e-2,
@@ -107,24 +110,21 @@ class DDPG:
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
         assert isinstance(
-            max_action, (float, int, np.floating, np.integer)
+            max_action, (float, int, np.float32, np.float64, np.integer)
         ), "Max action must be a float or integer."
         assert isinstance(
-            min_action, (float, int, np.floating, np.integer)
+            min_action, (float, int, np.float32, np.float64, np.integer)
         ), "Min action must be a float or integer."
         assert max_action > min_action, "Max action must be greater than min action."
         assert max_action > 0, "Max action must be greater than zero."
         assert min_action <= 0, "Min action must be less than or equal to zero."
         assert (isinstance(expl_noise, (float, int))) or (
-            isinstance(expl_noise, np.ndarray) and expl_noise.shape == (action_dim,)
+            isinstance(expl_noise, np.ndarray)
+            and expl_noise.shape == (vect_noise_dim, action_dim)
         ), "Exploration action noise rate must be a float, or an array of size action_dim"
         if isinstance(expl_noise, (float, int)):
             assert (
                 expl_noise >= 0
-            ), "Exploration noise must be greater than or equal to zero."
-        else:
-            assert (
-                expl_noise.all() >= 0
             ), "Exploration noise must be greater than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -167,13 +167,18 @@ class DDPG:
         self.mut = mut
         self.policy_freq = policy_freq
         self.O_U_noise = O_U_noise
+        self.vect_noise_dim = vect_noise_dim
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
-            else expl_noise * np.ones(action_dim)
+            else expl_noise * np.ones((vect_noise_dim, action_dim))
         )
-        self.mean_noise = mean_noise * np.ones(action_dim)
-        self.current_noise = np.zeros(action_dim)
+        self.mean_noise = (
+            mean_noise
+            if isinstance(mean_noise, np.ndarray)
+            else mean_noise * np.ones((vect_noise_dim, action_dim))
+        )
+        self.current_noise = np.zeros((vect_noise_dim, action_dim))
         self.theta = theta
         self.dt = dt
         self.device = device
@@ -321,7 +326,7 @@ class DDPG:
         """
         return np.where(action > 0, action * self.max_action, action * -self.min_action)
 
-    def getAction(self, state, training=True):
+    def get_action(self, state, training=True):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -376,14 +381,20 @@ class DDPG:
                 + self.theta * (self.mean_noise - self.current_noise) * self.dt
                 + self.expl_noise
                 * np.sqrt(self.dt)
-                * np.random.normal(size=self.action_dim)
+                * np.random.normal(size=(self.vect_noise_dim, self.action_dim))
             )
             self.current_noise = noise
         else:
             noise = np.random.normal(
-                self.mean_noise, self.expl_noise, size=self.action_dim
+                self.mean_noise,
+                self.expl_noise,
+                size=(self.vect_noise_dim, self.action_dim),
             )
         return noise.astype(np.float32)
+
+    def reset_action_noise(self, indices):
+        """Reset action noise."""
+        self.current_noise[indices] = 0
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
@@ -474,8 +485,8 @@ class DDPG:
                 actor_loss.backward()
             self.actor_optimizer.step()
 
-            self.softUpdate(self.actor, self.actor_target)
-            self.softUpdate(self.critic, self.critic_target)
+            self.soft_update(self.actor, self.actor_target)
+            self.soft_update(self.critic, self.critic_target)
 
             actor_loss = actor_loss.item()
             critic_loss = critic_loss.item()
@@ -486,7 +497,7 @@ class DDPG:
 
         return actor_loss, critic_loss
 
-    def softUpdate(self, net, target):
+    def soft_update(self, net, target):
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
@@ -517,7 +528,7 @@ class DDPG:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state, training=False)
+                    action = self.get_action(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -683,7 +694,7 @@ class DDPG:
                 self.critic_optimizer, self.critic, self.lr_critic
             )
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -712,7 +723,7 @@ class DDPG:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

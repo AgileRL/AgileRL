@@ -30,7 +30,7 @@ So far, we have implemented CQN - CQL applied to DQN, which cannot be used on co
 adding other CQL extensions of algorithms for offline RL.
 
 Example
-------------
+-------
 
 .. code-block:: python
 
@@ -58,7 +58,7 @@ Example
       state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
   field_names = ["state", "action", "reward", "next_state", "done"]
-  memory = ReplayBuffer(action_dim=action_dim, memory_size=10000, field_names=field_names)
+  memory = ReplayBuffer(memory_size=10000, field_names=field_names)
   dataset = h5py.File('data/cartpole/cartpole_random_v1.1.0.h5', 'r')  # Load dataset
 
   # Save transitions to replay buffer
@@ -67,12 +67,12 @@ Example
       state = dataset['observations'][i]
       next_state = dataset['observations'][i+1]
       if channels_last:
-          state = np.moveaxis(state, [3], [1])
-          next_state = np.moveaxis(next_state, [3], [1])
+          state = np.moveaxis(state, [-1], [-3])
+          next_state = np.moveaxis(next_state, [-1], [-3])
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])
-      memory.save2memory(state, action, reward, next_state, done)
+      memory.save_to_memory(state, action, reward, next_state, done)
 
   agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DQN agent
 
@@ -82,7 +82,12 @@ Example
       # Learn according to agent's RL algorithm
       agent.learn(experiences)
 
-To configure the network architecture, pass a dict to the CQN ``net_config`` field. For an MLP, this can be as simple as:
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a dict to the CQN ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 
@@ -112,7 +117,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -121,7 +126,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create CQN agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 
