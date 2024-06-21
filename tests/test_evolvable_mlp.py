@@ -92,27 +92,7 @@ def test_reset_noise(device):
     assert isinstance(evolvable_mlp.advantage_net[0], NoisyLinear)
 
 
-def test_feature_hidden_size(device):
-    feature_hidden_size = [32, 64, 128]
-    evolvable_mlp = EvolvableMLP(
-        num_inputs=10,
-        num_outputs=4,
-        hidden_size=[32, 32],
-        rainbow=True,
-        output_vanish=True,
-        support=torch.linspace(0.0, 200.0, 50).to(device),
-        feature_hidden_size=feature_hidden_size,
-        device=device,
-    )
-    print(evolvable_mlp)
-    idx = 0
-    for layer in evolvable_mlp.feature_net:
-        if isinstance(layer, nn.Linear):
-            assert feature_hidden_size[idx] == layer.out_features
-            idx += 1
-
-
-@pytest.mark.parametrize("output_vanish, noisy", [(True, False), (False, True)])
+@pytest.mark.parametrize("output_vanish, noisy", [(True, True), (False, True)])
 def test_create_mlp(output_vanish, noisy, device):
     evolvable_mlp = EvolvableMLP(
         num_inputs=10,
@@ -309,7 +289,7 @@ def test_remove_mlp_layer_rainbow(device):
     evolvable_mlp = EvolvableMLP(
         num_inputs=10,
         num_outputs=4,
-        hidden_size=[32, 32],
+        hidden_size=[32, 32, 32],
         rainbow=True,
         output_vanish=True,
         support=torch.linspace(0.0, 200.0, 50).to(device),

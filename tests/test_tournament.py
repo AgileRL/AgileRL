@@ -78,7 +78,7 @@ def test_returns_best_agent_and_new_population():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "hidden_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -131,7 +131,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "hidden_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -183,7 +183,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
     state_dim = [[4], [4]]
     action_dim = [2, 2]
     one_hot = False
-    net_config = {"arch": "mlp", "hidden_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
     population_size = 5
@@ -229,7 +229,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     state_dim = [[4], [4]]
     action_dim = [2, 2]
     one_hot = False
-    net_config = {"arch": "mlp", "hidden_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
     population_size = 5

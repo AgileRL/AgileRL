@@ -19,8 +19,6 @@ class EvolvableMLP(nn.Module):
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
     :type hidden_size: list[int]
-    :param feature_hidden_size: Hidden size for the feature network when using Rainbow DQN, defaults to [128]
-    :type feature_hidden_size: list[int]
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 51
     :type num_atoms: int, optional
     :param mlp_activation: Activation layer, defaults to 'relu'
@@ -45,6 +43,8 @@ class EvolvableMLP(nn.Module):
     :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
     :type rainbow: bool, optional
+    :param noise_std: Noise standard deviation, defaults to 0.5
+    :type noise_std: float, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -56,7 +56,6 @@ class EvolvableMLP(nn.Module):
         num_inputs: int,
         num_outputs: int,
         hidden_size: List[int],
-        feature_hidden_size=[128],
         num_atoms=51,
         mlp_activation="ReLU",
         mlp_output_activation=None,
@@ -69,6 +68,7 @@ class EvolvableMLP(nn.Module):
         init_layers=True,
         support=None,
         rainbow=False,
+        noise_std=0.5,
         device="cpu",
         accelerator=None,
         arch="mlp",
@@ -103,15 +103,15 @@ class EvolvableMLP(nn.Module):
         self.min_mlp_nodes = min_mlp_nodes
         self.max_mlp_nodes = max_mlp_nodes
         self.layer_norm = layer_norm
-        self.output_vanish = False if rainbow else output_vanish
-        self.init_layers = False if rainbow else init_layers
+        self.output_vanish = output_vanish
+        self.init_layers = init_layers
         self.hidden_size = hidden_size
         self.num_atoms = num_atoms
         self.support = support
         self.rainbow = rainbow
         self.device = device
         self.accelerator = accelerator
-        self.feature_hidden_size = feature_hidden_size
+        self.noise_std = noise_std
         self._net_config = {
             "arch": self.arch,
             "hidden_size": self.hidden_size,
@@ -158,8 +158,18 @@ class EvolvableMLP(nn.Module):
         )
 
     def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
-        torch.nn.init.orthogonal_(layer.weight, std)
-        torch.nn.init.constant_(layer.bias, bias_const)
+        if hasattr(layer, "weight"):
+            torch.nn.init.orthogonal_(layer.weight, std)
+        elif hasattr(layer, "weight_mu") and hasattr(layer, "weight_sigma"):
+            torch.nn.init.orthogonal_(layer.weight_mu, std)
+            torch.nn.init.orthogonal_(layer.weight_sigma, std)
+
+        if hasattr(layer, "bias"):
+            torch.nn.init.constant_(layer.bias, bias_const)
+        elif hasattr(layer, "bias_mu") and hasattr(layer, "bias_sigma"):
+            torch.nn.init.constant(layer.bias_mu, bias_const)
+            torch.nn.init.constant(layer.bias_sigma, bias_const)
+
         return layer
 
     def create_mlp(
@@ -175,7 +185,9 @@ class EvolvableMLP(nn.Module):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
         if noisy:
-            net_dict["linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+            net_dict["linear_layer_0"] = NoisyLinear(
+                input_size, hidden_size[0], self.noise_std
+            )
         else:
             net_dict["linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.init_layers:
@@ -191,7 +203,7 @@ class EvolvableMLP(nn.Module):
             for l_no in range(1, len(hidden_size)):
                 if noisy:
                     net_dict[f"linear_layer_{str(l_no)}"] = NoisyLinear(
-                        hidden_size[l_no - 1], hidden_size[l_no]
+                        hidden_size[l_no - 1], hidden_size[l_no], self.noise_std
                     )
                 else:
                     net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
@@ -212,14 +224,20 @@ class EvolvableMLP(nn.Module):
                 )
         if not rainbow_feature_net:
             if noisy:
-                output_layer = NoisyLinear(hidden_size[-1], output_size)
+                output_layer = NoisyLinear(hidden_size[-1], output_size, self.noise_std)
             else:
                 output_layer = nn.Linear(hidden_size[-1], output_size)
             if self.init_layers:
                 output_layer = self.layer_init(output_layer)
             if output_vanish:
-                output_layer.weight.data.mul_(0.1)
-                output_layer.bias.data.mul_(0.1)
+                if self.rainbow:
+                    output_layer.weight_mu.data.mul_(0.1)
+                    output_layer.bias_mu.data.mul_(0.1)
+                    output_layer.weight_sigma.data.mul_(0.1)
+                    output_layer.bias_sigma.data.mul_(0.1)
+                else:
+                    output_layer.weight.data.mul_(0.1)
+                    output_layer.bias.data.mul_(0.1)
             net_dict["linear_layer_output"] = output_layer
             if output_activation is not None:
                 net_dict["activation_output"] = self.get_activation(output_activation)
@@ -231,9 +249,9 @@ class EvolvableMLP(nn.Module):
         if not self.rainbow:
             feature_net = self.create_mlp(
                 input_size=self.num_inputs,
-                output_size=self.hidden_size[-1] if self.rainbow else self.num_outputs,
+                output_size=self.num_outputs,
                 hidden_size=self.hidden_size,
-                output_vanish=False,
+                output_vanish=self.output_vanish,
                 output_activation=self.mlp_output_activation,
             )
             if self.accelerator is None:
@@ -244,24 +262,24 @@ class EvolvableMLP(nn.Module):
         if self.rainbow:
             feature_net = self.create_mlp(
                 input_size=self.num_inputs,
-                output_size=self.feature_hidden_size[-1],
-                hidden_size=self.feature_hidden_size,
+                output_size=self.hidden_size[0],
+                hidden_size=[self.hidden_size[0]],
                 output_vanish=False,
-                output_activation=self.mlp_output_activation,
+                output_activation=self.mlp_activation,
                 rainbow_feature_net=True,
             )
             value_net = self.create_mlp(
-                input_size=self.feature_hidden_size[-1],
+                input_size=self.hidden_size[0],
                 output_size=self.num_atoms,
-                hidden_size=self.hidden_size,
+                hidden_size=self.hidden_size[1:],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
             )
             advantage_net = self.create_mlp(
-                input_size=self.feature_hidden_size[-1],
+                input_size=self.hidden_size[0],
                 output_size=self.num_atoms * self.num_outputs,
-                hidden_size=self.hidden_size,
+                hidden_size=self.hidden_size[1:],
                 output_vanish=self.output_vanish,
                 output_activation=None,
                 noisy=True,
@@ -285,13 +303,15 @@ class EvolvableMLP(nn.Module):
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
 
-    def forward(self, x, q=True):
+    def forward(self, x, q=True, log=False):
         """Returns output of neural network.
 
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
         :param q: Return Q value if using rainbow, defaults to True
         :type q: bool, optional
+        :param log: Return log softmax instead of softmax, defaults to False
+        :type log: bool, optional
         """
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(np.array(x))
@@ -307,13 +327,16 @@ class EvolvableMLP(nn.Module):
             advantage = self.advantage_net(x)
             value = value.view(-1, 1, self.num_atoms)
             advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
-
             x = value + advantage - advantage.mean(1, keepdim=True)
-            x = F.softmax(x, dim=-1)
-            x = x.clamp(min=1e-3)
+            if log:
+                x = F.log_softmax(x, dim=2)
+                return x
+            else:
+                x = F.softmax(x, dim=2)
 
+            # Output at this point is (batch_size, actions, num_support)
             if q:
-                x = torch.sum(x * self.support, dim=2)
+                x = torch.sum(x * self.support.expand_as(x), dim=2)
 
         return x
 
@@ -324,7 +347,6 @@ class EvolvableMLP(nn.Module):
             "num_inputs": self.num_inputs,
             "num_outputs": self.num_outputs,
             "hidden_size": self.hidden_size,
-            "feature_hidden_size": self.feature_hidden_size,
             "num_atoms": self.num_atoms,
             "mlp_activation": self.mlp_activation,
             "mlp_output_activation": self.mlp_output_activation,
@@ -337,6 +359,7 @@ class EvolvableMLP(nn.Module):
             "output_vanish": self.output_vanish,
             "support": self.support,
             "rainbow": self.rainbow,
+            "noise_std": self.noise_std,
             "device": self.device,
             "accelerator": self.accelerator,
         }

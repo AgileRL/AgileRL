@@ -59,12 +59,16 @@ class EvolvableCNN(nn.Module):
     :type support: torch.Tensor(), optional
     :param rainbow: Using Rainbow DQN, defaults to False
     :type rainbow: bool, optional
+    :param noise_std: Noise standard deviation, defaults to 0.5
+    :type noise_std: float, optional
     :param critic: CNN is a critic network, defaults to False
     :type critic: bool, optional
     :param normalize: Normalize CNN inputs, defaults to True
     :type normalize: bool, optional
     :param init_layers: Initialise network layers, defaults to True
     :type init_layers: bool, optional
+    :param output_vanish: Vanish output by multiplying by 0.1, defaults to False
+    :type output_vanish: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -96,9 +100,11 @@ class EvolvableCNN(nn.Module):
         layer_norm=False,
         support=None,
         rainbow=False,
+        noise_std=0.5,
         critic=False,
         normalize=True,
         init_layers=True,
+        output_vanish=False,
         device="cpu",
         accelerator=None,
         arch="cnn",
@@ -163,11 +169,13 @@ class EvolvableCNN(nn.Module):
         self.rainbow = rainbow
         self.critic = critic
         self.normalize = normalize
-        self.init_layers = False if rainbow else init_layers
+        self.init_layers = init_layers
         self.device = device
         self.accelerator = accelerator
         self.multi = multi
         self.n_agents = n_agents
+        self.noise_std = noise_std
+        self.output_vanish = output_vanish
         self._net_config = {
             "arch": self.arch,
             "channel_size": self.channel_size,
@@ -226,6 +234,7 @@ class EvolvableCNN(nn.Module):
         input_size,
         output_size,
         hidden_size,
+        output_vanish,
         name,
         output_activation,
         noisy=False,
@@ -233,7 +242,9 @@ class EvolvableCNN(nn.Module):
         """Creates and returns multi-layer perceptron."""
         net_dict = OrderedDict()
         if noisy:
-            net_dict[f"{name}_linear_layer_0"] = NoisyLinear(input_size, hidden_size[0])
+            net_dict[f"{name}_linear_layer_0"] = NoisyLinear(
+                input_size, hidden_size[0], self.noise_std
+            )
         else:
             net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
         if self.init_layers:
@@ -247,7 +258,7 @@ class EvolvableCNN(nn.Module):
             for l_no in range(1, len(hidden_size)):
                 if noisy:
                     net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
-                        hidden_size[l_no - 1], hidden_size[l_no]
+                        hidden_size[l_no - 1], hidden_size[l_no], self.noise_std
                     )
                 else:
                     net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
@@ -265,11 +276,20 @@ class EvolvableCNN(nn.Module):
                     self.mlp_activation
                 )
         if noisy:
-            output_layer = NoisyLinear(hidden_size[-1], output_size)
+            output_layer = NoisyLinear(hidden_size[-1], output_size, self.noise_std)
         else:
             output_layer = nn.Linear(hidden_size[-1], output_size)
         if self.init_layers:
             output_layer = self.layer_init(output_layer)
+        if output_vanish:
+            if self.rainbow:
+                output_layer.weight_mu.data.mul_(0.1)
+                output_layer.bias_mu.data.mul_(0.1)
+                output_layer.weight_sigma.data.mul_(0.1)
+                output_layer.bias_sigma.data.mul_(0.1)
+            else:
+                output_layer.weight.data.mul_(0.1)
+                output_layer.bias.data.mul_(0.1)
         net_dict[f"{name}_linear_layer_output"] = output_layer
         if output_activation is not None:
             net_dict[f"{name}_activation_output"] = self.get_activation(
@@ -424,6 +444,7 @@ class EvolvableCNN(nn.Module):
                 input_size,
                 output_size=self.num_atoms,
                 hidden_size=self.hidden_size,
+                output_vanish=self.output_vanish,
                 name="value",
                 output_activation=None,
                 noisy=True,
@@ -432,6 +453,7 @@ class EvolvableCNN(nn.Module):
                 input_size,
                 output_size=self.num_atoms * self.num_actions,
                 hidden_size=self.hidden_size,
+                output_vanish=self.output_vanish,
                 name="advantage",
                 output_activation=None,
                 noisy=True,
@@ -453,6 +475,7 @@ class EvolvableCNN(nn.Module):
                     output_size=1,
                     hidden_size=self.hidden_size,
                     name="value",
+                    output_vanish=self.output_vanish,
                     output_activation=self.mlp_output_activation,
                 )
             else:
@@ -461,6 +484,7 @@ class EvolvableCNN(nn.Module):
                     output_size=self.num_actions,
                     hidden_size=self.hidden_size,
                     name="value",
+                    output_vanish=self.output_vanish,
                     output_activation=self.mlp_output_activation,
                 )
             advantage_net = None
@@ -478,17 +502,27 @@ class EvolvableCNN(nn.Module):
 
     def reset_noise(self):
         """Resets noise of value and advantage networks."""
-        for layer in self.value_net:
-            if isinstance(layer, NoisyLinear):
-                layer.reset_noise()
         if self.rainbow:
+            for layer in self.value_net:
+                if isinstance(layer, NoisyLinear):
+                    layer.reset_noise()
             for layer in self.advantage_net:
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
 
     def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
-        torch.nn.init.orthogonal_(layer.weight, std)
-        torch.nn.init.constant_(layer.bias, bias_const)
+        if hasattr(layer, "weight"):
+            torch.nn.init.orthogonal_(layer.weight, std)
+        elif hasattr(layer, "weight_mu") and hasattr(layer, "weight_sigma"):
+            torch.nn.init.orthogonal_(layer.weight_mu, std)
+            torch.nn.init.orthogonal_(layer.weight_sigma, std)
+
+        if hasattr(layer, "bias"):
+            torch.nn.init.constant_(layer.bias, bias_const)
+        elif hasattr(layer, "bias_mu") and hasattr(layer, "bias_sigma"):
+            torch.nn.init.constant(layer.bias_mu, bias_const)
+            torch.nn.init.constant(layer.bias_sigma, bias_const)
+
         return layer
 
     def forward(self, x, xc=None, q=True):
@@ -570,6 +604,8 @@ class EvolvableCNN(nn.Module):
             "layer_norm": self.layer_norm,
             "critic": self.critic,
             "rainbow": self.rainbow,
+            "noise_std": self.noise_std,
+            "output_vanish": self.output_vanish,
             "device": self.device,
             "accelerator": self.accelerator,
         }
@@ -644,8 +680,6 @@ class EvolvableCNN(nn.Module):
             self.channel_size, self.kernel_size, self.stride_size, self.input_shape
         )
         stride_size_ranges = self.calc_stride_size_ranges()
-
-        print(max_kernels, stride_size_ranges)
 
         if (
             len(self.channel_size) < self.max_cnn_hidden_layers
