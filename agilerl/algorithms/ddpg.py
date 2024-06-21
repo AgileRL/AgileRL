@@ -110,10 +110,10 @@ class DDPG:
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
         assert isinstance(
-            max_action, (float, int, np.floating, np.integer)
+            max_action, (float, int, np.float32, np.float64, np.integer)
         ), "Max action must be a float or integer."
         assert isinstance(
-            min_action, (float, int, np.floating, np.integer)
+            min_action, (float, int, np.float32, np.float64, np.integer)
         ), "Min action must be a float or integer."
         assert max_action > min_action, "Max action must be greater than min action."
         assert max_action > 0, "Max action must be greater than zero."
