@@ -270,7 +270,7 @@ def test_returns_expected_action():
 
     action_mask = None
 
-    action = bandit.getAction(state, action_mask)
+    action = bandit.get_action(state, action_mask)
 
     assert action.is_integer()
     assert action >= 0 and action < action_dim
@@ -287,7 +287,7 @@ def test_returns_expected_action_mask():
 
     action_mask = np.array([0, 1])
 
-    action = bandit.getAction(state, action_mask)
+    action = bandit.get_action(state, action_mask)
 
     assert action.is_integer()
     assert action == 1
@@ -605,7 +605,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.saveCheckpoint(checkpoint_path)
+    bandit.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -627,7 +627,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     bandit = NeuralTS(state_dim=[4], action_dim=2)
     # Load checkpoint
-    bandit.loadCheckpoint(checkpoint_path)
+    bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert bandit.net_config == {"arch": "mlp", "hidden_size": [128]}
@@ -670,7 +670,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.saveCheckpoint(checkpoint_path)
+    bandit.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -692,7 +692,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     bandit = NeuralTS(state_dim=[4], action_dim=2)
     # Load checkpoint
-    bandit.loadCheckpoint(checkpoint_path)
+    bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert bandit.net_config == net_config_cnn
@@ -738,7 +738,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.saveCheckpoint(checkpoint_path)
+    bandit.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -760,7 +760,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     bandit = NeuralTS(state_dim=[4], action_dim=2)
     # Load checkpoint
-    bandit.loadCheckpoint(checkpoint_path)
+    bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert bandit.net_config is None
@@ -802,7 +802,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.saveCheckpoint(checkpoint_path)
+    bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_bandit = NeuralTS.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -863,7 +863,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.saveCheckpoint(checkpoint_path)
+    bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_bandit = NeuralTS.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -923,7 +923,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    bandit.saveCheckpoint(checkpoint_path)
+    bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_bandit = NeuralTS.load(checkpoint_path)

@@ -22,7 +22,7 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -32,7 +32,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     if not multi:
         ####
         if not atari:
-            env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+            env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
             try:
                 state_dims = env.single_observation_space.n
                 one_hot = True
@@ -330,7 +330,7 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         device=device,
     )
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         INIT_HP["ALGO"],
         state_dims,
         action_dims,
@@ -407,8 +407,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             wb=INIT_HP["WANDB"],
         )
 
-    printHyperparams(trained_pop)
-    # plotPopulationScore(trained_pop)
+    print_hyperparams(trained_pop)
+    # plot_population_score(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

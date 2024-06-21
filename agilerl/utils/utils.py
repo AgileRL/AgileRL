@@ -15,7 +15,7 @@ from agilerl.algorithms.td3 import TD3
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
-def makeVectEnvs(env_name, num_envs=1):
+def make_vect_envs(env_name, num_envs=1):
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -28,7 +28,7 @@ def makeVectEnvs(env_name, num_envs=1):
     )
 
 
-def makeMultiAgentVectEnvs(env, num_envs=1):
+def make_multi_agent_vect_envs(env, num_envs=1):
     """Returns async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
@@ -39,7 +39,7 @@ def makeMultiAgentVectEnvs(env, num_envs=1):
     return PettingZooVectorizationParallelWrapper(env, num_envs)
 
 
-def makeSkillVectEnvs(env_name, skill, num_envs=1):
+def make_skill_vect_envs(env_name, skill, num_envs=1):
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -54,7 +54,7 @@ def makeSkillVectEnvs(env_name, skill, num_envs=1):
     )
 
 
-def initialPopulation(
+def create_population(
     algo,
     state_dim,
     action_dim,
@@ -401,7 +401,7 @@ def calculate_vectorized_scores(
     return episode_rewards
 
 
-def printHyperparams(pop):
+def print_hyperparams(pop):
     """Prints current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
@@ -410,13 +410,13 @@ def printHyperparams(pop):
 
     for agent in pop:
         print(
-            "Agent ID: {}    Mean 100 fitness: {:.2f}    lr: {}    Batch Size: {}".format(
-                agent.index, np.mean(agent.fitness[-100:]), agent.lr, agent.batch_size
+            "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
+                agent.index, np.mean(agent.fitness[-5:]), agent.inspect_attributes()
             )
         )
 
 
-def plotPopulationScore(pop):
+def plot_population_score(pop):
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents

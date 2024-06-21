@@ -152,15 +152,15 @@ NET_CONFIG = {
     'hidden_size': [32, 32], # Actor hidden size
 }
 ```
-First, use <code>utils.utils.initialPopulation</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
+First, use <code>utils.utils.create_population</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```python
-from agilerl.utils.utils import makeVectEnvs, initialPopulation
+from agilerl.utils.utils import make_vect_envs, create_population
 import torch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 num_envs = 16
-env = makeVectEnvs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
+env = make_vect_envs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
 try:
     state_dim = env.single_observation_space.n          # Discrete observation space
     one_hot = True                                      # Requires one-hot encoding
@@ -175,7 +175,7 @@ except Exception:
 if INIT_HP['CHANNELS_LAST']:
     state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-agent_pop = initialPopulation(
+agent_pop = create_population(
     algo=INIT_HP['ALGO'],                 # Algorithm
     state_dim=state_dim,                  # State dimension
     action_dim=action_dim,                # Action dimension
@@ -222,7 +222,7 @@ mutations = Mutations(
     device=device,
 )
 ```
-The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have methods <code>getAction()</code> and <code>learn().</code>
+The easiest training loop implementation is to use our <code>train_off_policy()</code> function. It requires the <code>agent</code> have methods <code>get_action()</code> and <code>learn().</code>
 ```python
 from agilerl.training.train_off_policy import train_off_policy
 

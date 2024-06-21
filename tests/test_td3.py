@@ -460,7 +460,7 @@ def test_returns_expected_action_training():
     td3 = TD3(state_dim, action_dim, one_hot=False, max_action=max_action)
     state = np.array([1, 2, 3, 4])
     training = False
-    action = td3.getAction(state, training)[0]
+    action = td3.get_action(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -476,7 +476,7 @@ def test_returns_expected_action_training():
     )
     state = np.array([1])
     training = True
-    action = td3.getAction(state, training)[0]
+    action = td3.get_action(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -493,7 +493,7 @@ def test_returns_expected_action_training():
     )
     state = np.array([1])
     training = True
-    action = td3.getAction(state, training)[0]
+    action = td3.get_action(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -666,7 +666,7 @@ def test_soft_update():
         wrap=wrap,
     )
 
-    td3.softUpdate(td3.actor, td3.actor_target)
+    td3.soft_update(td3.actor, td3.actor_target)
 
     eval_params = list(td3.actor.parameters())
     target_params = list(td3.actor_target.parameters())
@@ -680,7 +680,7 @@ def test_soft_update():
         for expected_param, target_param in zip(expected_params, target_params)
     )
 
-    td3.softUpdate(td3.critic_1, td3.critic_target_1)
+    td3.soft_update(td3.critic_1, td3.critic_target_1)
 
     eval_params = list(td3.critic_1.parameters())
     target_params = list(td3.critic_target_1.parameters())
@@ -694,7 +694,7 @@ def test_soft_update():
         for expected_param, target_param in zip(expected_params, target_params)
     )
 
-    td3.softUpdate(td3.critic_2, td3.critic_target_2)
+    td3.soft_update(td3.critic_2, td3.critic_target_2)
 
     eval_params = list(td3.critic_2.parameters())
     target_params = list(td3.critic_target_2.parameters())
@@ -717,7 +717,7 @@ def test_algorithm_test_loop():
 
     env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=False, max_action=1)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -1033,7 +1033,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.saveCheckpoint(checkpoint_path)
+    td3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1070,7 +1070,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
     # Load checkpoint
-    td3.loadCheckpoint(checkpoint_path)
+    td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert td3.net_config == {
@@ -1122,7 +1122,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.saveCheckpoint(checkpoint_path)
+    td3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1159,7 +1159,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
     # Load checkpoint
-    td3.loadCheckpoint(checkpoint_path)
+    td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert td3.net_config == net_config_cnn
@@ -1227,7 +1227,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.saveCheckpoint(checkpoint_path)
+    td3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1264,7 +1264,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
     # Load checkpoint
-    td3.loadCheckpoint(checkpoint_path)
+    td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert td3.net_config is None
@@ -1441,7 +1441,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.saveCheckpoint(checkpoint_path)
+    td3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_td3 = TD3.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1515,7 +1515,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.saveCheckpoint(checkpoint_path)
+    td3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_td3 = TD3.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1590,7 +1590,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    td3.saveCheckpoint(checkpoint_path)
+    td3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_td3 = TD3.load(checkpoint_path)

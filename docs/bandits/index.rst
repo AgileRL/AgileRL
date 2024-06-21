@@ -43,7 +43,7 @@ We can convert these labelled datasets into a bandit learning environment easily
 
 .. code-block:: python
 
-    from agilerl.utils.utils import initialPopulation
+    from agilerl.utils.utils import create_population
     from agilerl.wrappers.learning import BanditEnv
     import torch
     from ucimlrepo import fetch_ucirepo
@@ -76,7 +76,7 @@ We can convert these labelled datasets into a bandit learning environment easily
     context_dim = env.context_dim
     action_dim = env.arms
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="NeuralUCB",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -95,7 +95,7 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
-During training it can be added to using the ``ReplayBuffer.save2memory()`` method. To sample from the replay buffer, call ``ReplayBuffer.sample()``.
+During training it can be added to using the ``ReplayBuffer.save_to_memory()`` method. To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 
 .. code-block:: python
 
@@ -210,7 +210,7 @@ Alternatively, use a custom bandit training loop:
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import initialPopulation
+    from agilerl.utils.utils import create_population
     from agilerl.wrappers.learning import BanditEnv
 
 
@@ -245,7 +245,7 @@ Alternatively, use a custom bandit training loop:
     context_dim = env.context_dim
     action_dim = env.arms
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="NeuralUCB",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -316,11 +316,11 @@ Alternatively, use a custom bandit training loop:
                 if INIT_HP["CHANNELS_LAST"]:
                     context = np.moveaxis(context, [-1], [-3])
                 # Get next action from agent
-                action = agent.getAction(context)
+                action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(context[action], reward)
+                memory.save_to_memory(context[action], reward)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:

@@ -10,7 +10,7 @@ from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation, makeVectEnvs
+from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     }
 
     num_envs = 8
-    env = makeVectEnvs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="DQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -143,7 +143,7 @@ if __name__ == "__main__":
 
             for idx_step in range(evo_steps):
                 # Get next action from agent
-                action = agent.getAction(state, epsilon)
+                action = agent.get_action(state, epsilon)
                 epsilon = max(
                     eps_end, epsilon * eps_decay
                 )  # Decay epsilon for exploration
@@ -162,7 +162,7 @@ if __name__ == "__main__":
                         scores[idx] = 0
 
                 # Save experience to replay buffer
-                memory.save2memoryVectEnvs(
+                memory.save_to_memory_vect_envs(
                     state, action, reward, next_state, terminated
                 )
 
@@ -220,11 +220,11 @@ if __name__ == "__main__":
             elite, pop = tournament.select(pop)
             pop = mutations.mutation(pop)
             for pop_i, model in enumerate(pop):
-                model.saveCheckpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")
+                model.save_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")
         accelerator.wait_for_everyone()
         if not accelerator.is_main_process:
             for pop_i, model in enumerate(pop):
-                model.loadCheckpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")
+                model.load_checkpoint(f"{accel_temp_models_path}/DQN_{pop_i}.pt")
         accelerator.wait_for_everyone()
         for model in pop:
             model.wrap_models()

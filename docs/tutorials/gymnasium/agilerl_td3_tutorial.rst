@@ -53,7 +53,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
+    from agilerl.utils.utils import create_population, make_vect_envs
     from tqdm import trange
 
 
@@ -126,7 +126,7 @@ correct values for ``state_dim`` and ``one_hot``, depending on whether the obser
 .. code-block:: python
 
     num_envs=8
-    env = makeVectEnvs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -162,7 +162,7 @@ population. The sequence of evolution (tournament selection followed by mutation
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
 
     # Define a population
-    pop = initialPopulation(
+    pop = create_population(
         algo="TD3",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -183,8 +183,8 @@ For example, if you were able to watch a bunch of people attempt to solve a maze
 without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined
-by the class ``ReplayBuffer()``. During training it can be added to using the ``ReplayBuffer.save2memory()`` function, or
-``ReplayBuffer.save2memoryVectEnvs()`` for vectorized environments (recommended). To sample from the replay buffer, call ``ReplayBuffer.sample()``.
+by the class ``ReplayBuffer()``. During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or
+``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended). To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 
 .. code-block:: python
 
@@ -316,7 +316,7 @@ function and is an example of how we might choose to make use of a population of
                 if INIT_HP["CHANNELS_LAST"]:
                     state = np.moveaxis(state, [-1], [-3])
 
-                action = agent.getAction(state)  # Get next action from agent
+                action = agent.get_action(state)  # Get next action from agent
 
                 # Act in environment
                 next_state, reward, terminated, truncated, info = env.step(action)
@@ -336,7 +336,7 @@ function and is an example of how we might choose to make use of a population of
 
                 # Save experience to replay buffer
                 if INIT_HP["CHANNELS_LAST"]:
-                    memory.save2memory(
+                    memory.save_to_memory(
                         state,
                         action,
                         reward,
@@ -345,7 +345,7 @@ function and is an example of how we might choose to make use of a population of
                         is_vectorised=True,
                     )
                 else:
-                    memory.save2memory(
+                    memory.save_to_memory(
                         state,
                         action,
                         reward,
@@ -405,7 +405,7 @@ function and is an example of how we might choose to make use of a population of
 
     # Save the trained algorithm
     save_path = "TD3_trained_agent.pt"
-    elite.saveCheckpoint(save_path)
+    elite.save_checkpoint(save_path)
 
     pbar.close()
     env.close()
@@ -421,7 +421,7 @@ Load agent
 ~~~~~~~~~~
 .. code-block:: python
 
-    td3 = TD3.loadCheckpoint(save_path, device=device)
+    td3 = TD3.load_checkpoint(save_path, device=device)
 
 
 Test loop for inference
@@ -444,7 +444,7 @@ Test loop for inference
                     state = np.moveaxis(state, [-1], [-3])
 
                 # Get next action from agent
-                action, *_ = td3.getAction(state, training=False)
+                action, *_ = td3.get_action(state, training=False)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()

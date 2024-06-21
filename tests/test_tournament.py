@@ -9,7 +9,7 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -96,7 +96,7 @@ def test_returns_best_agent_and_new_population():
     }
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -149,7 +149,7 @@ def test_returns_best_agent_and_new_population_without_elitism():
     }
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -194,7 +194,7 @@ def test_returns_best_agent_and_new_population_multi_agent():
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,
@@ -240,7 +240,7 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     algo_classes = {"MADDPG": MADDPG, "MATD3": MATD3}
 
     for algo in algo_classes.keys():
-        population = initialPopulation(
+        population = create_population(
             algo=algo,
             state_dim=state_dim,
             action_dim=action_dim,

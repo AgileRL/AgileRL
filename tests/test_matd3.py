@@ -15,7 +15,7 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.utils import makeMultiAgentVectEnvs
+from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -754,7 +754,7 @@ def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device):
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
     ],
 )
-def test_matd3_getAction_mlp(
+def test_matd3_get_action_mlp(
     training, state_dims, action_dims, discrete_actions, one_hot, device
 ):
     agent_ids = ["agent_0", "agent_1"]
@@ -781,7 +781,7 @@ def test_matd3_getAction_mlp(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = matd3.getAction(state, training)
+    cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -811,7 +811,7 @@ def test_matd3_getAction_mlp(
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_matd3_getAction_cnn(
+def test_matd3_get_action_cnn(
     training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
@@ -838,7 +838,7 @@ def test_matd3_getAction_cnn(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = matd3.getAction(state, training)
+    cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -868,7 +868,7 @@ def test_matd3_getAction_cnn(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
     ],
 )
-def test_matd3_getAction_distributed(
+def test_matd3_get_action_distributed(
     training, state_dims, action_dims, discrete_actions
 ):
     accelerator = Accelerator()
@@ -898,7 +898,7 @@ def test_matd3_getAction_distributed(
         for actor in matd3.actors
     ]
     matd3.actors = new_actors
-    cont_actions, discrete_action = matd3.getAction(state, training)
+    cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -928,7 +928,7 @@ def test_matd3_getAction_distributed(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_matd3_getAction_agent_masking(
+def test_matd3_get_action_agent_masking(
     training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
@@ -951,7 +951,7 @@ def test_matd3_getAction_agent_masking(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = matd3.getAction(
+    cont_actions, discrete_action = matd3.get_action(
         state, training, agent_mask=agent_mask, env_defined_actions=env_defined_actions
     )
     if discrete_actions:
@@ -1412,7 +1412,7 @@ def test_matd3_soft_update(device):
         matd3.critic_targets_2,
     ):
         # Check actors
-        matd3.softUpdate(actor, actor_target)
+        matd3.soft_update(actor, actor_target)
         eval_params = list(actor.parameters())
         target_params = list(actor_target.parameters())
         expected_params = [
@@ -1423,7 +1423,7 @@ def test_matd3_soft_update(device):
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
-        matd3.softUpdate(critic_1, critic_target_1)
+        matd3.soft_update(critic_1, critic_target_1)
         eval_params = list(critic_1.parameters())
         target_params = list(critic_target_1.parameters())
         expected_params = [
@@ -1435,7 +1435,7 @@ def test_matd3_soft_update(device):
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
-        matd3.softUpdate(critic_2, critic_target_2)
+        matd3.soft_update(critic_2, critic_target_2)
         eval_params = list(critic_2.parameters())
         target_params = list(critic_target_2.parameters())
         expected_params = [
@@ -1456,7 +1456,7 @@ def test_matd3_algorithm_test_loop(device):
 
     env = DummyMultiEnv(state_dims[0], action_dims)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     matd3 = MATD3(
         state_dims,
         action_dims,
@@ -1517,7 +1517,7 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device):
     }
     action_dims = [2, 2]
     accelerator = None
-    env = makeMultiAgentVectEnvs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
+    env = make_multi_agent_vect_envs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
     matd3 = MATD3(
         agent_state_dims,
         action_dims,
@@ -1795,7 +1795,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1845,7 +1845,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(tmpdir):
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_matd3.loadCheckpoint(checkpoint_path)
+    loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_matd3.net_config == net_config
@@ -1922,7 +1922,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1968,7 +1968,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_matd3.loadCheckpoint(checkpoint_path)
+    loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_matd3.net_config == net_config_cnn
@@ -2063,7 +2063,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     )
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -2109,7 +2109,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_matd3.loadCheckpoint(checkpoint_path)
+    loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert all(isinstance(actor, MakeEvolvable) for actor in loaded_matd3.actors)
@@ -2258,7 +2258,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -2361,7 +2361,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_matd3 = MATD3.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -2502,7 +2502,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    matd3.saveCheckpoint(checkpoint_path)
+    matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_matd3 = MATD3.load(checkpoint_path)

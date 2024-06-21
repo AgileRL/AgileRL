@@ -6,7 +6,7 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
-multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save2memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
+multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save_to_memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
 
 .. code-block:: python
 

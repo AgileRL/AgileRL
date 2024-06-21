@@ -41,7 +41,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
+    from agilerl.utils.utils import create_population, make_vect_envs
     import torch
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,7 +63,7 @@ are more likely to remain present in the population. The sequence of evolution (
     }
 
     num_envs = 16
-    env = makeVectEnvs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
@@ -79,7 +79,7 @@ are more likely to remain present in the population. The sequence of evolution (
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="DQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -102,7 +102,7 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
-During training it can be added to using the ``ReplayBuffer.save2memory()`` function, or ``ReplayBuffer.save2memoryVectEnvs()`` for vectorized environments (recommended).
+During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or ``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended).
 To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 
 .. code-block:: python
@@ -219,7 +219,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
+    from agilerl.utils.utils import create_population, make_vect_envs
     import numpy as np
     import torch
     from tqdm import trange
@@ -243,7 +243,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     }
 
     num_envs = 16
-    env = makeVectEnvs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
@@ -259,7 +259,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="DQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -331,7 +331,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                 if INIT_HP["CHANNELS_LAST"]:
                     state = np.moveaxis(state, [-1], [-3])
 
-                action = agent.getAction(state, epsilon)  # Get next action from agent
+                action = agent.get_action(state, epsilon)  # Get next action from agent
                 epsilon = max(
                     eps_end, epsilon * eps_decay
                 )  # Decay epsilon for exploration
@@ -351,7 +351,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
                 # Save experience to replay buffer
                 if INIT_HP["CHANNELS_LAST"]:
-                    memory.save2memory(
+                    memory.save_to_memory(
                         state,
                         action,
                         reward,
@@ -360,7 +360,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                         is_vectorised=True,
                     )
                 else:
-                    memory.save2memory(
+                    memory.save_to_memory(
                         state,
                         action,
                         reward,

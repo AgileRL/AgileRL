@@ -31,13 +31,13 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.utils import makeVectEnvs
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.algorithms.td3 import TD3
 
   # Create environment and Experience Replay Buffer
   num_envs = 1
-  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=num_envs)
+  env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
 
   max_action = float(env.single_action_space.high[0])
   try:
@@ -65,14 +65,14 @@ Example
   while True:
       if channels_last:
           state = np.moveaxis(state, [-1], [-3])
-      action = agent.getAction(state, training=True)    # Get next action from agent
+      action = agent.get_action(state, training=True)    # Get next action from agent
       next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
       if channels_last:
-          memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [-1], [-3]), done)
+          memory.save_to_memory_vect_envs(state, action, reward, np.moveaxis(next_state, [-1], [-3]), done)
       else:
-          memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+          memory.save_to_memory_vect_envs(state, action, reward, next_state, done)
 
       # Learn according to learning frequency
       if len(memory) >= agent.batch_size:
@@ -113,7 +113,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -122,7 +122,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create TD3 agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

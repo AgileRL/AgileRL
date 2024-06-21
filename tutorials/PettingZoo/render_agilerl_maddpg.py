@@ -102,7 +102,7 @@ if __name__ == "__main__":
             )
 
             # Get next action from agent
-            cont_actions, discrete_action = maddpg.getAction(
+            cont_actions, discrete_action = maddpg.get_action(
                 state,
                 training=False,
                 agent_mask=agent_mask,

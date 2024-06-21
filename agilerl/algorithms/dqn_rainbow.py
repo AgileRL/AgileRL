@@ -263,7 +263,7 @@ class RainbowDQN:
         # delete this
         print(self.actor, self.actor_target)
 
-    def getAction(self, state, action_mask=None, training=True):
+    def get_action(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -508,7 +508,7 @@ class RainbowDQN:
         self.optimizer.step()
 
         # soft update target network
-        self.softUpdate()
+        self.soft_update()
 
         if per:
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
@@ -516,7 +516,7 @@ class RainbowDQN:
 
         return loss.item(), idxs, new_priorities
 
-    def softUpdate(self):
+    def soft_update(self):
         """Soft updates target network."""
         for eval_param, target_param in zip(
             self.actor.parameters(), self.actor_target.parameters()
@@ -549,7 +549,7 @@ class RainbowDQN:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state, training=False)
+                    action = self.get_action(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -655,7 +655,7 @@ class RainbowDQN:
             self.actor_target = self.accelerator.unwrap_model(self.actor_target)
             self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -679,7 +679,7 @@ class RainbowDQN:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

@@ -53,11 +53,11 @@ the ``MakeEvolvable`` wrapper.
                                     device=device)
 
 There are two further considerations to make when defining custom architecture. The first is when instantiating the
-``initialPopulation`` object, you need to set ``net_config`` to ``None`` and ``actor_network`` to ``evolvable_actor``.
+``create_population`` object, you need to set ``net_config`` to ``None`` and ``actor_network`` to ``evolvable_actor``.
 
 .. code-block:: python
 
-    pop = initialPopulation(algo="DQN",  # Algorithm
+    pop = create_population(algo="DQN",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
                             one_hot=one_hot,  # One-hot encoding
@@ -68,11 +68,11 @@ There are two further considerations to make when defining custom architecture. 
                             device=device)
 
 If you are using an algorithm that also uses a single critic (PPO, DDPG), define the critic network and pass it into the
-``initialPopulation`` class, again setting ``net_config`` to ``None``.
+``create_population`` class, again setting ``net_config`` to ``None``.
 
 .. code-block:: python
 
-    pop = initialPopulation(algo="DDPG",  # Algorithm
+    pop = create_population(algo="DDPG",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
                             one_hot=one_hot,  # One-hot encoding
@@ -87,7 +87,7 @@ If the single agent algorithm has more than one critic (e.g. TD3), then pass the
 
 .. code-block:: python
 
-    pop = initialPopulation(algo="TD3",  # Algorithm
+    pop = create_population(algo="TD3",  # Algorithm
                             state_dim=state_dim,  # State dimension
                             action_dim=action_dim,  # Action dimension
                             one_hot=one_hot,  # One-hot encoding
@@ -113,7 +113,7 @@ multi-agent environment. The example below outlines how this would work for a tw
                          [critic_2_network_1, critic_2_network_2]]
 
     # Instantiate the populations as follows
-    pop = initialPopulation(algo="MADDPG",  # Algorithm
+    pop = create_population(algo="MADDPG",  # Algorithm
                             state_dim=state_dim,  # State dimensions
                             action_dim=action_dim,  # Action dimensions
                             one_hot=one_hot,  # One-hot encoding

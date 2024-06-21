@@ -36,9 +36,9 @@ def test_get_length_of_memory():
     buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(1, 2, 3)
-    buffer.save2memorySingleEnv(4, 5, 6)
-    buffer.save2memorySingleEnv(7, 8, 9)
+    buffer.save_to_memory_single_env(1, 2, 3)
+    buffer.save_to_memory_single_env(4, 5, 6)
+    buffer.save_to_memory_single_env(7, 8, 9)
 
     assert len(buffer) == 3
 
@@ -86,7 +86,7 @@ def test_add_experience_when_memory_full():
     assert buffer.memory[1].done is False
 
 
-# Can add single experiences to memory with save2memorySingleEnv method
+# Can add single experiences to memory with save_to_memory_single_env method
 def test_add_single_experiences_to_memory():
     memory_size = 100
     field_names = ["state", "action", "reward"]
@@ -98,7 +98,7 @@ def test_add_single_experiences_to_memory():
     action = np.array([0])
     reward = np.array([0])
 
-    buffer.save2memorySingleEnv(state, action, reward)
+    buffer.save_to_memory_single_env(state, action, reward)
 
     assert len(buffer.memory) == 1
     assert buffer.memory[0].state.tolist() == state.tolist()
@@ -106,7 +106,7 @@ def test_add_single_experiences_to_memory():
     assert buffer.memory[0].reward.tolist() == reward.tolist()
 
 
-# Can add multiple experiences to memory with save2memoryVectEnvs method
+# Can add multiple experiences to memory with save_to_memory_vect_envs method
 def test_add_multiple_experiences_to_memory():
     memory_size = 100
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -120,7 +120,7 @@ def test_add_multiple_experiences_to_memory():
     next_states = np.array([[5, 6], [7, 8]])
     dones = np.array([[False], [True]])
 
-    buffer.save2memoryVectEnvs(states, actions, rewards, next_states, dones)
+    buffer.save_to_memory_vect_envs(states, actions, rewards, next_states, dones)
 
     assert len(buffer.memory) == 2
     assert buffer.memory[0].state.tolist() == states[0].tolist()
@@ -149,7 +149,9 @@ def test_add_any_experiences_to_memory():
     next_states = np.array([[5, 6], [7, 8]])
     dones = np.array([[False], [True]])
 
-    buffer.save2memory(states, actions, rewards, next_states, dones, is_vectorised=True)
+    buffer.save_to_memory(
+        states, actions, rewards, next_states, dones, is_vectorised=True
+    )
 
     assert len(buffer.memory) == 2
     assert buffer.memory[0].state.tolist() == states[0].tolist()
@@ -169,7 +171,7 @@ def test_add_any_experiences_to_memory():
     new_next_state = np.array([3, 4])
     new_done = np.array([False])
 
-    buffer.save2memory(
+    buffer.save_to_memory(
         new_state, new_action, new_reward, new_next_state, new_done, is_vectorised=False
     )
 
@@ -191,9 +193,9 @@ def test_sample_experiences_from_memory():
     buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(np.array([1, 1]), 2, 3)
-    buffer.save2memorySingleEnv(np.array([4, 4]), 5, 6)
-    buffer.save2memorySingleEnv(np.array([7, 7]), 8, 9)
+    buffer.save_to_memory_single_env(np.array([1, 1]), 2, 3)
+    buffer.save_to_memory_single_env(np.array([4, 4]), 5, 6)
+    buffer.save_to_memory_single_env(np.array([7, 7]), 8, 9)
 
     # Sample experiences from memory
     batch_size = 2
@@ -220,9 +222,9 @@ def test_sample_experiences_from_memory_images():
     buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 2, 3)
-    buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 5, 6)
-    buffer.save2memorySingleEnv(np.random.rand(3, 128, 128), 8, 9)
+    buffer.save_to_memory_single_env(np.random.rand(3, 128, 128), 2, 3)
+    buffer.save_to_memory_single_env(np.random.rand(3, 128, 128), 5, 6)
+    buffer.save_to_memory_single_env(np.random.rand(3, 128, 128), 8, 9)
 
     # Sample experiences from memory
     batch_size = 2
@@ -248,9 +250,9 @@ def test_sample_experiences_from_memory_return_idx():
     buffer = ReplayBuffer(memory_size, field_names, device)
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(np.array([1, 1]), 2, 3)
-    buffer.save2memorySingleEnv(np.array([4, 4]), 5, 6)
-    buffer.save2memorySingleEnv(np.array([7, 7]), 8, 9)
+    buffer.save_to_memory_single_env(np.array([1, 1]), 2, 3)
+    buffer.save_to_memory_single_env(np.array([4, 4]), 5, 6)
+    buffer.save_to_memory_single_env(np.array([7, 7]), 8, 9)
 
     # Sample experiences from memory
     batch_size = 2
@@ -385,17 +387,17 @@ def test_save_single_env_transition():
     next_state = np.array([5, 6, 7, 8])
     done = np.array([False])
 
-    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
 
     assert len(replay_buffer.memory) == 0
     assert len(replay_buffer.n_step_buffers[0]) == 1
 
-    replay_buffer.save2memorySingleEnv(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory_single_env(state, action, reward, next_state, done)
 
     assert len(replay_buffer.memory) == 0
     assert len(replay_buffer.n_step_buffers[0]) == 2
 
-    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
 
     assert len(replay_buffer.memory) == num_envs
     assert len(replay_buffer.n_step_buffers[0]) == n_step
@@ -419,7 +421,7 @@ def test_save_multiple_env_transitions():
     next_state = np.array([[5, 6, 7, 8], [13, 14, 15, 16]])
     done = np.array([[False], [True]])
 
-    replay_buffer.save2memory(
+    replay_buffer.save_to_memory(
         state, action, reward, next_state, done, is_vectorised=True
     )
 
@@ -427,7 +429,7 @@ def test_save_multiple_env_transitions():
     assert len(replay_buffer.n_step_buffers[0]) == 1
     assert len(replay_buffer.n_step_buffers[1]) == 1
 
-    one_step_transition = replay_buffer.save2memoryVectEnvs(
+    one_step_transition = replay_buffer.save_to_memory_vect_envs(
         state, action, reward, next_state, done
     )
 
@@ -460,7 +462,7 @@ def test_save_multiple_env_image_transitions():
     next_state = np.random.rand(num_envs, 3, 128, 128)
     done = np.array([[False], [True]])
 
-    replay_buffer.save2memory(
+    replay_buffer.save_to_memory(
         state, action, reward, next_state, done, is_vectorised=True
     )
 
@@ -468,7 +470,7 @@ def test_save_multiple_env_image_transitions():
     assert len(replay_buffer.n_step_buffers[0]) == 1
     assert len(replay_buffer.n_step_buffers[1]) == 1
 
-    one_step_transition = replay_buffer.save2memoryVectEnvs(
+    one_step_transition = replay_buffer.save_to_memory_vect_envs(
         state, action, reward, next_state, done
     )
 
@@ -503,10 +505,10 @@ def test_sample_nstep_experiences_from_memory():
 
     print(state, state.shape)
 
-    replay_buffer.save2memory(state, action, reward, next_state, done)
-    replay_buffer.save2memory(state, action, reward, next_state, done)
-    replay_buffer.save2memory(state, action, reward, next_state, done)
-    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
 
     batch_size = 2
     experiences = replay_buffer.sample(batch_size)
@@ -536,9 +538,9 @@ def test_sample_experiences_from_memory_with_indices():
     next_state = np.array([5, 6, 7, 8])
     done = False
 
-    replay_buffer.save2memory(state, action, reward, next_state, done)
-    replay_buffer.save2memory(state, action, reward, next_state, done)
-    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
 
     indices = [0]
     experiences = replay_buffer.sample_from_indices(indices)
@@ -672,7 +674,7 @@ def test_save_and_sample_experience():
     next_state = np.random.rand(4)
     done = False
 
-    replay_buffer.save2memorySingleEnv(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory_single_env(state, action, reward, next_state, done)
 
     batch_size = 1
     transition = replay_buffer.sample(batch_size)
@@ -708,7 +710,7 @@ def test_update_priorities():
     next_state = np.array([5, 6, 7, 8])
     done = np.array([False])
 
-    replay_buffer.save2memory(state, action, reward, next_state, done)
+    replay_buffer.save_to_memory(state, action, reward, next_state, done)
 
     transition = replay_buffer.sample(1)
 
@@ -764,7 +766,7 @@ def test_calculate_weight_normal_case():
     next_state = np.array([5, 6, 7, 8])
     done = np.array([False])
 
-    buffer.save2memory(state, action, reward, next_state, done)
+    buffer.save_to_memory(state, action, reward, next_state, done)
 
     idx = 0
     beta = 0.4
@@ -790,7 +792,7 @@ def test_calculate_weight_parameterized():
     next_state = np.array([5, 6, 7, 8])
     done = np.array([False])
 
-    buffer.save2memory(state, action, reward, next_state, done)
+    buffer.save_to_memory(state, action, reward, next_state, done)
 
     buffer.sum_tree = SumSegmentTree(128)
     buffer.sum_tree[0] = 0.5

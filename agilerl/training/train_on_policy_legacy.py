@@ -223,7 +223,7 @@ def train_on_policy(
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
                     # Get next action from agent
-                    action, log_prob, _, value = agent.getAction(state)
+                    action, log_prob, _, value = agent.get_action(state)
 
                     if not is_vectorised:
                         action = action[0]
@@ -338,13 +338,13 @@ def train_on_policy(
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            model.saveCheckpoint(
+                            model.save_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:
                         for pop_i, model in enumerate(pop):
-                            model.loadCheckpoint(
+                            model.load_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
@@ -362,7 +362,7 @@ def train_on_policy(
                             env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                         )
                     )
-                    elite.saveCheckpoint(f"{elite_save_path}.pt")
+                    elite.save_checkpoint(f"{elite_save_path}.pt")
 
             if verbose:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -397,7 +397,7 @@ def train_on_policy(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                            agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                         print("Saved checkpoint.")
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -405,7 +405,7 @@ def train_on_policy(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                        agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                     print("Saved checkpoint.")
 
     if wb:

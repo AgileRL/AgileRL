@@ -261,9 +261,9 @@ def train_off_policy(
                     state = np.moveaxis(state, [-1], [-3])
                 # Get next action from agent
                 if algo in ["DQN"]:
-                    action = agent.getAction(state, epsilon)
+                    action = agent.get_action(state, epsilon)
                 else:
-                    action = agent.getAction(state)
+                    action = agent.get_action(state)
 
                 if algo in ["DQN", "Rainbow DQN"]:
                     for a in action:
@@ -280,7 +280,7 @@ def train_off_policy(
                 # Save experience to replay buffer
                 if n_step_memory is not None:
                     if swap_channels:
-                        one_step_transition = n_step_memory.save2memoryVectEnvs(
+                        one_step_transition = n_step_memory.save_to_memory_vect_envs(
                             state,
                             action,
                             reward,
@@ -288,7 +288,7 @@ def train_off_policy(
                             done,
                         )
                     else:
-                        one_step_transition = n_step_memory.save2memoryVectEnvs(
+                        one_step_transition = n_step_memory.save_to_memory_vect_envs(
                             state,
                             action,
                             reward,
@@ -296,10 +296,10 @@ def train_off_policy(
                             done,
                         )
                     if one_step_transition:
-                        memory.save2memoryVectEnvs(*one_step_transition)
+                        memory.save_to_memory_vect_envs(*one_step_transition)
                 else:
                     if swap_channels:
-                        memory.save2memory(
+                        memory.save_to_memory(
                             state,
                             action,
                             reward,
@@ -308,7 +308,7 @@ def train_off_policy(
                             is_vectorised=is_vectorised,
                         )
                     else:
-                        memory.save2memory(
+                        memory.save_to_memory(
                             state,
                             action,
                             reward,
@@ -480,13 +480,13 @@ def train_off_policy(
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            model.saveCheckpoint(
+                            model.save_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:
                         for pop_i, model in enumerate(pop):
-                            model.loadCheckpoint(
+                            model.load_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
@@ -504,7 +504,7 @@ def train_off_policy(
                             env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                         )
                     )
-                    elite.saveCheckpoint(f"{elite_save_path}.pt")
+                    elite.save_checkpoint(f"{elite_save_path}.pt")
 
             if verbose:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -538,7 +538,7 @@ def train_off_policy(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                            agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                         print("Saved checkpoint.")
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -546,7 +546,7 @@ def train_off_policy(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                        agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                     print("Saved checkpoint.")
 
     if wb:

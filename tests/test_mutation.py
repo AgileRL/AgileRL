@@ -7,7 +7,7 @@ from accelerate import Accelerator
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 
 # from pytest_mock import mocker
 
@@ -106,7 +106,7 @@ def init_pop(
     device,
     accelerator,
 ):
-    yield initialPopulation(
+    yield create_population(
         algo=algo,
         state_dim=state_dim,
         action_dim=action_dim,

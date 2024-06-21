@@ -68,7 +68,7 @@ Importing the following packages, functions and classes will enable us to run th
 
       from agilerl.algorithms.ppo import PPO
       from agilerl.training.train_on_policy import train_on_policy
-      from agilerl.utils.utils import initialPopulation, makeSkillVectEnvs, makeVectEnvs
+      from agilerl.utils.utils import create_population, make_skill_vect_envs, make_vect_envs
       from agilerl.wrappers.learning import Skill
 
 
@@ -264,7 +264,7 @@ Once the skills have been defined, training agents to solve them is very straigh
    .. code-block:: python
 
       for skill in skills.keys():
-         env = makeSkillVectEnvs(
+         env = make_skill_vect_envs(
                INIT_HP["ENV_NAME"], skills[skill], num_envs=1
          )  # Create environment
 
@@ -284,7 +284,7 @@ Once the skills have been defined, training agents to solve them is very straigh
          if INIT_HP["CHANNELS_LAST"]:
                state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-         pop = initialPopulation(
+         pop = create_population(
                algo="PPO",  # Algorithm
                state_dim=state_dim,  # State dimension
                action_dim=action_dim,  # Action dimension
@@ -315,7 +315,7 @@ Once the skills have been defined, training agents to solve them is very straigh
          # Save the trained algorithm
          filename = f"PPO_trained_agent_{skill}.pt"
          save_path = os.path.join(save_dir, filename)
-         trained_pop[0].saveCheckpoint(save_path)
+         trained_pop[0].save_checkpoint(save_path)
 
          env.close()
 
@@ -350,7 +350,7 @@ Next we can define the variables we will need in our training loop.
 
    .. code-block:: python
 
-      env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
+      env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
       try:
          state_dim = env.single_observation_space.n  # Discrete observation space
@@ -366,7 +366,7 @@ Next we can define the variables we will need in our training loop.
       if INIT_HP["CHANNELS_LAST"]:
          state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-      pop = initialPopulation(
+      pop = create_population(
          algo="PPO",  # Algorithm
          state_dim=state_dim,  # State dimension
          action_dim=action_dim,  # Action dimension
@@ -427,7 +427,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
 
                for idx_step in range(500):
                   # Get next action from agent
-                  action, log_prob, _, value = agent.getAction(state)
+                  action, log_prob, _, value = agent.get_action(state)
 
                   # Internal loop to execute trained skill
                   skill_agent = trained_skills[action[0]]["agent"]
@@ -440,7 +440,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                               [0]
                            )
                      else:
-                           skill_action, _, _, _ = skill_agent.getAction(state)
+                           skill_action, _, _, _ = skill_agent.get_action(state)
                            next_state, skill_reward, termination, truncation, _ = env.step(
                               skill_action
                            )  # Act in environment
@@ -500,7 +500,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
       # Save the trained selector
       filename = "PPO_trained_agent_selector.pt"
       save_path = os.path.join(save_dir, filename)
-      pop[0].saveCheckpoint(save_path)
+      pop[0].save_checkpoint(save_path)
 
 
 Trained model weights

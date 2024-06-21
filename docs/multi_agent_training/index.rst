@@ -31,7 +31,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils.utils import initialPopulation
+    from agilerl.utils.utils import create_population
     from pettingzoo.mpe import simple_speaker_listener_v4
     import torch
 
@@ -98,7 +98,7 @@ are more likely to remain present in the population. The sequence of evolution (
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop = initialPopulation(
+    pop = create_population(
         "MADDPG",
         state_dim,
         action_dim,
@@ -120,7 +120,7 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``MultiAgentReplayBuffer()`` for
-multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save2memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
+multi-agent environments. During training it can be added to using the ``MultiAgentReplayBuffer.save_to_memory()`` function and sampled using the  ``MultiAgentReplayBuffer.sample()``.
 
 .. code-block:: python
 
@@ -248,7 +248,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import initialPopulation
+    from agilerl.utils.utils import create_population
     from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
@@ -315,7 +315,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop = initialPopulation(
+    pop = create_population(
         "MADDPG",
         state_dim,
         action_dim,
@@ -400,7 +400,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                 )
 
                 # Get next action from agent
-                cont_actions, discrete_action = agent.getAction(
+                cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
                     agent_mask=agent_mask,
@@ -426,7 +426,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                     }
 
                 # Save experiences to replay buffer
-                memory.save2memory(
+                memory.save_to_memory(
                     state,
                     cont_actions,
                     reward,

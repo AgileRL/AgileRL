@@ -12,7 +12,7 @@ from ucimlrepo import fetch_ucirepo
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
 
 if __name__ == "__main__":
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="NeuralTS",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -104,11 +104,11 @@ if __name__ == "__main__":
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
                 # Get next action from agent
-                action = agent.getAction(context)
+                action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(context[action], reward)
+                memory.save_to_memory(context[action], reward)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:

@@ -30,7 +30,7 @@ from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_offline import train_offline
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import makeMultiAgentVectEnvs
+from agilerl.utils.utils import make_multi_agent_vect_envs
 
 
 class DummyEnv:
@@ -90,7 +90,7 @@ class DummyAgentOffPolicy:
         self.mut = "mutation"
         self.index = 1
 
-    def getAction(self, *args):
+    def get_action(self, *args):
         return np.random.rand(self.action_size)
 
     def learn(self, experiences, n_step=False, per=False):
@@ -106,12 +106,12 @@ class DummyAgentOffPolicy:
         self.fitness.append(rand_int)
         return rand_int
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         empty_dic = {}
         torch.save(empty_dic, path, pickle_module=dill)
         return True
 
-    def loadCheckpoint(self, *args):
+    def load_checkpoint(self, *args):
         return
 
     def wrap_models(self, *args):
@@ -132,16 +132,16 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def learn(self, *args, **kwargs):
         return random.random()
 
-    def getAction(self, *args):
+    def get_action(self, *args):
         return tuple(np.random.randn(self.action_size) for _ in range(4))
 
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
 
-    def saveCheckpoint(self, path):
-        return super().saveCheckpoint(path)
+    def save_checkpoint(self, path):
+        return super().save_checkpoint(path)
 
-    def loadCheckpoint(self, *args):
+    def load_checkpoint(self, *args):
         return
 
     def wrap_models(self, *args):
@@ -166,7 +166,7 @@ class DummyBandit:
         self.mut = "mutation"
         self.index = 1
 
-    def getAction(self, *args):
+    def get_action(self, *args):
         return np.random.randint(self.action_size)
 
     def learn(self, experiences):
@@ -177,12 +177,12 @@ class DummyBandit:
         self.fitness.append(rand_int)
         return rand_int
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         empty_dic = {}
         torch.save(empty_dic, path, pickle_module=dill)
         return True
 
-    def loadCheckpoint(self, *args):
+    def load_checkpoint(self, *args):
         return
 
     def wrap_models(self, *args):
@@ -229,7 +229,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr_critic = 0.01
         self.discrete_actions = False
 
-    def getAction(self, *args, **kwargs):
+    def get_action(self, *args, **kwargs):
         return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
 
     def learn(self, experiences):
@@ -241,10 +241,10 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
 
-    def saveCheckpoint(self, path):
-        return super().saveCheckpoint(path)
+    def save_checkpoint(self, path):
+        return super().save_checkpoint(path)
 
-    def loadCheckpoint(self, *args):
+    def load_checkpoint(self, *args):
         return
 
     def wrap_models(self, *args):
@@ -280,7 +280,7 @@ class DummyMemory:
         self.action_size = None
         self.next_state_size = None
 
-    def save2memoryVectEnvs(self, states, actions, rewards, next_states, dones):
+    def save_to_memory_vect_envs(self, states, actions, rewards, next_states, dones):
         if self.state_size is None:
             self.state_size, *_ = (state.shape for state in states)
             self.action_size, *_ = (action.shape for action in actions)
@@ -297,9 +297,11 @@ class DummyMemory:
 
         return one_step_transition
 
-    def save2memory(self, state, action, reward, next_state, done, is_vectorised=False):
+    def save_to_memory(
+        self, state, action, reward, next_state, done, is_vectorised=False
+    ):
         if is_vectorised:
-            self.save2memoryVectEnvs(state, action, reward, next_state, done)
+            self.save_to_memory_vect_envs(state, action, reward, next_state, done)
         else:
             self.state_size = state.shape
             self.action_size = action.shape
@@ -351,10 +353,10 @@ class DummyNStepMemory(DummyMemory):
     def __init__(self):
         super().__init__()
 
-    def save2memory(self, state, action, reward, next_state, done, is_vectorised):
-        return super().save2memory(state, action, reward, next_state, done)
+    def save_to_memory(self, state, action, reward, next_state, done, is_vectorised):
+        return super().save_to_memory(state, action, reward, next_state, done)
 
-    def save2memoryVectEnvs(self, state, action, reward, next_state, done):
+    def save_to_memory_vect_envs(self, state, action, reward, next_state, done):
         self.state_size = state.shape
         self.action_size = action.shape
         self.next_state_size = next_state.shape
@@ -389,14 +391,14 @@ class DummyBanditMemory:
         self.state_size = None
         self.action_size = 1
 
-    def save2memoryVectEnvs(self, states, rewards):
+    def save_to_memory_vect_envs(self, states, rewards):
         if self.state_size is None:
             self.state_size, *_ = (state.shape for state in states)
             self.counter += 1
 
-    def save2memory(self, state, reward, is_vectorised=False):
+    def save_to_memory(self, state, reward, is_vectorised=False):
         if is_vectorised:
-            self.save2memoryVectEnvs(state, reward)
+            self.save_to_memory_vect_envs(state, reward)
         else:
             self.state_size = state.shape
             self.counter += 1
@@ -422,7 +424,9 @@ class DummyMultiMemory(DummyMemory):
         super().__init__()
         self.agents = ["agent_0", "agent_1"]
 
-    def save2memory(self, state, action, reward, next_state, done, is_vectorised=False):
+    def save_to_memory(
+        self, state, action, reward, next_state, done, is_vectorised=False
+    ):
         self.state_size = list(state.values())[0].shape
         self.action_size = list(action.values())[0].shape
         self.next_state_size = list(next_state.values())[0].shape
@@ -540,11 +544,11 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.getAction.side_effect = lambda state: np.random.randn(env.action_size)
+    mock_agent.get_action.side_effect = lambda state: np.random.randn(env.action_size)
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
-    mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
     if algo in [DDPG, TD3]:
@@ -573,13 +577,13 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.getAction.side_effect = lambda state: tuple(
+    mock_agent.get_action.side_effect = lambda state: tuple(
         np.random.randn(env.action_size) for _ in range(4)
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
-    mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.algo = "PPO"
@@ -602,13 +606,13 @@ def mocked_bandit(bandit_env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.getAction.side_effect = lambda state: np.random.randint(
+    mock_agent.get_action.side_effect = lambda state: np.random.randint(
         bandit_env.action_size
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
-    mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
 
@@ -631,20 +635,20 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.index = 1
     mock_agent.discrete_actions = False
 
-    def getAction(*args, **kwargs):
+    def get_action(*args, **kwargs):
         return {
             agent: np.random.randn(mock_agent.action_size)
             for agent in mock_agent.agents
         }, None
 
-    mock_agent.getAction.side_effect = getAction
+    mock_agent.get_action.side_effect = get_action
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: {
         "agent_0": (random.random(), random.random()),
         "agent_1": (random.random(), random.random()),
     }
-    mock_agent.saveCheckpoint.side_effect = lambda *args, **kwargs: None
-    mock_agent.loadCheckpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
+    mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.unwrap_models.side_effect = lambda *args, **kwargs: None
     mock_agent.reset_action_noise.side_effect = lambda *args, **kwargs: None
@@ -665,7 +669,7 @@ def mocked_memory():
     mock_memory.next_state_size = None
     mock_memory.__len__.return_value = 10
 
-    def save2memoryVectEnvs(states, actions, rewards, next_states, dones):
+    def save_to_memory_vect_envs(states, actions, rewards, next_states, dones):
         if mock_memory.state_size is None:
             mock_memory.state_size, *_ = (state.shape for state in states)
             mock_memory.action_size, *_ = (action.shape for action in actions)
@@ -683,19 +687,21 @@ def mocked_memory():
         )
         return one_step_transition
 
-    mock_memory.save2memoryVectEnvs.side_effect = save2memoryVectEnvs
+    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
 
-    def save2memory(state, action, reward, next_state, done, is_vectorised=False):
+    def save_to_memory(state, action, reward, next_state, done, is_vectorised=False):
         if is_vectorised:
-            mock_memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+            mock_memory.save_to_memory_vect_envs(
+                state, action, reward, next_state, done
+            )
         else:
             mock_memory.state_size = state.shape
             mock_memory.action_size = action.shape
             mock_memory.next_state_size = next_state.shape
             mock_memory.counter += 1
 
-    # Assigning the save2memory function to the MagicMock
-    mock_memory.save2memory.side_effect = save2memory
+    # Assigning the save_to_memory function to the MagicMock
+    mock_memory.save_to_memory.side_effect = save_to_memory
 
     def sample(batch_size, beta=None, *args):
         # Account for sample_from_indices
@@ -753,7 +759,7 @@ def mocked_n_step_memory():
     mock_memory.next_state_size = None
     mock_memory.__len__.return_value = 10000
 
-    def save2memoryVectEnvs(state, action, reward, next_state, done):
+    def save_to_memory_vect_envs(state, action, reward, next_state, done):
         mock_memory.state_size = state.shape
         mock_memory.action_size = action.shape
         mock_memory.next_state_size = next_state.shape
@@ -768,19 +774,21 @@ def mocked_n_step_memory():
         )
         return one_step_transition
 
-    mock_memory.save2memoryVectEnvs.side_effect = save2memoryVectEnvs
+    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
 
-    def save2memory(state, action, reward, next_state, done, is_vectorised):
+    def save_to_memory(state, action, reward, next_state, done, is_vectorised):
         if is_vectorised:
-            mock_memory.save2memoryVectEnvs(state, action, reward, next_state, done)
+            mock_memory.save_to_memory_vect_envs(
+                state, action, reward, next_state, done
+            )
         else:
             mock_memory.state_size = state.shape
             mock_memory.action_size = action.shape
             mock_memory.next_state_size = next_state.shape
             mock_memory.counter += 1
 
-    # Assigning the save2memory function to the MagicMock
-    mock_memory.save2memory.side_effect = save2memory
+    # Assigning the save_to_memory function to the MagicMock
+    mock_memory.save_to_memory.side_effect = save_to_memory
 
     def sample(batch_size, beta=None, *args):
         # Account for sample_from_indices
@@ -834,22 +842,22 @@ def mocked_bandit_memory():
     mock_memory.state_size = None
     mock_memory.__len__.return_value = 10
 
-    def save2memoryVectEnvs(states, rewards):
+    def save_to_memory_vect_envs(states, rewards):
         if mock_memory.state_size is None:
             mock_memory.state_size, *_ = (state.shape for state in states)
             mock_memory.counter += 1
 
-    mock_memory.save2memoryVectEnvs.side_effect = save2memoryVectEnvs
+    mock_memory.save_to_memory_vect_envs.side_effect = save_to_memory_vect_envs
 
-    def save2memory(state, reward, is_vectorised=False):
+    def save_to_memory(state, reward, is_vectorised=False):
         if is_vectorised:
-            mock_memory.save2memoryVectEnvs(state, reward)
+            mock_memory.save_to_memory_vect_envs(state, reward)
         else:
             mock_memory.state_size = state.shape
             mock_memory.counter += 1
 
-    # Assigning the save2memory function to the MagicMock
-    mock_memory.save2memory.side_effect = save2memory
+    # Assigning the save_to_memory function to the MagicMock
+    mock_memory.save_to_memory.side_effect = save_to_memory
 
     def sample(batch_size, *args):
         if batch_size == 1:
@@ -879,14 +887,14 @@ def mocked_multi_memory():
     mock_memory.__len__.return_value = 10000
     mock_memory.agents = ["agent_0", "agent_1"]
 
-    def save2memory(state, action, reward, next_state, done, is_vectorised=False):
+    def save_to_memory(state, action, reward, next_state, done, is_vectorised=False):
         mock_memory.state_size = list(state.values())[0].shape
         mock_memory.action_size = list(action.values())[0].shape
         mock_memory.next_state_size = list(next_state.values())[0].shape
         mock_memory.counter += 1
 
-    # Assigning the save2memory function to the MagicMock
-    mock_memory.save2memory.side_effect = save2memory
+    # Assigning the save_to_memory function to the MagicMock
+    mock_memory.save_to_memory.side_effect = save_to_memory
 
     def sample(batch_size, *args):
         states = {
@@ -1138,7 +1146,7 @@ def test_train_off_policy_agent_calls_made(
             save_elite=True,
         )
 
-        mocked_agent_off_policy.getAction.assert_called()
+        mocked_agent_off_policy.get_action.assert_called()
         mocked_agent_off_policy.learn.assert_called()
         mocked_agent_off_policy.test.assert_called()
         if accelerator is not None:
@@ -1254,7 +1262,7 @@ def test_train_off_policy_replay_buffer_calls(
         mutation=mutations,
         wb=False,
     )
-    mocked_memory.save2memory.assert_called()
+    mocked_memory.save_to_memory.assert_called()
     mocked_memory.sample.assert_called()
 
 
@@ -1290,8 +1298,8 @@ def test_train_off_policy_alternate_buffer_calls(
         mutation=mutations,
         wb=False,
     )
-    mocked_n_step_memory.save2memoryVectEnvs.assert_called()
-    mocked_memory.save2memoryVectEnvs.assert_called()
+    mocked_n_step_memory.save_to_memory_vect_envs.assert_called()
+    mocked_memory.save_to_memory_vect_envs.assert_called()
     if per:
         mocked_n_step_memory.sample_from_indices.assert_called()
         mocked_memory.update_priorities.assert_called()
@@ -1771,7 +1779,7 @@ def test_train_on_policy_agent_calls_made(
             accelerator=accelerator,
         )
 
-        mocked_agent_on_policy.getAction.assert_called()
+        mocked_agent_on_policy.get_action.assert_called()
         mocked_agent_on_policy.learn.assert_called()
         mocked_agent_on_policy.test.assert_called()
         if accelerator is not None:
@@ -2224,7 +2232,7 @@ def test_train_multi_agent_rgb(
 def test_train_multi_agent_rgb_vectorized(
     multi_env, population_multi_agent, multi_memory, tournament, mutations
 ):
-    env = makeMultiAgentVectEnvs(multi_env)
+    env = make_multi_agent_vect_envs(multi_env)
     env.reset()
     pop, pop_fitnesses = train_multi_agent(
         env,
@@ -2466,7 +2474,7 @@ def test_train_multi_agent_calls(
     )
 
     for agent in mock_population:
-        agent.getAction.assert_called()
+        agent.get_action.assert_called()
         agent.learn.assert_called()
         agent.test.assert_called()
         if accelerator is not None:
@@ -2558,7 +2566,7 @@ def test_train_multi_memory_calls(
         wb=False,
     )
     mocked_multi_memory.sample.assert_called()
-    mocked_multi_memory.save2memory.assert_called()
+    mocked_multi_memory.save_to_memory.assert_called()
 
 
 @pytest.mark.parametrize(
@@ -2975,7 +2983,7 @@ def test_offline_memory_calls(
             wb=False,
             accelerator=accelerator,
         )
-        mocked_memory.save2memory.assert_called()
+        mocked_memory.save_to_memory.assert_called()
         mocked_memory.sample.assert_called()
 
 
@@ -3183,7 +3191,7 @@ def test_train_bandit_agent_calls_made(
             save_elite=True,
         )
 
-        mocked_bandit.getAction.assert_called()
+        mocked_bandit.get_action.assert_called()
         mocked_bandit.learn.assert_called()
         mocked_bandit.test.assert_called()
         if accelerator is not None:
@@ -3297,7 +3305,7 @@ def test_train_bandit_replay_buffer_calls(
         mutation=mutations,
         wb=False,
     )
-    mocked_bandit_memory.save2memory.assert_called()
+    mocked_bandit_memory.save_to_memory.assert_called()
     mocked_bandit_memory.sample.assert_called()
 
 

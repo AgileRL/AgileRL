@@ -357,7 +357,7 @@ class TD3:
         """
         return np.where(action > 0, action * self.max_action, action * -self.min_action)
 
-    def getAction(self, state, training=True):
+    def get_action(self, state, training=True):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -530,15 +530,15 @@ class TD3:
             self.actor_optimizer.step()
 
             # Add in a soft update for both critic_targets
-            self.softUpdate(self.actor, self.actor_target)
-            self.softUpdate(self.critic_1, self.critic_target_1)
-            self.softUpdate(self.critic_2, self.critic_target_2)
+            self.soft_update(self.actor, self.actor_target)
+            self.soft_update(self.critic_1, self.critic_target_1)
+            self.soft_update(self.critic_2, self.critic_target_2)
 
             return actor_loss.item(), critic_loss.item()
         else:
             return None, critic_loss.item()
 
-    def softUpdate(self, net, target):
+    def soft_update(self, net, target):
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
@@ -569,7 +569,7 @@ class TD3:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state, training=False)
+                    action = self.get_action(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -769,7 +769,7 @@ class TD3:
                 self.critic_2_optimizer, self.critic_2, self.lr_critic
             )
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -803,7 +803,7 @@ class TD3:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

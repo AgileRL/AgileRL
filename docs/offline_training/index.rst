@@ -29,7 +29,7 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
+    from agilerl.utils.utils import create_population, make_vect_envs
     import gymnasium as gym
     import h5py
     import torch
@@ -49,7 +49,7 @@ are more likely to remain present in the population. The sequence of evolution (
     }
 
     num_envs = 1
-    env = makeVectEnvs("CartPole-v1", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
     dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
     try:
@@ -66,7 +66,7 @@ are more likely to remain present in the population. The sequence of evolution (
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="CQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -88,7 +88,7 @@ by an individual agent because it allows faster learning from the behaviour of o
 a maze, you could learn from their mistakes and successes without necessarily having to explore the entire maze yourself.
 
 The object used to store experiences collected by agents in the environment is called the Experience Replay Buffer, and is defined by the class ``ReplayBuffer()``.
-During training it can be added to using the ``ReplayBuffer.save2memory()`` function, or ``ReplayBuffer.save2memoryVectEnvs()`` for vectorized environments (recommended).
+During training it can be added to using the ``ReplayBuffer.save_to_memory()`` function, or ``ReplayBuffer.save_to_memory_vect_envs()`` for vectorized environments (recommended).
 To sample from the replay buffer, call ``ReplayBuffer.sample()``.
 
 We must fill the replay buffer with our offline data so that we can sample and learn.
@@ -117,7 +117,7 @@ We must fill the replay buffer with our offline data so that we can sample and l
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
         # Save experience to replay buffer
-        memory.save2memory(state, action, reward, next_state, done)
+        memory.save_to_memory(state, action, reward, next_state, done)
 
 
 
@@ -223,7 +223,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
+    from agilerl.utils.utils import create_population, make_vect_envs
     import h5py
     import numpy as np
     import torch
@@ -249,7 +249,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     }
 
     num_envs = 1
-    env = makeVectEnvs("CartPole-v1", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
     dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
     try:
@@ -266,7 +266,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="CQN",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -298,7 +298,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
         # Save experience to replay buffer
-        memory.save2memory(state, action, reward, next_state, done)
+        memory.save_to_memory(state, action, reward, next_state, done)
 
     tournament = TournamentSelection(
         tournament_size=2,  # Tournament selection size

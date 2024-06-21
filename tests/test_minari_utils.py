@@ -106,7 +106,7 @@ def test_minari_to_agile_dataset(dataset_id, env_id):
 
     total_timesteps = create_dataset_return_timesteps(dataset_id, env_id)
 
-    dataset = minari_utils.MinariToAgileDataset(dataset_id)
+    dataset = minari_utils.minari_to_agile_dataset(dataset_id)
 
     assert len(dataset["rewards"][:]) == total_timesteps
 
@@ -131,7 +131,7 @@ def test_minari_to_agile_buffer(dataset_id, env_id):
 
     total_timesteps = create_dataset_return_timesteps(dataset_id, env_id)
 
-    minari_utils.MinariToAgileBuffer(dataset_id, memory)
+    minari_utils.minari_to_agile_buffer(dataset_id, memory)
 
     assert len(memory) == total_timesteps
 

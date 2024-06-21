@@ -10,7 +10,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -149,7 +149,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         actor = None
         critic = None
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         state_dim=state_dims,
         action_dim=action_dims,

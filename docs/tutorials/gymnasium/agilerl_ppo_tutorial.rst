@@ -45,7 +45,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_on_policy import train_on_policy
-    from agilerl.utils.utils import initialPopulation, makeVectEnvs
+    from agilerl.utils.utils import create_population, make_vect_envs
     from tqdm import trange
 
 
@@ -117,7 +117,7 @@ or continuous.
 .. code-block:: python
 
     num_envs=8
-    env = makeVectEnvs("Acrobot-v1", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("Acrobot-v1", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -151,7 +151,7 @@ followed by mutations) is detailed further below.
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
 
     # Define a population
-    pop = initialPopulation(
+    pop = create_population(
         algo="PPO",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -292,7 +292,7 @@ function and is an example of how we might choose to make use of a population of
                         state = np.moveaxis(state, [-1], [-3])
 
                     # Get next action from agent
-                    action, log_prob, _, value = agent.getAction(state)
+                    action, log_prob, _, value = agent.get_action(state)
 
                     # Act in environment
                     next_state, reward, terminated, truncated, info = env.step(action)
@@ -373,7 +373,7 @@ function and is an example of how we might choose to make use of a population of
             agent.steps.append(agent.steps[-1])
 
     # Save the trained algorithm
-    elite.saveCheckpoint(save_path)
+    elite.save_checkpoint(save_path)
 
     pbar.close()
     env.close()
@@ -411,7 +411,7 @@ Test loop for inference
                     state = np.moveaxis(state, [-1], [-3])
 
                 # Get next action from agent
-                action, *_ = ppo.getAction(state)
+                action, *_ = ppo.get_action(state)
                 action = action.squeeze()
 
                 # Save the frame for this step and append to frames list

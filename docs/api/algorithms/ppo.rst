@@ -33,12 +33,12 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.utils import makeVectEnvs
+  from agilerl.utils.utils import make_vect_envs
   from agilerl.algorithms.ppo import PPO
 
   # Create environment
   num_envs = 1
-  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=num_envs)
+  env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
@@ -63,7 +63,7 @@ Example
           if channels_last:
               state = np.moveaxis(state, [-1], [-3])
           # Get next action from agent
-          action, log_prob, _, value = agent.getAction(state)
+          action, log_prob, _, value = agent.get_action(state)
           next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
 
           states.append(state)
@@ -121,7 +121,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -130,7 +130,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = PPO(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, discrete_actions=discrete_actions)   # Create PPO agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

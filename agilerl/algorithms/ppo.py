@@ -348,7 +348,7 @@ class PPO:
 
         return state.float()
 
-    def getAction(self, state, action=None, grad=False):
+    def get_action(self, state, action=None, grad=False):
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -483,7 +483,7 @@ class PPO:
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                _, log_prob, entropy, value = self.getAction(
+                _, log_prob, entropy, value = self.get_action(
                     state=states[minibatch_idxs],
                     action=actions[minibatch_idxs],
                     grad=True,
@@ -564,7 +564,7 @@ class PPO:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action, _, _, _ = self.getAction(state)
+                    action, _, _, _ = self.get_action(state)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -683,7 +683,7 @@ class PPO:
                 self.optimizer, [self.actor, self.critic], self.lr
             )
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -708,7 +708,7 @@ class PPO:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

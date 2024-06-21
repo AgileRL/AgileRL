@@ -37,7 +37,7 @@ def load_minari_dataset(dataset_id, accelerator=None, remote=False):
     return minari_dataset
 
 
-def MinariToAgileBuffer(dataset_id, memory, accelerator=None, remote=False):
+def minari_to_agile_buffer(dataset_id, memory, accelerator=None, remote=False):
     minari_dataset = load_minari_dataset(dataset_id, accelerator, remote)
 
     for episode in minari_dataset.iterate_episodes():
@@ -47,12 +47,14 @@ def MinariToAgileBuffer(dataset_id, memory, accelerator=None, remote=False):
             action = episode.actions[num_steps]
             reward = episode.rewards[num_steps]
             terminal = episode.terminations[num_steps]
-            memory.save2memory(observation, action, reward, next_observation, terminal)
+            memory.save_to_memory(
+                observation, action, reward, next_observation, terminal
+            )
 
     return memory
 
 
-def MinariToAgileDataset(dataset_id, remote=False):
+def minari_to_agile_dataset(dataset_id, remote=False):
     observations = []
     next_observations = []
     actions = []

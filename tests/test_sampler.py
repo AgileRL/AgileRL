@@ -45,9 +45,9 @@ def test_sample_standard_with_valid_batch_size():
     )
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(1, 2, 3)
-    buffer.save2memorySingleEnv(4, 5, 6)
-    buffer.save2memorySingleEnv(7, 8, 9)
+    buffer.save_to_memory_single_env(1, 2, 3)
+    buffer.save_to_memory_single_env(4, 5, 6)
+    buffer.save_to_memory_single_env(7, 8, 9)
 
     batch_size = 3
     samples = sampler.sample(batch_size)
@@ -81,9 +81,9 @@ def test_sample_distributed_with_valid_batch_size():
     )
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(1, 2, 3)
-    buffer.save2memorySingleEnv(4, 5, 6)
-    buffer.save2memorySingleEnv(7, 8, 9)
+    buffer.save_to_memory_single_env(1, 2, 3)
+    buffer.save_to_memory_single_env(4, 5, 6)
+    buffer.save_to_memory_single_env(7, 8, 9)
 
     samples = sampler.sample(batch_size)
 
@@ -116,9 +116,9 @@ def test_sample_per_with_valid_batch_size():
     )
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(1, 2, 3, 2, 1)
-    buffer.save2memorySingleEnv(4, 5, 6, 5, 4)
-    buffer.save2memorySingleEnv(7, 8, 9, 8, 7)
+    buffer.save_to_memory_single_env(1, 2, 3, 2, 1)
+    buffer.save_to_memory_single_env(4, 5, 6, 5, 4)
+    buffer.save_to_memory_single_env(7, 8, 9, 8, 7)
 
     batch_size = 3
     samples = sampler.sample(batch_size, beta=0.4)
@@ -151,10 +151,10 @@ def test_sample_n_step_with_valid_batch_size():
     )
 
     # Add experiences to memory
-    buffer.save2memorySingleEnv(1, 2, 3, 2, 1)
-    buffer.save2memorySingleEnv(4, 5, 6, 5, 4)
-    buffer.save2memorySingleEnv(7, 8, 9, 8, 7)
-    buffer.save2memorySingleEnv(9, 8, 7, 8, 9)
+    buffer.save_to_memory_single_env(1, 2, 3, 2, 1)
+    buffer.save_to_memory_single_env(4, 5, 6, 5, 4)
+    buffer.save_to_memory_single_env(7, 8, 9, 8, 7)
+    buffer.save_to_memory_single_env(9, 8, 7, 8, 9)
 
     idxs = [0, 1]
     samples = sampler.sample(idxs)

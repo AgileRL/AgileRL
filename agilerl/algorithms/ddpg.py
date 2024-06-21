@@ -326,7 +326,7 @@ class DDPG:
         """
         return np.where(action > 0, action * self.max_action, action * -self.min_action)
 
-    def getAction(self, state, training=True):
+    def get_action(self, state, training=True):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -485,8 +485,8 @@ class DDPG:
                 actor_loss.backward()
             self.actor_optimizer.step()
 
-            self.softUpdate(self.actor, self.actor_target)
-            self.softUpdate(self.critic, self.critic_target)
+            self.soft_update(self.actor, self.actor_target)
+            self.soft_update(self.critic, self.critic_target)
 
             actor_loss = actor_loss.item()
             critic_loss = critic_loss.item()
@@ -497,7 +497,7 @@ class DDPG:
 
         return actor_loss, critic_loss
 
-    def softUpdate(self, net, target):
+    def soft_update(self, net, target):
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
@@ -528,7 +528,7 @@ class DDPG:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.getAction(state, training=False)
+                    action = self.get_action(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1
                     scores += np.array(reward)
@@ -694,7 +694,7 @@ class DDPG:
                 self.critic_optimizer, self.critic, self.lr_critic
             )
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -723,7 +723,7 @@ class DDPG:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

@@ -89,7 +89,7 @@ if __name__ == "__main__":
             )
 
             # Get next action from agent
-            cont_actions, discrete_action = matd3.getAction(
+            cont_actions, discrete_action = matd3.get_action(
                 state,
                 training=False,
                 agent_mask=agent_mask,

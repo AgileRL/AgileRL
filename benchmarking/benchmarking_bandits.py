@@ -7,7 +7,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_bandits import train_bandits
-from agilerl.utils.utils import initialPopulation, printHyperparams
+from agilerl.utils.utils import create_population, print_hyperparams
 from agilerl.wrappers.learning import BanditEnv
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -81,7 +81,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     else:
         actor = None
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         state_dim=context_dim,
         action_dim=action_dim,
@@ -113,7 +113,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         wb=INIT_HP["WANDB"],
     )
 
-    printHyperparams(trained_pop)
+    print_hyperparams(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

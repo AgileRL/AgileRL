@@ -4,7 +4,7 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -21,7 +21,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         print("============ AgileRL Distributed ============")
     accelerator.wait_for_everyone()
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -65,7 +65,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         accelerator=accelerator,
     )
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         state_dim=state_dim,
         action_dim=action_dim,
@@ -101,8 +101,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         accelerator=accelerator,
     )
 
-    printHyperparams(trained_pop)
-    # plotPopulationScore(trained_pop)
+    print_hyperparams(trained_pop)
+    # plot_population_score(trained_pop)
 
     env.close()
 

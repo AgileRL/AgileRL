@@ -220,11 +220,11 @@ def train_bandits(
                 if swap_channels:
                     context = np.moveaxis(context, [-1], [-3])
                 # Get next action from agent
-                action = agent.getAction(context)
+                action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment
 
                 # Save experience to replay buffer
-                memory.save2memory(context[action], reward, is_vectorised=False)
+                memory.save_to_memory(context[action], reward, is_vectorised=False)
 
                 # Learn according to learning frequency
                 if len(memory) >= agent.batch_size:
@@ -310,13 +310,13 @@ def train_bandits(
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            model.saveCheckpoint(
+                            model.save_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:
                         for pop_i, model in enumerate(pop):
-                            model.loadCheckpoint(
+                            model.load_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
@@ -332,7 +332,7 @@ def train_bandits(
                         if elite_path is not None
                         else f"{env_name}-elite_{algo}-{elite.steps[-1]}"
                     )
-                    elite.saveCheckpoint(f"{elite_save_path}.pt")
+                    elite.save_checkpoint(f"{elite_save_path}.pt")
                 evo_count += 1
 
         if verbose:
@@ -371,7 +371,7 @@ def train_bandits(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.saveCheckpoint(
+                            agent.save_checkpoint(
                                 f"{save_path}_{i}_{agent.steps[-1]}.pt"
                             )
                         print("Saved checkpoint.")
@@ -381,7 +381,7 @@ def train_bandits(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.saveCheckpoint(f"{save_path}_{i}_{agent.steps[-1]}.pt")
+                        agent.save_checkpoint(f"{save_path}_{i}_{agent.steps[-1]}.pt")
                     print("Saved checkpoint.")
                 checkpoint_count += 1
 

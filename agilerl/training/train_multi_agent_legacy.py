@@ -266,7 +266,7 @@ def train_multi_agent(
                     if "env_defined_actions" in info.keys()
                     else None
                 )
-                cont_actions, discrete_action = agent.getAction(
+                cont_actions, discrete_action = agent.get_action(
                     state, epsilon, agent_mask, env_defined_actions
                 )
                 if agent.discrete_actions:
@@ -292,7 +292,7 @@ def train_multi_agent(
                         for agent_id, ns in next_state.items()
                     }
 
-                memory.save2memory(
+                memory.save_to_memory(
                     state,
                     cont_actions,
                     reward,
@@ -456,13 +456,13 @@ def train_multi_agent(
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            model.saveCheckpoint(
+                            model.save_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:
                         for pop_i, model in enumerate(pop):
-                            model.loadCheckpoint(
+                            model.load_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
@@ -480,7 +480,7 @@ def train_multi_agent(
                             env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                         )
                     )
-                    elite.saveCheckpoint(f"{elite_save_path}.pt")
+                    elite.save_checkpoint(f"{elite_save_path}.pt")
 
             if verbose:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -514,7 +514,7 @@ def train_multi_agent(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                            agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                         print("Saved checkpoint.")
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -522,7 +522,7 @@ def train_multi_agent(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                        agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                     print("Saved checkpoint.")
 
     if wb:

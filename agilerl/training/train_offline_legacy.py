@@ -9,7 +9,7 @@ from tqdm import trange
 import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.utils.minari_utils import MinariToAgileBuffer
+from agilerl.utils.minari_utils import minari_to_agile_buffer
 
 
 def train_offline(
@@ -182,7 +182,7 @@ def train_offline(
     if minari_dataset_id:
         print(f"Loading Minari Dataset with dataset_id {minari_dataset_id} in Buffer")
 
-        memory = MinariToAgileBuffer(minari_dataset_id, memory, accelerator, remote)
+        memory = minari_to_agile_buffer(minari_dataset_id, memory, accelerator, remote)
 
         print(f"Minari Dataset with dataset_id {minari_dataset_id} loaded in Buffer")
 
@@ -199,7 +199,7 @@ def train_offline(
         #     action = dataset['actions'][i]
         #     reward = dataset['rewards'][i]
         #     done = bool(dataset['terminals'][i])
-        #     memory.save2memory(state, action, next_state, reward, done)
+        #     memory.save_to_memory(state, action, next_state, reward, done)
         for i in range(dataset_length - 1):
             state = dataset["observations"][i]
             next_state = dataset["observations"][i + 1]
@@ -209,7 +209,7 @@ def train_offline(
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])
-            memory.save2memory(state, action, reward, next_state, done)
+            memory.save_to_memory(state, action, reward, next_state, done)
         if accelerator is not None:
             if accelerator.is_main_process:
                 print("Loaded buffer.")
@@ -338,13 +338,13 @@ def train_offline(
                         elite, pop = tournament.select(pop)
                         pop = mutation.mutation(pop)
                         for pop_i, model in enumerate(pop):
-                            model.saveCheckpoint(
+                            model.save_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
                     if not accelerator.is_main_process:
                         for pop_i, model in enumerate(pop):
-                            model.loadCheckpoint(
+                            model.load_checkpoint(
                                 f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
                             )
                     accelerator.wait_for_everyone()
@@ -362,7 +362,7 @@ def train_offline(
                             env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                         )
                     )
-                    elite.saveCheckpoint(f"{elite_save_path}.pt")
+                    elite.save_checkpoint(f"{elite_save_path}.pt")
 
             if verbose:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -395,7 +395,7 @@ def train_offline(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                            agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                         print("Saved checkpoint.")
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -403,7 +403,7 @@ def train_offline(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.saveCheckpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
+                        agent.save_checkpoint(f"{save_path}_{i}_{idx_epi+1}.pt")
                     print("Saved checkpoint.")
 
     if wb:

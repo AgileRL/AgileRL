@@ -4,7 +4,7 @@ from tqdm import trange
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation, makeVectEnvs
+from agilerl.utils.utils import create_population, make_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -43,7 +43,7 @@ if __name__ == "__main__":
     }
 
     num_envs = 16
-    env = makeVectEnvs("LunarLander-v2", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
@@ -59,7 +59,7 @@ if __name__ == "__main__":
     if INIT_HP["CHANNELS_LAST"]:
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
-    pop = initialPopulation(
+    pop = create_population(
         algo="PPO",  # Algorithm
         state_dim=state_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
@@ -127,7 +127,7 @@ if __name__ == "__main__":
                         state = np.moveaxis(state, [-1], [-3])
 
                     # Get next action from agent
-                    action, log_prob, _, value = agent.getAction(state)
+                    action, log_prob, _, value = agent.get_action(state)
 
                     # Act in environment
                     next_state, reward, terminated, truncated, info = env.step(action)

@@ -56,7 +56,7 @@ if __name__ == "__main__":
                 if state[6] or state[7]:
                     action = [0]
                 else:
-                    action, log_prob, _, value = agent.getAction(state)
+                    action, log_prob, _, value = agent.get_action(state)
                 next_state, reward, termination, truncation, _ = env.step(
                     action[0]
                 )  # Act in environment

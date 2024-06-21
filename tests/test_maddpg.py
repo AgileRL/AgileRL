@@ -15,7 +15,7 @@ from agilerl.algorithms.maddpg import MADDPG
 from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.utils import makeMultiAgentVectEnvs
+from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -686,7 +686,7 @@ def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device):
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
     ],
 )
-def test_maddpg_getAction_mlp(
+def test_maddpg_get_action_mlp(
     training, state_dims, action_dims, discrete_actions, one_hot, device
 ):
     agent_ids = ["agent_0", "agent_1"]
@@ -713,7 +713,7 @@ def test_maddpg_getAction_mlp(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.getAction(state, training)
+    cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -744,7 +744,7 @@ def test_maddpg_getAction_mlp(
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_maddpg_getAction_cnn(
+def test_maddpg_get_action_cnn(
     training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
@@ -771,7 +771,7 @@ def test_maddpg_getAction_cnn(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.getAction(state, training)
+    cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -801,7 +801,7 @@ def test_maddpg_getAction_cnn(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False),
     ],
 )
-def test_getAction_distributed(training, state_dims, action_dims, discrete_actions):
+def test_get_action_distributed(training, state_dims, action_dims, discrete_actions):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
     state = {
@@ -831,7 +831,7 @@ def test_getAction_distributed(training, state_dims, action_dims, discrete_actio
         for actor in maddpg.actors
     ]
     maddpg.actors = new_actors
-    cont_actions, discrete_action = maddpg.getAction(state, training)
+    cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -861,7 +861,7 @@ def test_getAction_distributed(training, state_dims, action_dims, discrete_actio
         (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
     ],
 )
-def test_maddpg_getAction_distributed_cnn(
+def test_maddpg_get_action_distributed_cnn(
     training, state_dims, action_dims, discrete_actions
 ):
     accelerator = Accelerator()
@@ -906,7 +906,7 @@ def test_maddpg_getAction_distributed_cnn(
         for actor in maddpg.actors
     ]
     maddpg.actors = new_actors
-    cont_actions, discrete_action = maddpg.getAction(state, training)
+    cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
             assert len(action) == action_dims[idx]
@@ -936,7 +936,7 @@ def test_maddpg_getAction_distributed_cnn(
         (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True),
     ],
 )
-def test_maddpg_getAction_agent_masking(
+def test_maddpg_get_action_agent_masking(
     training, state_dims, action_dims, discrete_actions, device
 ):
     agent_ids = ["agent_0", "agent_1"]
@@ -957,7 +957,7 @@ def test_maddpg_getAction_agent_masking(
         discrete_actions=discrete_actions,
         device=device,
     )
-    cont_actions, discrete_action = maddpg.getAction(
+    cont_actions, discrete_action = maddpg.get_action(
         state, training, agent_mask=agent_mask, env_defined_actions=env_defined_actions
     )
     if discrete_actions:
@@ -1308,7 +1308,7 @@ def test_maddpg_soft_update(device):
         maddpg.actors, maddpg.actor_targets, maddpg.critics, maddpg.critic_targets
     ):
         # Check actors
-        maddpg.softUpdate(actor, actor_target)
+        maddpg.soft_update(actor, actor_target)
         eval_params = list(actor.parameters())
         target_params = list(actor_target.parameters())
         expected_params = [
@@ -1319,7 +1319,7 @@ def test_maddpg_soft_update(device):
             torch.allclose(expected_param, target_param)
             for expected_param, target_param in zip(expected_params, target_params)
         )
-        maddpg.softUpdate(critic, critic_target)
+        maddpg.soft_update(critic, critic_target)
         eval_params = list(critic.parameters())
         target_params = list(critic_target.parameters())
         expected_params = [
@@ -1340,7 +1340,7 @@ def test_maddpg_algorithm_test_loop(device):
 
     env = DummyMultiEnv(state_dims[0], action_dims)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -1401,7 +1401,7 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device):
     }
     action_dims = [2, 2]
     accelerator = None
-    env = makeMultiAgentVectEnvs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
+    env = make_multi_agent_vect_envs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
     maddpg = MADDPG(
         agent_state_dims,
         action_dims,
@@ -1645,7 +1645,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    maddpg.saveCheckpoint(checkpoint_path)
+    maddpg.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1689,7 +1689,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_maddpg.loadCheckpoint(checkpoint_path)
+    loaded_maddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_maddpg.net_config == net_config
@@ -1750,7 +1750,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    maddpg.saveCheckpoint(checkpoint_path)
+    maddpg.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1790,7 +1790,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_maddpg.loadCheckpoint(checkpoint_path)
+    loaded_maddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_maddpg.net_config == net_config_cnn
@@ -1861,7 +1861,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     )
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    maddpg.saveCheckpoint(checkpoint_path)
+    maddpg.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1901,7 +1901,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
         min_action=[(-1,)],
         discrete_actions=True,
     )
-    loaded_maddpg.loadCheckpoint(checkpoint_path)
+    loaded_maddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert all(isinstance(actor, MakeEvolvable) for actor in loaded_maddpg.actors)
@@ -2021,7 +2021,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    maddpg.saveCheckpoint(checkpoint_path)
+    maddpg.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_maddpg = MADDPG.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -2110,7 +2110,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    maddpg.saveCheckpoint(checkpoint_path)
+    maddpg.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_maddpg = MADDPG.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -2227,7 +2227,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    maddpg.saveCheckpoint(checkpoint_path)
+    maddpg.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_maddpg = MADDPG.load(checkpoint_path)

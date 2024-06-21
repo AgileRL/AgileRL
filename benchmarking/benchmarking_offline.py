@@ -7,7 +7,7 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
-from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -47,7 +47,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
     try:
         state_dim = env.single_observation_space.n
         one_hot = True
@@ -98,7 +98,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         device=device,
     )
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         state_dim=state_dim,
         action_dim=action_dim,
@@ -131,8 +131,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         wb=INIT_HP["WANDB"],
     )
 
-    printHyperparams(trained_pop)
-    # plotPopulationScore(trained_pop)
+    print_hyperparams(trained_pop)
+    # plot_population_score(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()

@@ -19,7 +19,7 @@ import wandb
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 
 
 class CurriculumEnv:
@@ -72,11 +72,11 @@ class CurriculumEnv:
                     p0_action = self.env.action_space("player_0").sample(p0_action_mask)
                 else:
                     if self.lesson["warm_up_opponent"] == "random":
-                        p0_action = opponent.getAction(
+                        p0_action = opponent.get_action(
                             p0_action_mask, p1_action, self.lesson["block_vert_coef"]
                         )
                     else:
-                        p0_action = opponent.getAction(player=0)
+                        p0_action = opponent.get_action(player=0)
                 self.step(p0_action)  # Act in environment
                 observation, env_reward, done, truncation, _ = self.last()
                 p0_next_state, p0_next_state_flipped = transform_and_flip(
@@ -85,7 +85,7 @@ class CurriculumEnv:
 
                 if done or truncation:
                     reward = self.reward(done=True, player=0)
-                    memory.save2memoryVectEnvs(
+                    memory.save_to_memory_vect_envs(
                         np.concatenate(
                             (p0_state, p1_state, p0_state_flipped, p1_state_flipped)
                         ),
@@ -109,7 +109,7 @@ class CurriculumEnv:
                 else:  # Play continues
                     if p1_state is not None:
                         reward = self.reward(done=False, player=1)
-                        memory.save2memoryVectEnvs(
+                        memory.save_to_memory_vect_envs(
                             np.concatenate((p1_state, p1_state_flipped)),
                             [p1_action, 6 - p1_action],
                             [reward, reward],
@@ -128,11 +128,11 @@ class CurriculumEnv:
                         )
                     else:
                         if self.lesson["warm_up_opponent"] == "random":
-                            p1_action = opponent.getAction(
+                            p1_action = opponent.get_action(
                                 p1_action_mask, p0_action, LESSON["block_vert_coef"]
                             )
                         else:
-                            p1_action = opponent.getAction(player=1)
+                            p1_action = opponent.get_action(player=1)
                     self.step(p1_action)  # Act in environment
                     observation, env_reward, done, truncation, _ = self.last()
                     p1_next_state, p1_next_state_flipped = transform_and_flip(
@@ -141,7 +141,7 @@ class CurriculumEnv:
 
                     if done or truncation:
                         reward = self.reward(done=True, player=1)
-                        memory.save2memoryVectEnvs(
+                        memory.save_to_memory_vect_envs(
                             np.concatenate(
                                 (p0_state, p1_state, p0_state_flipped, p1_state_flipped)
                             ),
@@ -165,7 +165,7 @@ class CurriculumEnv:
 
                     else:  # Play continues
                         reward = self.reward(done=False, player=0)
-                        memory.save2memoryVectEnvs(
+                        memory.save_to_memory_vect_envs(
                             np.concatenate((p0_state, p0_state_flipped)),
                             [p0_action, 6 - p0_action],
                             [reward, reward],
@@ -320,11 +320,11 @@ class Opponent:
         self.env = env.env
         self.difficulty = difficulty
         if self.difficulty == "random":
-            self.getAction = self.random_opponent
+            self.get_action = self.random_opponent
         elif self.difficulty == "weak":
-            self.getAction = self.weak_rule_based_opponent
+            self.get_action = self.weak_rule_based_opponent
         else:
-            self.getAction = self.strong_rule_based_opponent
+            self.get_action = self.strong_rule_based_opponent
         self.num_cols = 7
         self.num_rows = 6
         self.length = 4
@@ -564,7 +564,7 @@ if __name__ == "__main__":
         action_dim = action_dim[0]
 
         # Create a population ready for evolutionary hyper-parameter optimisation
-        pop = initialPopulation(
+        pop = create_population(
             INIT_HP["ALGO"],
             state_dim,
             action_dim,
@@ -633,7 +633,7 @@ if __name__ == "__main__":
         if LESSON["pretrained_path"] is not None:
             for agent in pop:
                 # Load pretrained checkpoint
-                agent.loadCheckpoint(LESSON["pretrained_path"])
+                agent.load_checkpoint(LESSON["pretrained_path"])
                 # Reinit optimizer for new task
                 agent.lr = INIT_HP["LR"]
                 agent.optimizer = torch.optim.Adam(
@@ -731,17 +731,17 @@ if __name__ == "__main__":
 
                         if opponent_first:
                             if LESSON["opponent"] == "self":
-                                p0_action = opponent.getAction(
+                                p0_action = opponent.get_action(
                                     p0_state, 0, p0_action_mask
                                 )[0]
                             elif LESSON["opponent"] == "random":
-                                p0_action = opponent.getAction(
+                                p0_action = opponent.get_action(
                                     p0_action_mask, p1_action, LESSON["block_vert_coef"]
                                 )
                             else:
-                                p0_action = opponent.getAction(player=0)
+                                p0_action = opponent.get_action(player=0)
                         else:
-                            p0_action = agent.getAction(
+                            p0_action = agent.get_action(
                                 p0_state, epsilon, p0_action_mask
                             )[
                                 0
@@ -760,7 +760,7 @@ if __name__ == "__main__":
                         # Check if game is over (Player 0 win)
                         if done or truncation:
                             reward = env.reward(done=True, player=0)
-                            memory.save2memoryVectEnvs(
+                            memory.save_to_memory_vect_envs(
                                 np.concatenate(
                                     (
                                         p0_state,
@@ -789,7 +789,7 @@ if __name__ == "__main__":
                         else:  # Play continues
                             if p1_state is not None:
                                 reward = env.reward(done=False, player=1)
-                                memory.save2memoryVectEnvs(
+                                memory.save_to_memory_vect_envs(
                                     np.concatenate((p1_state, p1_state_flipped)),
                                     [p1_action, 6 - p1_action],
                                     [reward, reward],
@@ -807,19 +807,19 @@ if __name__ == "__main__":
 
                             if not opponent_first:
                                 if LESSON["opponent"] == "self":
-                                    p1_action = opponent.getAction(
+                                    p1_action = opponent.get_action(
                                         p1_state, 0, p1_action_mask
                                     )[0]
                                 elif LESSON["opponent"] == "random":
-                                    p1_action = opponent.getAction(
+                                    p1_action = opponent.get_action(
                                         p1_action_mask,
                                         p0_action,
                                         LESSON["block_vert_coef"],
                                     )
                                 else:
-                                    p1_action = opponent.getAction(player=1)
+                                    p1_action = opponent.get_action(player=1)
                             else:
-                                p1_action = agent.getAction(
+                                p1_action = agent.get_action(
                                     p1_state, epsilon, p1_action_mask
                                 )[
                                     0
@@ -841,7 +841,7 @@ if __name__ == "__main__":
                             # Check if game is over (Player 1 win)
                             if done or truncation:
                                 reward = env.reward(done=True, player=1)
-                                memory.save2memoryVectEnvs(
+                                memory.save_to_memory_vect_envs(
                                     np.concatenate(
                                         (
                                             p0_state,
@@ -875,7 +875,7 @@ if __name__ == "__main__":
 
                             else:  # Play continues
                                 reward = env.reward(done=False, player=0)
-                                memory.save2memoryVectEnvs(
+                                memory.save_to_memory_vect_envs(
                                     np.concatenate((p0_state, p0_state_flipped)),
                                     [p0_action, 6 - p0_action],
                                     [reward, reward],
@@ -952,31 +952,35 @@ if __name__ == "__main__":
                                 if player < 0:
                                     if opponent_first:
                                         if LESSON["eval_opponent"] == "random":
-                                            action = opponent.getAction(action_mask)
+                                            action = opponent.get_action(action_mask)
                                         else:
-                                            action = opponent.getAction(player=0)
+                                            action = opponent.get_action(player=0)
                                     else:
                                         state = np.moveaxis(
                                             observation["observation"], [-1], [-3]
                                         )
                                         state = np.expand_dims(state, 0)
-                                        action = agent.getAction(state, 0, action_mask)[
+                                        action = agent.get_action(
+                                            state, 0, action_mask
+                                        )[
                                             0
                                         ]  # Get next action from agent
                                         eval_actions_hist[action] += 1
                                 if player > 0:
                                     if not opponent_first:
                                         if LESSON["eval_opponent"] == "random":
-                                            action = opponent.getAction(action_mask)
+                                            action = opponent.get_action(action_mask)
                                         else:
-                                            action = opponent.getAction(player=1)
+                                            action = opponent.get_action(player=1)
                                     else:
                                         state = np.moveaxis(
                                             observation["observation"], [-1], [-3]
                                         )
                                         state[[0, 1], :, :] = state[[1, 0], :, :]
                                         state = np.expand_dims(state, 0)
-                                        action = agent.getAction(state, 0, action_mask)[
+                                        action = agent.get_action(
+                                            state, 0, action_mask
+                                        )[
                                             0
                                         ]  # Get next action from agent
                                         eval_actions_hist[action] += 1
@@ -1050,5 +1054,5 @@ if __name__ == "__main__":
         # Save the trained agent
         save_path = LESSON["save_path"]
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        elite.saveCheckpoint(save_path)
+        elite.save_checkpoint(save_path)
         print(f"Elite agent saved to '{save_path}'.")

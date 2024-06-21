@@ -4,13 +4,13 @@ from collections import deque
 from functools import partial
 
 import torch
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import IterableDataset
 from tqdm import tqdm
 from wordle.load_objects import load_item
 
+import wandb
 from agilerl.data.rl_data import Iterable_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset, GeneralIterDataset
 from agilerl.utils.ilql_utils import add_system_configs, convert_path
@@ -136,7 +136,7 @@ def train(cfg):
                     train_cfg["loss"]["q_loss_weight"] != 0.0
                     or train_cfg["loss"]["v_loss_weight"] != 0.0
                 ):
-                    accelerator.unwrap_model(model).softUpdate()
+                    accelerator.unwrap_model(model).soft_update()
             if (train_cfg["hard_update_every"] is not None) and (
                 (step + 1) % train_cfg["hard_update_every"] == 0
             ):

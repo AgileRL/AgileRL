@@ -14,7 +14,7 @@ from tqdm import trange
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import initialPopulation
+from agilerl.utils.utils import create_population
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 if __name__ == "__main__":
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Create a population ready for evolutionary hyper-parameter optimisation
-    pop = initialPopulation(
+    pop = create_population(
         INIT_HP["ALGO"],
         state_dim,
         action_dim,
@@ -184,7 +184,7 @@ if __name__ == "__main__":
                 )
 
                 # Get next action from agent
-                cont_actions, discrete_action = agent.getAction(
+                cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
                     agent_mask=agent_mask,
@@ -210,7 +210,7 @@ if __name__ == "__main__":
                     }
 
                 # Save experiences to replay buffer
-                memory.save2memory(
+                memory.save_to_memory(
                     state,
                     cont_actions,
                     reward,
@@ -301,7 +301,7 @@ if __name__ == "__main__":
     filename = "MADDPG_trained_agent.pt"
     os.makedirs(path, exist_ok=True)
     save_path = os.path.join(path, filename)
-    elite.saveCheckpoint(save_path)
+    elite.save_checkpoint(save_path)
 
     pbar.close()
     env.close()

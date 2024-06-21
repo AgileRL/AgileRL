@@ -513,7 +513,7 @@ def test_returns_expected_action(
 
     # First with grad=False
     grad = False
-    action, action_logprob, dist_entropy, state_values = build_ppo.getAction(
+    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
         state, grad=grad
     )
 
@@ -535,7 +535,7 @@ def test_returns_expected_action(
     # Now with grad=True, and eval_action
     grad = True
     eval_action = torch.Tensor([[0, 1]])
-    action, action_logprob, dist_entropy, state_values = build_ppo.getAction(
+    action, action_logprob, dist_entropy, state_values = build_ppo.get_action(
         state, action=eval_action, grad=grad
     )
 
@@ -666,7 +666,7 @@ def test_algorithm_test_loop():
 
     env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = PPO(
         state_dim=state_dim, action_dim=action_dim, one_hot=False, discrete_actions=True
     )
@@ -926,7 +926,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.saveCheckpoint(checkpoint_path)
+    ppo.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -960,7 +960,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
     # Load checkpoint
-    ppo.loadCheckpoint(checkpoint_path)
+    ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert ppo.net_config == {
@@ -1009,7 +1009,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.saveCheckpoint(checkpoint_path)
+    ppo.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1041,7 +1041,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
     # Load checkpoint
-    ppo.loadCheckpoint(checkpoint_path)
+    ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert ppo.net_config == net_config_cnn
@@ -1098,7 +1098,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.saveCheckpoint(checkpoint_path)
+    ppo.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1130,7 +1130,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     ppo = PPO(state_dim=[4], action_dim=2, one_hot=False, discrete_actions=True)
     # Load checkpoint
-    ppo.loadCheckpoint(checkpoint_path)
+    ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert ppo.net_config is None
@@ -1167,7 +1167,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.saveCheckpoint(checkpoint_path)
+    ppo.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_ppo = PPO.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1219,7 +1219,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.saveCheckpoint(checkpoint_path)
+    ppo.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_ppo = PPO.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1272,7 +1272,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ppo.saveCheckpoint(checkpoint_path)
+    ppo.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_ppo = PPO.load(checkpoint_path)

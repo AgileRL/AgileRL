@@ -62,7 +62,7 @@ Dependencies
         PrioritizedReplayBuffer,
     )
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import makeVectEnvs
+    from agilerl.utils.utils import make_vect_envs
     from tqdm import trange
 
 
@@ -112,7 +112,7 @@ or continuous.
 .. code-block:: python
 
     num_envs=16
-    env = makeVectEnvs("CartPole-v1", num_envs=num_envs)  # Create environment
+    env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -251,7 +251,7 @@ function and is an example of how we might choose to train an AgileRL agent.
                 state = np.moveaxis(state, [-1], [-3])
 
             # Get next action from agent
-            action = rainbow_dqn.getAction(state)
+            action = rainbow_dqn.get_action(state)
             next_state, reward, terminated, truncated, info = env.step(action)  # Act in environment
             scores += np.array(reward)
             steps += num_envs
@@ -265,7 +265,7 @@ function and is an example of how we might choose to train an AgileRL agent.
                     scores[idx] = 0
 
             if INIT_HP["CHANNELS_LAST"]: # Channels last for atari envs, set to False for this tutorial
-                one_step_transition = n_step_memory.save2memoryVectEnvs(
+                one_step_transition = n_step_memory.save_to_memory_vect_envs(
                     state,
                     action,
                     reward,
@@ -273,7 +273,7 @@ function and is an example of how we might choose to train an AgileRL agent.
                     done,
                 )
             else:
-                one_step_transition = n_step_memory.save2memoryVectEnvs(
+                one_step_transition = n_step_memory.save_to_memory_vect_envs(
                     state,
                     action,
                     reward,
@@ -281,7 +281,7 @@ function and is an example of how we might choose to train an AgileRL agent.
                     done,
                 )
             if one_step_transition:
-                memory.save2memoryVectEnvs(*one_step_transition)
+                memory.save_to_memory_vect_envs(*one_step_transition)
 
             # Update agent beta
             fraction = min(
@@ -342,7 +342,7 @@ function and is an example of how we might choose to train an AgileRL agent.
         rainbow_dqn.steps.append(rainbow_dqn.steps[-1])
 
     # Save the trained algorithm at the end of the training loop
-    rainbow_dqn.saveCheckpoint(save_path)
+    rainbow_dqn.save_checkpoint(save_path)
 
 
 Loading an Agent for Inference and Rendering your Solved Environment
@@ -378,7 +378,7 @@ Test loop for inference
                     state = np.moveaxis(state, [-1], [-3])
 
                 # Get next action from agent
-                action, *_ = rainbow_dqn.getAction(state, training=False)
+                action, *_ = rainbow_dqn.get_action(state, training=False)
 
                 # Save the frame for this step and append to frames list
                 frame = test_env.render()

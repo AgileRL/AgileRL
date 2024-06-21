@@ -442,7 +442,7 @@ def test_returns_expected_action_training():
     state = np.array([1, 2, 3, 4])
 
     training = False
-    action = ddpg.getAction(state, training)[0]
+    action = ddpg.get_action(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -452,7 +452,7 @@ def test_returns_expected_action_training():
     ddpg = DDPG(state_dim, action_dim, one_hot=True, accelerator=accelerator)
     state = np.array([1])
     training = True
-    action = ddpg.getAction(state, training)[0]
+    action = ddpg.get_action(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -464,7 +464,7 @@ def test_returns_expected_action_training():
     )
     state = np.array([1])
     training = True
-    action = ddpg.getAction(state, training)[0]
+    action = ddpg.get_action(state, training)[0]
 
     assert len(action) == action_dim
     for act in action:
@@ -626,7 +626,7 @@ def test_soft_update():
         wrap=wrap,
     )
 
-    ddpg.softUpdate(ddpg.actor, ddpg.actor_target)
+    ddpg.soft_update(ddpg.actor, ddpg.actor_target)
 
     eval_params = list(ddpg.actor.parameters())
     target_params = list(ddpg.actor_target.parameters())
@@ -640,7 +640,7 @@ def test_soft_update():
         for expected_param, target_param in zip(expected_params, target_params)
     )
 
-    ddpg.softUpdate(ddpg.critic, ddpg.critic_target)
+    ddpg.soft_update(ddpg.critic, ddpg.critic_target)
 
     eval_params = list(ddpg.critic.parameters())
     target_params = list(ddpg.critic_target.parameters())
@@ -663,7 +663,7 @@ def test_algorithm_test_loop():
 
     env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
 
-    # env = makeVectEnvs("CartPole-v1", num_envs=num_envs)
+    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -934,7 +934,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.saveCheckpoint(checkpoint_path)
+    ddpg.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -969,7 +969,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         one_hot=False,
     )
     # Load checkpoint
-    ddpg.loadCheckpoint(checkpoint_path)
+    ddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert ddpg.net_config == {
@@ -1013,7 +1013,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.saveCheckpoint(checkpoint_path)
+    ddpg.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1051,7 +1051,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         one_hot=False,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
     )
-    ddpg.loadCheckpoint(checkpoint_path)
+    ddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert ddpg.net_config == net_config_cnn
@@ -1107,7 +1107,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.saveCheckpoint(checkpoint_path)
+    ddpg.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
@@ -1142,7 +1142,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
         one_hot=False,
     )
     # Load checkpoint
-    ddpg.loadCheckpoint(checkpoint_path)
+    ddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert ddpg.net_config is None
@@ -1207,7 +1207,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.saveCheckpoint(checkpoint_path)
+    ddpg.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1271,7 +1271,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.saveCheckpoint(checkpoint_path)
+    ddpg.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
@@ -1336,7 +1336,7 @@ def test_load_from_pretrained_networks(
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
-    ddpg.saveCheckpoint(checkpoint_path)
+    ddpg.save_checkpoint(checkpoint_path)
 
     # Create new agent object
     new_ddpg = DDPG.load(checkpoint_path)

@@ -52,7 +52,7 @@ can be implemented in a custom loop as follows:
 .. code-block:: python
 
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.getAction(state, epsilon, info['agent_mask'], info['env_defined_actions'])
+    cont_actions, discrete_action = agent.get_action(state, epsilon, info['agent_mask'], info['env_defined_actions'])
     if agent.discrete_actions:
         action = discrete_action
     else:
@@ -139,7 +139,7 @@ Example
             )
 
             # Get next action from agent
-            cont_actions, discrete_action = agent.getAction(
+            cont_actions, discrete_action = agent.get_action(
                 states=state,
                 training=True,
                 agent_mask=agent_mask,
@@ -163,7 +163,7 @@ Example
                     agent_id: np.moveaxis(ns, [-1], [-3])
                     for agent_id, ns in next_state.items()
                 }
-            memory.save2memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
+            memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
 
             # Learn according to learning frequency
             if len(memory) >= agent.batch_size:
@@ -230,7 +230,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -246,7 +246,7 @@ To save an agent, use the ``saveCheckpoint`` method:
                  discrete_actions=discrete_actions)   # Create MATD3 agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

@@ -115,15 +115,15 @@ if __name__ == "__main__":
                     state, _ = transform_and_flip(observation, player=0)
                     if opponent_first:
                         if opponent_difficulty == "self":
-                            action = opponent.getAction(
+                            action = opponent.get_action(
                                 state, epsilon=0, action_mask=action_mask
                             )[0]
                         elif opponent_difficulty == "random":
-                            action = opponent.getAction(action_mask)
+                            action = opponent.get_action(action_mask)
                         else:
-                            action = opponent.getAction(player=0)
+                            action = opponent.get_action(player=0)
                     else:
-                        action = dqn.getAction(
+                        action = dqn.get_action(
                             state, epsilon=0, action_mask=action_mask
                         )[
                             0
@@ -132,15 +132,15 @@ if __name__ == "__main__":
                     state, _ = transform_and_flip(observation, player=1)
                     if not opponent_first:
                         if opponent_difficulty == "self":
-                            action = opponent.getAction(
+                            action = opponent.get_action(
                                 state, epsilon=0, action_mask=action_mask
                             )[0]
                         elif opponent_difficulty == "random":
-                            action = opponent.getAction(action_mask)
+                            action = opponent.get_action(action_mask)
                         else:
-                            action = opponent.getAction(player=1)
+                            action = opponent.get_action(player=1)
                     else:
-                        action = dqn.getAction(
+                        action = dqn.get_action(
                             state, epsilon=0, action_mask=action_mask
                         )[
                             0

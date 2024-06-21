@@ -38,11 +38,11 @@ Example
     context = env.reset()  # Reset environment at start of episode
     for _ in range(500):
         # Get next action from agent
-        action = agent.getAction(context)
+        action = agent.get_action(context)
         next_context, reward = env.step(action)  # Act in environment
 
         # Save experience to replay buffer
-        memory.save2memory(context[action], reward)
+        memory.save_to_memory(context[action], reward)
 
         # Learn according to learning frequency
         if len(memory) >= agent.batch_size:
@@ -87,7 +87,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -96,7 +96,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = NeuralUCB(state_dim=state_dim, action_dim=action_dim)   # Create NeuralUCB agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

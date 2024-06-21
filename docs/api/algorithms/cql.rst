@@ -72,7 +72,7 @@ Example
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])
-      memory.save2memory(state, action, reward, next_state, done)
+      memory.save_to_memory(state, action, reward, next_state, done)
 
   agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DQN agent
 
@@ -117,7 +117,7 @@ Or for a CNN:
 Saving and loading agents
 -------------------------
 
-To save an agent, use the ``saveCheckpoint`` method:
+To save an agent, use the ``save_checkpoint`` method:
 
 .. code-block:: python
 
@@ -126,7 +126,7 @@ To save an agent, use the ``saveCheckpoint`` method:
   agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create CQN agent
 
   checkpoint_path = "path/to/checkpoint"
-  agent.saveCheckpoint(checkpoint_path)
+  agent.save_checkpoint(checkpoint_path)
 
 To load a saved agent, use the ``load`` method:
 

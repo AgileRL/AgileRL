@@ -371,7 +371,7 @@ class MADDPG:
             action * -self.min_action[idx][0],
         )
 
-    def getAction(
+    def get_action(
         self, states, training=True, agent_mask=None, env_defined_actions=None
     ):
         """Returns the next action to take in the environment.
@@ -737,12 +737,12 @@ class MADDPG:
         for actor, actor_target, critic, critic_target in zip(
             self.actors, self.actor_targets, self.critics, self.critic_targets
         ):
-            self.softUpdate(actor, actor_target)
-            self.softUpdate(critic, critic_target)
+            self.soft_update(actor, actor_target)
+            self.soft_update(critic, critic_target)
 
         return loss_dict
 
-    def softUpdate(self, net, target):
+    def soft_update(self, net, target):
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
@@ -792,7 +792,7 @@ class MADDPG:
                         if "env_defined_actions" in info.keys()
                         else None
                     )
-                    cont_actions, discrete_action = self.getAction(
+                    cont_actions, discrete_action = self.get_action(
                         state,
                         training=False,
                         agent_mask=agent_mask,
@@ -1023,7 +1023,7 @@ class MADDPG:
                 )
             ]
 
-    def saveCheckpoint(self, path):
+    def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
@@ -1066,7 +1066,7 @@ class MADDPG:
             pickle_module=dill,
         )
 
-    def loadCheckpoint(self, path):
+    def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.
 
         :param path: Location to load checkpoint from

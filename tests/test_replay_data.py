@@ -31,8 +31,8 @@ def test_sampling_batch_from_buffer():
     next_state1 = np.array([4, 5, 6])
     done1 = np.array([False])
 
-    buffer.save2memory(state1, action1, reward1, next_state1, done1)
-    buffer.save2memory(state1, action1, reward1, next_state1, done1)
+    buffer.save_to_memory(state1, action1, reward1, next_state1, done1)
+    buffer.save_to_memory(state1, action1, reward1, next_state1, done1)
 
     batch_size = 2
     dataset = ReplayDataset(buffer, batch_size=batch_size)

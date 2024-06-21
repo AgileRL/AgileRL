@@ -10,7 +10,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.utils import initialPopulation, makeVectEnvs, printHyperparams
+from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -24,7 +24,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
-    env = makeVectEnvs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
+    env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
 
     try:
         state_dim = (env.single_observation_space.n,)
@@ -129,7 +129,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     else:
         actor = None
 
-    agent_pop = initialPopulation(
+    agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         state_dim=state_dim,
         action_dim=action_dim,
@@ -167,7 +167,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         elite_path="elite_rainbow.pt",
     )
 
-    printHyperparams(trained_pop)
+    print_hyperparams(trained_pop)
 
     if str(device) == "cuda":
         torch.cuda.empty_cache()
