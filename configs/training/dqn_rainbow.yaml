@@ -21,7 +21,7 @@ INIT_HP:
     BETA: 0.4                  # Importance sampling coefficient
     TAU: 0.001                 # For soft update of target parameters
     PRIOR_EPS: 0.000001        # Minimum priority for sampling
-    NOISE_STD: 0.4             # Noise standard deviation
+    NOISE_STD: 0.5             # Noise standard deviation
     NUM_ATOMS: 51              # Unit number of support
     V_MIN: -200.               # Minimum value of support
     V_MAX: 200.                # Maximum value of support

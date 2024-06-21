@@ -69,13 +69,13 @@ class NoisyLinear(nn.Module):
         bias_epsilon = self.bias_epsilon.to(x.device)
 
         if self.training:
-            return F.linear(
-                x,
-                self.weight_mu + self.weight_sigma * weight_epsilon,
-                self.bias_mu + self.bias_sigma * bias_epsilon,
-            )
+            weight = self.weight_mu + self.weight_sigma.mul(weight_epsilon)
+            bias = self.bias_mu + self.bias_sigma.mul(bias_epsilon)
         else:
-            return F.linear(x, self.weight_mu, self.bias_mu)
+            weight = self.weight_mu
+            bias = self.bias_mu
+
+        return F.linear(x, weight, bias)
 
     def reset_parameters(self):
         """Resets neural network parameters."""

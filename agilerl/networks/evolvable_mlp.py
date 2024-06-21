@@ -68,7 +68,7 @@ class EvolvableMLP(nn.Module):
         init_layers=True,
         support=None,
         rainbow=False,
-        noise_std=0.4,
+        noise_std=0.5,
         device="cpu",
         accelerator=None,
         arch="mlp",

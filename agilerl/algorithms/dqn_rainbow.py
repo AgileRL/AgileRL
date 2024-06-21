@@ -55,6 +55,8 @@ class RainbowDQN:
     :type n_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
+    :param combined_reward: Boolean flag indicating whether to use combined 1-step and n-step reward, defaults to False
+    :type combined_reward: bool, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
@@ -85,6 +87,7 @@ class RainbowDQN:
         noise_std=0.5,
         n_step=3,
         mut=None,
+        combined_reward=False,
         actor_network=None,
         device="cpu",
         accelerator=None,
@@ -166,6 +169,8 @@ class RainbowDQN:
         self.scores = []
         self.fitness = []
         self.steps = [0]
+        self.combined_reward = combined_reward
+        self.noise_std = noise_std
 
         self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms)
         self.delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
@@ -446,15 +451,19 @@ class RainbowDQN:
                     next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
-            elementwise_loss = self._dqn_loss(
-                states, actions, rewards, next_states, dones, self.gamma
-            )
+            if self.combined_reward or not n_step:
+                elementwise_loss = self._dqn_loss(
+                    states, actions, rewards, next_states, dones, self.gamma
+                )
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
                     n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
                 )
-                elementwise_loss += n_step_elementwise_loss
+                if self.combined_reward:
+                    elementwise_loss += n_step_elementwise_loss
+                else:
+                    elementwise_loss = n_step_elementwise_loss
             loss = torch.mean(elementwise_loss * weights)
 
         else:
@@ -499,15 +508,21 @@ class RainbowDQN:
                     dones = dones.to(self.accelerator.device)
                 idxs = None
             new_priorities = None
-            elementwise_loss = self._dqn_loss(
-                states, actions, rewards, next_states, dones, self.gamma
-            )
+
+            if self.combined_reward or not n_step:
+                elementwise_loss = self._dqn_loss(
+                    states, actions, rewards, next_states, dones, self.gamma
+                )
+
             if n_step:
                 n_gamma = self.gamma**self.n_step
                 n_step_elementwise_loss = self._dqn_loss(
                     n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
                 )
-                elementwise_loss += n_step_elementwise_loss
+                if self.combined_reward:
+                    elementwise_loss += n_step_elementwise_loss
+                else:
+                    elementwise_loss = n_step_elementwise_loss
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
