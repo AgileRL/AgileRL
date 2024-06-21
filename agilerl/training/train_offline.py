@@ -31,6 +31,7 @@ def train_offline(
     mutation=None,
     checkpoint=None,
     checkpoint_path=None,
+    overwrite_checkpoints=False,
     save_elite=False,
     elite_path=None,
     wb=False,
@@ -80,6 +81,8 @@ def train_offline(
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
+    :param overwrite_checkpoints: Overwrite previous checkpoints during training, defaults to False
+    :type overwrite_checkpoints: bool, optional
     :param save_elite: Boolean flag indicating whether to save elite member at the end
         of training, defaults to False
     :type save_elite: bool, optional
@@ -354,7 +357,7 @@ def train_offline(
                 elite_save_path = (
                     elite_path.split(".pt")[0]
                     if elite_path is not None
-                    else f"{env_name}-elite_{algo}-{elite.steps[-1]}"
+                    else f"{env_name}-elite_{algo}"
                 )
                 elite.save_checkpoint(f"{elite_save_path}.pt")
 
@@ -387,9 +390,12 @@ def train_offline(
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         for i, agent in enumerate(pop):
-                            agent.save_checkpoint(
-                                f"{save_path}_{i}_{agent.steps[-1]}.pt"
+                            current_checkpoint_path = (
+                                f"{save_path}_{i}.pt"
+                                if overwrite_checkpoints
+                                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
                             )
+                            agent.save_checkpoint(current_checkpoint_path)
                         print("Saved checkpoint.")
                     accelerator.wait_for_everyone()
                     for model in pop:
@@ -397,7 +403,12 @@ def train_offline(
                     accelerator.wait_for_everyone()
                 else:
                     for i, agent in enumerate(pop):
-                        agent.save_checkpoint(f"{save_path}_{i}_{agent.steps[-1]}.pt")
+                        current_checkpoint_path = (
+                            f"{save_path}_{i}.pt"
+                            if overwrite_checkpoints
+                            else f"{save_path}_{i}_{agent.steps[-1]}.pt"
+                        )
+                        agent.save_checkpoint(current_checkpoint_path)
                     print("Saved checkpoint.")
                 checkpoint_count += 1
 
