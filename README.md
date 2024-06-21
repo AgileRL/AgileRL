@@ -2,7 +2,7 @@
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/222710068-e09a4e3c-368c-458a-9e01-b68674806887.png height="120">
 </p>
-<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://docs.agilerl.com">documentation</a>.<br>Join the <a href="https://discord.gg/eB8HyTA2ux">Discord Server</a> to collaborate.</p>
+<p align="center"><b>Reinforcement learning streamlined.</b><br>Easier and faster reinforcement learning with RLOps. Visit our <a href="https://agilerl.com">website</a>. View <a href="https://docs.agilerl.com">documentation</a>.<br>Join the <a href="https://discord.gg/eB8HyTA2ux">Discord Server</a> for questions, help and collaboration.</p>
 
 <div align="center">
 
@@ -11,28 +11,46 @@
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
 
-**_NEW: AgileRL now introduces evolvable [Contextual Multi-armed Bandit Algorithms](https://docs.agilerl.com/en/latest/bandits/index.html)!_**
-
 </div>
 
-This is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
+AgileRL is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
-This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.<br>
+This library is initially focused on reducing the time taken for training models and hyperparameter optimization (HPO) by pioneering [evolutionary HPO techniques](https://docs.agilerl.com/en/latest/evo_hyperparam_opt/index.html) for reinforcement learning.<br>
 Evolutionary HPO has been shown to drastically reduce overall training times by automatically converging on optimal hyperparameters, without requiring numerous training runs.<br>
-We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable on-policy, off-policy, offline, multi-agent and contextual multi-armed bandit reinforcement learning algorithms with distributed training.
+We are constantly adding more algorithms and features. AgileRL already includes state-of-the-art evolvable [on-policy](https://docs.agilerl.com/en/latest/on_policy/index.html), [off-policy](https://docs.agilerl.com/en/latest/off_policy/index.html), [offline](https://docs.agilerl.com/en/latest/offline_training/index.html), [multi-agent](https://docs.agilerl.com/en/latest/multi_agent_training/index.html) and [contextual multi-armed bandit](https://docs.agilerl.com/en/latest/bandits/index.html) reinforcement learning algorithms with [distributed training](https://docs.agilerl.com/en/latest/distributed_training/index.html).
 
 <p align="center">
   <img src=https://user-images.githubusercontent.com/47857277/236407686-21363eb3-ffcf-419f-b019-0be4ddf1ed4a.gif width="100%" max-width="900">
 </p>
-<p align="center">AgileRL offers 10x faster hyperparameter optimization than SOTA.<br> Global steps is the sum of every step taken by any agent in the environment, including across an entire population, during the entire hyperparameter optimization process.</p>
+<p align="center">AgileRL offers 10x faster hyperparameter optimization than SOTA.</p>
 
 ## Table of Contents
-  * [Benchmarks](#benchmarks)
   * [Get Started](#get-started)
+  * [Benchmarks](#benchmarks)
   * [Tutorials](#tutorials)
   * [Algorithms implemented](#evolvable-algorithms-implemented-more-coming-soon)
   * [Train an agent](#train-an-agent-to-beat-a-gym-environment)
   * [Citing AgileRL](#citing-agilerl)
+
+## Get Started
+
+To see the full AgileRL documentation, including tutorials, visit our [documentation site](https://docs.agilerl.com/). To ask questions and get help, collaborate, or discuss anything related to reinforcement learning, join the [AgileRL Discord Server](https://discord.gg/eB8HyTA2ux).
+
+Install as a package with pip:
+```bash
+pip install agilerl
+```
+Or install in development mode:
+```bash
+git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
+pip install -e .
+```
+
+Demo:
+```bash
+cd demos
+python demo_off_policy.py
+```
 
 ## Benchmarks
 
@@ -51,37 +69,13 @@ AgileRL also supports multi-agent reinforcement learning using the Petting Zoo-s
   <img src=https://github-production-user-asset-6210df.s3.amazonaws.com/118982716/264712154-4965ea5f-b777-423c-989b-e4db86eda3bd.png  min-width="100%" width="700">
 </p>
 
-## Get Started
-Install as a package with pip:
-```bash
-pip install agilerl
-```
-Or install in development mode:
-```bash
-git clone https://github.com/AgileRL/AgileRL.git && cd AgileRL
-pip install -e .
-```
-
-Demo:
-```bash
-cd demos
-python demo_online.py
-```
-or to demo distributed training:
-```bash
-cd demos
-accelerate launch --config_file configs/accelerate/accelerate.yaml demos/demo_online_distributed.py
-```
-
 ## Tutorials
 We are in the process of creating tutorials on how to use AgileRL and train agents on a variety of tasks.
 
 Currently, we have [tutorials for single-agent tasks](https://docs.agilerl.com/en/latest/tutorials/gymnasium/index.html)
-that will guide you through the process of training both on and off-policy agents to beat a variety of Gymnasium environments. Additionally, we have [multi-agent tutorials](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html)
-that make use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. We also have a
-[tutorial on using hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) to teach agents Skills. We also have files for a tutorial on training a language model with reinforcement learning using ILQL on Wordle in ``tutorials/Language``. If using ILQL on Wordle, download and unzip data.zip <a href="https://drive.google.com/drive/folders/13LFspsFQ-7XIlFjnsZttKf4nfVDlnmW2?usp=sharing">here</a>.
+that will guide you through the process of training both on and off-policy agents to beat a variety of Gymnasium environments. Additionally, we have [multi-agent tutorials](https://docs.agilerl.com/en/latest/tutorials/pettingzoo/index.html) that make use of PettingZoo environments such as training DQN to play Connect Four with curriculum learning and self-play, and also for multi-agent tasks in MPE environments. The [tutorial on using hierarchical curriculum learning](https://docs.agilerl.com/en/latest/tutorials/skills/index.html) shows how to teach agents Skills and combine them to achieve an end goal. There are also [tutorials for contextual multi-arm bandits](https://docs.agilerl.com/en/latest/tutorials/bandits/index.html), which learn to make the correct decision in environments that only have one timestep.
 
-Our demo files in ``demos`` also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
+The demo files in ``demos`` also provide examples on how to train agents using AgileRL, and more information can be found in our <a href="https://docs.agilerl.com">documentation</a>.
 
 ## Evolvable algorithms (more coming soon!)
 
