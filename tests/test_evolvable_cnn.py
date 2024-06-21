@@ -361,8 +361,8 @@ def test_forward_rainbow(device):
 
 
 ######### Test create_mlp and create_cnn########
-@pytest.mark.parametrize("noisy", [(False), (True)])
-def test_create_mlp_create_cnn(noisy, device):
+@pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+def test_create_mlp_create_cnn(noisy, output_vanish, device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
         channel_size=[32, 32],
@@ -375,15 +375,21 @@ def test_create_mlp_create_cnn(noisy, device):
         device=device,
     )
     value_net = evolvable_cnn.create_mlp(
-        10, 4, [64, 64], output_activation=None, noisy=noisy, name="value"
+        10,
+        4,
+        [64, 64],
+        output_activation=None,
+        noisy=noisy,
+        name="value",
+        output_vanish=output_vanish,
     )
     feature_net = evolvable_cnn.create_cnn(1, [32, 32], [3, 3], [1, 1], "feature")
     assert isinstance(value_net, nn.Module)
     assert isinstance(feature_net, nn.Module)
 
 
-@pytest.mark.parametrize("noisy", [(False), (True)])
-def test_create_mlp_create_cnn_multi(noisy, device):
+@pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+def test_create_mlp_create_cnn_multi(noisy, output_vanish, device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 64, 64],
         channel_size=[32, 32],
@@ -398,7 +404,13 @@ def test_create_mlp_create_cnn_multi(noisy, device):
         device=device,
     )
     value_net = evolvable_cnn.create_mlp(
-        10, 4, [64, 64], output_activation=None, noisy=noisy, name="value"
+        10,
+        4,
+        [64, 64],
+        output_activation=None,
+        noisy=noisy,
+        name="value",
+        output_vanish=output_vanish,
     )
     feature_net = evolvable_cnn.create_cnn(1, [32, 32], [3, 3], [1, 1], "feature")
     assert isinstance(value_net, nn.Module)

@@ -49,6 +49,8 @@ class RainbowDQN:
     :type v_min: float, optional
     :param v_max: Maximum value of support, defaults to 200
     :type v_max: float, optional
+    :param noise_std: Noise standard deviation, defaults to 0.5
+    :type noise_std: float, optional
     :param n_step: Step number to calculate n-step td error, defaults to 3
     :type n_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
@@ -80,6 +82,7 @@ class RainbowDQN:
         num_atoms=51,
         v_min=-10,
         v_max=10,
+        noise_std=0.5,
         n_step=3,
         mut=None,
         actor_network=None,
@@ -126,6 +129,18 @@ class RainbowDQN:
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
+        if net_config is not None:
+            if "hidden_size" in net_config.keys():
+                assert (
+                    len(net_config["hidden_size"]) > 1
+                ), f"Length of hidden size list must be greater than 1, currently {len(net_config['hidden_size'])}"
+
+            if "min_hidden_layers" in net_config.keys():
+                assert (
+                    net_config["min_hidden_layers"] > 1
+                ), f"Minimum number of hidden layers must be greater than 1 for Rainbow DQN, currently {net_config['min_hidden_layers']}"
+            else:
+                net_config["min_hidden_layers"] = 2
 
         self.algo = "Rainbow DQN"
         self.state_dim = state_dim
@@ -153,6 +168,7 @@ class RainbowDQN:
         self.steps = [0]
 
         self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms)
+        self.delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
         if self.accelerator is None:
             self.support = self.support.to(self.device)
         else:
@@ -199,12 +215,13 @@ class RainbowDQN:
                 self.actor = EvolvableMLP(
                     num_inputs=state_dim[0],
                     num_outputs=action_dim,
-                    output_vanish=False,
+                    output_vanish=True,
                     init_layers=False,
-                    layer_norm=False,
+                    layer_norm=True,
                     num_atoms=self.num_atoms,
                     support=self.support,
                     rainbow=True,
+                    noise_std=noise_std,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
@@ -237,6 +254,7 @@ class RainbowDQN:
                     num_atoms=self.num_atoms,
                     support=self.support,
                     rainbow=True,
+                    noise_std=noise_std,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
@@ -261,9 +279,6 @@ class RainbowDQN:
         # Put the nets into training mode
         self.actor.train()
         self.actor_target.train()
-
-        # delete this
-        print(self.actor, self.actor_target)
 
     def getAction(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.
@@ -294,7 +309,6 @@ class RainbowDQN:
         self.actor.train(mode=training)
         with torch.no_grad():
             action_values = self.actor(state)
-
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:
@@ -321,32 +335,29 @@ class RainbowDQN:
                 .squeeze()
             )
 
-        # Calculate delta z - i.e. the distance between each atom
-        delta_z = float(self.v_max - self.v_min) / (self.num_atoms - 1)
-
         with torch.no_grad():
 
             # Predict next actions from next_states
             next_actions = self.actor(next_states).argmax(1)
 
-            # Predict the next distribution for the same next states
-            next_dist = self.actor_target(next_states, q=False)
-            torch.set_printoptions(linewidth=200)
+            # Predict the target q distribution for the same next states
+            target_q_dist = self.actor_target(next_states, q=False)
 
-            # Select the probabilities for the predicted next actions
-            next_dist = next_dist[range(self.batch_size), next_actions]
+            # Index the target q_dist to select the distributions corresponding to next_actions
+            target_q_dist = target_q_dist[range(self.batch_size), next_actions]
 
             # Determine the target z values
             t_z = rewards + (1 - dones) * gamma * self.support
             t_z = t_z.clamp(min=self.v_min, max=self.v_max)
 
             # Finds closest support element index value
-            b = (t_z - self.v_min) / delta_z
+            b = (t_z - self.v_min) / self.delta_z
 
             # Find the neighbouring indices of b
             L = b.floor().long()
             u = b.ceil().long()
 
+            # Shape of projected q distribution is (batch_size, num_atoms) as we have argmaxed over actions
             # Fix disappearing probability mass
             L[(u > 0) * (L == u)] -= 1
             u[(L < (self.num_atoms - 1)) * (L == u)] += 1
@@ -358,7 +369,7 @@ class RainbowDQN:
                 .unsqueeze(1)
                 .expand(self.batch_size, self.num_atoms)
             )
-            proj_dist = torch.zeros(next_dist.size())
+            proj_dist = torch.zeros(target_q_dist.size())
             if self.accelerator is None:
                 offset = offset.to(self.device)
                 proj_dist = proj_dist.to(self.device)
@@ -366,14 +377,15 @@ class RainbowDQN:
                 offset = offset.to(self.accelerator.device)
                 proj_dist = proj_dist.to(self.accelerator.device)
             proj_dist.view(-1).index_add_(
-                0, (L + offset).view(-1), (next_dist * (u.float() - b)).view(-1)
+                0, (L + offset).view(-1), (target_q_dist * (u.float() - b)).view(-1)
             )
             proj_dist.view(-1).index_add_(
-                0, (u + offset).view(-1), (next_dist * (b - L.float())).view(-1)
+                0, (u + offset).view(-1), (target_q_dist * (b - L.float())).view(-1)
             )
 
-        dist = self.actor(states, q=False)
-        log_p = torch.log(dist[range(self.batch_size), actions.squeeze().long()])
+        # Calculate the current state
+        log_q_dist = self.actor(states, q=False, log=True)
+        log_p = log_q_dist[range(self.batch_size), actions.squeeze().long()]
 
         # loss
         elementwise_loss = -(proj_dist * log_p).sum(1)
@@ -389,9 +401,6 @@ class RainbowDQN:
         :param per: Use prioritized experience replay buffer, defaults to True
         :type per: bool, optional
         """
-        # Reset the noise
-        self.actor.reset_noise()
-        self.actor_target.reset_noise()
         if per:
             if n_step:
                 (
@@ -511,6 +520,8 @@ class RainbowDQN:
 
         # soft update target network
         self.softUpdate()
+        self.actor.reset_noise()
+        self.actor_target.reset_noise()
 
         if per:
             loss_for_prior = elementwise_loss.detach().cpu().numpy()
