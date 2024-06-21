@@ -49,11 +49,11 @@ Dependencies
 
 .. code-block:: python
 
-    Author: Michael Pratt
-    License: MIT License
+    # Author: Michael Pratt
     import os
 
     import imageio
+    import gymnasium as gym
     import numpy as np
     import torch
     from agilerl.algorithms.dqn_rainbow import RainbowDQN
@@ -62,13 +62,10 @@ Dependencies
         PrioritizedReplayBuffer,
     )
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import calculate_vectorized_scores, makeVectEnvs
+    from agilerl.utils.utils import makeVectEnvs
     from tqdm import trange
 
-    import gymnasium as gym
 
-
-%%
 Defining Hyperparameters
 ------------------------
 Before we commence training, it's easiest to define all of our hyperparameters in one dictionary. Below is an example of
@@ -96,12 +93,13 @@ is the case, we do not need to define a mutatinos parameters dictionary.
         "V_MAX": 200.0,  # Maximum value of support
         "NOISY": True,  # Add noise directly to the weights of the network
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
+        "LEARNING_DELAY": 1000,  # Steps before starting learning
         "CHANNELS_LAST": False,  # Use with RGB states
-        "EPISODES": 200,  # Number of episodes to train for
-        "EVAL_EPS": 20,  # Number of episodes after which to evaluate the agent after
         "TARGET_SCORE": 200.0,  # Target score that will beat the environment
-        "EVO_LOOP": 3,  # Number of evaluation episodes
-        "MAX_STEPS": 500,  # Maximum number of steps an agent takes in an environment
+        "MAX_STEPS": 200000,  # Maximum number of steps an agent takes in an environment
+        "EVO_STEPS": 10000,  # Evolution frequency
+        "EVAL_STEPS": None,  # Number of evaluation steps per episode
+        "EVAL_LOOP": 1,  # Number of evaluation episodes
     }
 
 Create the Environment
@@ -113,7 +111,8 @@ or continuous.
 
 .. code-block:: python
 
-    env = makeVectEnvs("CartPole-v1", num_envs=16)  # Create environment
+    num_envs=16
+    env = makeVectEnvs("CartPole-v1", num_envs=num_envs)  # Create environment
     try:
         state_dim = env.single_observation_space.n  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
@@ -125,9 +124,8 @@ or continuous.
     except Exception:
         action_dim = env.single_action_space.shape[0]  # Continuous action space
 
-    if INIT_HP[
-        "CHANNELS_LAST"
-    ]:  # Adjusts dimensions to be in accordance with PyTorch API (C, H, W), used with envs with RGB image states
+    if INIT_HP["CHANNELS_LAST"]:
+        # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
         state_dim = (state_dim[2], state_dim[0], state_dim[1])
 
 Instantiate an Agent
@@ -176,7 +174,7 @@ you would define your memory and n_step_memory.
     memory = PrioritizedReplayBuffer(
         memory_size=INIT_HP["MEMORY_SIZE"],
         field_names=field_names,
-        num_envs=16,
+        num_envs=num_envs,
         alpha=INIT_HP["ALPHA"],
         gamma=INIT_HP["GAMMA"],
         device=device,
@@ -184,7 +182,7 @@ you would define your memory and n_step_memory.
     n_step_memory = MultiStepReplayBuffer(
         memory_size=INIT_HP["MEMORY_SIZE"],
         field_names=field_names,
-        num_envs=16,
+        num_envs=num_envs,
         n_step=INIT_HP["N_STEP"],
         gamma=INIT_HP["GAMMA"],
         device=device,
@@ -205,10 +203,6 @@ for both the tournament and mutation arguments.
 .. code-block:: python
 
     # Define parameters per and n_step
-    n_step = True if INIT_HP["N_STEP"] > 1 else False
-    per = INIT_HP["PER"]
-
-
     trained_pop, pop_fitnesses = train_off_policy(
         env=env,
         env_name="CartPole-v1",
@@ -218,17 +212,18 @@ for both the tournament and mutation arguments.
         n_step_memory=n_step_memory,
         INIT_HP=INIT_HP,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        n_episodes=INIT_HP["EPISODES"],
-        evo_loop=INIT_HP["EVO_LOOP"],
+        max_steps=INIT_HP["MAX_STEPS"],
+        evo_steps=INIT_HP["EVO_STEPS"],
+        eval_steps=INIT_HP["EVAL_STEPS"],
+        eval_loop=INIT_HP["EVAL_LOOP"],
+        learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
-        evo_epochs=INIT_HP["EVAL_EPS"],
-        n_step=n_step,
-        per=per,
-        noisy=INIT_HP["NOISY"],
+        n_step=True,
+        per=True,
         tournament=None,
         mutation=None,
         wb=False,  # Boolean flag to record run with Weights & Biases
-        checkpoint=INIT_HP["EPISODES"],
+        checkpoint=INIT_HP["MAX_STEPS"],
         checkpoint_path="RainbowDQN.pt",
     )
 
@@ -241,20 +236,33 @@ function and is an example of how we might choose to train an AgileRL agent.
 .. code-block:: python
 
     total_steps = 0
-    n_step = True if INIT_HP["N_STEP"] > 1 else False
-    per = INIT_HP["PER"]
     save_path = "RainbowDQN.pt"
 
-    for episode in trange(INIT_HP["EPISODES"]):
+    # TRAINING LOOP
+    print("Training...")
+    pbar = trange(INIT_HP["MAX_STEPS"], unit="step")
+    while rainbow_dqn.steps[-1] < INIT_HP["MAX_STEPS"]:
         state = env.reset()[0]  # Reset environment at start of episode
-        rewards, terminations, truncs = [], [], []
-        score = 0
-        for step in range(INIT_HP["MAX_STEPS"]):
+        scores = np.zeros(num_envs)
+        completed_episode_scores = []
+        steps = 0
+        for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
             if INIT_HP["CHANNELS_LAST"]:
                 state = np.moveaxis(state, [-1], [-3])
+
             # Get next action from agent
             action = rainbow_dqn.getAction(state)
-            next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
+            next_state, reward, terminated, truncated, info = env.step(action)  # Act in environment
+            scores += np.array(reward)
+            steps += num_envs
+            total_steps += num_envs
+
+            # Collect scores for completed episodes
+            for idx, (d, t) in enumerate(zip(terminated, truncated)):
+                if d or t:
+                    completed_episode_scores.append(scores[idx])
+                    rainbow_dqn.scores.append(scores[idx])
+                    scores[idx] = 0
 
             if INIT_HP["CHANNELS_LAST"]: # Channels last for atari envs, set to False for this tutorial
                 one_step_transition = n_step_memory.save2memoryVectEnvs(
@@ -275,73 +283,66 @@ function and is an example of how we might choose to train an AgileRL agent.
             if one_step_transition:
                 memory.save2memoryVectEnvs(*one_step_transition)
 
-            # Learn according to learning frequency
-            if per:
-                fraction = min((step + 1) / INIT_HP["MAX_STEPS"], 1.0)
-                rainbow_dqn.beta += fraction * (1.0 - rainbow_dqn.beta)
+            # Update agent beta
+            fraction = min(
+                ((rainbow_dqn.steps[-1] + idx_step + 1) * num_envs / INIT_HP["MAX_STEPS"]), 1.0
+            )
+            rainbow_dqn.beta += fraction * (1.0 - rainbow_dqn.beta)
 
             # Learn according to learning frequency
-            if (
-                memory.counter % rainbow_dqn.learn_step == 0
-                and len(memory) >= rainbow_dqn.batch_size
-            ):
-                # Sample replay buffer
-                # Learn according to agent's RL algorithm
+            if len(memory) >= rainbow_dqn.batch_size and memory.counter > INIT_HP["LEARNING_DELAY"]:
+                for _ in range(num_envs // rainbow_dqn.learn_step):
+                    # Sample replay buffer
+                    # Learn according to agent's RL algorithm
+                    experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
+                    n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
+                    experiences += n_step_experiences
+                    loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
+                    memory.update_priorities(idxs, priorities)
 
-                experiences = memory.sample(rainbow_dqn.batch_size, rainbow_dqn.beta)
-                n_step_experiences = n_step_memory.sample_from_indices(experiences[6])
-                experiences += n_step_experiences
-                loss, idxs, priorities = rainbow_dqn.learn(experiences, n_step=n_step, per=per)
-                memory.update_priorities(idxs, priorities)
-
-            terminations.append(done)
-            rewards.append(reward)
-            truncs.append(trunc)
             state = next_state
+            total_steps += num_envs
+            steps += num_envs
 
-            rainbow_dqn.scores.append(score)
-
-            rainbow_dqn.steps[-1] += step
-            total_steps += step
-
-        scores = calculate_vectorized_scores(
-            np.array(rewards).transpose((1, 0)), np.array(terminations).transpose((1, 0))
+        # Evaluate population
+        fitness = rainbow_dqn.test(
+            env,
+            swap_channels=INIT_HP["CHANNELS_LAST"],
+            max_steps=INIT_HP["EVAL_STEPS"],
+            loop=INIT_HP["EVO_LOOP"],
         )
-        score = np.mean(scores)
+        mean_score = (
+           np.mean(completed_episode_scores)
+           if len(completed_episode_scores) > 0
+           else "0 completed episodes"
+        )
 
-        rainbow_dqn.scores.append(score)
+        print(f"--- Global steps {total_steps} ---")
+        print(f"Steps {rainbow_dqn.steps[-1]}")
+        print(f"Scores: {"%.2f"%mean_score}")
+        print(f'Fitness: {"%.2f"%fitness}')
+        print(f'5 fitness avg: {"%.2f"%np.mean(rainbow_dqn.fitness[-5:])}')
 
-        rainbow_dqn.steps[-1] += INIT_HP["MAX_STEPS"]
-        total_steps += INIT_HP["MAX_STEPS"]
+        fitness = "%.2f" % fitness
+        avg_fitness = "%.2f" % np.mean(rainbow_dqn.fitness[-100:])
+        avg_score = "%.2f" % np.mean(rainbow_dqn.scores[-100:])
+        num_steps = rainbow_dqn.steps[-1]
 
-        if (episode + 1) % INIT_HP["EVAL_EPS"] == 0:
-            # Evaluate population
-            fitness = rainbow_dqn.test(
-                env,
-                swap_channels=INIT_HP["CHANNELS_LAST"],
-                max_steps=INIT_HP["MAX_STEPS"],
-                loop=INIT_HP["EVO_LOOP"],
-            )
+        print(
+            f"""
+            --- Epoch {episode + 1} ---
+            Fitness:\t\t{fitness}
+            100 fitness avgs:\t{avg_fitness}
+            100 score avgs:\t{avg_score}
+            Steps:\t\t{num_steps}
+            """,
+            end="\r",
+        )
 
-            fitness = "%.2f" % fitness
-            avg_fitness = "%.2f" % np.mean(rainbow_dqn.fitness[-100:])
-            avg_score = "%.2f" % np.mean(rainbow_dqn.scores[-100:])
-            num_steps = rainbow_dqn.steps[-1]
+        rainbow_dqn.steps.append(rainbow_dqn.steps[-1])
 
-            print(
-                f"""
-                --- Epoch {episode + 1} ---
-                Fitness:\t\t{fitness}
-                100 fitness avgs:\t{avg_fitness}
-                100 score avgs:\t{avg_score}
-                Steps:\t\t{num_steps}
-                """,
-                end="\r",
-            )
-
-        if episode + 1 == INIT_HP["EPISODES"]:
-            # Save the trained algorithm at the end of the training loop
-            rainbow_dqn.saveCheckpoint(save_path)
+    # Save the trained algorithm at the end of the training loop
+    rainbow_dqn.saveCheckpoint(save_path)
 
 
 Loading an Agent for Inference and Rendering your Solved Environment
@@ -364,13 +365,14 @@ Test loop for inference
     rewards = []
     frames = []
     testing_eps = 7
+    max_testing_steps = 1000
     test_env = gym.make("CartPole-v1", render_mode="rgb_array")
     with torch.no_grad():
         for ep in range(testing_eps):
             state = test_env.reset()[0]  # Reset environment at start of episode
             score = 0
 
-            for step in range(INIT_HP["MAX_STEPS"]):
+            for step in range(max_testing_steps):
                 # If your state is an RGB image
                 if INIT_HP["CHANNELS_LAST"]:
                     state = np.moveaxis(state, [-1], [-3])
@@ -383,9 +385,7 @@ Test loop for inference
                 frames.append(frame)
 
                 # Take the action in the environment
-                state, reward, terminated, truncated, _ = test_env.step(
-                    action
-                )  # Act in environment
+                state, reward, terminated, truncated, _ = test_env.step(action)
 
                 # Collect the score of environment 0
                 score += reward

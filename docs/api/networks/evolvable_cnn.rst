@@ -1,3 +1,5 @@
+.. _evolvable_cnn:
+
 Evolvable Convolutional Neural Network (CNN)
 ============================================
 

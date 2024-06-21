@@ -45,15 +45,21 @@ Example
         memory.save2memory(context[action], reward)
 
         # Learn according to learning frequency
-        if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
-            experiences = memory.sample(agent.batch_size) # Sample replay buffer
-            agent.learn(experiences)    # Learn according to agent's RL algorithm
+        if len(memory) >= agent.batch_size:
+            for _ in range(agent.learn_step):
+                experiences = memory.sample(agent.batch_size) # Sample replay buffer
+                agent.learn(experiences)    # Learn according to agent's RL algorithm
+
 
         context = next_context
 
 
-To configure the network architecture, pass a dict to the NeuralUCB ``net_config`` field. For an MLP, this can be as simple as:
+Neural Network Configuration
+----------------------------
 
+To configure the network architecture, pass a kwargs dict to the NeuralUCB ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 .. code-block:: python
 
   NET_CONFIG = {

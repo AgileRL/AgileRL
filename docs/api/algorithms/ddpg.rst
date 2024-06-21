@@ -36,7 +36,8 @@ Example
   from agilerl.algorithms.ddpg import DDPG
 
   # Create environment and Experience Replay Buffer
-  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=1)
+  num_envs = 1
+  env = makeVectEnvs('LunarLanderContinuous-v2', num_envs=num_envs)
   try:
       state_dim = env.single_observation_space.n          # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
@@ -61,22 +62,27 @@ Example
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
       if channels_last:
-          state = np.moveaxis(state, [3], [1])
+          state = np.moveaxis(state, [-1], [-3])
       action = agent.getAction(state, training=True)    # Get next action from agent
       next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
       if channels_last:
-          memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [3], [1]), done)
+          memory.save2memoryVectEnvs(state, action, reward, np.moveaxis(next_state, [-1], [-3]), done)
       else:
           memory.save2memoryVectEnvs(state, action, reward, next_state, done)
 
       # Learn according to learning frequency
-      if memory.counter % agent.learn_step == 0 and len(memory) >= agent.batch_size:
+      if len(memory) >= agent.batch_size:
           experiences = memory.sample(agent.batch_size) # Sample replay buffer
           agent.learn(experiences)    # Learn according to agent's RL algorithm
 
-To configure the network architecture, pass a dict to the DDPG ``net_config`` field. For an MLP, this can be as simple as:
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a kwargs dict to the DDPG ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 

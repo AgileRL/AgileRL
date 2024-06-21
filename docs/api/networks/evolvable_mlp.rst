@@ -1,3 +1,5 @@
+.. _evolvable_mlp:
+
 Evolvable Multi-layer Perceptron (MLP)
 ======================================
 

@@ -30,7 +30,7 @@ So far, we have implemented CQN - CQL applied to DQN, which cannot be used on co
 adding other CQL extensions of algorithms for offline RL.
 
 Example
-------------
+-------
 
 .. code-block:: python
 
@@ -67,8 +67,8 @@ Example
       state = dataset['observations'][i]
       next_state = dataset['observations'][i+1]
       if channels_last:
-          state = np.moveaxis(state, [3], [1])
-          next_state = np.moveaxis(next_state, [3], [1])
+          state = np.moveaxis(state, [-1], [-3])
+          next_state = np.moveaxis(next_state, [-1], [-3])
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])
@@ -82,7 +82,12 @@ Example
       # Learn according to agent's RL algorithm
       agent.learn(experiences)
 
-To configure the network architecture, pass a dict to the CQN ``net_config`` field. For an MLP, this can be as simple as:
+Neural Network Configuration
+----------------------------
+
+To configure the network architecture, pass a dict to the CQN ``net_config`` field. Full arguments can be found in the documentation
+of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+For an MLP, this can be as simple as:
 
 .. code-block:: python
 

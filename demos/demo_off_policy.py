@@ -116,13 +116,13 @@ if __name__ == "__main__":
         for agent in pop:  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
-            completed_episode_scores, losses = [], []
+            completed_episode_scores = []
             steps = 0
             epsilon = eps_start
 
             for idx_step in range(evo_steps // num_envs):
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [3], [1])
+                    state = np.moveaxis(state, [-1], [-3])
 
                 action = agent.getAction(state, epsilon)  # Get next action from agent
                 epsilon = max(
@@ -148,7 +148,7 @@ if __name__ == "__main__":
                         state,
                         action,
                         reward,
-                        np.moveaxis(next_state, [3], [1]),
+                        np.moveaxis(next_state, [-1], [-3]),
                         terminated,
                         is_vectorised=True,
                     )
