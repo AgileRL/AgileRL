@@ -196,7 +196,6 @@ class RainbowDQN:
                 ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
 
         else:
-            # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
             assert (
                 "arch" in self.net_config.keys()
