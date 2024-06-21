@@ -125,7 +125,7 @@ def test_create_initial_population_single_agent():
     state_dim = [4]
     action_dim = 2
     one_hot = False
-    net_config = {"arch": "mlp", "hidden_size": [8]}
+    net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
     accelerator = None
