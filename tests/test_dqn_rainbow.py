@@ -96,7 +96,8 @@ def test_initialize_dqn_with_minimum_parameters():
         "arch": "mlp",
         "hidden_size": [64, 64],
         "mlp_output_activation": "ReLU",
-    }
+        "min_hidden_layers": 2,
+    }, dqn.net_config
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
     assert dqn.learn_step == 5
@@ -190,7 +191,7 @@ def test_initialize_dqn_with_cnn_accelerator():
     index = 0
     net_config_cnn = {
         "arch": "cnn",
-        "hidden_size": [8],
+        "hidden_size": [8, 8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -440,14 +441,16 @@ def test_learns_from_experiences_one_hot(accelerator):
 
 
 @pytest.mark.parametrize(
-    "accelerator",
+    "accelerator, combined",
     [
-        None,
-        Accelerator(),
+        (None, True),
+        (Accelerator(), True),
+        (None, False),
+        (Accelerator(), False),
     ],
 )
 # learns from experiences and updates network parameters
-def test_learns_from_experiences_n_step(accelerator):
+def test_learns_from_experiences_n_step(accelerator, combined):
     state_dim = [4]
     action_dim = 2
     one_hot = False
@@ -455,7 +458,12 @@ def test_learns_from_experiences_n_step(accelerator):
 
     # Create an instance of the DQN class
     dqn = RainbowDQN(
-        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+        state_dim,
+        action_dim,
+        one_hot,
+        batch_size=batch_size,
+        accelerator=accelerator,
+        combined_reward=combined,
     )
 
     # Create a batch of experiences
@@ -505,14 +513,16 @@ def test_learns_from_experiences_n_step(accelerator):
 
 
 @pytest.mark.parametrize(
-    "accelerator",
+    "accelerator, combined",
     [
-        None,
-        Accelerator(),
+        (None, True),
+        (Accelerator(), True),
+        (None, False),
+        (Accelerator(), False),
     ],
 )
 # learns from experiences and updates network parameters
-def test_learns_from_experiences_per(accelerator):
+def test_learns_from_experiences_per(accelerator, combined):
     state_dim = [4]
     action_dim = 2
     one_hot = False
@@ -520,7 +530,12 @@ def test_learns_from_experiences_per(accelerator):
 
     # Create an instance of the DQN class
     dqn = RainbowDQN(
-        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+        state_dim,
+        action_dim,
+        one_hot,
+        batch_size=batch_size,
+        accelerator=accelerator,
+        combined_reward=combined,
     )
 
     # Create a batch of experiences
@@ -554,14 +569,16 @@ def test_learns_from_experiences_per(accelerator):
 
 
 @pytest.mark.parametrize(
-    "accelerator",
+    "accelerator, combined",
     [
-        None,
-        Accelerator(),
+        (None, True),
+        (Accelerator(), True),
+        (None, False),
+        (Accelerator(), False),
     ],
 )
 # learns from experiences and updates network parameters
-def test_learns_from_experiences_per_n_step(accelerator):
+def test_learns_from_experiences_per_n_step(accelerator, combined):
     state_dim = [4]
     action_dim = 2
     one_hot = False
@@ -569,7 +586,12 @@ def test_learns_from_experiences_per_n_step(accelerator):
 
     # Create an instance of the DQN class
     dqn = RainbowDQN(
-        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+        state_dim,
+        action_dim,
+        one_hot,
+        batch_size=batch_size,
+        accelerator=accelerator,
+        combined_reward=combined,
     )
 
     # Create a batch of experiences
@@ -704,7 +726,7 @@ def test_algorithm_test_loop_images():
 
     net_config_cnn = {
         "arch": "cnn",
-        "hidden_size": [8],
+        "hidden_size": [8, 8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -730,7 +752,7 @@ def test_algorithm_test_loop_images_unvectorized():
 
     net_config_cnn = {
         "arch": "cnn",
-        "hidden_size": [8],
+        "hidden_size": [8, 8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -942,6 +964,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
         "arch": "mlp",
         "hidden_size": [64, 64],
         "mlp_output_activation": "ReLU",
+        "min_hidden_layers": 2,
     }
     assert isinstance(dqn.actor, EvolvableMLP)
     assert isinstance(dqn.actor_target, EvolvableMLP)
@@ -963,7 +986,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
         "arch": "cnn",
-        "hidden_size": [8],
+        "hidden_size": [8, 8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1150,7 +1173,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         one_hot=False,
         net_config={
             "arch": "cnn",
-            "hidden_size": [8],
+            "hidden_size": [8, 8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
