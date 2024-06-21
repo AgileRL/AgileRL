@@ -1337,18 +1337,27 @@ def check_policy_q_learning_with_probe_env(
 ):
     print(f"Probe environment: {type(env).__name__}")
 
-    agent = algo_class(**algo_args, device=device)
+    agent = algo_class(**algo_args, vect_noise_dim=1, device=device)
 
     state, _ = env.reset()
     for _ in range(10000):
-        if agent.net_config["arch"] == "cnn":
-            state = {agent_id: np.expand_dims(s, 0) for agent_id, s in state.items()}
-        cont_actions, discrete_action = agent.getAction(state, epsilon=1)
+        # Make vectorized
+        state = {agent_id: np.expand_dims(s, 0) for agent_id, s in state.items()}
+        cont_actions, discrete_action = agent.getAction(state, training=True)
         action = discrete_action if agent.discrete_actions else cont_actions
         next_state, reward, done, _, _ = env.step(action)
-        if agent.net_config["arch"] == "cnn":
-            state = {agent_id: np.squeeze(s) for agent_id, s in state.items()}
-        memory.save2memory(state, cont_actions, reward, next_state, done)
+        reward = {
+            agent_id: np.expand_dims(np.array(r), 0) for agent_id, r in reward.items()
+        }
+        done = {
+            agent_id: np.expand_dims(np.array(d), 0) for agent_id, d in done.items()
+        }
+        mem_next_state = {
+            agent_id: np.expand_dims(ns, 0) for agent_id, ns in next_state.items()
+        }
+        memory.save2memory(
+            state, cont_actions, reward, mem_next_state, done, is_vectorised=True
+        )
         state = next_state
         if done[agent.agent_ids[0]]:
             state, _ = env.reset()
