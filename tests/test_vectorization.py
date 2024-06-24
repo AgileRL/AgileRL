@@ -170,7 +170,7 @@ class parallel_env_cont(ParallelEnv):
         return Box(0, 2, shape=(2,), dtype=float)
 
     def action_space(self, agent):
-        return Box(0, 2, shape=(2,), dtype=float)
+        return Box(0, 2, shape=(1,), dtype=float)
 
     def close(self):
         pass
@@ -266,12 +266,12 @@ def atari():
     return parallel_env_atari()
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_vectorisation_wrapper_petting_zoo_reset(env, request):
+def test_vectorisation_wrapper_petting_zoo_reset(env, request, n_envs):
     env = request.getfixturevalue(env)
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     vec_env.close()
@@ -280,12 +280,12 @@ def test_vectorisation_wrapper_petting_zoo_reset(env, request):
         assert len(infos[agent]) == n_envs
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_vectorisation_wrapper_petting_zoo_step(env, request):
+def test_vectorisation_wrapper_petting_zoo_step(env, request, n_envs):
     env = request.getfixturevalue(env)
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     for step in range(25):
@@ -307,16 +307,16 @@ def test_vectorisation_wrapper_petting_zoo_step(env, request):
             assert isinstance(infos, dict)
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env",
     [
         "petting_zoo_env_cont_actions",
     ],
 )
-def test_cont_action_observation_spaces(env, request):
+def test_cont_action_observation_spaces(env, request, n_envs):
     env = request.getfixturevalue(env)
     env.reset()
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     vec_env.reset()
     print(env.action_space("speaker_0").shape[0])
@@ -329,11 +329,11 @@ def test_cont_action_observation_spaces(env, request):
     ]
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize("env", ["petting_zoo_env_disc_actions", "atari"])
-def test_disc_action_observation_spaces(env, request):
+def test_disc_action_observation_spaces(env, request, n_envs):
     env = request.getfixturevalue(env)
     env.reset()
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     vec_env.reset()
     assert [env.action_space(agent).n for agent in env.agents] == [
@@ -344,13 +344,13 @@ def test_disc_action_observation_spaces(env, request):
     ]
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_basic_attributes(env, request):
+def test_basic_attributes(env, request, n_envs):
     env = request.getfixturevalue(env)
     env.reset()
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     assert env.agents == vec_env.agents
@@ -359,12 +359,12 @@ def test_basic_attributes(env, request):
     assert env.max_num_agents == vec_env.max_num_agents
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_close(env, request):
+def test_close(env, request, n_envs):
     env = request.getfixturevalue(env)
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     actions = {
@@ -381,12 +381,12 @@ def test_close(env, request):
     pass
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_seed(env, request):
+def test_seed(env, request, n_envs):
     env = request.getfixturevalue(env)
-    n_envs = 4
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     actions = {
@@ -397,12 +397,12 @@ def test_seed(env, request):
     vec_env.env.seed(0)
 
 
+@pytest.mark.parametrize("n_envs", [1])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_subproc_close(env, request):
+def test_subproc_close(env, request, n_envs):
     env = request.getfixturevalue(env)
-    n_envs = 1
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
 
@@ -422,10 +422,11 @@ def test_subproc_close(env, request):
     assert vec_env.env.closed is True
 
 
+@pytest.mark.parametrize("n_envs", [1, 4])
 @pytest.mark.parametrize(
     "env", ["petting_zoo_env_cont_actions", "petting_zoo_env_disc_actions", "atari"]
 )
-def test_sample_personas(env, request):
+def test_sample_personas(env, request, n_envs):
     env = request.getfixturevalue(env)
 
     def dummy_sp(is_train, is_val, path):
@@ -433,7 +434,6 @@ def test_sample_personas(env, request):
 
     env.sample_personas = dummy_sp
 
-    n_envs = 1
     vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
 
