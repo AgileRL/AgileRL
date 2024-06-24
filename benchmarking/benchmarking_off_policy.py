@@ -150,8 +150,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
 
 if __name__ == "__main__":
     with open("configs/training/dqn.yaml") as file:
-        td3_config = yaml.safe_load(file)
-    INIT_HP = td3_config["INIT_HP"]
-    MUTATION_PARAMS = td3_config["MUTATION_PARAMS"]
-    NET_CONFIG = td3_config["NET_CONFIG"]
+        config = yaml.safe_load(file)
+    INIT_HP = config["INIT_HP"]
+    MUTATION_PARAMS = config["MUTATION_PARAMS"]
+    NET_CONFIG = config["NET_CONFIG"]
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
