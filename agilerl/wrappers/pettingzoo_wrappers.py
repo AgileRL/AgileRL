@@ -39,7 +39,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         dict[AgentID, dict],
     ]:
         obs, rewards, terminations, truncations, infos = self.env.step(actions)
-        if np.any(list(terminations.values())) or np.any(list(truncations.values())):
+        if len(self.agents) <= 0:
             obs, infos = self.env.reset()
         return obs, rewards, terminations, truncations, infos
 
