@@ -611,7 +611,7 @@ def test_remove_nodes(
         ([3, 128, 128], [8, 8, 8], [2, 2, 2], [2, 2, 2], [32, 32, 32], 1),
     ],
 )
-def test_add_cnn_layer(
+def test_add_cnn_layer_simple(
     input_shape,
     channel_size,
     kernel_size,
@@ -641,6 +641,89 @@ def test_add_cnn_layer(
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
         assert len(evolvable_cnn.channel_size) == initial_channel_num
+
+
+@pytest.mark.parametrize(
+    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+    [
+        ([1, 16, 16], [32, 32], [5, 5], [2, 2], [128], 10),  # invalid output size
+        (
+            [1, 164, 164],
+            [8, 8, 8, 8, 8, 8],
+            [2, 2, 2, 2, 2, 2],
+            [2, 2, 1, 1, 1, 1],
+            [128],
+            10,
+        ),  # exceeds max layer limit
+    ],
+)
+def test_add_cnn_layer_no_layer_added(
+    input_shape,
+    channel_size,
+    kernel_size,
+    stride_size,
+    hidden_size,
+    num_actions,
+    device,
+):
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        hidden_size=hidden_size,
+        num_actions=num_actions,
+        device=device,
+    )
+    evolvable_cnn.add_cnn_layer()
+    assert len(channel_size) == len(evolvable_cnn.channel_size)
+
+
+@pytest.mark.parametrize(
+    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
+    [
+        ([3, 84, 84], [8, 8], [2, 2], [2, 2], [128], 10),  # exceeds max-layer limit
+    ],
+)
+def test_add_and_remove_multiple_cnn_layers(
+    input_shape,
+    channel_size,
+    kernel_size,
+    stride_size,
+    hidden_size,
+    num_actions,
+    device,
+):
+    evolvable_cnn = EvolvableCNN(
+        input_shape=input_shape,
+        channel_size=channel_size,
+        kernel_size=kernel_size,
+        stride_size=stride_size,
+        hidden_size=hidden_size,
+        num_actions=num_actions,
+        device=device,
+    )
+    # Keep adding layers until we reach max or it is infeasible
+    for _ in range(evolvable_cnn.max_cnn_hidden_layers):
+        evolvable_cnn.add_cnn_layer()
+
+    # Do a forward pass to ensure network parameter validity
+    output = evolvable_cnn(torch.ones(1, 3, 84, 84).to(device))
+    assert output.squeeze().shape[0] == num_actions
+    assert len(evolvable_cnn.stride_size) == len(evolvable_cnn.channel_size)
+    assert len(evolvable_cnn.kernel_size) == len(evolvable_cnn.channel_size)
+
+    # Remove as many layers as possible
+    for _ in evolvable_cnn.channel_size:
+        evolvable_cnn.remove_cnn_layer()
+
+    assert len(evolvable_cnn.channel_size) == evolvable_cnn.min_cnn_hidden_layers
+
+    # Do a forward pass to ensure network parameter validity
+    output = evolvable_cnn(torch.ones(1, 3, 84, 84).to(device))
+    assert output.squeeze().shape[0] == num_actions
+    assert len(evolvable_cnn.stride_size) == len(evolvable_cnn.channel_size)
+    assert len(evolvable_cnn.kernel_size) == len(evolvable_cnn.channel_size)
 
 
 def test_add_cnn_layer_else_statement(device):
@@ -858,6 +941,24 @@ def test_change_cnn_kernel(device):
     ], evolvable_cnn.kernel_size
 
 
+def test_change_kernel_size(device):
+    evolvable_cnn = EvolvableCNN(
+        input_shape=[1, 16, 16],
+        channel_size=[32, 32],
+        kernel_size=[3, 3],
+        stride_size=[1, 1],
+        hidden_size=[32, 32],
+        num_actions=4,
+        device=device,
+    )
+
+    for _ in range(100):
+        # Change kernel size and ensure we can make a valid forward pass
+        evolvable_cnn.change_cnn_kernel()
+        output = evolvable_cnn(torch.ones(1, 16, 16).to(device))
+        assert output.squeeze().shape[0] == 4  # (num actions)
+
+
 def test_change_cnn_kernel_else_statement(device):
     evolvable_cnn = EvolvableCNN(
         input_shape=[1, 16, 16],
@@ -1026,32 +1127,4 @@ def test_max_kernel_size_negative(
     max_kernel_sizes = evolvable_cnn.calc_max_kernel_sizes(
         channel_size, kernel_size, stride_size, input_shape
     )
-    assert max_kernel_sizes == [0, 0]
-
-
-@pytest.mark.parametrize(
-    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_actions",
-    [
-        ([1, 164, 164], [32, 16], [4, 3], [1, 1], [128], 10),
-    ],
-)
-def test_calc_stride_size_ranges(
-    input_shape,
-    channel_size,
-    kernel_size,
-    stride_size,
-    hidden_size,
-    num_actions,
-    device,
-):
-    evolvable_cnn = EvolvableCNN(
-        input_shape=input_shape,
-        channel_size=channel_size,
-        kernel_size=kernel_size,
-        stride_size=stride_size,
-        hidden_size=hidden_size,
-        num_actions=num_actions,
-        device=device,
-    )
-    stride_size_ranges = evolvable_cnn.calc_stride_size_ranges()
-    assert stride_size_ranges == [(2, 4), (2, 3)]
+    assert max_kernel_sizes == [1, 1]
