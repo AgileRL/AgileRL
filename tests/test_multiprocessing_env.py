@@ -71,7 +71,7 @@ def test_worker_cmd_not_implemented():
     with pytest.raises(NotImplementedError) as error:
         worker(remote, parent_remote, env_fn_wrapper)
 
-        assert error == NotImplementedError
+        assert error is NotImplementedError
 
 
 def test_vecenv():
