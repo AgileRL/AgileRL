@@ -109,7 +109,9 @@ class MultiAgentReplayBuffer:
             for j, arg in enumerate(args):
                 new_dict = {
                     key: (
-                        np.array(value[i]) if type(value[i]) != np.ndarray else value[i]
+                        np.array(value[i])
+                        if not isinstance(value[i], np.ndarray)
+                        else value[i]
                     )
                     for key, value in arg.items()
                 }

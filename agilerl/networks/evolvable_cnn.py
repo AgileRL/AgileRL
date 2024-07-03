@@ -679,39 +679,27 @@ class EvolvableCNN(nn.Module):
         max_kernels = self.calc_max_kernel_sizes(
             self.channel_size, self.kernel_size, self.stride_size, self.input_shape
         )
-        stride_size_ranges = self.calc_stride_size_ranges()
-
         if (
             len(self.channel_size) < self.max_cnn_hidden_layers
             and not any(i <= 2 for i in self.cnn_output_size[-2:])
             and max_kernels[-1] > 2
         ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
-            k_size = np.random.randint(3, max_kernels[-1] + 1)
+            k_size = np.random.randint(2, max_kernels[-1] + 1)
             self.kernel_size += [k_size]
-            stride_size_list = [
-                np.random.randint(tup[0], tup[1] + 1) for tup in stride_size_ranges
+            self.stride_size = self.stride_size + [
+                np.random.randint(1, self.stride_size[-1] + 1)
             ]
-            self.stride_size = stride_size_list + [1]
             self.recreate_nets()
         else:
             self.add_cnn_channel()
 
     def remove_cnn_layer(self):
         """Removes a hidden layer from convolutional neural network."""
-        stride_size_ranges = self.calc_stride_size_ranges()
         if len(self.channel_size) > self.min_cnn_hidden_layers:
             self.channel_size = self.channel_size[:-1]
             self.kernel_size = self.kernel_size[:-1]
-            stride_size_list = [
-                (
-                    np.random.randint(tup[0], tup[1] + 1)
-                    if not self.multi
-                    else min(np.random.randint(tup[0], tup[1] + 1), self.n_agents)
-                )
-                for tup in stride_size_ranges
-            ]
-            self.stride_size = stride_size_list[:-1]
+            self.stride_size = self.stride_size[:-1]
             self.recreate_nets(shrink_params=True)
         else:
             self.add_cnn_channel()
@@ -723,26 +711,23 @@ class EvolvableCNN(nn.Module):
         max_kernel_list = []
         height_in, width_in = input_shape[-2:]
         for idx, _ in enumerate(channel_size):
-            height_out = 1 + (height_in + 2 * 0 - 1 * (kernel_size[idx] - 1) - 1) / (
-                stride_size[idx]
+            height_out = 1 + np.floor(
+                (height_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
             )
-            width_out = 1 + (width_in + 2 * (0) - 1 * (kernel_size[idx] - 1) - 1) / (
-                stride_size[idx]
+            width_out = 1 + np.floor(
+                (width_in + 2 * (0) - kernel_size[idx]) / (stride_size[idx])
             )
             max_kernel_size = min(height_out, width_out) * 0.25
-            if max_kernel_size < 0:
-                max_kernel_size = 0
+            max_kernel_size = int(max_kernel_size)
+            if max_kernel_size <= 0:
+                max_kernel_size = 1
             elif max_kernel_size > 9:
                 max_kernel_size = 9
-            max_kernel_list.append(int(max_kernel_size))
+            max_kernel_list.append(max_kernel_size)
             height_in = height_out
             width_in = width_out
-        return max_kernel_list
 
-    def calc_stride_size_ranges(self):
-        "Calculates a range of stride sizes for each convolutional layer of the feature net."
-        stride_range_list = [(2, k_size) for k_size in self.kernel_size]
-        return stride_range_list
+        return max_kernel_list
 
     def change_cnn_kernel(self):
         """Randomly alters convolution kernel of random CNN layer."""
@@ -754,7 +739,6 @@ class EvolvableCNN(nn.Module):
             self.kernel_size[hidden_layer] = np.random.randint(
                 1, max_kernels[hidden_layer] + 1
             )
-
             self.recreate_nets()
         else:
             self.add_cnn_layer()
