@@ -40,10 +40,9 @@ class DummyEnv:
         self.vect = vect
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
-            self.n_envs = num_envs
             self.num_envs = num_envs
         else:
-            self.n_envs = 1
+            self.num_envs = 1
 
     def reset(self):
         return np.random.rand(*self.state_size), "info_string"
@@ -51,9 +50,9 @@ class DummyEnv:
     def step(self, action):
         return (
             np.random.rand(*self.state_size),
-            np.random.randint(0, 5, self.n_envs),
-            np.random.randint(0, 2, self.n_envs),
-            np.random.randint(0, 2, self.n_envs),
+            np.random.randint(0, 5, self.num_envs),
+            np.random.randint(0, 2, self.num_envs),
+            np.random.randint(0, 2, self.num_envs),
             "info_string",
         )
 
@@ -63,7 +62,7 @@ class DummyBanditEnv:
         self.arms = arms
         self.state_size = (arms,) + state_size
         self.action_size = 1
-        self.n_envs = 1
+        self.num_envs = 1
 
     def reset(self):
         return np.random.rand(*self.state_size)
@@ -544,9 +543,18 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = lambda state: np.random.randn(env.action_size)
+    mock_agent.get_action.side_effect = lambda state: np.random.randint(
+        env.action_size, size=(1,)
+    )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
-    mock_agent.learn.side_effect = lambda experiences: random.random()
+    if algo in [RainbowDQN]:
+        mock_agent.learn.side_effect = lambda experiences, **kwargs: (
+            random.random(),
+            random.random(),
+            random.random(),
+        )
+    else:
+        mock_agent.learn.side_effect = lambda experiences, **kwargs: random.random()
     mock_agent.save_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.load_checkpoint.side_effect = lambda *args, **kwargs: None
     mock_agent.wrap_models.side_effect = lambda *args, **kwargs: None
@@ -944,10 +952,9 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
     mock_env.vect = vect
     if mock_env.vect:
         mock_env.state_size = (num_envs,) + mock_env.state_size
-        mock_env.n_envs = num_envs
         mock_env.num_envs = num_envs
     else:
-        mock_env.n_envs = 1
+        mock_env.num_envs = 1
 
     def reset():
         return np.random.rand(*mock_env.state_size), "info_string"
@@ -957,9 +964,9 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
     def step(action):
         return (
             np.random.rand(*mock_env.state_size),
-            np.random.randint(0, 5, mock_env.n_envs),
-            np.random.randint(0, 2, mock_env.n_envs),
-            np.random.randint(0, 2, mock_env.n_envs),
+            np.random.randint(0, 5, mock_env.num_envs),
+            np.random.randint(0, 2, mock_env.num_envs),
+            np.random.randint(0, 2, mock_env.num_envs),
             "info_string",
         )
 
@@ -973,7 +980,7 @@ def mocked_bandit_env(state_size, action_size):
     mock_env = MagicMock()
     mock_env.state_size = (action_size,) + state_size
     mock_env.action_size = 1
-    mock_env.n_envs = 1
+    mock_env.num_envs = 1
 
     def reset():
         return np.random.rand(*mock_env.state_size)
@@ -983,7 +990,7 @@ def mocked_bandit_env(state_size, action_size):
     def step(action):
         return (
             np.random.rand(*mock_env.state_size),
-            np.random.rand(mock_env.n_envs),
+            np.random.rand(mock_env.num_envs),
         )
 
     mock_env.step.side_effect = step
@@ -1094,12 +1101,14 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
 
 
 @pytest.mark.parametrize(
-    "state_size, action_size, vect, per, n_step, algo",
+    "state_size, action_size, vect, per, n_step, algo, num_envs, learn_step",
     [
-        ((6,), 2, True, False, False, DQN),
-        ((6,), 2, False, False, False, DDPG),
-        ((6,), 2, False, False, False, TD3),
-        ((6,), 2, True, True, True, RainbowDQN),
+        ((6,), 2, True, False, False, DQN, 1, 2),
+        ((6,), 2, False, False, False, DDPG, 1, 2),
+        ((6,), 2, False, False, False, TD3, 1, 2),
+        ((6,), 2, True, False, False, DQN, 2, 1),
+        ((6,), 2, False, False, False, DDPG, 2, 1),
+        ((6,), 2, False, False, False, TD3, 2, 1),
     ],
 )
 def test_train_off_policy_agent_calls_made(
@@ -1112,17 +1121,21 @@ def test_train_off_policy_agent_calls_made(
     per,
     n_step,
     n_step_memory,
+    num_envs,
+    learn_step,
 ):
     for accelerator_flag in [True, False]:
         if accelerator_flag:
             accelerator = Accelerator()
         else:
             accelerator = None
-        if not isinstance(algo, RainbowDQN):
-            n_step_memory = None
-            per = False
-            n_step = False
+        n_step_memory = None
+        per = False
+        n_step = False
         mock_population = [mocked_agent_off_policy for _ in range(6)]
+        for agent in mock_population:
+            agent.learn_step = learn_step
+        env.num_envs = num_envs
 
         pop, pop_fitnesses = train_off_policy(
             env,
@@ -1152,6 +1165,68 @@ def test_train_off_policy_agent_calls_made(
         if accelerator is not None:
             mocked_agent_off_policy.wrap_models.assert_called()
             mocked_agent_off_policy.unwrap_models.assert_called()
+
+
+@pytest.mark.parametrize(
+    "state_size, action_size, vect, algo, num_envs, learn_step, n_step, per",
+    [
+        ((6,), 2, True, RainbowDQN, 1, 2, True, False),
+        ((6,), 2, True, RainbowDQN, 2, 1, True, False),
+        ((6,), 2, True, RainbowDQN, 1, 2, True, True),
+        ((6,), 2, True, RainbowDQN, 2, 1, True, True),
+        ((6,), 2, True, RainbowDQN, 1, 2, False, False),
+        ((6,), 2, True, RainbowDQN, 2, 1, False, False),
+    ],
+)
+def test_train_off_policy_agent_calls_made_rainbow(
+    env,
+    algo,
+    mocked_agent_off_policy,
+    tournament,
+    mutations,
+    memory,
+    per,
+    n_step,
+    n_step_memory,
+    num_envs,
+    learn_step,
+):
+    accelerator = None
+    n_step_memory = n_step_memory if n_step else None
+    print(n_step_memory)
+    mock_population = [mocked_agent_off_policy for _ in range(6)]
+    for agent in mock_population:
+        agent.learn_step = learn_step
+    env.num_envs = num_envs
+
+    pop, pop_fitnesses = train_off_policy(
+        env,
+        "env_name",
+        "Rainbow DQN",
+        mock_population,
+        memory,
+        INIT_HP=None,
+        MUT_P=None,
+        swap_channels=False,
+        max_steps=50,
+        evo_steps=50,
+        eval_loop=1,
+        n_step=n_step,
+        per=per,
+        n_step_memory=n_step_memory,
+        tournament=tournament,
+        mutation=mutations,
+        wb=False,
+        accelerator=accelerator,
+        save_elite=True,
+    )
+
+    mocked_agent_off_policy.get_action.assert_called()
+    mocked_agent_off_policy.learn.assert_called()
+    mocked_agent_off_policy.test.assert_called()
+    if accelerator is not None:
+        mocked_agent_off_policy.wrap_models.assert_called()
+        mocked_agent_off_policy.unwrap_models.assert_called()
 
 
 @pytest.mark.parametrize("state_size, action_size, vect", [((6,), 2, False)])

@@ -613,14 +613,14 @@ def check_policy_q_learning_with_probe_env(
             predicted_q_values = agent.critic(input_combined).detach().cpu().numpy()[0]
         else:
             predicted_q_values = agent.critic(state, action).detach().cpu().numpy()[0]
-        print("---")
-        print("q", q_values, predicted_q_values)
+        # print("---")
+        # print("q", q_values, predicted_q_values)
         assert np.allclose(q_values, predicted_q_values, atol=0.1)
 
         if policy_values is not None:
             predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
 
-            print("pol", policy_values, predicted_policy_values)
+            # print("pol", policy_values, predicted_policy_values)
             assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
 
 
