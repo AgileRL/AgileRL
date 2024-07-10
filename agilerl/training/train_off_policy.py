@@ -190,8 +190,8 @@ def train_off_policy(
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
-        is_vectorised = True
         num_envs = env.num_envs
+        is_vectorised = True
     else:
         is_vectorised = False
         num_envs = 1
@@ -287,7 +287,6 @@ def train_off_policy(
 
                 # Act in environment
                 next_state, reward, done, trunc, _ = env.step(action)
-
                 scores += np.array(reward)
 
                 if not is_vectorised:
@@ -354,7 +353,44 @@ def train_off_policy(
                     agent.beta += fraction * (1.0 - agent.beta)
 
                 # Learn according to learning frequency
-                if len(memory) >= agent.batch_size and memory.counter > learning_delay:
+                # Handle learn_step > num_envs
+                if agent.learn_step > num_envs:
+                    learn_step = agent.learn_step // num_envs
+                    if (
+                        idx_step % learn_step == 0
+                        and len(memory) >= agent.batch_size
+                        and memory.counter > learning_delay
+                    ):
+                        if per:
+                            experiences = sampler.sample(agent.batch_size, agent.beta)
+                            if n_step_memory is not None:
+                                n_step_experiences = n_step_sampler.sample(
+                                    experiences[6]
+                                )
+                                experiences += n_step_experiences
+                            loss, idxs, priorities = agent.learn(
+                                experiences, n_step=n_step, per=per
+                            )
+                            memory.update_priorities(idxs, priorities)
+                        else:
+                            experiences = sampler.sample(
+                                agent.batch_size,
+                                return_idx=True if n_step_memory is not None else False,
+                            )
+                            if n_step_memory is not None:
+                                n_step_experiences = n_step_sampler.sample(
+                                    experiences[5]
+                                )
+                                experiences += n_step_experiences
+                                loss, *_ = agent.learn(experiences, n_step=n_step)
+                            else:
+                                loss = agent.learn(experiences)
+                                if algo == "Rainbow DQN":
+                                    loss, *_ = loss
+
+                elif (
+                    len(memory) >= agent.batch_size and memory.counter > learning_delay
+                ):
                     for _ in range(num_envs // agent.learn_step):
                         # Sample replay buffer
                         # Learn according to agent's RL algorithm
