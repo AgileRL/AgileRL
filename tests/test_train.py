@@ -41,8 +41,9 @@ class DummyEnv:
         if self.vect:
             self.state_size = (num_envs,) + self.state_size
             self.num_envs = num_envs
+            self.n_envs = num_envs
         else:
-            self.num_envs = 1
+            self.n_envs = 1
 
     def reset(self):
         return np.random.rand(*self.state_size), "info_string"
@@ -50,9 +51,9 @@ class DummyEnv:
     def step(self, action):
         return (
             np.random.rand(*self.state_size),
-            np.random.randint(0, 5, self.num_envs),
-            np.random.randint(0, 2, self.num_envs),
-            np.random.randint(0, 2, self.num_envs),
+            np.random.randint(0, 5, self.n_envs),
+            np.random.randint(0, 2, self.n_envs),
+            np.random.randint(0, 2, self.n_envs),
             "info_string",
         )
 
@@ -353,7 +354,7 @@ class DummyNStepMemory(DummyMemory):
         super().__init__()
 
     def save_to_memory(self, state, action, reward, next_state, done, is_vectorised):
-        return super().save_to_memory(state, action, reward, next_state, done)
+        return super().save_to_memory(state, action, reward, next_state, done)  #
 
     def save_to_memory_vect_envs(self, state, action, reward, next_state, done):
         self.state_size = state.shape
@@ -1103,12 +1104,12 @@ def test_train_off_policy(env, population_off_policy, tournament, mutations, mem
 @pytest.mark.parametrize(
     "state_size, action_size, vect, per, n_step, algo, num_envs, learn_step",
     [
-        ((6,), 2, True, False, False, DQN, 1, 2),
+        ((6,), 2, False, False, False, DQN, 1, 2),
         ((6,), 2, False, False, False, DDPG, 1, 2),
         ((6,), 2, False, False, False, TD3, 1, 2),
         ((6,), 2, True, False, False, DQN, 2, 1),
-        ((6,), 2, False, False, False, DDPG, 2, 1),
-        ((6,), 2, False, False, False, TD3, 2, 1),
+        ((6,), 2, True, False, False, DDPG, 2, 1),
+        ((6,), 2, True, False, False, TD3, 2, 1),
     ],
 )
 def test_train_off_policy_agent_calls_made(
@@ -1170,11 +1171,11 @@ def test_train_off_policy_agent_calls_made(
 @pytest.mark.parametrize(
     "state_size, action_size, vect, algo, num_envs, learn_step, n_step, per",
     [
-        ((6,), 2, True, RainbowDQN, 1, 2, True, False),
+        ((6,), 2, False, RainbowDQN, 1, 2, True, False),
         ((6,), 2, True, RainbowDQN, 2, 1, True, False),
-        ((6,), 2, True, RainbowDQN, 1, 2, True, True),
+        ((6,), 2, False, RainbowDQN, 1, 2, True, True),
         ((6,), 2, True, RainbowDQN, 2, 1, True, True),
-        ((6,), 2, True, RainbowDQN, 1, 2, False, False),
+        ((6,), 2, False, RainbowDQN, 1, 2, False, False),
         ((6,), 2, True, RainbowDQN, 2, 1, False, False),
     ],
 )
@@ -1193,7 +1194,6 @@ def test_train_off_policy_agent_calls_made_rainbow(
 ):
     accelerator = None
     n_step_memory = n_step_memory if n_step else None
-    print(n_step_memory)
     mock_population = [mocked_agent_off_policy for _ in range(6)]
     for agent in mock_population:
         agent.learn_step = learn_step
