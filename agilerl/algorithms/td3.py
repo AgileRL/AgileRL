@@ -480,6 +480,7 @@ class TD3:
                 noise = noise.to(self.device)
             noise = noise.clamp(-noise_clip, noise_clip)
             next_actions = next_actions + noise
+            next_actions.clamp_(self.min_action, self.max_action)
 
             # Compute the target, y_j, making use of twin critic networks
             if self.arch == "mlp":

@@ -443,6 +443,7 @@ class DDPG:
             noise = actions.data.normal_(0, policy_noise)
             noise = noise.clamp(-noise_clip, noise_clip)
             next_actions = next_actions + noise
+            next_actions.clamp_(self.min_action, self.max_action)
 
             if self.arch == "mlp":
                 next_input_combined = torch.cat([next_states, next_actions], 1)
