@@ -350,19 +350,34 @@ def test_returns_expected_action_one_hot(accelerator):
 @pytest.mark.parametrize(
     "accelerator, net_config, state_dim",
     [
-        (None, {"arch": "mlp", 
+        (
+            None,
+            {
+                "arch": "mlp",
                 "hidden_size": [64, 64],
-                }, [4]),
-        (None, {"arch": "cnn", 
-                "channel_size": [16, 32, 32], 
-                "kernel_size": [8, 4, 3], 
-                "stride_size": [4, 2, 1], 
+            },
+            [4],
+        ),
+        (
+            None,
+            {
+                "arch": "cnn",
+                "channel_size": [16, 32, 32],
+                "kernel_size": [8, 4, 3],
+                "stride_size": [4, 2, 1],
                 "hidden_size": [64, 64],
                 "normalize": False,
-                }, [4, 84, 84]),
-        (Accelerator(), {"arch": "mlp", 
-                         "hidden_size": [64, 64],
-                         }, [4]),
+            },
+            [4, 84, 84],
+        ),
+        (
+            Accelerator(),
+            {
+                "arch": "mlp",
+                "hidden_size": [64, 64],
+            },
+            [4],
+        ),
     ],
 )
 # learns from experiences and updates network parameters
@@ -375,7 +390,12 @@ def test_learns_from_experiences(accelerator, net_config, state_dim):
 
     # Create an instance of the DQN class
     dqn = RainbowDQN(
-        state_dim, action_dim, one_hot, net_config=net_config, batch_size=batch_size, accelerator=accelerator
+        state_dim,
+        action_dim,
+        one_hot,
+        net_config=net_config,
+        batch_size=batch_size,
+        accelerator=accelerator,
     )
 
     # Create a batch of experiences
