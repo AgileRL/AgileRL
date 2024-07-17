@@ -348,30 +348,41 @@ def test_returns_expected_action_one_hot(accelerator):
 
 
 @pytest.mark.parametrize(
-    "accelerator",
+    "accelerator, net_config, state_dim",
     [
-        None,
-        Accelerator(),
+        (None, {"arch": "mlp", 
+                "hidden_size": [64, 64],
+                }, [4]),
+        (None, {"arch": "cnn", 
+                "channel_size": [16, 32, 32], 
+                "kernel_size": [8, 4, 3], 
+                "stride_size": [4, 2, 1], 
+                "hidden_size": [64, 64],
+                "normalize": False,
+                }, [4, 84, 84]),
+        (Accelerator(), {"arch": "mlp", 
+                         "hidden_size": [64, 64],
+                         }, [4]),
     ],
 )
 # learns from experiences and updates network parameters
-def test_learns_from_experiences(accelerator):
+def test_learns_from_experiences(accelerator, net_config, state_dim):
     torch.autograd.set_detect_anomaly(True)
-    state_dim = [4]
+    # state_dim = [4]
     action_dim = 2
     one_hot = False
     batch_size = 64
 
     # Create an instance of the DQN class
     dqn = RainbowDQN(
-        state_dim, action_dim, one_hot, batch_size=batch_size, accelerator=accelerator
+        state_dim, action_dim, one_hot, net_config=net_config, batch_size=batch_size, accelerator=accelerator
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, state_dim[0])
+    states = torch.randn(batch_size, *state_dim)
     actions = torch.randint(0, action_dim, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, state_dim[0])
+    next_states = torch.randn(batch_size, *state_dim)
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
