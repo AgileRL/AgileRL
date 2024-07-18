@@ -193,7 +193,7 @@ class DDPG:
         self.critic_network = None
 
         if actor_network is not None and critic_network is not None:
-            assert type(actor_network) == type(
+            assert type(actor_network) is type(
                 critic_network
             ), "'actor_network' and 'critic_network' must be the same type."
             self.actor = actor_network

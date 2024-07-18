@@ -525,7 +525,7 @@ class EvolvableCNN(nn.Module):
 
         return layer
 
-    def forward(self, x, xc=None, q=True):
+    def forward(self, x, xc=None, q=True, log=False):
         """Returns output of neural network.
 
         :param x: Neural network input
@@ -562,10 +562,16 @@ class EvolvableCNN(nn.Module):
             advantage = advantage.view(batch_size, self.num_actions, self.num_atoms)
 
             x = value + advantage - advantage.mean(1, keepdim=True)
-            x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                -1, self.num_actions, self.num_atoms
-            )
-            x = x.clamp(min=1e-3)
+            if log:
+                x = F.log_softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                    -1, self.num_actions, self.num_atoms
+                )
+                return x
+            else:
+                x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                    -1, self.num_actions, self.num_atoms
+                )
+                x = x.clamp(min=1e-3)
 
             if q:
                 x = torch.sum(x * self.support, dim=2)

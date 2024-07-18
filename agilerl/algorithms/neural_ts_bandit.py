@@ -231,7 +231,7 @@ class NeuralTS:
         self.criterion = nn.MSELoss()
 
     def _init_weights_gaussian(self, m, mean, std):
-        if type(m) == nn.Linear:
+        if isinstance(m, nn.Linear):
             init.normal_(m.weight, mean=mean, std=std)
             if m.bias is not None:
                 init.constant_(m.bias, 0)
