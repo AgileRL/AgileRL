@@ -1198,6 +1198,10 @@ class MATD3:
             "actor_targets_state_dict": [
                 actor_target.state_dict() for actor_target in self.actor_targets
             ],
+            "actor_optimizers_state_dict": [
+                actor_optimizer.state_dict()
+                for actor_optimizer in self.actor_optimizers
+            ],
             "critics_1_init_dict": [critic_1.init_dict for critic_1 in self.critics_1],
             "critics_1_state_dict": [
                 critic_1.state_dict() for critic_1 in self.critics_1
@@ -1209,13 +1213,9 @@ class MATD3:
                 critic_target_1.state_dict()
                 for critic_target_1 in self.critic_targets_1
             ],
-            "actor_optimizers_state_dict": [
-                actor_optimizer.state_dict()
-                for actor_optimizer in self.actor_optimizers
-            ],
-            "critic_2_optimizers_state_dict": [
-                critic_2_optimizer.state_dict()
-                for critic_2_optimizer in self.critic_2_optimizers
+            "critic_1_optimizers_state_dict": [
+                critic_1_optimizer.state_dict()
+                for critic_1_optimizer in self.critic_1_optimizers
             ],
             "critics_2_init_dict": [critic_2.init_dict for critic_2 in self.critics_2],
             "critics_2_state_dict": [
@@ -1228,7 +1228,7 @@ class MATD3:
                 critic_target_2.state_dict()
                 for critic_target_2 in self.critic_targets_2
             ],
-            "critic_1_optimizers_state_dict": [
+            "critic_2_optimizers_state_dict": [
                 critic_2_optimizer.state_dict()
                 for critic_2_optimizer in self.critic_2_optimizers
             ],
