@@ -365,7 +365,6 @@ class DDPG:
             action = (action + self.action_noise()).clip(
                 self.min_action, self.max_action
             )
-
         return action
 
     def action_noise(self):
@@ -394,7 +393,7 @@ class DDPG:
 
     def reset_action_noise(self, indices):
         """Reset action noise."""
-        self.current_noise[indices] = 0
+        self.current_noise[indices] = self.mean_noise[indices]
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
         """Updates agent network parameters to learn from experiences.
@@ -407,6 +406,7 @@ class DDPG:
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
+
         if self.accelerator is not None:
             states = states.to(self.accelerator.device)
             actions = actions.to(self.accelerator.device)
