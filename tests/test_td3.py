@@ -1399,32 +1399,38 @@ def test_initialize_td3_with_incorrect_actor_net():
         assert td3
 
 
-# Returns the input action scaled to the action space defined by self.min_action and self.max_action.
-def test_action_scaling():
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    td3 = TD3(state_dim=[4], action_dim=1, one_hot=False, max_action=1, min_action=-1)
-    scaled_action = td3.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
-
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    td3 = TD3(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-2)
-    scaled_action = td3.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
-
-    action = np.array([0.1, 0.2, 0.3, 0])
-    td3 = TD3(state_dim=[4], action_dim=1, one_hot=False, max_action=1, min_action=0)
-    scaled_action = td3.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
-
-    action = np.array([0.1, 0.2, 0.3, 0])
-    td3 = TD3(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=0)
-    scaled_action = td3.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
-
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    td3 = TD3(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-1)
-    scaled_action = td3.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+@pytest.mark.parametrize(
+    "action_array_vals, min_max, activation_func",
+    [
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 1), "Tanh"),
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 1), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], (0, 1), "Tanh"),
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-2, 2), "Sigmoid"),
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 2), "Softmax"),
+    ],
+)
+def test_action_scaling(action_array_vals, min_max, activation_func):
+    net_config = {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": activation_func,
+    }
+    min_action, max_action = min_max
+    min_tanh, max_tanh = -1, 1
+    action = np.array(action_array_vals)
+    ddpg = TD3(
+        state_dim=[4],
+        action_dim=1,
+        one_hot=False,
+        max_action=max_action,
+        min_action=min_action,
+        net_config=net_config,
+    )
+    scaled_action = ddpg.scale_to_action_space(action)
+    expected_result = min_action + (action - min_tanh) * (max_action - min_action) / (
+        max_tanh - min_tanh
+    )
+    assert np.allclose(scaled_action, expected_result)
 
 
 @pytest.mark.parametrize(
