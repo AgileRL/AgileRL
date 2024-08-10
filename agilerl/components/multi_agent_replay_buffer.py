@@ -43,35 +43,41 @@ class MultiAgentReplayBuffer:
 
     def _process_transition(self, experiences, np_array=False):
         """Returns transition dictionary from experiences."""
-        transition = {}
-        for field in self.field_names:
-            field_dict = {}
-            for agent_id in self.agent_ids:
-                ts = [getattr(e, field)[agent_id] for e in experiences if e is not None]
+        transition = {field: {} for field in self.field_names}
+        experiences_filtered = [e for e in experiences if e is not None]
 
-                # Handle numpy stacking
-                ts = np.stack(ts, axis=0)
-                if len(ts.shape) == 1:
+        for field in self.field_names:
+            # Precompute conditions outside the inner loop
+            is_binary_field = field in [
+                "done",
+                "termination",
+                "terminated",
+                "truncation",
+                "truncated",
+            ]
+
+            for agent_id in self.agent_ids:
+                # Extract all experiences for the current field and agent
+                ts = np.array(
+                    [getattr(e, field)[agent_id] for e in experiences_filtered]
+                )
+
+                # Adjust shape if necessary
+                if ts.ndim == 1:
                     ts = np.expand_dims(ts, axis=1)
 
-                if field in [
-                    "done",
-                    "termination",
-                    "terminated",
-                    "truncation",
-                    "truncated",
-                ]:
+                # Convert binary fields to uint8
+                if is_binary_field:
                     ts = ts.astype(np.uint8)
 
+                # Optionally convert to PyTorch tensor
                 if not np_array:
-                    # Handle torch tensor creation
-                    ts = torch.from_numpy(ts).float()
-                    # Place on device
+                    ts = torch.tensor(ts, dtype=torch.float32)
                     if self.device is not None:
                         ts = ts.to(self.device)
 
-                field_dict[agent_id] = ts
-            transition[field] = field_dict
+                transition[field][agent_id] = ts
+
         return transition
 
     def sample(self, batch_size, *args):
