@@ -473,7 +473,10 @@ def test_returns_expected_action_training():
 
 
 # learns from experiences and updates network parameters
-def test_learns_from_experiences():
+@pytest.mark.parametrize(
+    "min_action, max_action", [(-1, 1), ([-1, 0], 1), (-1, [0, 1]), ([-1, -2], [1, 0])]
+)
+def test_learns_from_experiences(min_action, max_action):
     state_dim = (3, 32, 32)
     action_dim = 2
     one_hot = False
@@ -493,6 +496,8 @@ def test_learns_from_experiences():
         state_dim,
         action_dim,
         one_hot,
+        min_action=min_action,
+        max_action=max_action,
         net_config=net_config_cnn,
         batch_size=batch_size,
         policy_freq=policy_freq,
@@ -1166,31 +1171,73 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
 
 # Returns the input action scaled to the action space defined by self.min_action and self.max_action.
-def test_action_scaling():
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=1, min_action=-1)
+@pytest.mark.parametrize(
+    "action_array_vals, min_max, activation_func",
+    [
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 1), "Tanh"),
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 1), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], (0, 1), "Tanh"),
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-2, 2), "Sigmoid"),
+        ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 2), "Softmax"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Sigmoid"),
+    ],
+)
+def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
+    net_config = {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "mlp_output_activation": activation_func,
+    }
+    min_action, max_action = min_max
+    if activation_func == "Tanh":
+        min_activation_val, max_activation_val = -1, 1
+    else:
+        min_activation_val, max_activation_val = 0, 1
+    action = np.array(action_array_vals)
+    ddpg = DDPG(
+        state_dim=[4],
+        action_dim=4,
+        one_hot=False,
+        max_action=max_action,
+        min_action=min_action,
+        net_config=net_config,
+    )
     scaled_action = ddpg.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
+    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
+    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
+    expected_result = min_action + (action - min_activation_val) * (
+        max_action - min_action
+    ) / (max_activation_val - min_activation_val)
+    assert np.allclose(scaled_action, expected_result)
 
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-2)
-    scaled_action = ddpg.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
 
-    action = np.array([0.1, 0.2, 0.3, 0])
-    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=1, min_action=0)
-    scaled_action = ddpg.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
-
-    action = np.array([0.1, 0.2, 0.3, 0])
-    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=0)
-    scaled_action = ddpg.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
-
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
-    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, max_action=2, min_action=-1)
-    scaled_action = ddpg.scale_to_action_space(action)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+@pytest.mark.parametrize(
+    "min, max, action, expected_result",
+    [
+        (0, 1, [1.1, 0.75, -1], [1.0, 0.75, 0]),
+        ([0.5, 0, 0.1], 1, [0, 0, 0.2], [0.5, 0, 0.2]),
+        (0, [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1]),
+    ],
+)
+def test_custom_clamp(min, max, action, expected_result):
+    if isinstance(min, list):
+        min = np.array(min)
+    if isinstance(max, list):
+        max = np.array(max)
+    ddpg = DDPG(
+        state_dim=[4],
+        action_dim=1,
+        one_hot=False,
+    )
+    input = torch.tensor(action, dtype=torch.float32)
+    clamped_actions = ddpg.custom_clamp(min, max, input).type(torch.float32)
+    expected_result = torch.tensor(expected_result)
+    assert clamped_actions.dtype == expected_result.dtype
 
 
 @pytest.mark.parametrize(

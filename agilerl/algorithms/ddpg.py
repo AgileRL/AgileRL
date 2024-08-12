@@ -110,14 +110,31 @@ class DDPG:
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
         assert isinstance(
-            max_action, (float, int, np.float32, np.float64, np.integer)
+            max_action,
+            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
         ), "Max action must be a float or integer."
         assert isinstance(
-            min_action, (float, int, np.float32, np.float64, np.integer)
+            min_action,
+            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
         ), "Min action must be a float or integer."
-        assert max_action > min_action, "Max action must be greater than min action."
-        assert max_action > 0, "Max action must be greater than zero."
-        assert min_action <= 0, "Min action must be less than or equal to zero."
+        if isinstance(min_action, list):
+            assert (
+                len(min_action) == action_dim
+            ), "Length of min_action must be equal to action_dim."
+            min_action = np.array(min_action)
+        if isinstance(max_action, list):
+            assert (
+                len(max_action) == action_dim
+            ), "Length of max_action must be equal to action_dim."
+            max_action = np.array(max_action)
+        if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
+            assert np.all(
+                max_action > min_action
+            ), "Max action must be greater than min action."
+        else:
+            assert (
+                max_action > min_action
+            ), "Max action must be greater than min action."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, action_dim)
@@ -224,7 +241,7 @@ class DDPG:
             ), "Net config must contain arch: 'mlp' or 'cnn'."
 
             if "mlp_output_activation" not in self.net_config.keys():
-                if self.min_action < 0:
+                if np.any(self.min_action < 0):
                     net_config["mlp_output_activation"] = "Tanh"
                 else:
                     net_config["mlp_output_activation"] = "Sigmoid"
@@ -318,13 +335,48 @@ class DDPG:
 
         self.criterion = nn.MSELoss()
 
-    def scale_to_action_space(self, action):
+    def scale_to_action_space(self, action, convert_to_torch=False):
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
         :type action: numpy.ndarray
+        :param convert_to_torch: Flag to convert array to torch, defaults to False
+        :type convert_to_torch: bool, optional
         """
-        return np.where(action > 0, action * self.max_action, action * -self.min_action)
+        if convert_to_torch:
+            max_action = (
+                torch.from_numpy(self.max_action).to(self.device)
+                if isinstance(self.max_action, (np.ndarray))
+                else self.max_action
+            )
+            min_action = (
+                torch.from_numpy(self.min_action).to(self.device)
+                if isinstance(self.min_action, (np.ndarray))
+                else self.min_action
+            )
+        else:
+            max_action = self.max_action
+            min_action = self.min_action
+
+        if self.net_config.get("mlp_output_activation") in ["Tanh"]:
+            pre_scaled_min = -1
+            pre_scaled_max = 1
+        elif self.net_config.get("mlp_output_activation") in ["Sigmoid", "Softmax"]:
+            pre_scaled_min = 0
+            pre_scaled_max = 1
+        else:
+            return np.where(action > 0, action * max_action, action * -min_action)
+
+        if not (
+            isinstance(min_action, (np.ndarray, torch.Tensor))
+            or isinstance(max_action, (np.ndarray, torch.Tensor))
+        ):
+            if pre_scaled_min == min_action and pre_scaled_max == max_action:
+                return action
+
+        return min_action + (max_action - min_action) * (action - pre_scaled_min) / (
+            pre_scaled_max - pre_scaled_min
+        )
 
     def get_action(self, state, training=True):
         """Returns the next action to take in the environment.
@@ -391,6 +443,27 @@ class DDPG:
             )
         return noise.astype(np.float32)
 
+    def custom_clamp(self, min, max, input):
+        """Multi-dimensional clamp function"""
+        if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
+            return torch.clamp(input, min, max)
+
+        min = (
+            torch.from_numpy(min).to(self.device)
+            if isinstance(min, np.ndarray)
+            else min
+        )
+        max = torch.from_numpy(max) if isinstance(max, np.ndarray) else max
+
+        if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
+            min = torch.full_like(max, min).to(self.device)
+        if isinstance(min, torch.Tensor) and isinstance(max, (int, float)):
+            max = torch.full_like(min, max).to(self.device)
+
+        output = torch.max(torch.min(input, max), min).type(input.dtype)
+
+        return output
+
     def reset_action_noise(self, indices):
         """Reset action noise."""
         self.current_noise[indices] = self.mean_noise[indices]
@@ -434,16 +507,15 @@ class DDPG:
 
         with torch.no_grad():
             next_actions = self.actor_target(next_states)
-            # Scale actions
-            next_actions = torch.where(
-                next_actions > 0,
-                next_actions * self.max_action,
-                next_actions * -self.min_action,
+            next_actions = self.scale_to_action_space(
+                next_actions, convert_to_torch=True
             )
             noise = actions.data.normal_(0, policy_noise)
-            noise = noise.clamp(-noise_clip, noise_clip)
+            noise = self.custom_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
-            next_actions.clamp_(self.min_action, self.max_action)
+            next_actions = self.custom_clamp(
+                self.min_action, self.max_action, next_actions
+            )
 
             if self.arch == "mlp":
                 next_input_combined = torch.cat([next_states, next_actions], 1)
@@ -467,10 +539,8 @@ class DDPG:
         self.learn_counter += 1
         if self.learn_counter % self.policy_freq == 0:
             policy_actions = self.actor.forward(states)
-            policy_actions = torch.where(
-                policy_actions > 0,
-                policy_actions * self.max_action,
-                policy_actions * -self.min_action,
+            policy_actions = self.scale_to_action_space(
+                policy_actions, convert_to_torch=True
             )
             if self.arch == "mlp":
                 input_combined = torch.cat([states, policy_actions], 1)
