@@ -118,8 +118,14 @@ class TD3:
             (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
         ), "Min action must be a float or integer."
         if isinstance(min_action, list):
+            assert (
+                len(min_action) == action_dim
+            ), "Length of min_action must be equal to action_dim."
             min_action = np.array(min_action)
         if isinstance(max_action, list):
+            assert (
+                len(max_action) == action_dim
+            ), "Length of max_action must be equal to action_dim."
             max_action = np.array(max_action)
         if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
             assert np.all(
@@ -240,7 +246,7 @@ class TD3:
             ), "Net config must contain arch: 'mlp' or 'cnn'."
 
             if "mlp_output_activation" not in self.net_config.keys():
-                if self.min_action < 0:
+                if np.any(self.min_action < 0):
                     self.net_config["mlp_output_activation"] = "Tanh"
                 else:
                     self.net_config["mlp_output_activation"] = "Sigmoid"
@@ -392,8 +398,12 @@ class TD3:
         else:
             return np.where(action > 0, action * max_action, action * -min_action)
 
-        if (pre_scaled_min == min_action) and (pre_scaled_max == max_action):
-            return action
+        if not (
+            isinstance(min_action, (np.ndarray, torch.Tensor))
+            or isinstance(max_action, (np.ndarray, torch.Tensor))
+        ):
+            if pre_scaled_min == min_action and pre_scaled_max == max_action:
+                return action
 
         return min_action + (max_action - min_action) * (action - pre_scaled_min) / (
             pre_scaled_max - pre_scaled_min

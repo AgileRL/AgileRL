@@ -502,7 +502,10 @@ def test_returns_expected_action_training():
 
 
 # learns from experiences and updates network parameters
-def test_learns_from_experiences():
+@pytest.mark.parametrize(
+    "min_action, max_action", [(-1, 1), ([-1, 0], 1), (-1, [0, 1]), ([-1, -2], [1, 0])]
+)
+def test_learns_from_experiences(min_action, max_action):
     state_dim = (3, 32, 32)
     action_dim = 2
     one_hot = False
@@ -522,7 +525,8 @@ def test_learns_from_experiences():
         state_dim,
         action_dim,
         one_hot,
-        max_action,
+        min_action=min_action,
+        max_action=max_action,
         net_config=net_config_cnn,
         batch_size=batch_size,
         policy_freq=2,
@@ -1407,29 +1411,40 @@ def test_initialize_td3_with_incorrect_actor_net():
         ([0.1, 0.2, 0.3, 0], (0, 1), "Tanh"),
         ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-2, 2), "Sigmoid"),
         ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 2), "Softmax"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Sigmoid"),
     ],
 )
-def test_action_scaling(action_array_vals, min_max, activation_func):
+def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     net_config = {
         "arch": "mlp",
         "hidden_size": [64, 64],
         "mlp_output_activation": activation_func,
     }
     min_action, max_action = min_max
-    min_tanh, max_tanh = -1, 1
+    if activation_func == "Tanh":
+        min_activation_val, max_activation_val = -1, 1
+    else:
+        min_activation_val, max_activation_val = 0, 1
     action = np.array(action_array_vals)
-    ddpg = TD3(
+    td3 = TD3(
         state_dim=[4],
-        action_dim=1,
+        action_dim=4,
         one_hot=False,
         max_action=max_action,
         min_action=min_action,
         net_config=net_config,
     )
-    scaled_action = ddpg.scale_to_action_space(action)
-    expected_result = min_action + (action - min_tanh) * (max_action - min_action) / (
-        max_tanh - min_tanh
-    )
+    scaled_action = td3.scale_to_action_space(action)
+    min_action = np.array(min_action) if isinstance(min_action, list) else min_action
+    max_action = np.array(max_action) if isinstance(max_action, list) else max_action
+    expected_result = min_action + (action - min_activation_val) * (
+        max_action - min_action
+    ) / (max_activation_val - min_activation_val)
     assert np.allclose(scaled_action, expected_result)
 
 
