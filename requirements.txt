@@ -20,4 +20,4 @@ torch==2.0.1
 tqdm==4.65.0
 transformers==4.36.0
 ucimlrepo==0.0.3
-wandb==0.13.10
+wandb==0.17.6
