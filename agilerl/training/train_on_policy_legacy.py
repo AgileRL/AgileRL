@@ -3,9 +3,9 @@ import warnings
 from datetime import datetime
 
 import numpy as np
+import wandb
 from tqdm import trange
 
-import wandb
 from agilerl.utils.utils import calculate_vectorized_scores
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
