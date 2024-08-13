@@ -1217,25 +1217,38 @@ def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
 
 
 @pytest.mark.parametrize(
-    "min, max, action, expected_result",
+    "min, max, action, expected_result, device",
     [
-        (0, 1, [1.1, 0.75, -1], [1.0, 0.75, 0]),
-        ([0.5, 0, 0.1], 1, [0, 0, 0.2], [0.5, 0, 0.2]),
-        (0, [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1]),
+        (0, 1, [1.1, 0.75, -1], [1.0, 0.75, 0], "cpu"),
+        ([0.5, 0, 0.1], 1, [0, 0, 0.2], [0.5, 0, 0.2], "cpu"),
+        (0, [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cpu"),
+        (
+            [-1, -1, -1],
+            [1, 1, 1],
+            [[-2, 1, 0.25], [1.5, -1, 0.75]],
+            [[-1, 1, 0.25], [1, -1, 0.75]],
+            "cpu",
+        ),
+        (0, 1, [1.1, 0.75, -1], [1.0, 0.75, 0], "cuda"),
+        ([0.5, 0, 0.1], 1, [0, 0, 0.2], [0.5, 0, 0.2], "cuda"),
+        (0, [0.75, 1.0, 0.1], [1.0, 0.75, 0.1], [0.75, 0.75, 0.1], "cuda"),
+        (
+            [-1, -1, -1],
+            [1, 1, 1],
+            [[-2, 1, 0.25], [1.5, -1, 0.75]],
+            [[-1, 1, 0.25], [1, -1, 0.75]],
+            "cuda",
+        ),
     ],
 )
-def test_custom_clamp(min, max, action, expected_result):
+def test_multi_dim_clamp(min, max, action, expected_result, device):
     if isinstance(min, list):
         min = np.array(min)
     if isinstance(max, list):
         max = np.array(max)
-    ddpg = DDPG(
-        state_dim=[4],
-        action_dim=1,
-        one_hot=False,
-    )
-    input = torch.tensor(action, dtype=torch.float32)
-    clamped_actions = ddpg.custom_clamp(min, max, input).type(torch.float32)
+    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, device=device)
+    input = torch.tensor(action, dtype=torch.float32).to(device)
+    clamped_actions = ddpg.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
     assert clamped_actions.dtype == expected_result.dtype
 

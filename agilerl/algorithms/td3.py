@@ -409,7 +409,7 @@ class TD3:
             pre_scaled_max - pre_scaled_min
         )
 
-    def custom_clamp(self, min, max, input):
+    def multi_dim_clamp(self, min, max, input):
         """Multi-dimensional clamp function"""
         if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
             return torch.clamp(input, min, max)
@@ -419,7 +419,11 @@ class TD3:
             if isinstance(min, np.ndarray)
             else min
         )
-        max = torch.from_numpy(max) if isinstance(max, np.ndarray) else max
+        max = (
+            torch.from_numpy(max).to(self.device)
+            if isinstance(max, np.ndarray)
+            else max
+        )
 
         if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
             min = torch.full_like(max, min).to(self.device)
@@ -547,9 +551,9 @@ class TD3:
                 noise = noise.to(self.accelerator.device)
             else:
                 noise = noise.to(self.device)
-            noise = self.custom_clamp(-noise_clip, noise_clip, noise)
+            noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
-            next_actions = self.custom_clamp(
+            next_actions = self.multi_dim_clamp(
                 self.min_action, self.max_action, next_actions
             )
 

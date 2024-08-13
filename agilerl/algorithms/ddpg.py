@@ -443,7 +443,7 @@ class DDPG:
             )
         return noise.astype(np.float32)
 
-    def custom_clamp(self, min, max, input):
+    def multi_dim_clamp(self, min, max, input):
         """Multi-dimensional clamp function"""
         if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
             return torch.clamp(input, min, max)
@@ -453,7 +453,11 @@ class DDPG:
             if isinstance(min, np.ndarray)
             else min
         )
-        max = torch.from_numpy(max) if isinstance(max, np.ndarray) else max
+        max = (
+            torch.from_numpy(max).to(self.device)
+            if isinstance(max, np.ndarray)
+            else max
+        )
 
         if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
             min = torch.full_like(max, min).to(self.device)
@@ -511,9 +515,9 @@ class DDPG:
                 next_actions, convert_to_torch=True
             )
             noise = actions.data.normal_(0, policy_noise)
-            noise = self.custom_clamp(-noise_clip, noise_clip, noise)
+            noise = self.multi_dim_clamp(-noise_clip, noise_clip, noise)
             next_actions = next_actions + noise
-            next_actions = self.custom_clamp(
+            next_actions = self.multi_dim_clamp(
                 self.min_action, self.max_action, next_actions
             )
 
