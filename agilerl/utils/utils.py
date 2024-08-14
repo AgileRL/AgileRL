@@ -78,6 +78,8 @@ def create_population(
     :type action_dim: int
     :param one_hot: One-hot encoding
     :type one_hot: bool
+    :param net_config: Network configuration
+    :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
     :param actor_network: Custom actor network, defaults to None
