@@ -326,7 +326,7 @@ def test_policy_q_learning_with_probe_env():
 def test_policy_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsImageEnv()
-    learn_steps = 3005
+    learn_steps = 10000
     algo_args = {
         "state_dim": (env.observation_space.shape),
         "action_dim": env.action_space.shape[0],
