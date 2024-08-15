@@ -26,6 +26,10 @@ class PPO:
     :type one_hot: bool
     :param discrete_actions: Boolean flag to indicate a discrete action space
     :type discrete_actions: bool, optional
+    :param max_action: Upper bound of the action space, defaults to 1
+    :type max_action: float, optional
+    :param min_action: Lower bound of the action space, defaults to -1
+    :type min_action: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -74,6 +78,8 @@ class PPO:
         action_dim,
         one_hot,
         discrete_actions,
+        max_action=1,
+        min_action=-1,
         index=0,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         batch_size=64,
@@ -167,6 +173,8 @@ class PPO:
         self.action_dim = action_dim
         self.one_hot = one_hot
         self.discrete_actions = discrete_actions
+        self.max_action = max_action
+        self.min_action = min_action
         self.net_config = net_config
         self.batch_size = batch_size
         self.lr = lr
@@ -229,8 +237,10 @@ class PPO:
             if "mlp_output_activation" not in self.net_config.keys():
                 if self.discrete_actions:
                     self.net_config["mlp_output_activation"] = "Softmax"
-                else:
+                elif np.any(self.min_action < 0):
                     self.net_config["mlp_output_activation"] = "Tanh"
+                else:
+                    self.net_config["mlp_output_activation"] = "Sigmoid"
 
             if "mlp_activation" not in self.net_config.keys():
                 self.net_config["mlp_activation"] = "Tanh"
@@ -348,6 +358,50 @@ class PPO:
 
         return state.float()
 
+    def scale_to_action_space(self, action, convert_to_torch=False):
+        """Scales actions to action space defined by self.min_action and self.max_action.
+
+        :param action: Action to be scaled
+        :type action: numpy.ndarray
+        :param convert_to_torch: Flag to convert array to torch, defaults to False
+        :type convert_to_torch: bool, optional
+        """
+        if convert_to_torch:
+            max_action = (
+                torch.from_numpy(self.max_action).to(self.device)
+                if isinstance(self.max_action, (np.ndarray))
+                else self.max_action
+            )
+            min_action = (
+                torch.from_numpy(self.min_action).to(self.device)
+                if isinstance(self.min_action, (np.ndarray))
+                else self.min_action
+            )
+        else:
+            max_action = self.max_action
+            min_action = self.min_action
+
+        mlp_output_activation = self.actor.mlp_output_activation
+        if mlp_output_activation in ["Tanh"]:
+            pre_scaled_min = -1
+            pre_scaled_max = 1
+        elif mlp_output_activation in ["Sigmoid", "Softmax"]:
+            pre_scaled_min = 0
+            pre_scaled_max = 1
+        else:
+            return np.where(action > 0, action * max_action, action * -min_action)
+
+        if not (
+            isinstance(min_action, (np.ndarray, torch.Tensor))
+            or isinstance(max_action, (np.ndarray, torch.Tensor))
+        ):
+            if pre_scaled_min == min_action and pre_scaled_max == max_action:
+                return action
+
+        return min_action + (max_action - min_action) * (action - pre_scaled_min) / (
+            pre_scaled_max - pre_scaled_min
+        )
+
     def get_action(self, state, action=None, grad=False):
         """Returns the next action to take in the environment.
 
@@ -392,10 +446,23 @@ class PPO:
         dist_entropy = dist.entropy()
 
         if return_tensors:
-            return action, action_logprob, dist_entropy, state_values
+            return (
+                (
+                    self.scale_to_action_space(action)
+                    if not self.discrete_actions
+                    else action
+                ),
+                action_logprob,
+                dist_entropy,
+                state_values,
+            )
         else:
             return (
-                action.cpu().data.numpy(),
+                (
+                    self.scale_to_action_space(action.cpu().data.numpy())
+                    if not self.discrete_actions
+                    else action.cpu().data.numpy()
+                ),
                 action_logprob.cpu().data.numpy(),
                 dist_entropy.cpu().data.numpy(),
                 state_values.cpu().data.numpy(),
