@@ -287,7 +287,7 @@ if __name__ == "__main__":
     total_steps = 0
 
     # RL training loop
-    while np.less([agent.steps[-1] for agent in pop], max_steps).all():
+    while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
