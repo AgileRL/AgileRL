@@ -389,10 +389,11 @@ class TD3:
             max_action = self.max_action
             min_action = self.min_action
 
-        if self.net_config.get("mlp_output_activation") in ["Tanh"]:
+        mlp_output_activation = self.actor.mlp_output_activation
+        if mlp_output_activation in ["Tanh"]:
             pre_scaled_min = -1
             pre_scaled_max = 1
-        elif self.net_config.get("mlp_output_activation") in ["Sigmoid", "Softmax"]:
+        elif mlp_output_activation in ["Sigmoid", "Softmax"]:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
