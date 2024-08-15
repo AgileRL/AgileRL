@@ -46,7 +46,7 @@ A selector agent is also trained to select which skill to execute.
 Code
 ----
 
-The following code should run without any issues. The comments are designed to help you understand how to use PettingZoo with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
+The following code should run without any issues. The comments are designed to help you understand how to use Gymnasium with AgileRL. If you have any questions, please feel free to ask in the `Discord server <https://discord.com/invite/eB8HyTA2ux>`_.
 
 Imports
 ^^^^^^^
