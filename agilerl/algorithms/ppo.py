@@ -448,7 +448,7 @@ class PPO:
         if return_tensors:
             return (
                 (
-                    self.scale_to_action_space(action)
+                    self.scale_to_action_space(action, convert_to_torch=True)
                     if not self.discrete_actions
                     else action
                 ),
