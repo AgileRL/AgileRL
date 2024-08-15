@@ -349,7 +349,7 @@ if __name__ == "__main__":
             agent.steps[-1] += idx_step + 1
             total_steps += idx_step + 1
 
-        if (agent.steps[-1] + 1) % INIT_HP["EVO_STEPS"] == 0:
+        if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
             if INIT_HP["WANDB"]:
                 wandb.log(
