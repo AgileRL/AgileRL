@@ -278,11 +278,7 @@ if __name__ == "__main__":
         )
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    pbar = trange(
-        INIT_HP["MAX_STEPS"],
-        unit="step",
-        bar_format=bar_format,
-        ascii=True)
+    pbar = trange(INIT_HP["MAX_STEPS"], unit="step", bar_format=bar_format, ascii=True)
 
     total_steps = 0
 
