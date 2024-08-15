@@ -278,18 +278,12 @@ if __name__ == "__main__":
         )
 
     bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    pbar = trange(
-        INIT_HP["EPISODES"],
-        unit="ep",
-        bar_format=bar_format,
-        ascii=True,
-        dynamic_ncols=True,
-    )
+    pbar = trange(INIT_HP["MAX_STEPS"], unit="step", bar_format=bar_format, ascii=True)
 
     total_steps = 0
 
     # RL training loop
-    for idx_epi in pbar:
+    while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
         for agent in pop:  # Loop through population
             state = env.reset()[0]  # Reset environment at start of episode
             score = 0
@@ -351,7 +345,7 @@ if __name__ == "__main__":
             agent.steps[-1] += idx_step + 1
             total_steps += idx_step + 1
 
-        if (idx_epi + 1) % INIT_HP["EVO_EPOCHS"] == 0:
+        if (agent.steps[-1]) % INIT_HP["EVO_STEPS"] == 0:
             mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
             if INIT_HP["WANDB"]:
                 wandb.log(
@@ -362,9 +356,8 @@ if __name__ == "__main__":
                 )
             print(
                 f"""
-                --- Epoch {idx_epi + 1} ---
-                Score avgs:\t{mean_scores}
-                Steps:\t\t{total_steps}
+                --- Global Steps {total_steps} ---
+                Score:\t\t{mean_scores}
                 """,
                 end="\r",
             )
