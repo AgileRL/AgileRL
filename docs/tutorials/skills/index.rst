@@ -239,8 +239,8 @@ Once the skills have been defined, training agents to solve them is very straigh
          "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
          "TARGET_KL": None,  # Target KL divergence threshold
          "TARGET_SCORE": 2000,
-         "EPISODES": 1000,
-         "EVO_EPOCHS": 5,
+         "MAX_STEPS": 10_000_000,
+         "EVO_STEPS": 10_000,
          "UPDATE_EPOCHS": 4,  # Number of policy update epochs
          # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
          "CHANNELS_LAST": False,
@@ -303,8 +303,8 @@ Once the skills have been defined, training agents to solve them is very straigh
                swap_channels=INIT_HP[
                   "CHANNELS_LAST"
                ],  # Swap image channel from last to first
-               n_episodes=INIT_HP["EPISODES"],  # Max number of training episodes
-               evo_epochs=INIT_HP["EVO_EPOCHS"],  # Evolution frequency
+               max_steps=INIT_HP["MAX_STEPS"],  # Max number of training episodes
+               evo_steps=INIT_HP["EVO_STEPS"],  # Evolution frequency
                evo_loop=3,  # Number of evaluation episodes per agent
                target=INIT_HP["TARGET_SCORE"],  # Target score for early stopping
                tournament=None,  # Tournament selection object
