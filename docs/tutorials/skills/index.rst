@@ -239,7 +239,7 @@ Once the skills have been defined, training agents to solve them is very straigh
          "MAX_GRAD_NORM": 0.5,  # Maximum norm for gradient clipping
          "TARGET_KL": None,  # Target KL divergence threshold
          "TARGET_SCORE": 2000,
-         "MAX_STEPS": 10_000_000,
+         "MAX_STEPS": 1_000_000,
          "EVO_STEPS": 10_000,
          "UPDATE_EPOCHS": 4,  # Number of policy update epochs
          # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
@@ -396,12 +396,10 @@ Next we can define the variables we will need in our training loop.
 
       bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
       pbar = trange(
-         INIT_HP["EPISODES"],
-         unit="ep",
-         bar_format=bar_format,
-         ascii=True,
-         dynamic_ncols=True,
-      )
+        INIT_HP["MAX_STEPS"],
+        unit="step",
+        bar_format=bar_format,
+        ascii=True)
 
       total_steps = 0
 
@@ -413,7 +411,7 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
    .. code-block:: python
 
       # RL training loop
-      for idx_epi in pbar:
+      while np.less([agent.steps[-1] for agent in pop], INIT_HP["MAX_STEPS"]).all():
          for agent in pop:  # Loop through population
                state = env.reset()[0]  # Reset environment at start of episode
                score = 0
@@ -475,23 +473,22 @@ Finally, we can run the training loop for the selector agent. Each skill agent's
                agent.steps[-1] += idx_step + 1
                total_steps += idx_step + 1
 
-         if (idx_epi + 1) % INIT_HP["EVO_EPOCHS"] == 0:
-               mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
-               if INIT_HP["WANDB"]:
-                  wandb.log(
-                     {
-                           "global_step": total_steps,
-                           "train/mean_score": np.mean(mean_scores),
-                     }
-                  )
-               print(
-                  f"""
-                  --- Epoch {idx_epi + 1} ---
-                  Score avgs:\t{mean_scores}
-                  Steps:\t\t{total_steps}
-                  """,
-                  end="\r",
-               )
+         if (agent.steps[-1] + 1) % INIT_HP["EVO_STEPS"] == 0:
+            mean_scores = np.mean([agent.scores[-20:] for agent in pop], axis=1)
+            if INIT_HP["WANDB"]:
+                wandb.log(
+                    {
+                        "global_step": total_steps,
+                        "train/mean_score": np.mean(mean_scores),
+                    }
+                )
+            print(
+                f"""
+                --- Global Steps {total_steps} ---
+                Score:\t\t{mean_scores}
+                """,
+                end="\r",
+            )
 
       if INIT_HP["WANDB"]:
          wandb.finish()
