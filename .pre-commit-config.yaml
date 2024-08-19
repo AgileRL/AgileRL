@@ -32,7 +32,7 @@ repos:
                 - --skip=*.css,*.js,*.map,*.scss,*.svg
                 - --ignore-words-list=magent,pres,roate
     - repo: https://github.com/astral-sh/ruff-pre-commit
-      rev: v0.5.7
+      rev: v0.6.1
       hooks:
           - id: ruff
             args:
