@@ -113,6 +113,32 @@ class PPO:
         assert isinstance(
             discrete_actions, bool
         ), "Discrete actions flag must be boolean value True or False."
+        assert isinstance(
+            max_action,
+            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
+        ), "Max action must be a float or integer."
+        assert isinstance(
+            min_action,
+            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
+        ), "Min action must be a float or integer."
+        if isinstance(min_action, list):
+            assert (
+                len(min_action) == action_dim
+            ), "Length of min_action must be equal to action_dim."
+            min_action = np.array(min_action)
+        if isinstance(max_action, list):
+            assert (
+                len(max_action) == action_dim
+            ), "Length of max_action must be equal to action_dim."
+            max_action = np.array(max_action)
+        if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
+            assert np.all(
+                max_action > min_action
+            ), "Max action must be greater than min action."
+        else:
+            assert (
+                max_action > min_action
+            ), "Max action must be greater than min action."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -697,6 +723,11 @@ class PPO:
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
