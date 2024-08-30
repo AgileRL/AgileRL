@@ -562,7 +562,7 @@ def test_learns_from_experiences():
     action_dim = 2
     one_hot = False
     discrete_actions = True
-    batch_size = 10
+    batch_size = 45
     net_config_cnn = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -585,17 +585,23 @@ def test_learns_from_experiences():
     actor = ppo.actor
     actor_pre_learn_sd = str(copy.deepcopy(ppo.actor.state_dict()))
 
-    num_steps = 50
-    num_envs = 8
+    # Create batch size + 1 samples to ensure we can handle this
+    num_steps = batch_size + 1
 
     # Create a batch of experiences
-    states = torch.rand(num_steps, num_envs, *state_dim)
-    actions = torch.randint(0, action_dim, (num_steps, num_envs)).float()
-    log_probs = torch.randn(num_steps, num_envs)
-    rewards = torch.randn(num_steps, num_envs)
-    dones = torch.randint(0, 2, (num_steps, num_envs))
-    values = torch.randn(num_steps, num_envs)
-    next_states = torch.rand(num_envs, *state_dim)
+    states = torch.rand(num_steps, *state_dim)
+    actions = torch.randint(0, action_dim, (num_steps,)).float()
+    log_probs = torch.randn(
+        num_steps,
+    )
+    rewards = torch.randn(
+        num_steps,
+    )
+    dones = torch.randint(0, 2, (num_steps,))
+    values = torch.randn(
+        num_steps,
+    )
+    next_states = torch.rand(1, *state_dim)
 
     experiences = [states, actions, log_probs, rewards, dones, values, next_states]
     # Call the learn method
@@ -636,17 +642,22 @@ def test_learns_from_experiences_continuous_accel():
     actor = ppo.actor
     actor_pre_learn_sd = str(copy.deepcopy(ppo.actor.state_dict()))
 
-    num_steps = 50
-    num_envs = 1
+    num_steps = 11
 
     # Create a batch of experiences
-    states = torch.rand(num_steps, num_envs, *state_dim)
-    actions = torch.rand(num_steps, num_envs, action_dim)
-    log_probs = torch.randn(num_steps, num_envs)
-    rewards = torch.randn(num_steps, num_envs)
-    dones = torch.randint(0, 2, (num_steps, num_envs))
-    values = torch.randn(num_steps, num_envs)
-    next_state = torch.rand(num_envs, *state_dim)
+    states = torch.rand(num_steps, *state_dim)
+    actions = torch.rand(num_steps, action_dim)
+    log_probs = torch.randn(
+        num_steps,
+    )
+    rewards = torch.randn(
+        num_steps,
+    )
+    dones = torch.randint(0, 2, (num_steps,))
+    values = torch.randn(
+        num_steps,
+    )
+    next_state = torch.rand(1, *state_dim)
 
     experiences = [states, actions, log_probs, rewards, dones, values, next_state]
     # Call the learn method

@@ -576,55 +576,58 @@ class PPO:
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                _, log_prob, entropy, value = self.get_action(
-                    state=states[minibatch_idxs],
-                    action=actions[minibatch_idxs],
-                    grad=True,
-                )
+                if len(minibatch_idxs) > 1:
+                    _, log_prob, entropy, value = self.get_action(
+                        state=states[minibatch_idxs],
+                        action=actions[minibatch_idxs],
+                        grad=True,
+                    )
 
-                logratio = log_prob - log_probs[minibatch_idxs]
-                ratio = logratio.exp()
+                    logratio = log_prob - log_probs[minibatch_idxs]
+                    ratio = logratio.exp()
 
-                with torch.no_grad():
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [
-                        ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
-                    ]
+                    with torch.no_grad():
+                        approx_kl = ((ratio - 1) - logratio).mean()
+                        clipfracs += [
+                            ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
+                        ]
 
-                minibatch_advs = advantages[minibatch_idxs]
-                minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
-                    minibatch_advs.std() + 1e-8
-                )
+                    minibatch_advs = advantages[minibatch_idxs]
+                    minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
+                        minibatch_advs.std() + 1e-8
+                    )
 
-                # Policy loss
-                pg_loss1 = -minibatch_advs * ratio
-                pg_loss2 = -minibatch_advs * torch.clamp(
-                    ratio, 1 - self.clip_coef, 1 + self.clip_coef
-                )
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                    # Policy loss
+                    pg_loss1 = -minibatch_advs * ratio
+                    pg_loss2 = -minibatch_advs * torch.clamp(
+                        ratio, 1 - self.clip_coef, 1 + self.clip_coef
+                    )
+                    pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Value loss
-                value = value.view(-1)
-                v_loss_unclipped = (value - returns[minibatch_idxs]) ** 2
-                v_clipped = values[minibatch_idxs] + torch.clamp(
-                    value - values[minibatch_idxs], -self.clip_coef, self.clip_coef
-                )
-                v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
-                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                v_loss = 0.5 * v_loss_max.mean()
-                entropy_loss = entropy.mean()
-                loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                    # Value loss
+                    value = value.view(-1)
+                    v_loss_unclipped = (value - returns[minibatch_idxs]) ** 2
+                    v_clipped = values[minibatch_idxs] + torch.clamp(
+                        value - values[minibatch_idxs], -self.clip_coef, self.clip_coef
+                    )
+                    v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    v_loss = 0.5 * v_loss_max.mean()
+                    entropy_loss = entropy.mean()
+                    loss = (
+                        pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                    )
 
-                # actor + critic loss backprop
-                self.optimizer.zero_grad()
-                if self.accelerator is not None:
-                    self.accelerator.backward(loss)
-                else:
-                    loss.backward()
-                clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                    # actor + critic loss backprop
+                    self.optimizer.zero_grad()
+                    if self.accelerator is not None:
+                        self.accelerator.backward(loss)
+                    else:
+                        loss.backward()
+                    clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
 
-                mean_loss += loss.item()
+                    mean_loss += loss.item()
 
             if self.target_kl is not None:
                 if approx_kl > self.target_kl:
