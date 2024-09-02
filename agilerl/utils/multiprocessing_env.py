@@ -9,9 +9,10 @@ https://github.com/Farama-Foundation/SuperSuit/issues/43#issuecomment-751792111
 from multiprocessing import Pipe, Process
 
 import numpy as np
+from pettingzoo.utils.env import ParallelEnv
 
 
-def worker(remote, parent_remote, env_fn_wrapper):
+def worker(remote, parent_remote, env_fn_wrapper, env_args={}):
     """Worker class
 
     References:
@@ -19,6 +20,8 @@ def worker(remote, parent_remote, env_fn_wrapper):
     """
     parent_remote.close()
     env = env_fn_wrapper.x()
+    if not isinstance(env, ParallelEnv):
+        env = env.parallel_env(**env_args)
     while True:
         cmd, data = remote.recv()
         if cmd == "step":
@@ -141,8 +144,12 @@ class SubprocVecEnv(VecEnv):
         https://github.com/openai/baselines/tree/master/baselines/common/vec_env
     """
 
-    def __init__(self, env_fns):
-        self.env = env_fns[0]()
+    def __init__(self, env_fns, env_args={}):
+        env = env_fns[0]()
+        if isinstance(env, ParallelEnv):
+            self.env = env
+        else:
+            self.env = env.parallel_env(**env_args)
         self.waiting = False
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
@@ -151,7 +158,8 @@ class SubprocVecEnv(VecEnv):
         self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(self.nenvs)])
         self.ps = [
             Process(
-                target=worker, args=(work_remote, remote, CloudpickleWrapper(env_fn))
+                target=worker,
+                args=(work_remote, remote, CloudpickleWrapper(env_fn), env_args),
             )
             for (work_remote, remote, env_fn) in zip(
                 self.work_remotes, self.remotes, env_fns
