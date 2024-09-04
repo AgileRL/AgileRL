@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import types
 from typing import Any
 
 import gymnasium.spaces
@@ -12,23 +11,15 @@ from agilerl.utils.multiprocessing_env import SubprocVecEnv
 
 
 class PettingZooAutoResetParallelWrapper(ParallelEnv):
-    def __init__(
-        self,
-        env: ParallelEnv[AgentID, ObsType, ActionType] | types.ModuleType,
-        env_args={},
-    ):
-        if not isinstance(env, ParallelEnv):
-            self.env_instance = env.parallel_env(**env_args)
-        else:
-            self.env_instance = env
+    def __init__(self, env: ParallelEnv[AgentID, ObsType, ActionType]):
         self.env = env
-        self.metadata = self.env_instance.metadata
-        self.possible_agents = self.env_instance.possible_agents
+        self.metadata = env.metadata
+        self.possible_agents = env.possible_agents
 
         # Not every environment has the .state_space attribute implemented
         try:
             self.state_space = (
-                self.env_instance.state_space  # pyright: ignore[reportGeneralTypeIssues]
+                self.env.state_space  # pyright: ignore[reportGeneralTypeIssues]
             )
         except AttributeError:
             pass
@@ -50,11 +41,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         dict[AgentID, dict],
     ]:
         obs, rewards, terminations, truncations, infos = self.env.step(actions)
-        # if np.any(list(terminations.values())) or np.any(list(truncations.values())):
-        #     obs, infos = self.env.reset()
-        if np.any(
-            np.array(terminations.values()) or np.any(np.array(truncations.values()))
-        ):
+        if np.any(list(terminations.values())) or np.any(list(truncations.values())):
             obs, infos = self.env.reset()
         return obs, rewards, terminations, truncations, infos
 
@@ -79,16 +66,16 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         return self.env.action_space(agent)
 
 
-class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
+class PettingZooVectorizationParallelWrapper(ParallelEnv):
     def __init__(
         self,
         env: ParallelEnv[AgentID, ObsType, ActionType],
         n_envs: int,
         env_args: dict[Any, Any] = {},
     ):
-        super().__init__(env=env)
+        # super().__init__(env=env)
         self.num_envs = n_envs
         self.env = SubprocVecEnv(
-            [lambda: self.env for _ in range(n_envs)], env_args=env_args
+            [lambda: env for _ in range(n_envs)], env_args=env_args
         )
         return

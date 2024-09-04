@@ -9,27 +9,50 @@ https://github.com/Farama-Foundation/SuperSuit/issues/43#issuecomment-751792111
 from multiprocessing import Pipe, Process
 
 import numpy as np
+
+# from agilerl.wrappers.pettingzoo_wrappers import PettingZooAutoResetParallelWrapper
+from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo.utils.env import ParallelEnv
 
 
-def worker(remote, parent_remote, env_fn_wrapper, env_args={}):
+def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_args={}):
     """Worker class
 
     References:
         https://github.com/openai/baselines/tree/master/baselines/common/vec_env
     """
     parent_remote.close()
-    env = env_fn_wrapper.x()
+    env = env_fn_wrapper()
+
+    autoreset = False
     if not isinstance(env, ParallelEnv):
         env = env.parallel_env(**env_args)
+    else:
+        # TODO check this
+        env = type(env)(**env_args)
+
     while True:
         cmd, data = remote.recv()
         if cmd == "step":
-            data = {
-                possible_agent: np.array(data[idx]).squeeze()
-                for idx, possible_agent in enumerate(env.possible_agents)
-            }
-            ob, reward, dones, truncs, info = env.step(data)
+            if autoreset:
+                ob, info = env.reset()
+                reward = {agent_id: 0 for agent_id in env.agents}
+                dones = {agent_id: False for agent_id in env.agents}
+                truncs = {agent_id: False for agent_id in env.agents}
+            else:
+                data = {
+                    possible_agent: np.array(data[idx]).squeeze()
+                    for idx, possible_agent in enumerate(env.possible_agents)
+                }
+                ob, reward, dones, truncs, info = env.step(data)
+
+            if enable_autoreset:
+                autoreset = all(
+                    [
+                        term | trunc
+                        for term, trunc in zip(dones.values(), truncs.values())
+                    ]
+                )
             ob = list(ob.values())
             reward = list(reward.values())
             dones = list(dones.values())
@@ -109,29 +132,8 @@ class VecEnv:
             for possible_agent in self.agents:
                 passed_actions_list[env_idx].append(actions[possible_agent][env_idx])
         self.step_async(passed_actions_list)
-        return self.step_wait()
-
-
-class CloudpickleWrapper:
-    """Uses cloudpickle to serialize contents
-    (otherwise multiprocessing tries to use pickle)
-
-    References:
-        https://github.com/openai/baselines/tree/master/baselines/common/vec_env
-    """
-
-    def __init__(self, x):
-        self.x = x
-
-    def __getstate__(self):
-        import cloudpickle
-
-        return cloudpickle.dumps(self.x)
-
-    def __setstate__(self, ob):
-        import pickle
-
-        self.x = pickle.loads(ob)
+        step_wait = self.step_wait()
+        return step_wait
 
 
 class SubprocVecEnv(VecEnv):
@@ -139,12 +141,14 @@ class SubprocVecEnv(VecEnv):
 
     Args:
         env_fns (list): list of gym environments to run in subprocesses
+        enable_autoreset: Boolean flag to enable autoreset when environment terminates or truncates
+        env_args: Dictionary of environments arguments
 
     References:
         https://github.com/openai/baselines/tree/master/baselines/common/vec_env
     """
 
-    def __init__(self, env_fns, env_args={}):
+    def __init__(self, env_fns, enable_autoreset=True, env_args={}):
         env = env_fns[0]()
         if isinstance(env, ParallelEnv):
             self.env = env
@@ -159,10 +163,16 @@ class SubprocVecEnv(VecEnv):
         self.ps = [
             Process(
                 target=worker,
-                args=(work_remote, remote, CloudpickleWrapper(env_fn), env_args),
+                args=(
+                    work_remote,
+                    remote,
+                    CloudpickleWrapper(env_fn),
+                    enable_autoreset,
+                    env_args,
+                ),
             )
-            for (work_remote, remote, env_fn) in zip(
-                self.work_remotes, self.remotes, env_fns
+            for idx, (work_remote, remote, env_fn) in enumerate(
+                zip(self.work_remotes, self.remotes, env_fns)
             )
         ]
         for p in self.ps:
@@ -170,8 +180,6 @@ class SubprocVecEnv(VecEnv):
                 True  # If the main process crashes, we should not cause things to hang
             )
             p.start()
-        for remote in self.work_remotes:
-            remote.close()
         VecEnv.__init__(
             self,
             len(env_fns),
@@ -229,6 +237,7 @@ class SubprocVecEnv(VecEnv):
                 ret_infos_dict,
             ]:
                 op_dict[possible_agent] = np.stack(op_dict[possible_agent])
+
         return (
             ret_obs_dict,
             ret_rews_dict,
@@ -279,3 +288,7 @@ class SubprocVecEnv(VecEnv):
 
     def sample_personas(self, is_train, is_val=True, path="./"):
         return self.env.sample_personas(is_train=is_train, is_val=is_val, path=path)
+
+    def step(self, actions):
+        return_val = super().step(actions)
+        return return_val

@@ -11,7 +11,6 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -46,7 +45,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
 
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
+    # env = PettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
 
     env.reset()
 
