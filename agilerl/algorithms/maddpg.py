@@ -371,9 +371,24 @@ class MADDPG:
             action * -self.min_action[idx][0],
         )
 
-    def get_action(
-        self, states, training=True, agent_mask=None, env_defined_actions=None
-    ):
+    def extract_action_masks(self, states):
+        """Extract observations and action masks into two separate dictionaries
+
+        :param states: Environment observations
+        :type states: Dict[str, Dict[]]
+        """
+        observations = {
+            agent: state.get("observation") if isinstance(state, dict) else state
+            for agent, state in states.items()
+        }
+        action_masks = {
+            agent: state.get("action_mask", None) if isinstance(state, dict) else None
+            for agent, state in states.items()
+        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+
+        return observations, action_masks
+
+    def get_action(self, states, training=True, env_defined_actions=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -382,38 +397,23 @@ class MADDPG:
         :type state: Dict[str, numpy.Array]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
-        :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
-        :type agent_mask: Dict[str, bool]
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
 
-        # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
-        if agent_mask is None:
-            agent_ids = self.agent_ids
-            actors = self.actors
-            state_dims = self.state_dims
-        else:
-            agent_ids = [agent for agent in agent_mask.keys() if agent_mask[agent]]
-            state_dims = [
-                state_dim
-                for state_dim, mask_flag in zip(self.state_dims, agent_mask.keys())
-                if mask_flag
-            ]
-            action_dims_dict = {
-                agent: action_dim
-                for agent, action_dim in zip(self.agent_ids, self.action_dims)
-            }
-            states = {
-                agent: states[agent] for agent in agent_mask.keys() if agent_mask[agent]
-            }
-            actors = [
-                actor
-                for agent, actor in zip(agent_mask.keys(), self.actors)
-                if agent_mask[agent]
-            ]
+        # Process action masks if present
+        states, action_masks = self.extract_action_masks(
+            states
+        )  # If no action masking action mask dict = {agent : None ...}
 
-        # states = {key: np.vstack(value) for key, value in states.items()}
+        # Process agent masks if present
+        # Agent masking
+        if env_defined_actions is not None:
+            agent_masks = {}
+            for agent, env_defined_action in env_defined_actions.items():
+                if env_defined_action is None:
+                    env_defined_action = np.nan
+                agent_masks[agent] = np.where(np.isnan(env_defined_action), 0, 1)
 
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
@@ -427,7 +427,7 @@ class MADDPG:
                 nn.functional.one_hot(state.long(), num_classes=state_dim[0])
                 .float()
                 .squeeze(1)
-                for state, state_dim in zip(states, state_dims)
+                for state, state_dim in zip(states, self.state_dims)
             ]
 
         if self.arch == "mlp":
@@ -447,7 +447,7 @@ class MADDPG:
 
         action_dict = {}
         for idx, (agent_id, state, actor, action_dim) in enumerate(
-            zip(agent_ids, states, actors, self.action_dims)
+            zip(self.agent_ids, states, self.actors, self.action_dims)
         ):
             actor.eval()
             if self.accelerator is not None:
@@ -474,6 +474,7 @@ class MADDPG:
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
+                action = np.ma.array(action, mask=1 - np.array(action_masks[agent]))
                 if self.one_hot:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
@@ -481,28 +482,17 @@ class MADDPG:
         else:
             discrete_action_dict = None
 
+        # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent in env_defined_actions.keys():
-                if not agent_mask[agent]:
-                    if self.discrete_actions:
-                        discrete_action_dict.update({agent: env_defined_actions[agent]})
-                        action = env_defined_actions[agent]
-                        action = (
-                            nn.functional.one_hot(
-                                torch.tensor(action).long(),
-                                num_classes=action_dims_dict[agent],
-                            )
-                            .float()
-                            .squeeze()
-                        )
-                        action_dict.update({agent: action})
-                    else:
-                        action_dict.update({agent: env_defined_actions[agent]})
+            for agent in self.agent_ids:
+                if self.discrete_actions:
+                    discrete_action_dict[agent] = (
+                        agent_masks[agent] * env_defined_actions[agent]
+                    )
+                else:
+                    action_dict[agent] = agent_masks[agent] * env_defined_actions[agent]
 
-        return (
-            action_dict,
-            discrete_action_dict,
-        )
+        return (action_dict, discrete_action_dict)
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or

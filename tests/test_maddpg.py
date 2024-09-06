@@ -736,6 +736,40 @@ def test_maddpg_get_action_mlp(
 
 
 @pytest.mark.parametrize(
+    "training, state_dims, action_dims, discrete_actions, one_hot",
+    [
+        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+    ],
+)
+def test_maddpg_get_action_action_masking(
+    training, state_dims, action_dims, discrete_actions, one_hot, device
+):
+    agent_ids = ["agent_0", "agent_1"]
+    state = {
+        agent: {
+            "observation": np.random.randn(*state_dims[idx]),
+            "action_mask": [0, 1, 0, 1],
+        }
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        state_dims,
+        action_dims,
+        one_hot=one_hot,
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        n_agents=2,
+        agent_ids=agent_ids,
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=discrete_actions,
+        device=device,
+    )
+    _, discrete_action = maddpg.get_action(state, training)
+    assert all(i not in [1, 3] for i in discrete_action.values())
+
+
+@pytest.mark.parametrize(
     "training, state_dims, action_dims, discrete_actions",
     [
         (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False),
