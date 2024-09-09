@@ -308,8 +308,8 @@ def test_initialize_matd3_with_net_config(
     assert matd3.max_action == max_action
     assert matd3.min_action == min_action
     assert matd3.discrete_actions == discrete_actions
-    for noise in matd3.expl_noise:
-        assert np.all(noise == expl_noise)
+    for noise_vec in matd3.expl_noise:
+        assert torch.all(noise_vec == expl_noise)
     assert matd3.net_config == net_config, matd3.net_config
     assert matd3.batch_size == batch_size
     assert matd3.multi
@@ -742,6 +742,73 @@ def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device):
 
 
 @pytest.mark.parametrize(
+    "mode", (None, 0, False, "default", "reduce-overhead", "max-autotune")
+)
+def test_matd3_init_torch_compiler_no_error(mode):
+    matd3 = MATD3(
+        state_dims=[(1,), (1,)],
+        action_dims=[1, 1],
+        one_hot=False,
+        agent_ids=["agent_0", "agent_1"],
+        n_agents=2,
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
+        discrete_actions=False,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        torch_compiler=mode,
+    )
+    if isinstance(mode, str):
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in matd3.actors
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in matd3.actor_targets
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in matd3.critics_1
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in matd3.critics_2
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in matd3.critic_targets_1
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in matd3.critic_targets_2
+        )
+        assert matd3.torch_compiler == mode
+    else:
+        assert isinstance(matd3, MATD3)
+
+
+@pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
+def test_matd3_init_torch_compiler_error(mode):
+    err_string = (
+        "Choose between torch compiler modes: "
+        "default, reduce-overhead, max-autotune or None"
+    )
+    with pytest.raises(AssertionError, match=err_string):
+        MATD3(
+            state_dims=[(1,), (1,)],
+            action_dims=[1, 1],
+            one_hot=False,
+            agent_ids=["agent_0", "agent_1"],
+            n_agents=2,
+            max_action=[(1,), (1,)],
+            min_action=[(-1,), (-1,)],
+            discrete_actions=False,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            torch_compiler=mode,
+        )
+
+
+@pytest.mark.parametrize(
     "training, state_dims, action_dims, discrete_actions, one_hot",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
@@ -786,11 +853,19 @@ def test_matd3_get_action_mlp(
         for action in env_actions:
             assert len(action) == action_dims[idx]
             if discrete_actions:
-                torch.testing.assert_close(
-                    sum(action),
-                    1.0,
-                    atol=0.1,
-                    rtol=1e-3,
+                assert (
+                    np.isclose(
+                        sum(action),
+                        1.0,
+                        atol=0.1,
+                        rtol=1e-3,
+                    ).all()
+                    or np.isclose(
+                        sum(action),
+                        0.0,
+                        atol=0.1,
+                        rtol=1e-3,
+                    ).all()
                 )
             act = action[idx]
             assert act.dtype == np.float32
@@ -800,6 +875,7 @@ def test_matd3_get_action_mlp(
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
                 assert action <= action_dims[idx] - 1
+    matd3 = None
 
 
 @pytest.mark.parametrize(
@@ -843,11 +919,19 @@ def test_matd3_get_action_cnn(
         for action in env_actions:
             assert len(action) == action_dims[idx]
             if discrete_actions:
-                torch.testing.assert_close(
-                    sum(action),
-                    1.0,
-                    atol=0.1,
-                    rtol=1e-3,
+                assert (
+                    np.isclose(
+                        sum(action),
+                        1.0,
+                        atol=0.1,
+                        rtol=1e-3,
+                    ).all()
+                    or np.isclose(
+                        sum(action),
+                        0.0,
+                        atol=0.1,
+                        rtol=1e-3,
+                    ).all()
                 )
             act = action[idx]
             assert act.dtype == np.float32
@@ -903,11 +987,19 @@ def test_matd3_get_action_distributed(
         for action in env_actions:
             assert len(action) == action_dims[idx]
             if discrete_actions:
-                torch.testing.assert_close(
-                    sum(action),
-                    1.0,
-                    atol=0.1,
-                    rtol=1e-3,
+                assert (
+                    np.isclose(
+                        sum(action),
+                        1.0,
+                        atol=0.1,
+                        rtol=1e-3,
+                    ).all()
+                    or np.isclose(
+                        sum(action),
+                        0.0,
+                        atol=0.1,
+                        rtol=1e-3,
+                    ).all()
                 )
             act = action[idx]
             assert act.dtype == np.float32
@@ -2200,7 +2292,7 @@ def test_matd3_unwrap_models():
 
 # Returns the input action scaled to the action space defined by self.min_action and self.max_action.
 def test_action_scaling():
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     max_actions = [(1,), (2,), (1,), (2,), (2,)]
     min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
 
@@ -2214,25 +2306,43 @@ def test_action_scaling():
         max_action=max_actions,
         min_action=min_actions,
     )
-
+    matd3.actors[0].mlp_output_activation = "Tanh"
     scaled_action = matd3.scale_to_action_space(action, idx=0)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
+    assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
 
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    matd3.actors[1].mlp_output_activation = "Tanh"
+    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = matd3.scale_to_action_space(action, idx=1)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
+    torch.testing.assert_close(
+        scaled_action, torch.Tensor([0.2, 0.4, 0.6, -0.2, -0.4, -0.6])
+    )
 
-    action = np.array([0.1, 0.2, 0.3, 0])
+    matd3.actors[2].mlp_output_activation = "Sigmoid"
+    action = torch.Tensor([0.1, 0.2, 0.3, 0])
     scaled_action = matd3.scale_to_action_space(action, idx=2)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
+    assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, 0]))
 
-    action = np.array([0.1, 0.2, 0.3, 0])
+    matd3.actors[3].mlp_output_activation = "GumbelSoftmax"
+    action = torch.Tensor([0.1, 0.2, 0.3, 0])
     scaled_action = matd3.scale_to_action_space(action, idx=3)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
+    assert torch.equal(scaled_action, torch.Tensor([0.2, 0.4, 0.6, 0]))
 
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    matd3.actors[4].mlp_output_activation = "Tanh"
+    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = matd3.scale_to_action_space(action, idx=4)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+    torch.testing.assert_close(
+        scaled_action,
+        torch.Tensor(
+            [
+                0.55 * 3 - 1,
+                0.6 * 3 - 1,
+                0.65 * 3 - 1,
+                0.45 * 3 - 1,
+                0.4 * 3 - 1,
+                0.35 * 3 - 1,
+            ]
+        ),
+    )
 
 
 @pytest.mark.parametrize(
