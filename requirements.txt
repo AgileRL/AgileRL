@@ -16,7 +16,7 @@ redis==4.4.4
 scipy==1.12.0
 SuperSuit==3.9.0
 termcolor==1.1.0
-torch==2.0.1
+torch==2.2.0
 tqdm==4.65.0
 transformers==4.36.0
 ucimlrepo==0.0.3
