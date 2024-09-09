@@ -705,6 +705,7 @@ def test_action_masking(env, request, n_envs):
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
         for agent in vec_env.agents
     }
+
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
 
     for agent in vec_env.agents:
@@ -729,9 +730,6 @@ def test_agent_masking(env, request, n_envs):
         for agent in vec_env.agents
     }
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
-
-    print("INFOS")
-    print(infos)
 
     for agent, dic in infos.items():
         assert "env_defined_actions" in dic.keys()

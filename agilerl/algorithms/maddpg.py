@@ -12,7 +12,10 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.wrappers.pettingzoo_wrappers import (
+    CustomPettingZooVectorizationParallelWrapper,
+    PettingZooVectorizationParallelWrapper,
+)
 
 
 class MADDPG:
@@ -388,6 +391,39 @@ class MADDPG:
 
         return observations, action_masks
 
+    def extract_agent_masks(self, env_defined_actions):
+        agent_masks = None
+        if env_defined_actions is not None:
+            agent_masks = {}
+            for idx, agent in enumerate(env_defined_actions.keys()):
+                # Handle None if environment isn't vectorized
+                if env_defined_actions[agent] is None:
+                    if not self.discrete_actions:
+                        nan_arr = np.empty(self.action_dims[idx])
+                        nan_arr.fill(np.nan)
+                    else:
+                        nan_arr = np.array([[np.nan]])
+                    env_defined_actions[agent] = nan_arr
+
+                # Handle discrete actions + env not vectorized
+                if isinstance(env_defined_actions[agent], (int, float)):
+                    env_defined_actions[agent] = np.array(
+                        [[env_defined_actions[agent]]]
+                    )
+
+                # Ensure additional dimension is added in so shapes align for masking
+                if len(env_defined_actions[agent].shape) == 1:
+                    env_defined_actions[agent] = (
+                        env_defined_actions[agent][:, np.newaxis]
+                        if self.discrete_actions
+                        else env_defined_actions[agent][np.newaxis, :]
+                    )
+                agent_masks[agent] = np.where(
+                    np.isnan(env_defined_actions[agent]), 0, 1
+                ).astype(bool)
+
+        return env_defined_actions, agent_masks
+
     def get_action(self, states, training=True, env_defined_actions=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -400,20 +436,15 @@ class MADDPG:
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
-
         # Process action masks if present
         states, action_masks = self.extract_action_masks(
-            states
+            states=states
         )  # If no action masking action mask dict = {agent : None ...}
 
-        # Process agent masks if present
         # Agent masking
-        if env_defined_actions is not None:
-            agent_masks = {}
-            for agent, env_defined_action in env_defined_actions.items():
-                if env_defined_action is None:
-                    env_defined_action = np.nan
-                agent_masks[agent] = np.where(np.isnan(env_defined_action), 0, 1)
+        env_defined_actions, agent_masks = self.extract_agent_masks(
+            env_defined_actions=env_defined_actions
+        )
 
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
@@ -474,11 +505,20 @@ class MADDPG:
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
-                action = np.ma.array(action, mask=1 - np.array(action_masks[agent]))
+                mask = (
+                    1 - np.array(action_masks[agent])
+                    if action_masks[agent] is not None
+                    else None
+                )
+                action = np.ma.array(action, mask=mask)
                 if self.one_hot:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
+                if len(discrete_action_dict[agent].shape) == 1:
+                    discrete_action_dict[agent] = discrete_action_dict[agent][
+                        :, np.newaxis
+                    ]
         else:
             discrete_action_dict = None
 
@@ -486,11 +526,13 @@ class MADDPG:
         if env_defined_actions is not None:
             for agent in self.agent_ids:
                 if self.discrete_actions:
-                    discrete_action_dict[agent] = (
-                        agent_masks[agent] * env_defined_actions[agent]
+                    discrete_action_dict[agent][agent_masks[agent]] = (
+                        env_defined_actions[agent][agent_masks[agent]]
                     )
                 else:
-                    action_dict[agent] = agent_masks[agent] * env_defined_actions[agent]
+                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
+                        agent_masks[agent]
+                    ]
 
         return (action_dict, discrete_action_dict)
 
@@ -751,7 +793,13 @@ class MADDPG:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
-        is_vectorised = isinstance(env, PettingZooVectorizationParallelWrapper)
+        is_vectorised = isinstance(
+            env,
+            (
+                PettingZooVectorizationParallelWrapper,
+                CustomPettingZooVectorizationParallelWrapper,
+            ),
+        )
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
@@ -774,18 +822,13 @@ class MADDPG:
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                                 for agent_id, s in state.items()
                             }
-                    agent_mask = (
-                        info["agent_mask"] if "agent_mask" in info.keys() else None
-                    )
-                    env_defined_actions = (
-                        info["env_defined_actions"]
-                        if "env_defined_actions" in info.keys()
-                        else None
-                    )
+                    env_defined_actions = {
+                        agent: info[agent].get("env_defined_actions", None)
+                        for agent in env.agents
+                    }
                     cont_actions, discrete_action = self.get_action(
                         state,
                         training=False,
-                        agent_mask=agent_mask,
                         env_defined_actions=env_defined_actions,
                     )
                     if self.discrete_actions:

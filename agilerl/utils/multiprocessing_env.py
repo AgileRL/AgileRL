@@ -54,30 +54,8 @@ def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_arg
                 # Deal with pettingzoo action masking
                 # observation returned in the following format when action masking is used
                 # obs = {"agent_0" : {"observation": 1, "action_mask": 0},...}
-                try:
-                    ob = {agent: obs[agent]["observation"] for agent in obs.keys()}
-                    action_mask = {
-                        agent: obs[agent]["action_mask"] for agent in obs.keys()
-                    }
-                    ob = list(ob.values())
-                    action_mask = list(action_mask.values())
-                except Exception:
-                    ob = list(obs.values())
-                    action_mask = None
-
-                # Info returned in the following format when agent masking is used
-                # info = {"agent_0": {"env_defined_actions":np.array([1,0,1])}, ...}
-                try:
-                    env_defined_actions = {
-                        agent: infos[agent].pop("env_defined_actions")
-                        for agent in infos.keys()
-                    }
-                    env_defined_actions = list(env_defined_actions.values())
-                    info = list(infos.values())
-                except Exception:
-                    env_defined_actions = None
-                    info = list(infos.values())
-
+                ob, action_mask = process_observation(obs)
+                info, env_defined_actions = process_info(infos)
                 reward = list(reward.values())
                 dones = list(dones.values())
                 truncs = list(truncs.values())
@@ -85,10 +63,10 @@ def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_arg
                     (ob, reward, dones, truncs, info, action_mask, env_defined_actions)
                 )
             elif cmd == "reset":
-                ob, infos = env.reset(seed=data, options=None)
-                ob = list(ob.values())
-                infos = list(infos.values())
-                remote.send((ob, infos))
+                obs, infos = env.reset(seed=data, options=None)
+                ob, action_mask = process_observation(obs)
+                info, env_defined_actions = process_info(infos)
+                remote.send((ob, info, action_mask, env_defined_actions))
             elif cmd == "close":
                 env.close()
                 remote.close()
@@ -104,6 +82,36 @@ def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_arg
                 raise NotImplementedError
             tb = traceback.format_exc()
             remote.send(("error", e, tb))
+
+
+def process_observation(obs):
+    """Process observation so we can handle action masking"""
+
+    try:
+        ob = {agent: obs[agent]["observation"] for agent in obs.keys()}
+        action_mask = {agent: obs[agent]["action_mask"] for agent in obs.keys()}
+        ob = list(ob.values())
+        action_mask = list(action_mask.values())
+    except Exception:
+        ob = list(obs.values())
+        action_mask = None
+
+    return ob, action_mask
+
+
+def process_info(infos):
+    """Process information dict so we can handle agent masking"""
+    try:
+        env_defined_actions = {
+            agent: infos[agent].pop("env_defined_actions") for agent in infos.keys()
+        }
+        env_defined_actions = list(env_defined_actions.values())
+        info = list(infos.values())
+    except Exception:
+        env_defined_actions = None
+        info = list(infos.values())
+
+    return info, env_defined_actions
 
 
 class VecEnv:
@@ -277,12 +285,11 @@ class SubprocVecEnv(VecEnv):
                 if env_defined_actions[0] is not None:
                     if env_defined_actions[env_idx][agent_idx] is None:
                         if hasattr(self.env.action_space(possible_agent), "n"):
-                            action_dim = self.action_space(possible_agent).n
+                            action_dim = 1  # self.action_space(possible_agent).n
                         else:
                             action_dim = self.action_space(possible_agent).shape[0]
-                        env_defined_actions[env_idx][agent_idx] = np.zeros(
-                            action_dim
-                        ).fill(np.nan)
+                        env_defined_actions[env_idx][agent_idx] = np.zeros(action_dim)
+                        env_defined_actions[env_idx][agent_idx][:] = np.nan
                     ret_env_def_act_dict[possible_agent].append(
                         env_defined_actions[env_idx][agent_idx]
                     )
@@ -350,25 +357,89 @@ class SubprocVecEnv(VecEnv):
         for remote in self.remotes:
             remote.send(("reset", seed))
         results = [remote.recv() for remote in self.remotes]
-        obs, infos = self.process_results(results, waiting_flag=self.waiting)
+        obs, infos, action_mask, env_defined_actions = self.process_results(
+            results, waiting_flag=self.waiting
+        )
+
         ret_obs_dict = {
             possible_agent: []
             for idx, possible_agent in enumerate(self.env.possible_agents)
         }
+        ret_action_mask_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+
         ret_infos_dict = {
             possible_agent: []
             for idx, possible_agent in enumerate(self.env.possible_agents)
         }
+        ret_env_def_act_dict = {
+            possible_agent: []
+            for idx, possible_agent in enumerate(self.env.possible_agents)
+        }
+
         for env_idx, _ in enumerate(obs):
             for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+                if action_mask[0] is not None:
+                    ret_action_mask_dict[possible_agent].append(
+                        action_mask[env_idx][agent_idx]
+                    )
                 ret_obs_dict[possible_agent].append(obs[env_idx][agent_idx])
+
+                ## FIXME Repeated code
+                if env_defined_actions[0] is not None:
+                    if env_defined_actions[env_idx][agent_idx] is None:
+                        if hasattr(self.env.action_space(possible_agent), "n"):
+                            action_dim = 1
+                        else:
+                            action_dim = self.action_space(possible_agent).shape[0]
+                        env_defined_actions[env_idx][agent_idx] = np.zeros(action_dim)
+                        env_defined_actions[env_idx][agent_idx][:] = np.nan
+                    ret_env_def_act_dict[possible_agent].append(
+                        env_defined_actions[env_idx][agent_idx]
+                    )
                 ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
+
         for agent_idx, possible_agent in enumerate(self.env.possible_agents):
-            for op_dict in [
-                ret_obs_dict,
-                ret_infos_dict,
-            ]:
+            for op_dict in [ret_obs_dict, ret_infos_dict, ret_env_def_act_dict]:
                 op_dict[possible_agent] = np.stack(op_dict[possible_agent])
+
+        if action_mask[0] is not None:
+            new_obs_dict = {}
+            for possible_agent in self.env.possible_agents:
+                new_obs_dict[possible_agent] = {}
+                new_obs_dict[possible_agent]["observation"] = ret_obs_dict[
+                    possible_agent
+                ]
+                new_obs_dict[possible_agent]["action_mask"] = ret_action_mask_dict[
+                    possible_agent
+                ]
+            ret_obs_dict = new_obs_dict
+
+        # Deal with the infos dict FIXME repeated code
+        vect_ret_infos_dict = {}
+        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+            merged_dict = {key: [] for key in ret_infos_dict[possible_agent][0].keys()}
+            # Collect values for each key from all dictionaries
+            for d in ret_infos_dict[possible_agent]:
+                for key in d:
+                    merged_dict[key].append(d[key])
+            # Convert the lists of values into stacked NumPy arrays
+            for key in merged_dict:
+                merged_dict[key] = np.array(merged_dict[key])
+            vect_ret_infos_dict[possible_agent] = merged_dict
+        ret_infos_dict = vect_ret_infos_dict
+
+        # FIXME repeated code
+        if env_defined_actions[0] is not None:
+            new_info_dict = {}
+            for possible_agent in self.env.possible_agents:
+                new_info_dict[possible_agent] = ret_infos_dict[possible_agent]
+                new_info_dict[possible_agent]["env_defined_actions"] = (
+                    ret_env_def_act_dict[possible_agent]
+                )
+            ret_infos_dict = new_info_dict
         return (ret_obs_dict, ret_infos_dict)
 
     def render(self):
