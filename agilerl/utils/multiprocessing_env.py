@@ -287,15 +287,11 @@ class SubprocVecEnv(VecEnv):
                 ret_truncs_dict[possible_agent].append(truncs[env_idx][agent_idx])
 
                 if env_defined_actions[0] is not None:
-                    if env_defined_actions[env_idx][agent_idx] is None:
-                        if hasattr(self.env.action_space(possible_agent), "n"):
-                            action_dim = 1  # self.action_space(possible_agent).n
-                        else:
-                            action_dim = self.action_space(possible_agent).shape[0]
-                        env_defined_actions[env_idx][agent_idx] = np.zeros(action_dim)
-                        env_defined_actions[env_idx][agent_idx][:] = np.nan
                     ret_env_def_act_dict[possible_agent].append(
-                        env_defined_actions[env_idx][agent_idx]
+                        self.handle_env_defined_action_none(
+                            env_defined_action=env_defined_actions[env_idx][agent_idx],
+                            agent=possible_agent,
+                        )
                     )
                 ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
 
@@ -314,40 +310,18 @@ class SubprocVecEnv(VecEnv):
                 if len(op_dict[possible_agent]) > 0:
                     op_dict[possible_agent] = np.stack(op_dict[possible_agent])
 
-        # Deal with the infos dict
-        vect_ret_infos_dict = {}
-        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
-            merged_dict = {key: [] for key in ret_infos_dict[possible_agent][0].keys()}
-            # Collect values for each key from all dictionaries
-            for d in ret_infos_dict[possible_agent]:
-                for key in d:
-                    merged_dict[key].append(d[key])
-            # Convert the lists of values into stacked NumPy arrays
-            for key in merged_dict:
-                merged_dict[key] = np.array(merged_dict[key])
-            vect_ret_infos_dict[possible_agent] = merged_dict
-        ret_infos_dict = vect_ret_infos_dict
-
         if action_mask[0] is not None:
-            new_obs_dict = {}
-            for possible_agent in self.env.possible_agents:
-                new_obs_dict[possible_agent] = {}
-                new_obs_dict[possible_agent]["observation"] = ret_obs_dict[
-                    possible_agent
-                ]
-                new_obs_dict[possible_agent]["action_mask"] = ret_action_mask_dict[
-                    possible_agent
-                ]
-            ret_obs_dict = new_obs_dict
+            ret_obs_dict = self.format_obs_dict(
+                obs=ret_obs_dict, action_mask=ret_action_mask_dict
+            )
+
+        # Deal with the infos dict
+        ret_infos_dict = self.format_infos_dict(ret_infos_dict)
 
         if env_defined_actions[0] is not None:
-            new_info_dict = {}
-            for possible_agent in self.env.possible_agents:
-                new_info_dict[possible_agent] = ret_infos_dict[possible_agent]
-                new_info_dict[possible_agent]["env_defined_actions"] = (
-                    ret_env_def_act_dict[possible_agent]
-                )
-            ret_infos_dict = new_info_dict
+            ret_infos_dict = self.combine_info_and_eda(
+                env_defined_actions=ret_env_def_act_dict, info=ret_infos_dict
+            )
 
         return (
             ret_obs_dict,
@@ -391,17 +365,12 @@ class SubprocVecEnv(VecEnv):
                     )
                 ret_obs_dict[possible_agent].append(obs[env_idx][agent_idx])
 
-                ## FIXME Repeated code
                 if env_defined_actions[0] is not None:
-                    if env_defined_actions[env_idx][agent_idx] is None:
-                        if hasattr(self.env.action_space(possible_agent), "n"):
-                            action_dim = 1
-                        else:
-                            action_dim = self.action_space(possible_agent).shape[0]
-                        env_defined_actions[env_idx][agent_idx] = np.zeros(action_dim)
-                        env_defined_actions[env_idx][agent_idx][:] = np.nan
                     ret_env_def_act_dict[possible_agent].append(
-                        env_defined_actions[env_idx][agent_idx]
+                        self.handle_env_defined_action_none(
+                            env_defined_action=env_defined_actions[env_idx][agent_idx],
+                            agent=possible_agent,
+                        )
                     )
                 ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
 
@@ -409,42 +378,15 @@ class SubprocVecEnv(VecEnv):
             for op_dict in [ret_obs_dict, ret_infos_dict, ret_env_def_act_dict]:
                 if len(op_dict[possible_agent]) > 0:
                     op_dict[possible_agent] = np.stack(op_dict[possible_agent])
-
         if action_mask[0] is not None:
-            new_obs_dict = {}
-            for possible_agent in self.env.possible_agents:
-                new_obs_dict[possible_agent] = {}
-                new_obs_dict[possible_agent]["observation"] = ret_obs_dict[
-                    possible_agent
-                ]
-                new_obs_dict[possible_agent]["action_mask"] = ret_action_mask_dict[
-                    possible_agent
-                ]
-            ret_obs_dict = new_obs_dict
-
-        # Deal with the infos dict FIXME repeated code
-        vect_ret_infos_dict = {}
-        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
-            merged_dict = {key: [] for key in ret_infos_dict[possible_agent][0].keys()}
-            # Collect values for each key from all dictionaries
-            for d in ret_infos_dict[possible_agent]:
-                for key in d:
-                    merged_dict[key].append(d[key])
-            # Convert the lists of values into stacked NumPy arrays
-            for key in merged_dict:
-                merged_dict[key] = np.array(merged_dict[key])
-            vect_ret_infos_dict[possible_agent] = merged_dict
-        ret_infos_dict = vect_ret_infos_dict
-
-        # FIXME repeated code
+            ret_obs_dict = self.format_obs_dict(
+                obs=ret_obs_dict, action_mask=ret_action_mask_dict
+            )
+        ret_infos_dict = self.format_infos_dict(ret_infos_dict)
         if env_defined_actions[0] is not None:
-            new_info_dict = {}
-            for possible_agent in self.env.possible_agents:
-                new_info_dict[possible_agent] = ret_infos_dict[possible_agent]
-                new_info_dict[possible_agent]["env_defined_actions"] = (
-                    ret_env_def_act_dict[possible_agent]
-                )
-            ret_infos_dict = new_info_dict
+            ret_infos_dict = self.combine_info_and_eda(
+                env_defined_actions=ret_env_def_act_dict, info=ret_infos_dict
+            )
         return (ret_obs_dict, ret_infos_dict)
 
     def render(self):
@@ -479,3 +421,45 @@ class SubprocVecEnv(VecEnv):
             tb = zipped_results[2][zipped_results[0].index("error")]
             raise Exception(f"{e} \nTraceback:\n{tb}")
         return zipped_results
+
+    def handle_env_defined_action_none(self, env_defined_action, agent):
+        if env_defined_action is None:
+            if hasattr(self.action_space(agent), "n"):
+                action_dim = 1  # self.action_space(possible_agent).n
+            else:
+                action_dim = self.action_space(agent).shape[0]
+            env_defined_action = np.zeros(action_dim)
+            env_defined_action[:] = np.nan
+        return env_defined_action
+
+    def format_infos_dict(self, info):
+        vect_ret_infos_dict = {}
+        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+            merged_dict = {key: [] for key in info[possible_agent][0].keys()}
+            # Collect values for each key from all dictionaries
+            for d in info[possible_agent]:
+                for key in d:
+                    merged_dict[key].append(d[key])
+            # Convert the lists of values into stacked NumPy arrays
+            for key in merged_dict:
+                merged_dict[key] = np.array(merged_dict[key])
+            vect_ret_infos_dict[possible_agent] = merged_dict
+
+        return vect_ret_infos_dict
+
+    def combine_info_and_eda(self, env_defined_actions, info):
+        new_info_dict = {}
+        for possible_agent in self.env.possible_agents:
+            new_info_dict[possible_agent] = info[possible_agent]
+            new_info_dict[possible_agent]["env_defined_actions"] = env_defined_actions[
+                possible_agent
+            ]
+        return new_info_dict
+
+    def format_obs_dict(self, obs, action_mask):
+        new_obs_dict = {}
+        for possible_agent in self.env.possible_agents:
+            new_obs_dict[possible_agent] = {}
+            new_obs_dict[possible_agent]["observation"] = obs[possible_agent]
+            new_obs_dict[possible_agent]["action_mask"] = action_mask[possible_agent]
+        return new_obs_dict
