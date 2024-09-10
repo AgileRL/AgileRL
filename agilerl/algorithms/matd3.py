@@ -569,7 +569,7 @@ class MATD3:
             actor.train()
             if self.discrete_actions and training:
                 actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
-            else:
+            elif not self.discrete_actions:
                 actions = self.scale_to_action_space(actions, idx)
                 if training:
                     actions = torch.clamp(
@@ -579,12 +579,11 @@ class MATD3:
                     )
             action_dict[agent_id] = actions
 
+        discrete_action_dict = None
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
                 discrete_action_dict[agent] = torch.argmax(action, axis=-1)
-        else:
-            discrete_action_dict = None
 
         if env_defined_actions is None:
             if self.device == "cuda":
