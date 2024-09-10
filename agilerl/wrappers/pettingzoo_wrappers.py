@@ -127,6 +127,11 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
 class CustomPettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
     """Wrapper to vectorize custom PettingZoo ParallelEnv environments, instantiated through
     env = CustomEnv()
+
+    :param env: Custom PettingZoo environment
+    :type env: ParallelEnv
+    :param n_envs: The number of environments to run in parallel
+    :type n_envs: int
     """
 
     def __init__(
@@ -145,6 +150,15 @@ class CustomPettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWr
 class PettingZooVectorizationParallelWrapper(PettingZooParallelWrapper):
     """Wrapper to vectorize PetttingZoo library parallel environments, instantiated through
     env = pettingzoo_env.parallel_env()
+
+    :param env: Default PettingZoo environment
+    :type env: types.ModuleType
+    :param n_envs: The number of environments to run in parallel
+    :type n_envs: int
+    :param enable_autoreset: Boolean flag to enable environment auto-resetting
+    :type enable_autoreset: bool
+    :param env_args: Dictionary of arguments for your environment instance
+    :type env_args: dict
     """
 
     def __init__(

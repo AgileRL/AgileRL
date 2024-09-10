@@ -440,3 +440,13 @@ def plot_population_score(pop):
     plt.xlabel("Steps")
     plt.ylim(bottom=-400)
     plt.show()
+
+
+def get_env_defined_actions(info, agents):
+    env_defined_actions = {
+        agent: info[agent].get("env_defined_action", None) for agent in agents
+    }
+
+    if all(eda is None for eda in env_defined_actions.values()):
+        return
+    return env_defined_actions

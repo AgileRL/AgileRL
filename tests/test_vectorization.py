@@ -489,9 +489,10 @@ def test_vectorisation_wrapper_petting_zoo_reset(env, request, n_envs):
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     vec_env.close()
+
     for agent in vec_env.agents:
         assert len(observations[agent]) == n_envs
-        assert len(infos[agent]) == n_envs
+        assert isinstance(infos[agent], dict)
 
 
 @pytest.mark.parametrize("n_envs", [1, 4])
@@ -515,7 +516,6 @@ def test_vectorisation_wrapper_petting_zoo_step(env, request, n_envs):
             for agent in vec_env.agents
         }
         observations, rewards, terminations, truncations, infos = vec_env.step(actions)
-        print("INFOS", infos)
         for agent in vec_env.agents:
             if isinstance(observations[agent], dict):
                 assert len(observations[agent]["observation"]) == n_envs

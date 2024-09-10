@@ -158,19 +158,11 @@ if __name__ == "__main__":
                 }
 
             for idx_step in range(evo_steps // num_envs):
-                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
-                env_defined_actions = (
-                    info["env_defined_actions"]
-                    if "env_defined_actions" in info.keys()
-                    else None
-                )
 
                 # Get next action from agent
                 cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
-                    agent_mask=agent_mask,
-                    env_defined_actions=env_defined_actions,
                 )
                 if agent.discrete_actions:
                     action = discrete_action

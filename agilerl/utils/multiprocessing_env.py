@@ -1,6 +1,9 @@
 """
 Author: Burak M Gonultas
 https://github.com/gonultasbu
+
+Author: Michael Pratt
+https://github.com/mikepratt1
 ---
 Original Reference:
 https://github.com/Farama-Foundation/SuperSuit/issues/43#issuecomment-751792111
@@ -282,6 +285,7 @@ class SubprocVecEnv(VecEnv):
                 ret_rews_dict[possible_agent].append(rews[env_idx][agent_idx])
                 ret_dones_dict[possible_agent].append(dones[env_idx][agent_idx])
                 ret_truncs_dict[possible_agent].append(truncs[env_idx][agent_idx])
+
                 if env_defined_actions[0] is not None:
                     if env_defined_actions[env_idx][agent_idx] is None:
                         if hasattr(self.env.action_space(possible_agent), "n"):
@@ -307,7 +311,7 @@ class SubprocVecEnv(VecEnv):
             ]:
 
                 # base case no masking
-                if op_dict[possible_agent]:
+                if len(op_dict[possible_agent]) > 0:
                     op_dict[possible_agent] = np.stack(op_dict[possible_agent])
 
         # Deal with the infos dict
@@ -403,7 +407,8 @@ class SubprocVecEnv(VecEnv):
 
         for agent_idx, possible_agent in enumerate(self.env.possible_agents):
             for op_dict in [ret_obs_dict, ret_infos_dict, ret_env_def_act_dict]:
-                op_dict[possible_agent] = np.stack(op_dict[possible_agent])
+                if len(op_dict[possible_agent]) > 0:
+                    op_dict[possible_agent] = np.stack(op_dict[possible_agent])
 
         if action_mask[0] is not None:
             new_obs_dict = {}

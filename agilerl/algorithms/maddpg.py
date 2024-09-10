@@ -400,7 +400,7 @@ class MADDPG:
                 if env_defined_actions[agent] is None:
                     if not self.discrete_actions:
                         nan_arr = np.empty(self.action_dims[idx])
-                        nan_arr.fill(np.nan)
+                        nan_arr[:] = np.nan
                     else:
                         nan_arr = np.array([[np.nan]])
                     env_defined_actions[agent] = nan_arr
@@ -826,6 +826,9 @@ class MADDPG:
                         agent: info[agent].get("env_defined_actions", None)
                         for agent in env.agents
                     }
+                    env_defined_actions = self.get_env_defined_actions(
+                        info, self.agent_ids
+                    )
                     cont_actions, discrete_action = self.get_action(
                         state,
                         training=False,
@@ -1360,3 +1363,12 @@ class MADDPG:
             setattr(agent, attribute, checkpoint[attribute])
 
         return agent
+
+    def get_env_defined_actions(self, info, agents):
+        env_defined_actions = {
+            agent: info[agent].get("env_defined_action", None) for agent in agents
+        }
+
+        if all(eda is None for eda in env_defined_actions.values()):
+            return
+        return env_defined_actions
