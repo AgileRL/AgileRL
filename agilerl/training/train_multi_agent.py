@@ -4,6 +4,7 @@ from datetime import datetime
 
 import numpy as np
 from torch.utils.data import DataLoader
+from tqdm import trange
 
 import wandb
 from agilerl.components.replay_data import ReplayDataset
@@ -167,7 +168,6 @@ def train_multi_agent(
         if accelerator.is_main_process:
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
-        assert False
 
     if isinstance(env, PettingZooVectorizationParallelWrapper):
         is_vectorised = True
@@ -200,17 +200,17 @@ def train_multi_agent(
     else:
         print("\nTraining...")
 
-    # bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
-    # if accelerator is not None:
-    #     pbar = trange(
-    #         max_steps,
-    #         unit="step",
-    #         bar_format=bar_format,
-    #         ascii=True,
-    #         disable=not accelerator.is_local_main_process,
-    #     )
-    # else:
-    #     pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
+    bar_format = "{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]"
+    if accelerator is not None:
+        pbar = trange(
+            max_steps,
+            unit="step",
+            bar_format=bar_format,
+            ascii=True,
+            disable=not accelerator.is_local_main_process,
+        )
+    else:
+        pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
 
     agent_ids = env.agents
     pop_actor_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
@@ -232,11 +232,11 @@ def train_multi_agent(
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
-            # state = {a: s[np.newaxis, :] for a, s in state.items()}
             scores = np.zeros(num_envs)
             losses = {agent_id: [] for agent_id in agent_ids}
             completed_episode_scores = []
             steps = 0
+
             if swap_channels:
                 if not is_vectorised:
                     state = {
@@ -249,7 +249,7 @@ def train_multi_agent(
                         for agent_id, s in state.items()
                     }
 
-            for idx_step in range(1024 * 4 // num_envs):  # FIXME RUN A FULL HORIZON
+            for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
                 env_defined_actions = (
@@ -353,16 +353,10 @@ def train_multi_agent(
                             state, info = env.reset()
                 agent.reset_action_noise(reset_noise_indices)
 
-            ##pbar.update(evo_steps // len(pop))
+            pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
             pop_episode_scores.append(completed_episode_scores)
-            print(
-                "agent",
-                agent_idx,
-                ": completed EPI SCO",
-                np.mean(completed_episode_scores),
-            )
             if len(losses[agent_ids[0]]) > 0:
                 if all([losses[a_id] for a_id in agent_ids]):
                     for agent_id in agent_ids:
@@ -386,7 +380,6 @@ def train_multi_agent(
             for agent in pop
         ]
         pop_fitnesses.append(fitnesses)
-        print("all fit.:", fitnesses)
         mean_scores = [
             (
                 np.mean(episode_scores)
@@ -395,7 +388,6 @@ def train_multi_agent(
             )
             for episode_scores in pop_episode_scores
         ]
-        print("POP EPI SCO::", mean_scores)
 
         if wb:
             wandb_dict = {
@@ -512,7 +504,7 @@ def train_multi_agent(
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]
-            ##pbar.update(0)
+            pbar.update(0)
 
             print(
                 f"""
@@ -569,5 +561,5 @@ def train_multi_agent(
         else:
             wandb.finish()
 
-    ##pbar.close()
+    pbar.close()
     return pop, pop_fitnesses
