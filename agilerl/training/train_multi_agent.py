@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
@@ -506,6 +506,16 @@ def train_multi_agent(
             muts = [agent.mut for agent in pop]
             pbar.update(0)
 
+            print(
+                "DateTime, now, H:m:s--u",
+                datetime.now().hour,
+                ":",
+                datetime.now().minute,
+                ":",
+                datetime.now().second,
+                "--",
+                datetime.now().microsecond,
+            )
             print(
                 f"""
                 --- Global Steps {total_steps} ---
