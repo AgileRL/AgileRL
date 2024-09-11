@@ -248,7 +248,7 @@ def train_multi_agent(
                         agent_id: np.moveaxis(s, [-1], [-3])
                         for agent_id, s in state.items()
                     }
-
+            # print('ASSERT', agent.actors)
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
@@ -257,12 +257,14 @@ def train_multi_agent(
                     if "env_defined_actions" in info.keys()
                     else None
                 )
+                assert len(agent.actors) > 0
                 cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
                     agent_mask=agent_mask,
                     env_defined_actions=env_defined_actions,
                 )
+                # print('1 ga', pop[0].actors)
                 if agent.discrete_actions:
                     action = discrete_action
                 else:
@@ -317,6 +319,8 @@ def train_multi_agent(
                         loss = agent.learn(experiences)
                         for agent_id in agent_ids:
                             losses[agent_id].append(loss[agent_id])
+                        # print('2.0 learning', agent.actors)
+                    # print('-2.0 lr[nop]', agent.actors)
                 # Handle num_envs > learn step; learn multiple times per step in env
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
@@ -328,6 +332,7 @@ def train_multi_agent(
                         loss = agent.learn(experiences)
                         for agent_id in agent_ids:
                             losses[agent_id].append(loss[agent_id])
+                    # print('2.1 learning', agent.actors)
 
                 # Update the state
                 if swap_channels and not is_vectorised:
@@ -354,7 +359,7 @@ def train_multi_agent(
                         if not is_vectorised:
                             state, info = env.reset()
                 agent.reset_action_noise(reset_noise_indices)
-
+                # print('2 rn an / eochunk', pop[0].actors)
             pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
@@ -373,6 +378,7 @@ def train_multi_agent(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
+            # print('3', pop[0].actors)
         # Evaluate population
         fitnesses = [
             agent.test(
@@ -446,7 +452,8 @@ def train_multi_agent(
                         f"indi_fitness_agent_{idx}": agent.fitness[-1],
                     }
                 )
-
+            # print('3.5 wb processing', pop[0].actors)
+        # print('4 calc fits', pop[0].actors)
         # Update step counter
         for agent in pop:
             agent.steps.append(agent.steps[-1])
@@ -487,8 +494,11 @@ def train_multi_agent(
                 for model in pop:
                     model.wrap_models()
             else:
+                # print(pop[0].actors)
                 elite, pop = tournament.select(pop)
+                # print(pop[0].actors)
                 pop = mutation.mutation(pop)
+                # print(pop[0].actors)
 
             if save_elite:
                 elite_save_path = (
@@ -497,6 +507,7 @@ def train_multi_agent(
                     else f"{env_name}-elite_{algo}"
                 )
                 elite.save_checkpoint(f"{elite_save_path}.pt")
+            # print('5 ts', pop[0].actors)
 
         if verbose:
             fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -530,7 +541,7 @@ def train_multi_agent(
                 """,
                 end="\r",
             )
-
+        # print('6 vb', pop[0].actors)
         # Save model checkpoint
         if checkpoint is not None:
             if pop[0].steps[-1] // checkpoint > checkpoint_count:
@@ -562,6 +573,7 @@ def train_multi_agent(
                         agent.save_checkpoint(current_checkpoint_path)
                     print("Saved checkpoint.")
                 checkpoint_count += 1
+            # print('7 chpt', pop[0].actors)
 
     if wb:
         if accelerator is not None:

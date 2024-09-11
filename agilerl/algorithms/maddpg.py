@@ -404,15 +404,37 @@ class MADDPG:
         self.criterion = nn.MSELoss()
 
     def recompile(self):
-        self.actors = [torch.compile(a, mode=self.torch_compiler) for a in self.actors]
+        self.actors = [
+            (
+                torch.compile(a, mode=self.torch_compiler)
+                if not isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+                else a
+            )
+            for a in self.actors
+        ]
         self.actor_targets = [
-            torch.compile(at, mode=self.torch_compiler) for at in self.actor_targets
+            (
+                torch.compile(at, mode=self.torch_compiler)
+                if not isinstance(at, torch._dynamo.eval_frame.OptimizedModule)
+                else at
+            )
+            for at in self.actor_targets
         ]
         self.critics = [
-            torch.compile(c, mode=self.torch_compiler) for c in self.critics
+            (
+                torch.compile(c, mode=self.torch_compiler)
+                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
+                else c
+            )
+            for c in self.critics
         ]
         self.critic_targets = [
-            torch.compile(ct, mode=self.torch_compiler) for ct in self.critic_targets
+            (
+                torch.compile(ct, mode=self.torch_compiler)
+                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
+                else ct
+            )
+            for ct in self.critic_targets
         ]
 
     def scale_to_action_space(self, action, idx):
@@ -522,7 +544,6 @@ class MADDPG:
             ]
 
         action_dict = {}
-        # print('ACTORS', actors)  # FIXME dropped!
 
         for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
             actor.eval()
@@ -748,9 +769,15 @@ class MADDPG:
             self.soft_update(actor, actor_target)
             self.soft_update(critic, critic_target)
 
-        if self.device == "cuda" and self.torch_compiler:
+        if self.is_cuda() and self.torch_compiler:
             self.cuda_cache_policy()
         return loss_dict
+
+    def is_cuda(self):
+        if isinstance(self.device, str):
+            return self.device == "cuda"
+        if isinstance(self.device, torch.device):
+            return self.device == torch.device("cuda")
 
     def learn_individual(
         self,

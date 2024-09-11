@@ -279,47 +279,53 @@ class Mutations:
             # assert hasattr(individual, 'torch_compiler')
             # assert isinstance(individual.actors[0], torch._dynamo.eval_frame.OptimizedModule)
             # assert next(individual.actors[0].parameters()).is_cuda
-
+            print()
+            print("MUTATION?", mutation)
             individual = mutation(individual)
 
             # assert hasattr(individual, 'torch_compiler')
             # assert next(individual.actors[0].parameters()).is_cuda)
 
-            # individual.recompile()  # FIXME
+            individual.recompile()  # FIXME
 
             # print('AFTER RECOMPILE', individual.actors[0])
             # assert isinstance(individual.actors[0], torch._dynamo.eval_frame.OptimizedModule)  # FIXME not true
 
             if self.multi_agent:
-                offspring_actors = getattr(individual, self.algo["actor"]["eval"])
+                offspring_actors = getattr(
+                    individual, self.algo["actor"]["eval"]
+                )  # GETS THE FORWARD METHOD
 
                 # Reinitialise target network with frozen weights due to potential
                 # mutation in architecture of value network
                 if individual.torch_compiler:
-                    new = []
-                    if not all(
-                        isinstance(
-                            offspring_actor, torch._dynamo.eval_frame.OptimizedModule
-                        )
-                        for offspring_actor in offspring_actors
-                    ):
-                        for offspring_actor in offspring_actors:
-                            if not isinstance(
-                                offspring_actor,
-                                torch._dynamo.eval_frame.OptimizedModule,
-                            ):
-                                offspring_actor = torch.compile(
-                                    offspring_actor, mode=individual.torch_compiler
-                                )
-                            else:
-                                new.append(offspring_actor)
-                        offspring_actors = new
-                        setattr(individual, self.algo["actor"]["eval"], new)
+                    # new = []
+                    # if not all(
+                    #     isinstance(
+                    #         offspring_actor, torch._dynamo.eval_frame.OptimizedModule
+                    #     )
+                    #     for offspring_actor in offspring_actors
+                    # ):
+                    #     for offspring_actor in offspring_actors:
+                    #         if not isinstance(
+                    #             offspring_actor,
+                    #             torch._dynamo.eval_frame.OptimizedModule,
+                    #         ):
+                    #             offspring_actor = torch.compile(
+                    #                 offspring_actor, mode=individual.torch_compiler
+                    #             )
+                    #         new.append(offspring_actor)
+                    #     offspring_actors = new
+                    #     setattr(individual, self.algo["actor"]["eval"], new)
                     assert all(
                         isinstance(
                             offspring_actor, torch._dynamo.eval_frame.OptimizedModule
                         )
                         for offspring_actor in offspring_actors
+                    )
+                    assert all(
+                        isinstance(actor, torch._dynamo.eval_frame.OptimizedModule)
+                        for actor in individual.actors
                     )
 
                 ind_targets = [
@@ -335,6 +341,9 @@ class Mutations:
 
                 for ind_target, offspring_actor in zip(ind_targets, offspring_actors):
                     if individual.torch_compiler:
+                        assert isinstance(
+                            offspring_actor, torch._dynamo.eval_frame.OptimizedModule
+                        )
                         ind_target.load_state_dict(
                             clipping(offspring_actor.state_dict())
                         )
@@ -348,7 +357,13 @@ class Mutations:
                 assert individual.torch_compiler
                 if individual.torch_compiler:
                     ind_targets = [
-                        torch.compile(ind_target, mode=individual.torch_compiler)
+                        (
+                            torch.compile(ind_target, mode=individual.torch_compiler)
+                            if not isinstance(
+                                ind_target, torch._dynamo.eval_frame.OptimizedModule
+                            )
+                            else ind_target
+                        )
                         for ind_target in ind_targets
                     ]
                 setattr(individual, self.algo["actor"]["target"], ind_targets)
@@ -359,31 +374,35 @@ class Mutations:
                 for critics_list in self.algo["critics"]:
                     offspring_critics = getattr(individual, critics_list["eval"])
                     if individual.torch_compiler:
-                        new = []
-                        if not all(
-                            isinstance(
-                                offspring_critic,
-                                torch._dynamo.eval_frame.OptimizedModule,
-                            )
-                            for offspring_critic in offspring_critics
-                        ):
-                            for offspring_critic in offspring_critics:
-                                if not isinstance(
-                                    offspring_critic,
-                                    torch._dynamo.eval_frame.OptimizedModule,
-                                ):
-                                    offspring_critic = torch.compile(
-                                        offspring_critic, mode=individual.torch_compiler
-                                    )
-                                new.append(offspring_critic)
-                            offspring_critics = new
-                            setattr(individual, critics_list["eval"], new)
+                        # new = []
+                        # if not all(
+                        #     isinstance(
+                        #         offspring_critic,
+                        #         torch._dynamo.eval_frame.OptimizedModule,
+                        #     )
+                        #     for offspring_critic in offspring_critics
+                        # ):
+                        #     for offspring_critic in offspring_critics:
+                        #         if not isinstance(
+                        #             offspring_critic,
+                        #             torch._dynamo.eval_frame.OptimizedModule,
+                        #         ):
+                        #             offspring_critic = torch.compile(
+                        #                 offspring_critic, mode=individual.torch_compiler
+                        #             )
+                        #         new.append(offspring_critic)
+                        #     offspring_critics = new
+                        #     setattr(individual, critics_list["eval"], new)
                         assert all(
                             isinstance(
                                 offspring_critic,
                                 torch._dynamo.eval_frame.OptimizedModule,
                             )
                             for offspring_critic in offspring_critics
+                        )
+                        assert all(
+                            isinstance(critic, torch._dynamo.eval_frame.OptimizedModule)
+                            for critic in individual.critics
                         )
 
                     assert individual.torch_compiler
@@ -405,6 +424,10 @@ class Mutations:
                         ind_targets, offspring_critics
                     ):
                         if individual.torch_compiler:
+                            assert isinstance(
+                                offspring_critic,
+                                torch._dynamo.eval_frame.OptimizedModule,
+                            )
                             ind_target.load_state_dict(
                                 clipping(offspring_critic.state_dict())
                             )
@@ -418,7 +441,15 @@ class Mutations:
                     assert individual.torch_compiler
                     if individual.torch_compiler:
                         ind_targets = [
-                            torch.compile(ind_target, mode=individual.torch_compiler)
+                            (
+                                torch.compile(
+                                    ind_target, mode=individual.torch_compiler
+                                )
+                                if not isinstance(
+                                    ind_target, torch._dynamo.eval_frame.OptimizedModule
+                                )
+                                else ind_target
+                            )
                             for ind_target in ind_targets
                         ]
                     setattr(individual, critics_list["target"], ind_targets)
