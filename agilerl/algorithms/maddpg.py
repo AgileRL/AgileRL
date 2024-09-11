@@ -184,6 +184,7 @@ class MADDPG:
         self.device = device
         self.accelerator = accelerator
         self.torch_compiler = torch_compiler
+        self.learn_counter = 0
         self.CUDA_CACHE_POLICY = "empty"  # or None or 'increase'
         self.index = index
         self.scores = []
@@ -573,9 +574,7 @@ class MADDPG:
                 discrete_action_dict[agent] = torch.argmax(action, axis=-1)
 
         if env_defined_actions is None:
-            # if self.device == "cuda" and self.torch_compiler:
-            #     self.cuda_cache_policy()
-            return (
+            ret = (
                 {a: t.cpu().data.numpy() for a, t in action_dict.items()},
                 (
                     discrete_action_dict
@@ -585,6 +584,9 @@ class MADDPG:
                     }
                 ),
             )
+            if self.is_cuda() and self.torch_compiler:
+                self.cuda_cache_policy()
+            return ret
 
         for agent in agent_mask.keys():
             if agent_mask[agent]:
@@ -604,9 +606,7 @@ class MADDPG:
             else:
                 action_dict.update({agent: env_defined_actions[agent]})
 
-        # if self.device == "cuda" and self.torch_compiler:
-        #     self.cuda_cache_policy()
-        return (
+        ret = (
             (
                 action_dict
                 if not self.discrete_actions
@@ -614,18 +614,9 @@ class MADDPG:
             ),
             discrete_action_dict,
         )
-
-    def cuda_cache_policy(self):
-        """apply cuda cache between potential nn.Module optimization re-compiles"""
-        if not self.CUDA_CACHE_POLICY:
-            return
-        if (
-            self.CUDA_CACHE_POLICY == "empty"
-            and self.steps[-1] % (4 * self.learn_step) == 0
-        ):
-            torch.cuda.empty_cache()
-            if self.steps[-1] % (8 * self.learn_step) == 0:
-                print("EMPTY CACHE")
+        if self.is_cuda() and self.torch_compiler:
+            self.cuda_cache_policy()
+        return ret
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -772,6 +763,16 @@ class MADDPG:
         if self.is_cuda() and self.torch_compiler:
             self.cuda_cache_policy()
         return loss_dict
+
+    def cuda_cache_policy(self):
+        """apply cuda cache between potential nn.Module optimization re-compiles"""
+        if not self.CUDA_CACHE_POLICY:
+            return
+        self.learn_counter += 1
+        if self.CUDA_CACHE_POLICY == "empty" and self.learn_counter % 10 == 0:
+            torch.cuda.empty_cache()
+            if self.learn_counter % 20 == 0:
+                print("EMPTY CACHE")
 
     def is_cuda(self):
         if isinstance(self.device, str):
@@ -995,9 +996,9 @@ class MADDPG:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
-        assert hasattr(self, "torch_compiler")
+
         clone = type(self)(**input_args)
-        assert hasattr(clone, "torch_compiler")
+
         if self.accelerator is not None:
             self.unwrap_models()
         actors = [actor.clone() for actor in self.actors]
@@ -1047,7 +1048,6 @@ class MADDPG:
                     self.accelerator.prepare(critic_optimizer)
                     for critic_optimizer in critic_optimizers
                 ]
-                assert False
             else:
                 (
                     clone.actors,
@@ -1064,7 +1064,6 @@ class MADDPG:
                     actor_optimizers,
                     critic_optimizers,
                 )
-                assert False
         elif self.torch_compiler:
             clone.actors = [
                 torch.compile(actor.to(self.device), mode=self.torch_compiler)
@@ -1097,9 +1096,6 @@ class MADDPG:
             ]
             clone.actor_optimizers = actor_optimizers
             clone.critic_optimizers = critic_optimizers
-            assert False
-
-        assert hasattr(clone, "torch_compiler")
 
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
@@ -1131,13 +1127,11 @@ class MADDPG:
         if index is not None:
             clone.index = index
 
-        assert hasattr(clone, "torch_compiler")
         return clone
 
     def inspect_attributes(self, input_args_only=False):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        ##assert 'torch_compiler' in attributes
         guarded_attributes = [
             "actors",
             "critics",
@@ -1150,7 +1144,7 @@ class MADDPG:
         # Exclude private and built-in attributes
         attributes = [
             a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]  # FIXME (fixed!) assert above / this eliminates internal __dict__, else all items in attributes list
+        ]
 
         if input_args_only:
             constructor_params = inspect.signature(self.__init__).parameters.keys()
@@ -1162,7 +1156,6 @@ class MADDPG:
         else:
             # Remove the algo specific guarded variables
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-        assert "torch_compiler" in attributes
         return attributes
 
     def wrap_models(self):
@@ -1220,7 +1213,6 @@ class MADDPG:
         :type path: string
         """
         attribute_dict = self.inspect_attributes()
-        assert "torch_compiler" in attribute_dict
 
         network_info = {
             "actors_init_dict": [actor.init_dict for actor in self.actors],
@@ -1363,7 +1355,6 @@ class MADDPG:
         self.actor_optimizers = actor_optimizer_list
         self.critic_optimizers = critic_optimizer_list
 
-        assert "torch_compiler" in checkpoint
         for attribute in checkpoint.keys():
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
@@ -1400,8 +1391,6 @@ class MADDPG:
         checkpoint["device"] = device
         checkpoint["accelerator"] = accelerator
 
-        assert "torch_compiler" in checkpoint
-
         constructor_params = inspect.signature(cls.__init__).parameters.keys()
         class_init_dict = {
             k: v for k, v in checkpoint.items() if k in constructor_params
@@ -1409,7 +1398,6 @@ class MADDPG:
 
         if checkpoint["net_config"] is not None:
             agent = cls(**class_init_dict)
-            assert hasattr(agent, "torch_compiler")
             agent.arch = checkpoint["net_config"]["arch"]
             if agent.arch == "mlp":
                 agent.actors = [

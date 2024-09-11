@@ -13,23 +13,23 @@ INIT_HP:
     MEAN_NOISE: 0.             # Mean action noise
     THETA: 0.15                # Rate of mean reversion in OU noise
     DT: 0.01                   # Timestep for OU noise
-    BATCH_SIZE: 24           # Batch size
+    BATCH_SIZE: 64             # Batch size
     LR_ACTOR: 0.001            # Actor learning rate
     LR_CRITIC: 0.01            # Critic earning rate
     MAX_STEPS: 2_000_000       # Max no. steps
     TARGET_SCORE: 100          # Early training stop at avg score of last 100 episodes
     GAMMA: 0.95                # Discount factor
-    MEMORY_SIZE: 50_000     # Max memory buffer size
-    LEARN_STEP: 50            # Learning frequency
+    MEMORY_SIZE: 250_000       # Max memory buffer size
+    LEARN_STEP: 512            # Learning frequency
     TAU: 0.01                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 55          # Evolution frequency
+    EVO_STEPS: 5_000           # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    LEARNING_DELAY: 0          # Steps before learning
-    WANDB: false                # Log with Weights and Biases
+    LEARNING_DELAY: 4_000      # Steps before learning
+    WANDB: false               # Log with Weights and Biases
     TORCH_COMPILE: default
 
 MUTATION_PARAMS:
@@ -48,8 +48,8 @@ MUTATION_PARAMS:
     MAX_LR: 0.01
     MIN_LEARN_STEP: 20
     MAX_LEARN_STEP: 200
-    MIN_BATCH_SIZE: 8
-    MAX_BATCH_SIZE: 512
+    MIN_BATCH_SIZE: 64
+    MAX_BATCH_SIZE: 1024
 
 NET_CONFIG:
     arch: mlp
