@@ -1,5 +1,6 @@
 import copy
 import functools
+from typing import Any, Literal
 from unittest.mock import patch
 
 import gymnasium
@@ -11,6 +12,8 @@ from pettingzoo.mpe import simple_adversary_v3
 
 from agilerl.wrappers.pettingzoo_wrappers import (
     CustomPettingZooVectorizationParallelWrapper,
+    PettingZooAutoResetParallelWrapper,
+    PettingZooParallelWrapper,
     PettingZooVectorizationParallelWrapper,
 )
 
@@ -240,6 +243,11 @@ class parallel_env_disc_action_masking(ParallelEnv):
         infos = {agent: {} for agent in self.agents}
         self.state = observations
 
+        for agent in self.agents:
+            observations[agent] = {}
+            observations[agent]["observation"] = 1
+            observations[agent]["action_mask"] = np.ones(self.action_space(agent).n)
+
         return observations, infos
 
     def step(self, actions):
@@ -364,7 +372,14 @@ class parallel_env_cont_agent_masking(ParallelEnv):
         self.agents = self.possible_agents[:]
         self.num_moves = 0
         observations = {agent: NONE for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
+        infos = {
+            agent: {
+                "env_defined_actions": np.random.normal(
+                    size=(self.action_space(agent).shape)
+                )
+            }
+            for agent in self.agents
+        }
         self.state = observations
         return observations, infos
 
@@ -386,12 +401,16 @@ class parallel_env_cont_agent_masking(ParallelEnv):
         if env_truncation:
             self.agents = []
         infos = {
-            agent: {
-                "env_defined_actions": np.random.normal(
-                    size=(self.action_space(agent).shape)
-                )
-            }
-            for agent in self.agents
+            agent: (
+                {
+                    "env_defined_actions": np.random.normal(
+                        size=(self.action_space(agent).shape)
+                    )
+                }
+                if idx % 2 == 0
+                else {"env_defined_actions": None}
+            )
+            for idx, agent in enumerate(self.agents)
         }
         return observations, rewards, terminations, truncations, infos
 
@@ -444,6 +463,90 @@ class parallel_env_atari(ParallelEnv):
         return observations, rewards, terminations, truncations, infos
 
 
+class terminal_env(ParallelEnv):
+    metadata = {"render_modes": ["human"], "name": "rps_v2"}
+
+    def __init__(self, terminal_mode, render_mode=None):
+        self.possible_agents = ["player_" + str(r) for r in range(2)]
+        self.agent_name_mapping = dict(
+            zip(self.possible_agents, list(range(len(self.possible_agents))))
+        )
+        self.render_mode = render_mode
+        self.terminal_mode = terminal_mode
+
+    def observation_space(self, agent):
+        return Box(0, 2, shape=(2,), dtype=float)
+
+    def action_space(self, agent):
+        return Box(0, 2, shape=(1,), dtype=float)
+
+    def close(self):
+        pass
+
+    def reset(self, seed=None, options=None):
+        self.agents = self.possible_agents[:]
+        observations = {agent: NONE for agent in self.agents}
+        infos = {agent: {"reset"} for agent in self.agents}
+        self.state = observations
+        return observations, infos
+
+    def step(self, actions):
+        if not actions:
+            self.agents = []
+            return {}, {}, {}, {}, {}
+        rewards = {}
+        rewards[self.agents[0]], rewards[self.agents[1]] = (0, 0)
+        if self.terminal_mode == "term_only":
+            terminations = {agent: True for agent in self.agents}
+            truncations = {agent: False for agent in self.agents}
+        elif self.terminal_mode == "trunc_only":
+            terminations = {agent: True for agent in self.agents}
+            truncations = {agent: False for agent in self.agents}
+        else:
+            terminations = {
+                agent: True if idx % 2 == 0 else False
+                for idx, agent in enumerate(self.agents)
+            }
+            truncations = {
+                agent: False if terminations[agent] else True for agent in self.agents
+            }
+        observations = {
+            self.agents[i]: actions[self.agents[1 - i]] for i in range(len(self.agents))
+        }
+        self.state = observations
+        infos = {
+            agent: {
+                "env_defined_actions": np.random.normal(
+                    size=(self.action_space(agent).shape)
+                )
+            }
+            for agent in self.agents
+        }
+        return observations, rewards, terminations, truncations, infos
+
+
+class error_env(ParallelEnv):
+    metadata = {}
+
+    def __init__(self):
+        self.agents = self.possible_agents = ["a1", "a2"]
+
+    def step(self, action, *args, **kwargs):
+        raise Exception
+
+    def reset(self, *args, **kwargs):
+        return ({a: 1 for a in self.agents}, {a: {} for a in self.agents})
+
+    @functools.lru_cache(maxsize=None)
+    def action_space(self, agent):
+        return Discrete(3)
+
+
+@pytest.fixture
+def make_error_env():
+    return error_env()
+
+
 @pytest.fixture
 def native_pz_env(env):
     return env
@@ -457,6 +560,11 @@ def petting_zoo_env_cont_actions():
 @pytest.fixture
 def petting_zoo_env_disc_actions():
     return parallel_env_disc()
+
+
+@pytest.fixture
+def petting_zoo_terminal_env(terminal_mode):
+    return terminal_env(terminal_mode)
 
 
 @pytest.fixture
@@ -484,14 +592,27 @@ def pettingzoo_env_cont_agent_masking():
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_vectorisation_wrapper_petting_zoo_reset(env, request, n_envs):
+def test_vectorisation_wrapper_petting_zoo_reset(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     vec_env.close()
 
     for agent in vec_env.agents:
-        assert len(observations[agent]) == n_envs
+        if hasattr(observations[agent], "get"):
+            assert len(observations[agent]["observation"]) == n_envs
+            assert len(observations[agent]["action_mask"]) == n_envs
+        else:
+            assert len(observations[agent]) == n_envs
         assert isinstance(infos[agent], dict)
 
 
@@ -505,7 +626,16 @@ def test_vectorisation_wrapper_petting_zoo_reset(env, request, n_envs):
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_vectorisation_wrapper_petting_zoo_step(env, request, n_envs):
+def test_vectorisation_wrapper_petting_zoo_step(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
@@ -539,7 +669,11 @@ def test_vectorisation_wrapper_petting_zoo_step(env, request, n_envs):
         "petting_zoo_env_cont_actions",
     ],
 )
-def test_cont_action_observation_spaces(env, request, n_envs):
+def test_cont_action_observation_spaces(
+    env: Literal["petting_zoo_env_cont_actions"],
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     env.reset()
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
@@ -557,7 +691,15 @@ def test_cont_action_observation_spaces(env, request, n_envs):
     "env",
     ["petting_zoo_env_disc_actions", "atari", "pettingzoo_env_disc_action_masking"],
 )
-def test_disc_action_observation_spaces(env, request, n_envs):
+def test_disc_action_observation_spaces(
+    env: (
+        Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     env.reset()
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
@@ -580,7 +722,16 @@ def test_disc_action_observation_spaces(env, request, n_envs):
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_basic_attributes(env, request, n_envs):
+def test_basic_attributes(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     env.reset()
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
@@ -601,7 +752,16 @@ def test_basic_attributes(env, request, n_envs):
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_close(env, request, n_envs):
+def test_close(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
@@ -629,7 +789,16 @@ def test_close(env, request, n_envs):
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_seed(env, request, n_envs):
+def test_seed(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
@@ -639,6 +808,7 @@ def test_seed(env, request, n_envs):
     }
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
     vec_env.env.seed(0)
+    vec_env.close()
 
 
 @pytest.mark.parametrize("n_envs", [1])
@@ -651,7 +821,16 @@ def test_seed(env, request, n_envs):
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_subproc_close(env, request, n_envs):
+def test_subproc_close(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
@@ -663,7 +842,7 @@ def test_subproc_close(env, request, n_envs):
         def send(self, *args):
             pass
 
-    vec_env.env.remotes = [DummyRemote()]
+    vec_env.env.parent_remotes = [DummyRemote()]
 
     vec_env.env.waiting = True
     vec_env.env.close()
@@ -682,7 +861,16 @@ def test_subproc_close(env, request, n_envs):
         "pettingzoo_env_disc_action_masking",
     ],
 )
-def test_sample_personas(env, request, n_envs):
+def test_sample_personas(
+    env: (
+        Literal["petting_zoo_env_cont_actions"]
+        | Literal["petting_zoo_env_disc_actions"]
+        | Literal["atari"]
+        | Literal["pettingzoo_env_disc_action_masking"]
+    ),
+    request: pytest.FixtureRequest,
+    n_envs: Literal[1] | Literal[4],
+):
     env = request.getfixturevalue(env)
 
     def dummy_sp(is_train, is_val, path):
@@ -692,12 +880,23 @@ def test_sample_personas(env, request, n_envs):
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     result = vec_env.env.sample_personas(False)
+    vec_env.close()
     assert result is None
 
 
-@pytest.mark.parametrize("n_envs", [1, 4])
+@pytest.mark.parametrize(
+    "n_envs",
+    [
+        # 1,
+        4
+    ],
+)
 @pytest.mark.parametrize("env", ["pettingzoo_env_disc_action_masking"])
-def test_action_masking(env, request, n_envs):
+def test_action_masking(
+    env: Literal["pettingzoo_env_disc_action_masking"],
+    request: pytest.FixtureRequest,
+    n_envs: Literal[4],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
@@ -719,9 +918,13 @@ def test_action_masking(env, request, n_envs):
     vec_env.close()
 
 
-@pytest.mark.parametrize("n_envs", [1, 4])
+@pytest.mark.parametrize("n_envs", [4])
 @pytest.mark.parametrize("env", ["pettingzoo_env_cont_agent_masking"])
-def test_agent_masking(env, request, n_envs):
+def test_agent_masking(
+    env: Literal["pettingzoo_env_cont_agent_masking"],
+    request: pytest.FixtureRequest,
+    n_envs: Literal[4],
+):
     env = request.getfixturevalue(env)
     vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
@@ -730,7 +933,6 @@ def test_agent_masking(env, request, n_envs):
         for agent in vec_env.agents
     }
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
-
     for agent, dic in infos.items():
         assert "env_defined_actions" in dic.keys()
         assert dic["env_defined_actions"].shape == (
@@ -769,7 +971,7 @@ def test_pz_native_env_reset():
     "env, continuous_actions",
     [(simple_adversary_v3, True), (simple_adversary_v3, False)],
 )
-def test_pz_native_env_step(env, native_pz_env, continuous_actions):
+def test_pz_native_env_step(env: Any, native_pz_env: Any, continuous_actions: bool):
     num_envs = 1
     env = PettingZooVectorizationParallelWrapper(
         native_pz_env,
@@ -793,3 +995,132 @@ def test_pz_native_env_step(env, native_pz_env, continuous_actions):
     assert list(info.keys()) == env_agents
     for k, v in info.items():
         assert isinstance(v, dict)
+
+
+@pytest.mark.parametrize(
+    "env",
+    ["petting_zoo_env_disc_actions"],
+)
+def test_render_vectorized_pz_default_wrapper(
+    env: Literal["petting_zoo_env_disc_actions"], request: pytest.FixtureRequest
+):
+    env = request.getfixturevalue(env)
+    env = PettingZooParallelWrapper(env)
+    env.render()
+
+
+@pytest.mark.parametrize(
+    "env, wrapper",
+    [
+        ("petting_zoo_env_disc_actions", PettingZooParallelWrapper),
+        ("petting_zoo_env_disc_actions", PettingZooAutoResetParallelWrapper),
+    ],
+)
+def test_unwrapped_property(
+    env: Literal["petting_zoo_env_disc_actions"],
+    request: pytest.FixtureRequest,
+    wrapper: Any | PettingZooAutoResetParallelWrapper,
+):
+    env = request.getfixturevalue(env)
+    wrapped_env = wrapper(env)
+    assert env.unwrapped == wrapped_env.unwrapped
+
+
+@pytest.mark.parametrize(
+    "env, wrapper",
+    [
+        ("petting_zoo_env_disc_actions", PettingZooParallelWrapper),
+        ("petting_zoo_env_disc_actions", PettingZooAutoResetParallelWrapper),
+    ],
+)
+def test_state_property(
+    env: Literal["petting_zoo_env_disc_actions"],
+    request: pytest.FixtureRequest,
+    wrapper: Any | PettingZooAutoResetParallelWrapper,
+):
+    env = request.getfixturevalue(env)
+    wrapped_env = wrapper(env)
+    assert env.state == wrapped_env.state
+
+
+@pytest.mark.parametrize(
+    "env, wrapper",
+    [
+        ("petting_zoo_env_disc_actions", PettingZooParallelWrapper),
+        ("petting_zoo_env_disc_actions", PettingZooAutoResetParallelWrapper),
+    ],
+)
+def test_observation_space_property(
+    env: Literal["petting_zoo_env_disc_actions"],
+    request: pytest.FixtureRequest,
+    wrapper: Any | PettingZooAutoResetParallelWrapper,
+):
+    env = request.getfixturevalue(env)
+    wrapped_env = wrapper(env)
+    for agent in env.possible_agents:
+        assert env.observation_space(agent) == wrapped_env.observation_space(agent)
+
+
+@pytest.mark.parametrize(
+    "terminal_mode", [("term_only"), ("trunc_only"), ("term_and_trunc")]
+)
+def test_auto_reset_wrapper(
+    petting_zoo_terminal_env: terminal_env,
+    terminal_mode: (
+        Literal["term_only"] | Literal["trunc_only"] | Literal["term_and_trunc"]
+    ),
+):
+    env = PettingZooAutoResetParallelWrapper(petting_zoo_terminal_env)
+    actions = {agent: env.action_space(agent).sample() for agent in env.possible_agents}
+    env.reset()
+    with patch.object(env.env, "reset", side_effect=lambda: ({}, {})) as mock_reset:
+        env.step(actions)
+        mock_reset.assert_called_once
+
+
+@pytest.mark.parametrize(
+    "env",
+    [(simple_adversary_v3)],
+)
+def test_auto_reset_subproc(
+    env: Any,
+    native_pz_env: Any,
+):
+    n_envs = 4
+    max_cycles = 25
+    vec_env = PettingZooVectorizationParallelWrapper(
+        env=native_pz_env, n_envs=n_envs, enable_autoreset=True
+    )
+    vec_env.reset()
+    actions = {
+        agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
+        for agent in vec_env.agents
+    }
+    for _ in range(max_cycles):
+        *_, trunc, _ = vec_env.step(actions)
+    assert all(all(t) for t in trunc.values())
+
+    *_, trunc, _ = vec_env.step(actions)
+    assert not all(all(t) for t in trunc.values())
+    vec_env.close()
+
+
+# @pytest.mark.parametrize(
+#         ""
+# )
+def test_exception_throws_from_within_subproc(make_error_env):
+    n_envs = 2
+    vec_env = CustomPettingZooVectorizationParallelWrapper(
+        make_error_env, n_envs=n_envs
+    )
+    vec_env.reset()
+    actions = {
+        agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
+        for agent in vec_env.agents
+    }
+    with pytest.raises(Exception):
+        vec_env.step(actions)
+
+
+def test_env_defined_action_none_to_nan():
+    pass

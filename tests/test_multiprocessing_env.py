@@ -1,4 +1,4 @@
-from multiprocessing import Pipe
+from multiprocessing import Pipe, Process
 
 import numpy as np
 import pytest
@@ -6,7 +6,7 @@ from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo.mpe import simple_adversary_v3
 
 from agilerl.utils.multiprocessing_env import VecEnv, worker
-from tests.test_vectorization import parallel_env_disc
+from tests.test_vectorization import error_env, parallel_env_disc
 
 
 class DummyRecv:
@@ -75,7 +75,7 @@ def test_worker_pettingzoo(enable_autoreset):
 
 
 def test_worker_cmd_not_implemented():
-    cmd = ["Command that doesn't exist"]
+    cmd = "Command that doesn't exist"
     data = [
         None,
     ]
@@ -98,6 +98,26 @@ def test_worker_cmd_not_implemented():
         worker(remote, parent_remote, env_fn_wrapper)
 
         assert error is NotImplementedError
+
+
+def test_worker_sends_error_message():
+    cmd = "step"
+    data = 3
+
+    env = error_env()
+
+    env_fns = [lambda: env for _ in range(2)]
+
+    parent_remote, child_remote = Pipe()
+    env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+
+    process = Process(target=worker, args=(child_remote, parent_remote, env_fn_wrapper))
+    process.start()
+    parent_remote.send((cmd, data))
+    results = parent_remote.recv()
+
+    assert results[0] == "error"
+    # remote.send(("close", None))
 
 
 def test_vecenv():

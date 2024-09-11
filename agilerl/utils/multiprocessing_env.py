@@ -17,7 +17,9 @@ from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo.utils.env import ParallelEnv
 
 
-def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_args={}):
+def worker(
+    child_remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_args={}
+):
     """Worker class
 
     References:
@@ -31,7 +33,7 @@ def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_arg
         env = env.parallel_env(**env_args)
 
     while True:
-        cmd, data = remote.recv()
+        cmd, data = child_remote.recv()
         try:
             if cmd == "step":
                 if autoreset:
@@ -62,17 +64,17 @@ def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_arg
                 reward = list(reward.values())
                 dones = list(dones.values())
                 truncs = list(truncs.values())
-                remote.send(
+                child_remote.send(
                     (ob, reward, dones, truncs, info, action_mask, env_defined_actions)
                 )
             elif cmd == "reset":
                 obs, infos = env.reset(seed=data, options=None)
                 ob, action_mask = process_observation(obs)
                 info, env_defined_actions = process_info(infos)
-                remote.send((ob, info, action_mask, env_defined_actions))
+                child_remote.send((ob, info, action_mask, env_defined_actions))
             elif cmd == "close":
                 env.close()
-                remote.close()
+                child_remote.close()
                 break
             elif cmd == "seed":
                 env.seed(data)
@@ -84,36 +86,49 @@ def worker(remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_arg
             if isinstance(e, NotImplementedError):
                 raise NotImplementedError
             tb = traceback.format_exc()
-            remote.send(("error", e, tb))
+            child_remote.send(("error", e, tb))
 
 
 def process_observation(obs):
     """Process observation so we can handle action masking"""
-
-    try:
-        ob = {agent: obs[agent]["observation"] for agent in obs.keys()}
-        action_mask = {agent: obs[agent]["action_mask"] for agent in obs.keys()}
-        ob = list(ob.values())
-        action_mask = list(action_mask.values())
-    except Exception:
-        ob = list(obs.values())
+    ob = {
+        agent: (
+            obs[agent].get("observation", None)
+            if hasattr(obs[agent], "get")
+            else obs[agent]
+        )
+        for agent in obs.keys()
+    }
+    ob = list(ob.values())
+    action_mask = {
+        agent: (
+            obs[agent].get("action_mask", None) if hasattr(obs[agent], "get") else None
+        )
+        for agent in obs.keys()
+    }
+    if all(am is None for am in action_mask.values()):
         action_mask = None
-
+    else:
+        action_mask = list(action_mask.values())
     return ob, action_mask
 
 
 def process_info(infos):
     """Process information dict so we can handle agent masking"""
-    try:
-        env_defined_actions = {
-            agent: infos[agent].pop("env_defined_actions") for agent in infos.keys()
-        }
+    env_defined_actions = {
+        agent: (
+            infos[agent].pop("env_defined_actions", None)
+            if hasattr(infos[agent], "get")
+            else infos[agent]
+        )
+        for agent in infos.keys()
+    }
+    if any(eda is not None for eda in env_defined_actions.values()):
         env_defined_actions = list(env_defined_actions.values())
         info = list(infos.values())
-    except Exception:
+    else:
         env_defined_actions = None
         info = list(infos.values())
-
     return info, env_defined_actions
 
 
@@ -200,20 +215,22 @@ class SubprocVecEnv(VecEnv):
         self.action_space = self.env.action_space
         self.closed = False
         self.nenvs = len(env_fns)
-        self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(self.nenvs)])
+        self.parent_remotes, self.child_remotes = zip(
+            *[Pipe() for _ in range(self.nenvs)]
+        )
         self.ps = [
             Process(
                 target=worker,
                 args=(
-                    work_remote,
-                    remote,
+                    child_remote,
+                    parent_remote,
                     CloudpickleWrapper(env_fn),
                     enable_autoreset,
                     env_args,
                 ),
             )
-            for idx, (work_remote, remote, env_fn) in enumerate(
-                zip(self.work_remotes, self.remotes, env_fns)
+            for idx, (child_remote, parent_remote, env_fn) in enumerate(
+                zip(self.child_remotes, self.parent_remotes, env_fns)
             )
         ]
         for p in self.ps:
@@ -229,20 +246,19 @@ class SubprocVecEnv(VecEnv):
 
     # Note: this is not part of the PettingZoo API
     def seed(self, value):
-        for i_remote, remote in enumerate(self.remotes):
-            remote.send(("seed", value + i_remote))
+        for i_remote, parent_remote in enumerate(self.parent_remotes):
+            parent_remote.send(("seed", value + i_remote))
 
     def step_async(self, actions):
-        for remote, action in zip(self.remotes, actions):
-            remote.send(("step", action))
+        for parent_remote, action in zip(self.parent_remotes, actions):
+            parent_remote.send(("step", action))
         self.waiting = True
 
     def step_wait(self):
-        results = [remote.recv() for remote in self.remotes]
+        results = [parent_remote.recv() for parent_remote in self.parent_remotes]
         obs, rews, dones, truncs, infos, action_mask, env_defined_actions = (
             self.process_results(results, waiting_flag=False)
         )
-
         ret_obs_dict = {
             possible_agent: []
             for idx, possible_agent in enumerate(self.env.possible_agents)
@@ -332,9 +348,9 @@ class SubprocVecEnv(VecEnv):
         )
 
     def reset(self, seed=None, options=None):
-        for remote in self.remotes:
-            remote.send(("reset", seed))
-        results = [remote.recv() for remote in self.remotes]
+        for parent_remote in self.parent_remotes:
+            parent_remote.send(("reset", seed))
+        results = [parent_remote.recv() for parent_remote in self.parent_remotes]
         obs, infos, action_mask, env_defined_actions = self.process_results(
             results, waiting_flag=self.waiting
         )
@@ -390,16 +406,16 @@ class SubprocVecEnv(VecEnv):
         return (ret_obs_dict, ret_infos_dict)
 
     def render(self):
-        self.remotes[0].send(("render", None))
+        self.parent_remotes[0].send(("render", None))
 
     def close(self):
         if self.closed:
             return
         if self.waiting:
-            results = [remote.recv() for remote in self.remotes]
+            results = [parent_remote.recv() for parent_remote in self.parent_remotes]
             self.process_results(results, self.waiting)
-        for remote in self.remotes:
-            remote.send(("close", None))
+        for parent_remote in self.parent_remotes:
+            parent_remote.send(("close", None))
         for p in self.ps:
             p.join()
             self.closed = True
