@@ -630,8 +630,7 @@ class MATD3:
 
     def empty_cuda_cache(self):
         """empty cuda cache between potential nn.Module optimization re-compiles"""
-        self.steps[0] += 1
-        if self.steps[0] % (4 * self.learn_step) == 0:
+        if self.steps[-1] % (4 * self.learn_step) == 0:
             torch.cuda.empty_cache()
 
     def action_noise(self, idx):
@@ -894,6 +893,8 @@ class MATD3:
         critic_2_optimizer.step()
 
         actor_loss = None
+
+        self.empty_cuda_cache()
 
         # update actor and targets every policy_freq learn steps
         self.learn_counter[agent_id] += 1

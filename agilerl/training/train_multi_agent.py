@@ -275,6 +275,8 @@ def train_multi_agent(
                     }
 
                 # Act in environment
+                assert not is_vectorised
+
                 next_state, reward, termination, truncation, info = env.step(action)
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 total_steps += num_envs
@@ -371,7 +373,6 @@ def train_multi_agent(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
-
         # Evaluate population
         fitnesses = [
             agent.test(
@@ -507,13 +508,13 @@ def train_multi_agent(
             pbar.update(0)
 
             print(
-                "DateTime, now, H:m:s--u",
+                "DateTime, now, H:m:s-u",
                 datetime.now().hour,
                 ":",
                 datetime.now().minute,
                 ":",
                 datetime.now().second,
-                "--",
+                "-",
                 datetime.now().microsecond,
             )
             print(

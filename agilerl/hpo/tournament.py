@@ -61,7 +61,11 @@ class TournamentSelection:
         for idx in range(selection_size):
             max_id += 1
             actor_parent = population[self._tournament(rank)]
+            assert hasattr(actor_parent, "torch_compiler")
+            # print('ACTOR PARENT', actor_parent)
             new_individual = actor_parent.clone(max_id, wrap=False)
+            # print('NEW INDIVIDUAL', new_individual)
             new_population.append(new_individual)
+            assert hasattr(new_individual, "torch_compiler")
 
         return elite, new_population
