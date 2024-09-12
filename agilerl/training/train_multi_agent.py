@@ -1,4 +1,5 @@
 import os
+import time
 import warnings
 from datetime import datetime
 
@@ -124,6 +125,8 @@ def train_multi_agent(
             "'checkpoint' set to None but 'checkpoint_path' has been defined, checkpoint will not\
                       be saved unless 'checkpoint' is defined."
         )
+
+    start_time = time.time()
 
     if wb:
         if not hasattr(wandb, "api"):
@@ -504,6 +507,7 @@ def train_multi_agent(
             muts = [agent.mut for agent in pop]
             pbar.update(0)
 
+            print()
             print(
                 "DateTime, now, H:m:s-u",
                 datetime.now().hour,
@@ -513,6 +517,14 @@ def train_multi_agent(
                 datetime.now().second,
                 "-",
                 datetime.now().microsecond,
+            )
+            total_time = time.time() - start_time
+            print(
+                "Steps",
+                total_steps / total_time,
+                "per sec,",
+                total_steps / (total_time / 60),
+                "per min.",
             )
             print(
                 f"""

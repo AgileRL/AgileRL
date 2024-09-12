@@ -185,7 +185,9 @@ class MADDPG:
         self.accelerator = accelerator
         self.torch_compiler = torch_compiler
         self.learn_counter = 0
-        self.CUDA_CACHE_POLICY = "empty"  # or None or 'increase'
+        self.CUDA_CACHE_POLICY = (
+            "increase_and_empty"  # None | 'empty' | 'increase_and_empty' | 'increase'
+        )
         self.index = index
         self.scores = []
         self.fitness = []
@@ -377,8 +379,8 @@ class MADDPG:
                 ]
             else:
                 torch.set_float32_matmul_precision("high")
-                if self.CUDA_CACHE_POLICY == "increase":
-                    pass
+                if self.CUDA_CACHE_POLICY.startswith("increase"):
+                    torch._dynamo.config.accumulated_cache_size_limit = 256
                 self.actors = [
                     torch.compile(a.to(device), mode=torch_compiler)
                     for a in self.actors
@@ -765,14 +767,15 @@ class MADDPG:
         return loss_dict
 
     def cuda_cache_policy(self):
-        """apply cuda cache between potential nn.Module optimization re-compiles"""
+        """apply cuda cache policy
+        between potential nn.Module optimization re-compiles"""
         if not self.CUDA_CACHE_POLICY:
             return
         self.learn_counter += 1
-        if self.CUDA_CACHE_POLICY == "empty" and self.learn_counter % 10 == 0:
+        if self.CUDA_CACHE_POLICY.endswith("empty") and self.learn_counter % 600 == 0:
             torch.cuda.empty_cache()
-            if self.learn_counter % 20 == 0:
-                print("EMPTY CACHE")
+            # if self.learn_counter % 1200 == 0:
+            #     print("EMPTY CACHE")
 
     def is_cuda(self):
         if isinstance(self.device, str):

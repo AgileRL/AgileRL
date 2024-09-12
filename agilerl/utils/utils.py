@@ -250,7 +250,6 @@ def create_population(
                 critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
-                torch_compiler=torch_compiler,
             )
             population.append(agent)
 
@@ -317,6 +316,7 @@ def create_population(
                 critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
+                torch_compiler=torch_compiler,
             )
             population.append(agent)
 

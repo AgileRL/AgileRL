@@ -190,6 +190,9 @@ class MATD3:
         self.device = device
         self.accelerator = accelerator
         self.torch_compiler = torch_compiler
+        self.CUDA_CACHE_POLICY = (
+            "empty"  # None | 'empty' | 'increase_and_empty' | 'increase'
+        )
         self.index = index
         self.policy_freq = policy_freq
         self.scores = []
@@ -424,6 +427,8 @@ class MATD3:
                 ]
             else:
                 torch.set_float32_matmul_precision("high")
+                if self.CUDA_CACHE_POLICY.startswith("increase"):
+                    torch._dynamo.config.accumulated_cache_size_limit = 256
                 self.actors = [
                     torch.compile(a.to(device), mode=torch_compiler)
                     for a in self.actors
@@ -450,6 +455,56 @@ class MATD3:
                 ]
 
         self.criterion = nn.MSELoss()
+
+    def recompile(self):
+        self.actors = [
+            (
+                torch.compile(a, mode=self.torch_compiler)
+                if not isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+                else a
+            )
+            for a in self.actors
+        ]
+        self.actor_targets = [
+            (
+                torch.compile(at, mode=self.torch_compiler)
+                if not isinstance(at, torch._dynamo.eval_frame.OptimizedModule)
+                else at
+            )
+            for at in self.actor_targets
+        ]
+        self.critics_1 = [
+            (
+                torch.compile(c, mode=self.torch_compiler)
+                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
+                else c
+            )
+            for c in self.critics_1
+        ]
+        self.critic_targets_1 = [
+            (
+                torch.compile(ct, mode=self.torch_compiler)
+                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
+                else ct
+            )
+            for ct in self.critic_targets_1
+        ]
+        self.critics_2 = [
+            (
+                torch.compile(c, mode=self.torch_compiler)
+                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
+                else c
+            )
+            for c in self.critics_2
+        ]
+        self.critic_targets_2 = [
+            (
+                torch.compile(ct, mode=self.torch_compiler)
+                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
+                else ct
+            )
+            for ct in self.critic_targets_2
+        ]
 
     def scale_to_action_space(self, action, idx):
         """Scales actions to action space defined by self.min_action and self.max_action.
@@ -586,9 +641,7 @@ class MATD3:
                 discrete_action_dict[agent] = torch.argmax(action, axis=-1)
 
         if env_defined_actions is None:
-            if self.device == "cuda":
-                self.empty_cuda_cache()
-            return (
+            ret = (
                 {a: t.cpu().data.numpy() for a, t in action_dict.items()},
                 (
                     discrete_action_dict
@@ -598,6 +651,9 @@ class MATD3:
                     }
                 ),
             )
+            if self.is_cuda() and self.torch_compiler:
+                self.empty_cuda_cache()
+            return ret
 
         for agent in agent_mask.keys():
             if agent_mask[agent]:
@@ -617,9 +673,7 @@ class MATD3:
             else:
                 action_dict.update({agent: env_defined_actions[agent]})
 
-        if self.device == "cuda":
-            self.empty_cuda_cache()
-        return (
+        ret = (
             (
                 action_dict
                 if not self.discrete_actions
@@ -627,11 +681,9 @@ class MATD3:
             ),
             discrete_action_dict,
         )
-
-    def empty_cuda_cache(self):
-        """empty cuda cache between potential nn.Module optimization re-compiles"""
-        if self.steps[-1] % (4 * self.learn_step) == 0:
-            torch.cuda.empty_cache()
+        if self.device == "cuda":
+            self.empty_cuda_cache()
+        return ret
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -800,7 +852,26 @@ class MATD3:
                 self.soft_update(critic_1, critic_target_1)
                 self.soft_update(critic_2, critic_target_2)
 
+        if self.is_cuda() and self.torch_compiler:
+            self.cuda_cache_policy()
         return loss_dict
+
+    def cuda_cache_policy(self):
+        """apply cuda cache policy
+        between potential nn.Module optimization re-compiles"""
+        if not self.CUDA_CACHE_POLICY:
+            return
+        self.learn_counter += 1
+        if self.CUDA_CACHE_POLICY.endswith("empty") and self.learn_counter % 600 == 0:
+            torch.cuda.empty_cache()
+            # if self.learn_counter % 1200 == 0:
+            #     print("EMPTY CACHE")
+
+    def is_cuda(self):
+        if isinstance(self.device, str):
+            return self.device == "cuda"
+        if isinstance(self.device, torch.device):
+            return self.device == torch.device("cuda")
 
     def learn_individual(
         self,
@@ -957,7 +1028,7 @@ class MATD3:
                 actor_loss.backward()
             actor_optimizer.step()
 
-        return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
+        return actor_loss if not actor_loss else actor_loss.item(), critic_loss.item()
 
     def soft_update(self, net, target):
         """Soft updates target network."""
@@ -1149,6 +1220,34 @@ class MATD3:
                     critic_1_optimizers,
                     critic_2_optimizers,
                 )
+        elif self.torch_compiler:
+            clone.actors = [
+                torch.compile(actor.to(self.device), mode=self.torch_compiler)
+                for actor in actors
+            ]
+            clone.actor_targets = [
+                torch.compile(actor_target.to(self.device), mode=self.torch_compiler)
+                for actor_target in actor_targets
+            ]
+            clone.critics_1 = [
+                torch.compile(critic.to(self.device), mode=self.torch_compiler)
+                for critic in critics_1
+            ]
+            clone.critic_targets_1 = [
+                torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
+                for critic_target in critic_targets_1
+            ]
+            clone.critics_2 = [
+                torch.compile(critic.to(self.device), mode=self.torch_compiler)
+                for critic in critics_2
+            ]
+            clone.critic_targets_2 = [
+                torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
+                for critic_target in critic_targets_2
+            ]
+            clone.actor_optimizers = actor_optimizers
+            clone.critic_1_optimizers = critic_1_optimizers
+            clone.critic_2_optimizers = critic_1_optimizers
         else:
             clone.actors = [actor.to(self.device) for actor in actors]
             clone.actor_targets = [
