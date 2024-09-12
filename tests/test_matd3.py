@@ -1792,6 +1792,10 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile):
     assert clone_agent.tau == matd3.tau
     assert clone_agent.device == matd3.device
     assert clone_agent.accelerator == matd3.accelerator
+
+    assert clone_agent.torch_compiler == matd3.torch_compiler
+    assert clone_agent.CUDA_CACHE_POLICY == matd3.CUDA_CACHE_POLICY
+
     for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
         assert str(clone_actor.state_dict()) == str(actor.state_dict())
     for clone_critic_1, critic_1 in zip(clone_agent.critics_1, matd3.critics_1):
@@ -1909,6 +1913,9 @@ def test_clone_after_learning(compile):
     assert clone_agent.tau == matd3.tau
     assert clone_agent.device == matd3.device
     assert clone_agent.accelerator == matd3.accelerator
+
+    assert clone_agent.torch_compiler == matd3.torch_compiler
+    assert clone_agent.CUDA_CACHE_POLICY == matd3.CUDA_CACHE_POLICY
 
     for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
         assert str(clone_actor.state_dict()) == str(actor.state_dict())
