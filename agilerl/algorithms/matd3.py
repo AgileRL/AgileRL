@@ -193,6 +193,7 @@ class MATD3:
         self.CUDA_CACHE_POLICY = (
             "empty"  # None | 'empty' | 'increase_and_empty' | 'increase'
         )
+        self.cache_counter = 0
         self.index = index
         self.policy_freq = policy_freq
         self.scores = []
@@ -861,8 +862,8 @@ class MATD3:
         between potential nn.Module optimization re-compiles"""
         if not self.CUDA_CACHE_POLICY:
             return
-        self.learn_counter += 1
-        if self.CUDA_CACHE_POLICY.endswith("empty") and self.learn_counter % 600 == 0:
+        self.cache_counter += 1
+        if self.CUDA_CACHE_POLICY.endswith("empty") and self.cache_counter % 600 == 0:
             torch.cuda.empty_cache()
             # if self.learn_counter % 1200 == 0:
             #     print("EMPTY CACHE")
@@ -964,8 +965,6 @@ class MATD3:
         critic_2_optimizer.step()
 
         actor_loss = None
-
-        self.empty_cuda_cache()
 
         # update actor and targets every policy_freq learn steps
         self.learn_counter[agent_id] += 1
