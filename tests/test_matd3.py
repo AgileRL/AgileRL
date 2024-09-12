@@ -1850,8 +1850,9 @@ def test_clone_new_index():
     assert clone_agent.index == 100
 
 
+@pytest.mark.parametrize("compiled", [True, False])
 @pytest.mark.parametrize("compile", [True, False])
-def test_clone_after_learning(compile):
+def test_clone_after_learning(compiled, compile):
     state_dims = [(4,), (4,)]
     action_dims = [2, 2]
     one_hot = False
@@ -1872,7 +1873,7 @@ def test_clone_after_learning(compile):
         min_action,
         discrete_actions,
         batch_size=batch_size,
-        torch_compiler="default" if compile else None,
+        torch_compiler="default" if compiled else None,
     )
 
     states = {
@@ -1892,7 +1893,7 @@ def test_clone_after_learning(compile):
 
     experiences = states, actions, rewards, next_states, dones
     matd3.learn(experiences)
-    clone_agent = matd3.clone()
+    clone_agent = matd3.clone(compile="default" if compile else None)
     assert isinstance(clone_agent, MATD3)
     assert clone_agent.state_dims == matd3.state_dims
     assert clone_agent.action_dims == matd3.action_dims
@@ -1914,33 +1915,40 @@ def test_clone_after_learning(compile):
     assert clone_agent.device == matd3.device
     assert clone_agent.accelerator == matd3.accelerator
 
-    assert clone_agent.torch_compiler == matd3.torch_compiler
+    assert clone_agent.torch_compiler == "default" if compile else None
+    assert matd3.torch_compiler == "default" if compiled else None
     assert clone_agent.CUDA_CACHE_POLICY == matd3.CUDA_CACHE_POLICY
 
-    for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
-        assert str(clone_actor.state_dict()) == str(actor.state_dict())
-    for clone_critic_1, critic_1 in zip(clone_agent.critics_1, matd3.critics_1):
-        assert str(clone_critic_1.state_dict()) == str(critic_1.state_dict())
-    for clone_actor_target, actor_target in zip(
-        clone_agent.actor_targets, matd3.actor_targets
-    ):
-        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
-    for clone_critic_target_1, critic_target_1 in zip(
-        clone_agent.critic_targets_1, matd3.critic_targets_1
-    ):
-        assert str(clone_critic_target_1.state_dict()) == str(
-            critic_target_1.state_dict()
-        )
+    if compiled == compile:
+        for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
+            assert str(clone_actor.state_dict()) == str(actor.state_dict())
+        for clone_critic_1, critic_1 in zip(clone_agent.critics_1, matd3.critics_1):
+            assert str(clone_critic_1.state_dict()) == str(critic_1.state_dict())
+        for clone_actor_target, actor_target in zip(
+            clone_agent.actor_targets, matd3.actor_targets
+        ):
+            assert str(clone_actor_target.state_dict()) == str(
+                actor_target.state_dict()
+            )
+        for clone_critic_target_1, critic_target_1 in zip(
+            clone_agent.critic_targets_1, matd3.critic_targets_1
+        ):
+            assert str(clone_critic_target_1.state_dict()) == str(
+                critic_target_1.state_dict()
+            )
 
-    for clone_critic_2, critic_2 in zip(clone_agent.critics_2, matd3.critics_2):
-        assert str(clone_critic_2.state_dict()) == str(critic_2.state_dict())
+        for clone_critic_2, critic_2 in zip(clone_agent.critics_2, matd3.critics_2):
+            assert str(clone_critic_2.state_dict()) == str(critic_2.state_dict())
 
-    for clone_critic_target_2, critic_target_2 in zip(
-        clone_agent.critic_targets_2, matd3.critic_targets_2
-    ):
-        assert str(clone_critic_target_2.state_dict()) == str(
-            critic_target_2.state_dict()
-        )
+        for clone_critic_target_2, critic_target_2 in zip(
+            clone_agent.critic_targets_2, matd3.critic_targets_2
+        ):
+            assert str(clone_critic_target_2.state_dict()) == str(
+                critic_target_2.state_dict()
+            )
+
+        assert clone_agent.actor_networks == matd3.actor_networks
+        assert clone_agent.critic_networks == matd3.critic_networks
 
     for clone_actor_opt, actor_opt in zip(
         clone_agent.actor_optimizers, matd3.actor_optimizers
@@ -1954,9 +1962,6 @@ def test_clone_after_learning(compile):
         clone_agent.critic_2_optimizers, matd3.critic_2_optimizers
     ):
         assert str(clone_critic_opt_2) == str(critic_opt_2)
-
-    assert clone_agent.actor_networks == matd3.actor_networks
-    assert clone_agent.critic_networks == matd3.critic_networks
 
 
 @pytest.mark.parametrize("checkpoint_compile", [True, False])

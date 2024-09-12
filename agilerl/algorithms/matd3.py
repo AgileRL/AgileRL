@@ -1113,7 +1113,7 @@ class MATD3:
         self.fitness.append(mean_fit)
         return mean_fit
 
-    def clone(self, index=None, wrap=True):
+    def clone(self, index=None, wrap=True, compile=True):
         """Returns cloned agent identical to self.
 
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
@@ -1219,34 +1219,34 @@ class MATD3:
                     critic_1_optimizers,
                     critic_2_optimizers,
                 )
-        elif self.torch_compiler:
-            clone.actors = [
-                torch.compile(actor.to(self.device), mode=self.torch_compiler)
-                for actor in actors
-            ]
-            clone.actor_targets = [
-                torch.compile(actor_target.to(self.device), mode=self.torch_compiler)
-                for actor_target in actor_targets
-            ]
-            clone.critics_1 = [
-                torch.compile(critic.to(self.device), mode=self.torch_compiler)
-                for critic in critics_1
-            ]
-            clone.critic_targets_1 = [
-                torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
-                for critic_target in critic_targets_1
-            ]
-            clone.critics_2 = [
-                torch.compile(critic.to(self.device), mode=self.torch_compiler)
-                for critic in critics_2
-            ]
-            clone.critic_targets_2 = [
-                torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
-                for critic_target in critic_targets_2
-            ]
-            clone.actor_optimizers = actor_optimizers
-            clone.critic_1_optimizers = critic_1_optimizers
-            clone.critic_2_optimizers = critic_1_optimizers
+        # elif compile:
+        #     clone.actors = [
+        #         torch.compile(actor.to(self.device), mode=self.torch_compiler)
+        #         for actor in actors
+        #     ]
+        #     clone.actor_targets = [
+        #         torch.compile(actor_target.to(self.device), mode=self.torch_compiler)
+        #         for actor_target in actor_targets
+        #     ]
+        #     clone.critics_1 = [
+        #         torch.compile(critic.to(self.device), mode=self.torch_compiler)
+        #         for critic in critics_1
+        #     ]
+        #     clone.critic_targets_1 = [
+        #         torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
+        #         for critic_target in critic_targets_1
+        #     ]
+        #     clone.critics_2 = [
+        #         torch.compile(critic.to(self.device), mode=self.torch_compiler)
+        #         for critic in critics_2
+        #     ]
+        #     clone.critic_targets_2 = [
+        #         torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
+        #         for critic_target in critic_targets_2
+        #     ]
+        #     clone.actor_optimizers = actor_optimizers
+        #     clone.critic_1_optimizers = critic_1_optimizers
+        #     clone.critic_2_optimizers = critic_1_optimizers
         else:
             clone.actors = [actor.to(self.device) for actor in actors]
             clone.actor_targets = [
@@ -1296,6 +1296,11 @@ class MATD3:
         if index is not None:
             clone.index = index
 
+        if not compile:
+            return clone
+
+        clone.torch_compiler = compile
+        clone.recompile()
         return clone
 
     def inspect_attributes(self, input_args_only=False):
