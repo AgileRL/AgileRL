@@ -14,7 +14,6 @@ from multiprocessing import Pipe, Process
 
 import numpy as np
 from gymnasium.vector.utils import CloudpickleWrapper
-from pettingzoo.utils.env import ParallelEnv
 
 
 def worker(
@@ -29,7 +28,8 @@ def worker(
     env = env_fn_wrapper()
 
     autoreset = False
-    if not isinstance(env, ParallelEnv):
+    # if not isinstance(env, ParallelEnv):
+    if hasattr(env, "parallel_env"):
         env = env.parallel_env(**env_args)
 
     while True:
@@ -183,6 +183,7 @@ class VecEnv:
         pass
 
     def step(self, actions):
+        print(actions)
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
@@ -206,10 +207,10 @@ class SubprocVecEnv(VecEnv):
 
     def __init__(self, env_fns, enable_autoreset=True, env_args={}):
         env = env_fns[0]()
-        if isinstance(env, ParallelEnv):
-            self.env = env
-        else:
+        if hasattr(env, "parallel_env"):
             self.env = env.parallel_env(**env_args)
+        else:
+            self.env = env
         self.waiting = False
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space

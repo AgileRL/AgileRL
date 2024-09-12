@@ -9,7 +9,10 @@ from tqdm import trange
 import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.wrappers.pettingzoo_wrappers import (
+    CustomPettingZooVectorizationParallelWrapper,
+    PettingZooVectorizationParallelWrapper,
+)
 
 
 def train_multi_agent(
@@ -170,7 +173,13 @@ def train_multi_agent(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
-    if isinstance(env, PettingZooVectorizationParallelWrapper):
+    if isinstance(
+        env,
+        (
+            PettingZooVectorizationParallelWrapper,
+            CustomPettingZooVectorizationParallelWrapper,
+        ),
+    ):
         is_vectorised = True
         num_envs = env.num_envs
     else:

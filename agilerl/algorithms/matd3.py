@@ -1642,10 +1642,13 @@ class MATD3:
         return agent
 
     def get_env_defined_actions(self, info, agents):
-        env_defined_actions = {
-            agent: info[agent].get("env_defined_action", None) for agent in agents
-        }
+        try:
+            env_defined_actions = {
+                agent: info[agent].get("env_defined_action", None) for agent in agents
+            }
 
-        if all(eda is None for eda in env_defined_actions.values()):
+            if all(eda is None for eda in env_defined_actions.values()):
+                return
+            return env_defined_actions
+        except Exception:
             return
-        return env_defined_actions
