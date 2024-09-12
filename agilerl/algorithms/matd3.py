@@ -652,7 +652,7 @@ class MATD3:
                 ),
             )
             if self.is_cuda() and self.torch_compiler:
-                self.empty_cuda_cache()
+                self.cuda_cache_policy()
             return ret
 
         for agent in agent_mask.keys():
@@ -682,7 +682,7 @@ class MATD3:
             discrete_action_dict,
         )
         if self.device == "cuda":
-            self.empty_cuda_cache()
+            self.cuda_cache_policy()
         return ret
 
     def action_noise(self, idx):
