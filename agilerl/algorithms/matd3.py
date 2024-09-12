@@ -10,7 +10,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import unwrap_optimizer
+from agilerl.utils.algo_utils import clip_mod, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
@@ -1264,7 +1264,9 @@ class MATD3:
             clone.critic_1_optimizers = critic_1_optimizers
             clone.critic_2_optimizers = critic_2_optimizers
 
-        for attribute in self.inspect_attributes().keys():
+        for (
+            attribute
+        ) in self.inspect_attributes().keys():  # no to device implies no models
             if hasattr(self, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
                 if isinstance(attr, torch.Tensor) or isinstance(
@@ -1409,30 +1411,61 @@ class MATD3:
         :param path: Location to save checkpoint at
         :type path: string
         """
-        attribute_dict = self.inspect_attributes()
+        attribute_dict = self.inspect_attributes()  # will not return guarded attr
 
+        # guarded attr:
         network_info = {
             "actors_init_dict": [actor.init_dict for actor in self.actors],
-            "actors_state_dict": [actor.state_dict() for actor in self.actors],
+            "actors_state_dict": [
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in actor.state_dict().items()
+                    ]
+                )
+                for actor in self.actors
+            ],
             "actor_targets_init_dict": [
                 actor_target.init_dict for actor_target in self.actor_targets
             ],
             "actor_targets_state_dict": [
-                actor_target.state_dict() for actor_target in self.actor_targets
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in actor_target.state_dict().items()
+                    ]
+                )
+                for actor_target in self.actor_targets
             ],
             "actor_optimizers_state_dict": [
-                actor_optimizer.state_dict()
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in actor_optimizer.state_dict().items()
+                    ]
+                )
                 for actor_optimizer in self.actor_optimizers
             ],
             "critics_1_init_dict": [critic_1.init_dict for critic_1 in self.critics_1],
             "critics_1_state_dict": [
-                critic_1.state_dict() for critic_1 in self.critics_1
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in critic_1.state_dict().items()
+                    ]
+                )
+                for critic_1 in self.critics_1
             ],
             "critic_targets_1_init_dict": [
                 critic_target_1.init_dict for critic_target_1 in self.critic_targets_1
             ],
             "critic_targets_1_state_dict": [
-                critic_target_1.state_dict()
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in critic_target_1.state_dict().items()
+                    ]
+                )
                 for critic_target_1 in self.critic_targets_1
             ],
             "critic_1_optimizers_state_dict": [
@@ -1441,13 +1474,24 @@ class MATD3:
             ],
             "critics_2_init_dict": [critic_2.init_dict for critic_2 in self.critics_2],
             "critics_2_state_dict": [
-                critic_2.state_dict() for critic_2 in self.critics_2
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in critic_2.state_dict().items()
+                    ]
+                )
+                for critic_2 in self.critics_2
             ],
             "critic_targets_2_init_dict": [
                 critic_target_2.init_dict for critic_target_2 in self.critic_targets_2
             ],
             "critic_targets_2_state_dict": [
-                critic_target_2.state_dict()
+                dict(
+                    [
+                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                        for k, v in critic_target_2.state_dict().items()
+                    ]
+                )
                 for critic_target_2 in self.critic_targets_2
             ],
             "critic_2_optimizers_state_dict": [
@@ -1572,22 +1616,49 @@ class MATD3:
                 self.critic_2_optimizers,
             )
         ):
-            actor.load_state_dict(checkpoint["actors_state_dict"][idx])
-            actor_list.append(actor)
-            actor_target.load_state_dict(checkpoint["actor_targets_state_dict"][idx])
-            actor_target_list.append(actor_target)
-            critic_1.load_state_dict(checkpoint["critics_1_state_dict"][idx])
-            critic_1_list.append(critic_1)
-            critic_2.load_state_dict(checkpoint["critics_2_state_dict"][idx])
-            critic_2_list.append(critic_2)
-            critic_target_1.load_state_dict(
-                checkpoint["critic_targets_1_state_dict"][idx]
-            )
-            critic_target_1_list.append(critic_target_1)
-            critic_target_2.load_state_dict(
-                checkpoint["critic_targets_2_state_dict"][idx]
-            )
-            critic_target_2_list.append(critic_target_2)
+            try:
+                actor.load_state_dict(checkpoint["actors_state_dict"][idx])
+                actor_list.append(actor)
+                actor_target.load_state_dict(
+                    checkpoint["actor_targets_state_dict"][idx]
+                )
+                actor_target_list.append(actor_target)
+                critic_1.load_state_dict(checkpoint["critics_1_state_dict"][idx])
+                critic_1_list.append(critic_1)
+                critic_2.load_state_dict(checkpoint["critics_2_state_dict"][idx])
+                critic_2_list.append(critic_2)
+                critic_target_1.load_state_dict(
+                    checkpoint["critic_targets_1_state_dict"][idx]
+                )
+                critic_target_1_list.append(critic_target_1)
+                critic_target_2.load_state_dict(
+                    checkpoint["critic_targets_2_state_dict"][idx]
+                )
+                critic_target_2_list.append(critic_target_2)
+            except Exception:
+                actor.load_state_dict(clip_mod(checkpoint["actors_state_dict"][idx]))
+                actor_list.append(actor)
+                actor_target.load_state_dict(
+                    clip_mod(checkpoint["actor_targets_state_dict"][idx])
+                )
+                actor_target_list.append(actor_target)
+                critic_1.load_state_dict(
+                    clip_mod(checkpoint["critics_1_state_dict"][idx])
+                )
+                critic_1_list.append(critic_1)
+                critic_2.load_state_dict(
+                    clip_mod(checkpoint["critics_2_state_dict"][idx])
+                )
+                critic_2_list.append(critic_2)
+                critic_target_1.load_state_dict(
+                    clip_mod(checkpoint["critic_targets_1_state_dict"][idx])
+                )
+                critic_target_1_list.append(critic_target_1)
+                critic_target_2.load_state_dict(
+                    clip_mod(checkpoint["critic_targets_2_state_dict"][idx])
+                )
+                critic_target_2_list.append(critic_target_2)
+
             actor_optimizer.load_state_dict(
                 checkpoint["actor_optimizers_state_dict"][idx]
             )
@@ -1612,8 +1683,13 @@ class MATD3:
         self.critic_2_optimizers = critic_2_optimizer_list
 
         for attribute in checkpoint.keys():
+            if attribute == "torch_compiler":
+                continue
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
+
+        if self.torch_compiler:
+            self.recompile()
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -1789,18 +1865,36 @@ class MATD3:
                 agent.critic_2_optimizers,
             )
         ):
-            actor.load_state_dict(actors_state_dict[idx])
-            actor_list.append(actor)
-            actor_target.load_state_dict(actor_targets_state_dict[idx])
-            actor_target_list.append(actor_target)
-            critic_1.load_state_dict(critics_1_state_dict[idx])
-            critic_1_list.append(critic_1)
-            critic_2.load_state_dict(critics_2_state_dict[idx])
-            critic_2_list.append(critic_2)
-            critic_target_1.load_state_dict(critic_targets_1_state_dict[idx])
-            critic_target_1_list.append(critic_target_1)
-            critic_target_2.load_state_dict(critic_targets_2_state_dict[idx])
-            critic_target_2_list.append(critic_target_2)
+            try:
+                actor.load_state_dict(actors_state_dict[idx])
+                actor_list.append(actor)
+                actor_target.load_state_dict(actor_targets_state_dict[idx])
+                actor_target_list.append(actor_target)
+                critic_1.load_state_dict(critics_1_state_dict[idx])
+                critic_1_list.append(critic_1)
+                critic_2.load_state_dict(critics_2_state_dict[idx])
+                critic_2_list.append(critic_2)
+                critic_target_1.load_state_dict(critic_targets_1_state_dict[idx])
+                critic_target_1_list.append(critic_target_1)
+                critic_target_2.load_state_dict(critic_targets_2_state_dict[idx])
+                critic_target_2_list.append(critic_target_2)
+            except Exception:
+                actor.load_state_dict(clip_mod(actors_state_dict[idx]))
+                actor_list.append(actor)
+                actor_target.load_state_dict(clip_mod(actor_targets_state_dict[idx]))
+                actor_target_list.append(actor_target)
+                critic_1.load_state_dict(clip_mod(critics_1_state_dict[idx]))
+                critic_1_list.append(critic_1)
+                critic_2.load_state_dict(clip_mod(critics_2_state_dict[idx]))
+                critic_2_list.append(critic_2)
+                critic_target_1.load_state_dict(
+                    clip_mod(critic_targets_1_state_dict[idx])
+                )
+                critic_target_1_list.append(critic_target_1)
+                critic_target_2.load_state_dict(
+                    clip_mod(critic_targets_2_state_dict[idx])
+                )
+                critic_target_2_list.append(critic_target_2)
             actor_optimizer.load_state_dict(actor_optimizers_state_dict[idx])
             actor_optimizer_list.append(actor_optimizer)
             critic_1_optimizer.load_state_dict(critic_1_optimizers_state_dict[idx])
@@ -1823,5 +1917,8 @@ class MATD3:
 
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
+
+        if agent.torch_compiler:
+            agent.recompile()
 
         return agent
