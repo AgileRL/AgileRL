@@ -10,7 +10,7 @@ import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.wrappers.pettingzoo_wrappers import (
-    CustomPettingZooVectorizationParallelWrapper,
+    DefaultPettingZooVectorizationParallelWrapper,
     PettingZooVectorizationParallelWrapper,
 )
 
@@ -176,8 +176,8 @@ def train_multi_agent(
     if isinstance(
         env,
         (
+            DefaultPettingZooVectorizationParallelWrapper,
             PettingZooVectorizationParallelWrapper,
-            CustomPettingZooVectorizationParallelWrapper,
         ),
     ):
         is_vectorised = True

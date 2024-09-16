@@ -13,7 +13,7 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.wrappers.pettingzoo_wrappers import (
-    CustomPettingZooVectorizationParallelWrapper,
+    DefaultPettingZooVectorizationParallelWrapper,
     PettingZooVectorizationParallelWrapper,
 )
 
@@ -42,8 +42,8 @@ def make_multi_agent_vect_envs(env, custom, num_envs=1):
     :type num_envs: int, optional
     """
     if custom:
-        return CustomPettingZooVectorizationParallelWrapper(env, num_envs)
-    return PettingZooVectorizationParallelWrapper(env, num_envs)
+        return PettingZooVectorizationParallelWrapper(env, num_envs)
+    return DefaultPettingZooVectorizationParallelWrapper(env, num_envs)
 
 
 def make_skill_vect_envs(env_name, skill, num_envs=1):

@@ -75,12 +75,12 @@ Example
     from tqdm import trange
 
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+    from agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
     env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
     env.reset()
 
     # Configure the multi-agent algo input arguments

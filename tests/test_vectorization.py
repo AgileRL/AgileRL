@@ -11,7 +11,7 @@ from pettingzoo import ParallelEnv
 from pettingzoo.mpe import simple_adversary_v3
 
 from agilerl.wrappers.pettingzoo_wrappers import (
-    CustomPettingZooVectorizationParallelWrapper,
+    DefaultPettingZooVectorizationParallelWrapper,
     PettingZooAutoResetParallelWrapper,
     PettingZooParallelWrapper,
     PettingZooVectorizationParallelWrapper,
@@ -603,7 +603,7 @@ def test_vectorisation_wrapper_petting_zoo_reset(
     n_envs: Literal[1] | Literal[4],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     vec_env.close()
 
@@ -637,7 +637,7 @@ def test_vectorisation_wrapper_petting_zoo_step(
     n_envs: Literal[1] | Literal[4],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
 
     for step in range(25):
@@ -676,7 +676,7 @@ def test_cont_action_observation_spaces(
 ):
     env = request.getfixturevalue(env)
     env.reset()
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     vec_env.reset()
     assert [env.action_space(agent).shape[0] for agent in env.agents] == [
         vec_env.action_space(agent).shape[0] for agent in vec_env.agents
@@ -702,7 +702,7 @@ def test_disc_action_observation_spaces(
 ):
     env = request.getfixturevalue(env)
     env.reset()
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     vec_env.reset()
     assert [env.action_space(agent).n for agent in env.agents] == [
         vec_env.action_space(agent).n for agent in vec_env.agents
@@ -734,7 +734,7 @@ def test_basic_attributes(
 ):
     env = request.getfixturevalue(env)
     env.reset()
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     assert env.agents == vec_env.agents
     assert env.num_agents == vec_env.num_agents
@@ -763,7 +763,7 @@ def test_close(
     n_envs: Literal[1] | Literal[4],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     actions = {
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
@@ -772,7 +772,7 @@ def test_close(
     observations, rewards, terminations, truncations, infos = vec_env.step(actions)
     vec_env.render()
     with patch(
-        "agilerl.wrappers.pettingzoo_wrappers.CustomPettingZooVectorizationParallelWrapper.close"
+        "agilerl.wrappers.pettingzoo_wrappers.PettingZooVectorizationParallelWrapper.close"
     ) as mock_close:
         vec_env.close()
         mock_close.assert_called()
@@ -800,7 +800,7 @@ def test_seed(
     n_envs: Literal[1] | Literal[4],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     actions = {
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
@@ -832,7 +832,7 @@ def test_subproc_close(
     n_envs: Literal[1],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
 
     class DummyRemote:
@@ -877,7 +877,7 @@ def test_sample_personas(
         return None
 
     env.sample_personas = dummy_sp
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     result = vec_env.env.sample_personas(False)
     vec_env.close()
@@ -898,7 +898,7 @@ def test_action_masking(
     n_envs: Literal[4],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     actions = {
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
@@ -926,7 +926,7 @@ def test_agent_masking(
     n_envs: Literal[4],
 ):
     env = request.getfixturevalue(env)
-    vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+    vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
     observations, infos = vec_env.reset()
     actions = {
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
@@ -947,7 +947,7 @@ def test_agent_masking(
 
 def test_pz_native_env_reset():
     num_envs = 2
-    env = PettingZooVectorizationParallelWrapper(simple_adversary_v3, num_envs)
+    env = DefaultPettingZooVectorizationParallelWrapper(simple_adversary_v3, num_envs)
 
     reset_result = env.reset()
     env_agents = copy.deepcopy(env.agents)
@@ -973,7 +973,7 @@ def test_pz_native_env_reset():
 )
 def test_pz_native_env_step(env: Any, native_pz_env: Any, continuous_actions: bool):
     num_envs = 1
-    env = PettingZooVectorizationParallelWrapper(
+    env = DefaultPettingZooVectorizationParallelWrapper(
         native_pz_env,
         num_envs,
         enable_autoreset=True,
@@ -1088,7 +1088,7 @@ def test_auto_reset_subproc(
 ):
     n_envs = 4
     max_cycles = 25
-    vec_env = PettingZooVectorizationParallelWrapper(
+    vec_env = DefaultPettingZooVectorizationParallelWrapper(
         env=native_pz_env, n_envs=n_envs, enable_autoreset=True
     )
     vec_env.reset()
@@ -1110,9 +1110,7 @@ def test_auto_reset_subproc(
 # )
 def test_exception_throws_from_within_subproc(make_error_env):
     n_envs = 2
-    vec_env = CustomPettingZooVectorizationParallelWrapper(
-        make_error_env, n_envs=n_envs
-    )
+    vec_env = PettingZooVectorizationParallelWrapper(make_error_env, n_envs=n_envs)
     vec_env.reset()
     actions = {
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]

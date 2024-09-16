@@ -22,9 +22,7 @@ from agilerl.utils.utils import (
     print_hyperparams,
 )
 from agilerl.wrappers.learning import Skill
-from agilerl.wrappers.pettingzoo_wrappers import (
-    CustomPettingZooVectorizationParallelWrapper,
-)
+from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 from tests.test_train import DummyMultiEnv
 
 # Shared HP dict that can be used by any algorithm
@@ -88,7 +86,7 @@ def test_returns_asyncvectorenv_object_multiagent():
     env = DummyMultiEnv([4], 4)
     env = make_multi_agent_vect_envs(env, num_envs=num_envs, custom=True)
     env.close()
-    assert isinstance(env, CustomPettingZooVectorizationParallelWrapper)
+    assert isinstance(env, PettingZooVectorizationParallelWrapper)
     assert env.num_envs == num_envs
 
 

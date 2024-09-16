@@ -15,7 +15,9 @@ from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.wrappers.pettingzoo_wrappers import (
+    DefaultPettingZooVectorizationParallelWrapper,
+)
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,7 +62,7 @@ if __name__ == "__main__":
         env = ss.color_reduction_v0(env, mode="B")
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
     env.reset()
 
     # Configure the multi-agent algo input arguments

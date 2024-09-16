@@ -13,7 +13,7 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import (
-    CustomPettingZooVectorizationParallelWrapper,
+    DefaultPettingZooVectorizationParallelWrapper,
     PettingZooVectorizationParallelWrapper,
 )
 
@@ -894,8 +894,8 @@ class MATD3:
         is_vectorised = isinstance(
             env,
             (
+                DefaultPettingZooVectorizationParallelWrapper,
                 PettingZooVectorizationParallelWrapper,
-                CustomPettingZooVectorizationParallelWrapper,
             ),
         )
         with torch.no_grad():

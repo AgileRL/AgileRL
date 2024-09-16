@@ -124,7 +124,7 @@ class PettingZooAutoResetParallelWrapper(ParallelEnv):
         return self.env.action_space(agent)
 
 
-class CustomPettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
+class PettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWrapper):
     """Wrapper to vectorize custom PettingZoo ParallelEnv environments, instantiated through
     env = CustomEnv()
 
@@ -147,7 +147,7 @@ class CustomPettingZooVectorizationParallelWrapper(PettingZooAutoResetParallelWr
         return
 
 
-class PettingZooVectorizationParallelWrapper(PettingZooParallelWrapper):
+class DefaultPettingZooVectorizationParallelWrapper(PettingZooParallelWrapper):
     """Wrapper to vectorize PetttingZoo library parallel environments, instantiated through
     env = pettingzoo_env.parallel_env()
 

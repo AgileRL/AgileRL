@@ -1,17 +1,17 @@
 PettingZoo Vectorization Parallel Wrappers
 ==========================================
 AgileRL has two PettingZoo vectorization wrappers, allowing multiple instances of the environments to run in parallel. The first,
-`PettingZooVectorizationParallelWrapper` is to be used with default parallel environments from the PettingZoo library. To vectorize
+`DefaultPettingZooVectorizationParallelWrapper` is to be used with default parallel environments from the PettingZoo library. To vectorize
 any of the default PettingZoo envs, the wrapper can be used as follows:
 
 .. code-block:: python
-  rom agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+  rom agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
   from pettingzoo.atari import space_invaders_v2
 
   env = space_invaders_v2
   env_args = {"continuous_actions": True, "max_cycles": 25}
   n_envs = 4
-  vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs, enable_autoreset=True, env_args=env_args)
+  vec_env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=n_envs, enable_autoreset=True, env_args=env_args)
   observations, infos = vec_env.reset()
   for step in range(25):
       actions = {
@@ -20,18 +20,18 @@ any of the default PettingZoo envs, the wrapper can be used as follows:
       }
       observations, rewards, terminations, truncations, infos = vec_env.step(actions)
 
-The second is for custom Parallel API PettingZoo environments, `CustomPettingZooVectorizationParallelWrapper`, which
+The second is for custom Parallel API PettingZoo environments, `PettingZooVectorizationParallelWrapper`, which
 should be used for environment classes that subclass `ParallelEnv` and can be used as follows:
 
 
 .. code-block:: python
 
-  from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+  from agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
   from pettingzoo.atari import space_invaders_v2
 
   env = CustomEnv(custom_arg="custom_arg")
   n_envs = 4
-  vec_env = CustomPettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
+  vec_env = PettingZooVectorizationParallelWrapper(env, n_envs=n_envs)
   observations, infos = vec_env.reset()
   for step in range(25):
       actions = {
@@ -44,10 +44,10 @@ should be used for environment classes that subclass `ParallelEnv` and can be us
 Parameters
 ------------
 
-.. autoclass:: agilerl.wrappers.pettingzoo_wrappers.PettingZooVectorizationParallelWrapper
+.. autoclass:: agilerl.wrappers.pettingzoo_wrappers.DefaultPettingZooVectorizationParallelWrapper
   :members:
   :inherited-members:
 
-.. autoclass:: agilerl.wrappers.pettingzoo_wrappers.CustomPettingZooVectorizationParallelWrapper
+.. autoclass:: agilerl.wrappers.pettingzoo_wrappers.PettingZooVectorizationParallelWrapper
   :members:
   :inherited-members:
