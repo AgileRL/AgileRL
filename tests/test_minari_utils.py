@@ -3,7 +3,8 @@ import minari
 import pytest
 import torch
 from accelerate import Accelerator
-from minari import DataCollector, MinariDataset
+from minari.data_collector import DataCollector
+from minari.dataset.minari_dataset import MinariDataset
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils import minari_utils
@@ -17,8 +18,6 @@ def check_delete_dataset(dataset_id: str):
     """
     # check dataset name is present in local database
     local_datasets = minari.list_local_datasets()
-
-    print("DATASET ID FROM WITHIN DEL FUNC", dataset_id)
 
     assert dataset_id in local_datasets
 
@@ -42,7 +41,7 @@ def create_dataset_return_timesteps(dataset_id, env_id):
 
     env.reset(seed=42)
     total_timesteps = 0
-    for episode in range(num_episodes):
+    for _ in range(num_episodes):
         terminated = False
         truncated = False
         while not terminated and not truncated:
