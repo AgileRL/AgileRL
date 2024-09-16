@@ -10,6 +10,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 from gymnasium.spaces import Discrete
+from pettingzoo import ParallelEnv
 
 import agilerl.training.train_bandits
 import agilerl.training.train_multi_agent
@@ -193,7 +194,7 @@ class DummyBandit:
         return
 
 
-class DummyMultiEnv:
+class DummyMultiEnv(ParallelEnv):
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.state_size = self.state_dims

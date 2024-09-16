@@ -14,6 +14,7 @@ from multiprocessing import Pipe, Process
 
 import numpy as np
 from gymnasium.vector.utils import CloudpickleWrapper
+from pettingzoo import ParallelEnv
 
 
 def worker(
@@ -211,6 +212,9 @@ class SubprocVecEnv(VecEnv):
             self.env = env.parallel_env(**env_args)
         else:
             self.env = env
+            assert isinstance(
+                self.env, ParallelEnv
+            ), "Custom environments must subclass ParallelEnv."
         self.waiting = False
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
