@@ -822,10 +822,6 @@ class MADDPG:
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                                 for agent_id, s in state.items()
                             }
-                    env_defined_actions = {
-                        agent: info[agent].get("env_defined_actions", None)
-                        for agent in env.agents
-                    }
                     env_defined_actions = self.get_env_defined_actions(
                         info, self.agent_ids
                     )

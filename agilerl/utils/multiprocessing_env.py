@@ -184,7 +184,6 @@ class VecEnv:
         pass
 
     def step(self, actions):
-        print(actions)
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
