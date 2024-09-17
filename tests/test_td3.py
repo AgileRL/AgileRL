@@ -1036,7 +1036,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     td3 = TD3(state_dim=[4], action_dim=2, one_hot=False, max_action=1)
 
     # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    checkpoint_path = Path(tmpdir) / "checkpoint123.pth"
     td3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
@@ -1125,7 +1125,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     )
 
     # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    checkpoint_path = Path(tmpdir) / "checkpoint234.pth"
     td3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
@@ -1230,7 +1230,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     )
 
     # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    checkpoint_path = Path(tmpdir) / "checkpoint345.pth"
     td3.save_checkpoint(checkpoint_path)
 
     # Load the saved checkpoint file
@@ -1498,7 +1498,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     td3 = TD3(state_dim=[4], action_dim=2, one_hot=False)
 
     # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    checkpoint_path = Path(tmpdir) / "checkpoint456.pth"
     td3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
@@ -1647,7 +1647,7 @@ def test_load_from_pretrained_networks(
     )
 
     # Save the checkpoint to a file
-    checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+    checkpoint_path = Path(tmpdir) / "checkpoint567.pth"
     td3.save_checkpoint(checkpoint_path)
 
     # Create new agent object

@@ -67,6 +67,7 @@ def create_population(
     num_envs=1,
     device="cpu",
     accelerator=None,
+    torch_compiler=None,
 ):
     """Returns population of identical agents.
 
@@ -94,6 +95,8 @@ def create_population(
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param torch_compiler:
+    :type torch_compiler:
     """
     population = []
 
@@ -279,6 +282,7 @@ def create_population(
                 critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
+                torch_compiler=torch_compiler,
             )
             population.append(agent)
 
@@ -312,6 +316,7 @@ def create_population(
                 critic_networks=critic_network,
                 device=device,
                 accelerator=accelerator,
+                torch_compiler=torch_compiler,
             )
             population.append(agent)
 

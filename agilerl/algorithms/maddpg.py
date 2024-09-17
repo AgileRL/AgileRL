@@ -72,6 +72,8 @@ class MADDPG:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param torch_compile: the torch compile mode 'default', 'reduce-overhead' or 'max-autotune'
+    :type torch_compile: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -105,6 +107,7 @@ class MADDPG:
         critic_networks=None,
         device="cpu",
         accelerator=None,
+        torch_compiler=None,
         wrap=True,
     ):
         assert isinstance(state_dims, list), "State dimensions must be a list."
@@ -153,10 +156,15 @@ class MADDPG:
             warnings.warn(
                 "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
             )
+        if torch_compiler:
+            assert torch_compiler in [
+                "default",
+                "reduce-overhead",
+                "max-autotune",
+            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
-
         self.algo = "MADDPG"
         self.state_dims = state_dims
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
@@ -175,6 +183,11 @@ class MADDPG:
         self.mut = mut
         self.device = device
         self.accelerator = accelerator
+        self.torch_compiler = torch_compiler
+        self.learn_counter = 0
+        self.CUDA_CACHE_POLICY = (
+            "increase_and_empty"  # None | 'empty' | 'increase_and_empty' | 'increase'
+        )
         self.index = index
         self.scores = []
         self.fitness = []
@@ -186,11 +199,15 @@ class MADDPG:
 
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
+        self.sample_gaussian = [
+            torch.zeros(*(vect_noise_dim, action_dims[idx])).to(device)
+            for idx in range(self.n_agents)
+        ]
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, list)
             else [
-                expl_noise * np.ones((vect_noise_dim, action_dim))
+                expl_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
                 for action_dim in self.action_dims
             ]
         )
@@ -198,15 +215,17 @@ class MADDPG:
             mean_noise
             if isinstance(mean_noise, list)
             else [
-                mean_noise * np.ones((vect_noise_dim, action_dim))
+                mean_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
                 for action_dim in self.action_dims
             ]
         )
         self.current_noise = [
-            np.zeros((vect_noise_dim, action_dim)) for action_dim in self.action_dims
+            torch.zeros(*(vect_noise_dim, action_dim)).to(device)
+            for action_dim in self.action_dims
         ]
         self.theta = theta
         self.dt = dt
+        self.sqdt = dt ** (0.5)
 
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
@@ -348,16 +367,78 @@ class MADDPG:
             if wrap:
                 self.wrap_models()
         else:
-            self.actors = [actor.to(self.device) for actor in self.actors]
-            self.actor_targets = [
-                actor_target.to(self.device) for actor_target in self.actor_targets
-            ]
-            self.critics = [critic.to(self.device) for critic in self.critics]
-            self.critic_targets = [
-                critic_target.to(self.device) for critic_target in self.critic_targets
-            ]
+            if not torch_compiler:
+                self.actors = [actor.to(self.device) for actor in self.actors]
+                self.actor_targets = [
+                    actor_target.to(self.device) for actor_target in self.actor_targets
+                ]
+                self.critics = [critic.to(self.device) for critic in self.critics]
+                self.critic_targets = [
+                    critic_target.to(self.device)
+                    for critic_target in self.critic_targets
+                ]
+            else:
+                torch.set_float32_matmul_precision("high")
+                if self.CUDA_CACHE_POLICY.startswith("increase"):
+                    torch._dynamo.config.accumulated_cache_size_limit = 256
+                self.actors = [
+                    torch.compile(a.to(device), mode=torch_compiler)
+                    for a in self.actors
+                ]
+                self.actor_targets = [
+                    torch.compile(at.to(device), mode=torch_compiler)
+                    for at in self.actor_targets
+                ]
+                self.critics = [
+                    torch.compile(c.to(device), mode=torch_compiler)
+                    for c in self.critics
+                ]
+                self.critic_targets = [
+                    torch.compile(ct.to(device), mode=torch_compiler)
+                    for ct in self.critic_targets
+                ]
+                # self.actor_optimizers = [
+                #     torch.compile(opt, mode=torch_compiler) for opt in self.actor_optimizers
+                # ]
+                # self.critic_optimizers = [
+                #     torch.compile(opt, mode=torch_compiler) for opt in self.critic_optimizers
+                # ]
 
         self.criterion = nn.MSELoss()
+
+    def recompile(self):
+        self.actors = [
+            (
+                torch.compile(a, mode=self.torch_compiler)
+                if not isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+                else a
+            )
+            for a in self.actors
+        ]
+        self.actor_targets = [
+            (
+                torch.compile(at, mode=self.torch_compiler)
+                if not isinstance(at, torch._dynamo.eval_frame.OptimizedModule)
+                else at
+            )
+            for at in self.actor_targets
+        ]
+        self.critics = [
+            (
+                torch.compile(c, mode=self.torch_compiler)
+                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
+                else c
+            )
+            for c in self.critics
+        ]
+        self.critic_targets = [
+            (
+                torch.compile(ct, mode=self.torch_compiler)
+                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
+                else ct
+            )
+            for ct in self.critic_targets
+        ]
 
     def scale_to_action_space(self, action, idx):
         """Scales actions to action space defined by self.min_action and self.max_action.
@@ -365,11 +446,33 @@ class MADDPG:
         :param action: Action to be scaled
         :type action: numpy.ndarray
         """
-        return np.where(
-            action > 0,
-            action * self.max_action[idx][0],
-            action * -self.min_action[idx][0],
-        )
+        mlp_output_activation = self.actors[idx].mlp_output_activation
+        if mlp_output_activation in ["Tanh"]:
+            pre_scaled_min = -1
+            pre_scaled_max = 1
+        elif mlp_output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+            pre_scaled_min = 0
+            pre_scaled_max = 1
+        else:
+            return torch.where(
+                action > 0,
+                action * self.max_action[idx][0],
+                action * -self.min_action[idx][0],
+            )
+
+        if not (
+            isinstance(self.min_action[idx][0], (np.ndarray, torch.Tensor))
+            or isinstance(self.max_action[idx][0], (np.ndarray, torch.Tensor))
+        ):
+            if (
+                pre_scaled_min == self.min_action[idx][0]
+                and pre_scaled_max == self.max_action[idx][0]
+            ):
+                return action
+
+        return self.min_action[idx][0] + (
+            self.max_action[idx][0] - self.min_action[idx][0]
+        ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
 
     def get_action(
         self, states, training=True, agent_mask=None, env_defined_actions=None
@@ -413,8 +516,6 @@ class MADDPG:
                 if agent_mask[agent]
             ]
 
-        # states = {key: np.vstack(value) for key, value in states.items()}
-
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
 
@@ -446,63 +547,78 @@ class MADDPG:
             ]
 
         action_dict = {}
-        for idx, (agent_id, state, actor, action_dim) in enumerate(
-            zip(agent_ids, states, actors, self.action_dims)
-        ):
+
+        for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
-                    action_values = actor(state)
+                    actions = actor(state)
             else:
                 with torch.no_grad():
-                    action_values = actor(state)
+                    actions = actor(state)
             actor.train()
-            if self.discrete_actions:
-                action = action_values.cpu().data.numpy()
+            if self.discrete_actions and training:
+                actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
+            elif not self.discrete_actions:
+                action = self.scale_to_action_space(actions, idx)
                 if training:
-                    action = (action + self.action_noise(idx)).clip(0, 1)
-            else:
-                action = self.scale_to_action_space(
-                    action_values.cpu().data.numpy(), idx
-                )
-                if training:
-                    action = (action + self.action_noise(idx)).clip(
-                        self.min_action[idx][0], self.max_action[idx][0]
+                    actions = torch.clamp(
+                        actions + self.action_noise(idx),
+                        self.min_action[idx][0],
+                        self.max_action[idx][0],
                     )
-            action_dict[agent_id] = action
+            action_dict[agent_id] = actions
 
+        discrete_action_dict = None
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
-                if self.one_hot:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-                else:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-        else:
-            discrete_action_dict = None
+                discrete_action_dict[agent] = torch.argmax(action, axis=-1)
 
-        if env_defined_actions is not None:
-            for agent in env_defined_actions.keys():
-                if not agent_mask[agent]:
-                    if self.discrete_actions:
-                        discrete_action_dict.update({agent: env_defined_actions[agent]})
-                        action = env_defined_actions[agent]
-                        action = (
-                            nn.functional.one_hot(
-                                torch.tensor(action).long(),
-                                num_classes=action_dims_dict[agent],
-                            )
-                            .float()
-                            .squeeze()
-                        )
-                        action_dict.update({agent: action})
-                    else:
-                        action_dict.update({agent: env_defined_actions[agent]})
+        if env_defined_actions is None:
+            ret = (
+                {a: t.cpu().data.numpy() for a, t in action_dict.items()},
+                (
+                    discrete_action_dict
+                    if discrete_action_dict is None
+                    else {
+                        a: t.cpu().data.numpy() for a, t in discrete_action_dict.items()
+                    }
+                ),
+            )
+            if self.is_cuda() and self.torch_compiler:
+                self.cuda_cache_policy()
+            return ret
 
-        return (
-            action_dict,
+        for agent in agent_mask.keys():
+            if agent_mask[agent]:
+                continue
+            if self.discrete_actions:
+                action = env_defined_actions[agent]
+                action = (
+                    nn.functional.one_hot(
+                        torch.tensor(action).long(),
+                        num_classes=action_dims_dict[agent],
+                    )
+                    .float()
+                    .squeeze()
+                )
+                action_dict.update({agent: action})
+                discrete_action_dict.update({agent: env_defined_actions[agent]})
+            else:
+                action_dict.update({agent: env_defined_actions[agent]})
+
+        ret = (
+            (
+                action_dict
+                if not self.discrete_actions
+                else {a: t.cpu().data.numpy() for a, t in action_dict.items()}
+            ),
             discrete_action_dict,
         )
+        if self.is_cuda() and self.torch_compiler:
+            self.cuda_cache_policy()
+        return ret
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -519,18 +635,14 @@ class MADDPG:
                 + self.theta
                 * (self.mean_noise[idx] - self.current_noise[idx])
                 * self.dt
-                + self.expl_noise[idx]
-                * np.sqrt(self.dt)
-                * np.random.normal(size=(self.vect_noise_dim, self.action_dims[idx]))
+                + self.expl_noise[idx] * self.sqdt * self.sample_gaussian[idx].normal_()
             )
             self.current_noise[idx] = noise
         else:
-            noise = np.random.normal(
-                self.mean_noise[idx],
-                self.expl_noise[idx],
-                size=(self.vect_noise_dim, self.action_dims[idx]),
+            noise = self.sample_gaussian[idx].normal_(
+                self.mean_noise[idx], self.expl_noise[idx]
             )
-        return noise.astype(np.float32)
+        return noise
 
     def reset_action_noise(self, indices):
         """Reset action noise."""
@@ -545,11 +657,71 @@ class MADDPG:
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
+        states, actions, rewards, next_states, dones = experiences
+        if self.one_hot:
+            states = {
+                agent_id: nn.functional.one_hot(state.long(), num_classes=state_dim[0])
+                .float()
+                .squeeze(1)
+                for (agent_id, state), state_dim in zip(states.items(), self.state_dims)
+            }
+            next_states = {
+                agent_id: nn.functional.one_hot(
+                    next_state.long(), num_classes=state_dim[0]
+                )
+                .float()
+                .squeeze(1)
+                for (agent_id, next_state), state_dim in zip(
+                    next_states.items(), self.state_dims
+                )
+            }
+        next_actions = []
+        if self.arch == "mlp":
+            for i, agent_id_label in enumerate(self.agent_ids):
+                unscaled_actions = self.actor_targets[i](
+                    next_states[agent_id_label]
+                ).detach_()
+                if not self.discrete_actions:
+                    scaled_actions = torch.where(
+                        unscaled_actions > 0,
+                        unscaled_actions * self.max_action[i][0],
+                        unscaled_actions * -self.min_action[i][0],
+                    )
+                    next_actions.append(scaled_actions)
+                else:
+                    next_actions.append(unscaled_actions)
+            action_values = list(actions.values())
+            state_values = list(states.values())
+            input_combined = torch.cat(state_values + action_values, 1)
+        elif self.arch == "cnn":
+            for i, agent_id_label in enumerate(self.agent_ids):
+                unscaled_actions = self.actor_targets[i](
+                    next_states[agent_id_label].unsqueeze(2)
+                ).detach_()
+                if not self.discrete_actions:
+                    scaled_actions = torch.where(
+                        unscaled_actions > 0,
+                        unscaled_actions * self.max_action[i][0],
+                        unscaled_actions * -self.min_action[i][0],
+                    )
+                    next_actions.append(scaled_actions)
+                else:
+                    next_actions.append(unscaled_actions)
+            stacked_states = torch.stack(list(states.values()), dim=2)
+            stacked_actions = torch.cat(list(actions.values()), dim=1)
+            stacked_next_states = torch.stack(list(next_states.values()), dim=2)
+
+        if self.arch == "mlp":
+            next_input_combined = torch.cat(
+                list(next_states.values()) + next_actions, 1
+            )
+        elif self.arch == "cnn":
+            stacked_next_actions = torch.cat(next_actions, dim=1)
+
         loss_dict = {}
         for idx, (
             agent_id,
             actor,
-            actor_target,
             critic,
             critic_target,
             actor_optimizer,
@@ -558,181 +730,31 @@ class MADDPG:
             zip(
                 self.agent_ids,
                 self.actors,
-                self.actor_targets,
                 self.critics,
                 self.critic_targets,
                 self.actor_optimizers,
                 self.critic_optimizers,
             )
         ):
-            states, actions, rewards, next_states, dones = experiences
-
-            if self.one_hot:
-                states = {
-                    agent_id: nn.functional.one_hot(
-                        state.long(), num_classes=state_dim[0]
-                    )
-                    .float()
-                    .squeeze(1)
-                    for (agent_id, state), state_dim in zip(
-                        states.items(), self.state_dims
-                    )
-                }
-                next_states = {
-                    agent_id: nn.functional.one_hot(
-                        next_state.long(), num_classes=state_dim[0]
-                    )
-                    .float()
-                    .squeeze(1)
-                    for (agent_id, next_state), state_dim in zip(
-                        next_states.items(), self.state_dims
-                    )
-                }
-
-            if self.arch == "mlp":
-                action_values = list(actions.values())
-                state_values = list(states.values())
-                input_combined = torch.cat(state_values + action_values, 1)
-                if self.accelerator is not None:
-                    with critic.no_sync():
-                        q_value = critic(input_combined)
-                else:
-                    q_value = critic(input_combined)
-                next_actions = []
-                for i, agent_id_label in enumerate(self.agent_ids):
-                    unscaled_actions = self.actor_targets[i](
-                        next_states[agent_id_label]
-                    ).detach_()
-                    if not self.discrete_actions:
-                        scaled_actions = torch.where(
-                            unscaled_actions > 0,
-                            unscaled_actions * self.max_action[i][0],
-                            unscaled_actions * -self.min_action[i][0],
-                        )
-                        next_actions.append(scaled_actions)
-                    else:
-                        next_actions.append(unscaled_actions)
-
-            elif self.arch == "cnn":
-                stacked_states = torch.stack(list(states.values()), dim=2)
-                stacked_actions = torch.cat(list(actions.values()), dim=1)
-                if self.accelerator is not None:
-                    with critic.no_sync():
-                        q_value = critic(stacked_states, stacked_actions)
-                else:
-                    q_value = critic(stacked_states, stacked_actions)
-                next_actions = []
-                for i, agent_id_label in enumerate(self.agent_ids):
-                    unscaled_actions = self.actor_targets[i](
-                        next_states[agent_id_label].unsqueeze(2)
-                    ).detach_()
-                    if not self.discrete_actions:
-                        scaled_actions = torch.where(
-                            unscaled_actions > 0,
-                            unscaled_actions * self.max_action[i][0],
-                            unscaled_actions * -self.min_action[i][0],
-                        )
-                        next_actions.append(scaled_actions)
-                    else:
-                        next_actions.append(unscaled_actions)
-
-            if self.arch == "mlp":
-                next_input_combined = torch.cat(
-                    list(next_states.values()) + next_actions, 1
-                )
-                if self.accelerator is not None:
-                    with critic_target.no_sync():
-                        q_value_next_state = critic_target(next_input_combined)
-                else:
-                    q_value_next_state = critic_target(next_input_combined)
-            elif self.arch == "cnn":
-                stacked_next_states = torch.stack(list(next_states.values()), dim=2)
-                stacked_next_actions = torch.cat(next_actions, dim=1)
-                if self.accelerator is not None:
-                    with critic_target.no_sync():
-                        q_value_next_state = critic_target(
-                            stacked_next_states, stacked_next_actions
-                        )
-                else:
-                    q_value_next_state = critic_target(
-                        stacked_next_states, stacked_next_actions
-                    )
-
-            y_j = (
-                rewards[agent_id]
-                + (1 - dones[agent_id]) * self.gamma * q_value_next_state
+            loss_dict[f"{agent_id}"] = self.learn_individual(
+                idx,
+                agent_id,
+                actor,
+                critic,
+                critic_target,
+                actor_optimizer,
+                critic_optimizer,
+                input_combined if self.arch == "mlp" else None,
+                stacked_states if self.arch == "cnn" else None,
+                stacked_actions if self.arch == "cnn" else None,
+                next_input_combined if self.arch == "mlp" else None,
+                stacked_next_states if self.arch == "cnn" else None,
+                stacked_next_actions if self.arch == "cnn" else None,
+                rewards,
+                dones,
+                actions,
+                states,
             )
-
-            critic_loss = self.criterion(q_value, y_j.detach_())
-
-            # critic loss backprop
-            critic_optimizer.zero_grad()
-            if self.accelerator is not None:
-                self.accelerator.backward(critic_loss)
-            else:
-                critic_loss.backward()
-            critic_optimizer.step()
-
-            # update actor and targets
-            if self.arch == "mlp":
-                if self.accelerator is not None:
-                    with actor.no_sync():
-                        action = actor(states[agent_id])
-                else:
-                    action = actor(states[agent_id])
-                if not self.discrete_actions:
-                    action = torch.where(
-                        action > 0,
-                        action * self.max_action[idx][0],
-                        action * -self.min_action[idx][0],
-                    )
-                detached_actions = copy.deepcopy(actions)
-                detached_actions[agent_id] = action
-                input_combined = torch.cat(
-                    list(states.values()) + list(detached_actions.values()), 1
-                )
-                if self.accelerator is not None:
-                    with critic.no_sync():
-                        actor_loss = -critic(input_combined).mean()
-                else:
-                    actor_loss = -critic(input_combined).mean()
-
-            elif self.arch == "cnn":
-                if self.accelerator is not None:
-                    with actor.no_sync():
-                        action = actor(states[agent_id].unsqueeze(2))
-                else:
-                    action = actor(states[agent_id].unsqueeze(2))
-                if not self.discrete_actions:
-                    action = torch.where(
-                        action > 0,
-                        action * self.max_action[idx][0],
-                        action * -self.min_action[idx][0],
-                    )
-                detached_actions = copy.deepcopy(actions)
-                detached_actions[agent_id] = action
-                stacked_detached_actions = torch.cat(
-                    list(detached_actions.values()), dim=1
-                )
-                if self.accelerator is not None:
-                    with critic.no_sync():
-                        actor_loss = -critic(
-                            stacked_states, stacked_detached_actions
-                        ).mean()
-                else:
-                    actor_loss = -critic(
-                        stacked_states, stacked_detached_actions
-                    ).mean()
-
-            # actor loss backprop
-            actor_optimizer.zero_grad()
-            if self.accelerator is not None:
-                self.accelerator.backward(actor_loss)
-            else:
-                actor_loss.backward()
-            actor_optimizer.step()
-
-            loss_dict[f"{agent_id}"] = actor_loss.item(), critic_loss.item()
 
         for actor, actor_target, critic, critic_target in zip(
             self.actors, self.actor_targets, self.critics, self.critic_targets
@@ -740,7 +762,150 @@ class MADDPG:
             self.soft_update(actor, actor_target)
             self.soft_update(critic, critic_target)
 
+        if self.is_cuda() and self.torch_compiler:
+            self.cuda_cache_policy()
         return loss_dict
+
+    def cuda_cache_policy(self):
+        """apply cuda cache policy
+        between potential nn.Module optimization re-compiles"""
+        if not self.CUDA_CACHE_POLICY:
+            return
+        self.learn_counter += 1
+        if self.CUDA_CACHE_POLICY.endswith("empty") and self.learn_counter % 600 == 0:
+            torch.cuda.empty_cache()
+            # if self.learn_counter % 1200 == 0:
+            #     print("EMPTY CACHE")
+
+    def is_cuda(self):
+        if isinstance(self.device, str):
+            return self.device == "cuda"
+        if isinstance(self.device, torch.device):
+            return self.device == torch.device("cuda")
+
+    def learn_individual(
+        self,
+        idx,
+        agent_id,
+        actor,
+        critic,
+        critic_target,
+        actor_optimizer,
+        critic_optimizer,
+        input_combined,
+        stacked_states,
+        stacked_actions,
+        next_input_combined,
+        stacked_next_states,
+        stacked_next_actions,
+        rewards,
+        dones,
+        actions,
+        states,
+    ):
+        """Inner call to each agent for the learning/algo training
+        steps, up until the soft updates. Applies all forward/backward props
+        """
+        if self.arch == "mlp":
+            if self.accelerator is not None:
+                with critic.no_sync():
+                    q_value = critic(input_combined)
+            else:
+                q_value = critic(input_combined)
+        elif self.arch == "cnn":
+            if self.accelerator is not None:
+                with critic.no_sync():
+                    q_value = critic(stacked_states, stacked_actions)
+            else:
+                q_value = critic(stacked_states, stacked_actions)
+
+        if self.arch == "mlp":
+            if self.accelerator is not None:
+                with critic_target.no_sync():
+                    q_value_next_state = critic_target(next_input_combined)
+            else:
+                q_value_next_state = critic_target(next_input_combined)
+        elif self.arch == "cnn":
+            if self.accelerator is not None:
+                with critic_target.no_sync():
+                    q_value_next_state = critic_target(
+                        stacked_next_states, stacked_next_actions
+                    )
+            else:
+                q_value_next_state = critic_target(
+                    stacked_next_states, stacked_next_actions
+                )
+
+        y_j = (
+            rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
+        )
+
+        critic_loss = self.criterion(q_value, y_j.detach_())
+
+        # critic loss backprop
+        critic_optimizer.zero_grad()
+        if self.accelerator is not None:
+            self.accelerator.backward(critic_loss)
+        else:
+            critic_loss.backward()
+        critic_optimizer.step()
+
+        # update actor and targets
+        if self.arch == "mlp":
+            if self.accelerator is not None:
+                with actor.no_sync():
+                    action = actor(states[agent_id])
+            else:
+                action = actor(states[agent_id])
+            if not self.discrete_actions:
+                action = torch.where(
+                    action > 0,
+                    action * self.max_action[idx][0],
+                    action * -self.min_action[idx][0],
+                )
+            detached_actions = copy.deepcopy(actions)
+            detached_actions[agent_id] = action
+            input_combined = torch.cat(
+                list(states.values()) + list(detached_actions.values()), 1
+            )
+            if self.accelerator is not None:
+                with critic.no_sync():
+                    actor_loss = -critic(input_combined).mean()
+            else:
+                actor_loss = -critic(input_combined).mean()
+
+        elif self.arch == "cnn":
+            if self.accelerator is not None:
+                with actor.no_sync():
+                    action = actor(states[agent_id].unsqueeze(2))
+            else:
+                action = actor(states[agent_id].unsqueeze(2))
+            if not self.discrete_actions:
+                action = torch.where(
+                    action > 0,
+                    action * self.max_action[idx][0],
+                    action * -self.min_action[idx][0],
+                )
+            detached_actions = copy.deepcopy(actions)
+            detached_actions[agent_id] = action
+            stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
+            if self.accelerator is not None:
+                with critic.no_sync():
+                    actor_loss = -critic(
+                        stacked_states, stacked_detached_actions
+                    ).mean()
+            else:
+                actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
+
+        # actor loss backprop
+        actor_optimizer.zero_grad()
+        if self.accelerator is not None:
+            self.accelerator.backward(actor_loss)
+        else:
+            actor_loss.backward()
+        actor_optimizer.step()
+
+        return actor_loss.item(), critic_loss.item()
 
     def soft_update(self, net, target):
         """Soft updates target network."""
@@ -834,6 +999,7 @@ class MADDPG:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -901,6 +1067,27 @@ class MADDPG:
                     actor_optimizers,
                     critic_optimizers,
                 )
+        elif self.torch_compiler:
+            clone.actors = [
+                torch.compile(actor.to(self.device), mode=self.torch_compiler)
+                for actor in actors
+            ]
+            clone.actor_targets = [
+                torch.compile(actor_target.to(self.device), mode=self.torch_compiler)
+                for actor_target in actor_targets
+            ]
+            clone.critics = [
+                torch.compile(critic.to(self.device), mode=self.torch_compiler)
+                for critic in critics
+            ]
+            clone.critic_targets = [
+                torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
+                for critic_target in critic_targets
+            ]
+            # clone.actor_optimizers = torch.compile(actor_optimizers, mode=self.torch_compiler)
+            # clone.critic_optimizers = torch.compile(critic_optimizers, mode=self.torch_compiler)
+            clone.actor_optimizers = actor_optimizers
+            clone.critic_optimizers = critic_optimizers
         else:
             clone.actors = [actor.to(self.device) for actor in actors]
             clone.actor_targets = [
@@ -972,7 +1159,6 @@ class MADDPG:
         else:
             # Remove the algo specific guarded variables
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-
         return attributes
 
     def wrap_models(self):

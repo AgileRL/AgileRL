@@ -305,8 +305,8 @@ def test_initialize_maddpg_with_net_config(
     assert maddpg.max_action == max_action
     assert maddpg.min_action == min_action
     assert maddpg.discrete_actions == discrete_actions
-    for noise in maddpg.expl_noise:
-        assert np.all(noise == expl_noise)
+    for noise_vec in maddpg.expl_noise:
+        assert torch.all(noise_vec == expl_noise)
     assert maddpg.net_config == net_config, maddpg.net_config
     assert maddpg.batch_size == batch_size
     assert maddpg.multi
@@ -674,6 +674,65 @@ def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device):
 
 
 @pytest.mark.parametrize(
+    "mode", (None, 0, False, "default", "reduce-overhead", "max-autotune")
+)
+def test_maddpg_init_torch_compiler_no_error(mode):
+    maddpg = MADDPG(
+        state_dims=[(1,), (1,)],
+        action_dims=[1, 1],
+        one_hot=False,
+        agent_ids=["agent_0", "agent_1"],
+        n_agents=2,
+        max_action=[(1,), (1,)],
+        min_action=[(-1,), (-1,)],
+        discrete_actions=False,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        torch_compiler=mode,
+    )
+    if isinstance(mode, str):
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in maddpg.actors
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in maddpg.critics
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in maddpg.actor_targets
+        )
+        assert all(
+            isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
+            for a in maddpg.critic_targets
+        )
+        assert maddpg.torch_compiler == mode
+    else:
+        assert isinstance(maddpg, MADDPG)
+
+
+@pytest.mark.parametrize("mode", (1, True, "max-autotune-no-cudagraphs"))
+def test_maddpg_init_torch_compiler_error(mode):
+    err_string = (
+        "Choose between torch compiler modes: "
+        "default, reduce-overhead, max-autotune or None"
+    )
+    with pytest.raises(AssertionError, match=err_string):
+        MADDPG(
+            state_dims=[(1,), (1,)],
+            action_dims=[1, 1],
+            one_hot=False,
+            agent_ids=["agent_0", "agent_1"],
+            n_agents=2,
+            max_action=[(1,), (1,)],
+            min_action=[(-1,), (-1,)],
+            discrete_actions=False,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            torch_compiler=mode,
+        )
+
+
+@pytest.mark.parametrize(
     "training, state_dims, action_dims, discrete_actions, one_hot",
     [
         (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
@@ -719,7 +778,7 @@ def test_maddpg_get_action_mlp(
             assert len(action) == action_dims[idx]
             if discrete_actions:
                 torch.testing.assert_close(
-                    sum(action),
+                    sum(action).item(),
                     1.0,
                     atol=0.1,
                     rtol=1e-3,
@@ -776,8 +835,9 @@ def test_maddpg_get_action_cnn(
         for action in env_actions:
             assert len(action) == action_dims[idx]
             if discrete_actions:
+                print(sum(action))
                 torch.testing.assert_close(
-                    sum(action),
+                    sum(action).item(),
                     1.0,
                     atol=0.1,
                     rtol=1e-3,
@@ -837,7 +897,7 @@ def test_get_action_distributed(training, state_dims, action_dims, discrete_acti
             assert len(action) == action_dims[idx]
             if discrete_actions:
                 torch.testing.assert_close(
-                    sum(action),
+                    sum(action).item(),
                     1.0,
                     atol=0.1,
                     rtol=1e-3,
@@ -912,7 +972,7 @@ def test_maddpg_get_action_distributed_cnn(
             assert len(action) == action_dims[idx]
             if discrete_actions:
                 torch.testing.assert_close(
-                    sum(action),
+                    sum(action).item(),
                     1.0,
                     atol=0.1,
                     rtol=1e-3,
@@ -1963,7 +2023,7 @@ def test_maddpg_unwrap_models():
 
 # Returns the input action scaled to the action space defined by self.min_action and self.max_action.
 def test_action_scaling():
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     max_actions = [(1,), (2,), (1,), (2,), (2,)]
     min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
 
@@ -1977,25 +2037,43 @@ def test_action_scaling():
         max_action=max_actions,
         min_action=min_actions,
     )
-
+    maddpg.actors[0].mlp_output_activation = "Tanh"
     scaled_action = maddpg.scale_to_action_space(action, idx=0)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
+    assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
 
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    maddpg.actors[1].mlp_output_activation = "Tanh"
+    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = maddpg.scale_to_action_space(action, idx=1)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
+    torch.testing.assert_close(
+        scaled_action, torch.Tensor([0.2, 0.4, 0.6, -0.2, -0.4, -0.6])
+    )
 
-    action = np.array([0.1, 0.2, 0.3, 0])
+    maddpg.actors[2].mlp_output_activation = "Sigmoid"
+    action = torch.Tensor([0.1, 0.2, 0.3, 0])
     scaled_action = maddpg.scale_to_action_space(action, idx=2)
-    assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
+    assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, 0]))
 
-    action = np.array([0.1, 0.2, 0.3, 0])
+    maddpg.actors[3].mlp_output_activation = "GumbelSoftmax"
+    action = torch.Tensor([0.1, 0.2, 0.3, 0])
     scaled_action = maddpg.scale_to_action_space(action, idx=3)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
+    assert torch.equal(scaled_action, torch.Tensor([0.2, 0.4, 0.6, 0]))
 
-    action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
+    maddpg.actors[4].mlp_output_activation = "Tanh"
+    action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = maddpg.scale_to_action_space(action, idx=4)
-    assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
+    torch.testing.assert_close(
+        scaled_action,
+        torch.Tensor(
+            [
+                0.55 * 3 - 1,
+                0.6 * 3 - 1,
+                0.65 * 3 - 1,
+                0.45 * 3 - 1,
+                0.4 * 3 - 1,
+                0.35 * 3 - 1,
+            ]
+        ),
+    )
 
 
 @pytest.mark.parametrize(
