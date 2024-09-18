@@ -12,10 +12,6 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.wrappers.pettingzoo_wrappers import (
-    DefaultPettingZooVectorizationParallelWrapper,
-    PettingZooVectorizationParallelWrapper,
-)
 
 
 class MATD3:
@@ -891,17 +887,15 @@ class MATD3:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
-        is_vectorised = isinstance(
-            env,
-            (
-                DefaultPettingZooVectorizationParallelWrapper,
-                PettingZooVectorizationParallelWrapper,
-            ),
-        )
         with torch.no_grad():
             rewards = []
-            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
-            for i in range(loop):
+            if hasattr(env, "num_envs"):
+                num_envs = env.num_envs
+                is_vectorised = True
+            else:
+                num_envs = 1
+                is_vectorised = False
+            for _ in range(loop):
                 state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)

@@ -12,10 +12,6 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.wrappers.pettingzoo_wrappers import (
-    DefaultPettingZooVectorizationParallelWrapper,
-    PettingZooVectorizationParallelWrapper,
-)
 
 
 class MADDPG:
@@ -793,16 +789,16 @@ class MADDPG:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
-        is_vectorised = isinstance(
-            env,
-            (
-                DefaultPettingZooVectorizationParallelWrapper,
-                PettingZooVectorizationParallelWrapper,
-            ),
-        )
+
         with torch.no_grad():
             rewards = []
-            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
+            if hasattr(env, "num_envs"):
+                num_envs = env.num_envs
+                is_vectorised = True
+            else:
+                num_envs = 1
+                is_vectorised = False
+
             for i in range(loop):
                 state, info = env.reset()
                 scores = np.zeros(num_envs)
@@ -847,8 +843,7 @@ class MADDPG:
                         trunc_array = np.expand_dims(trunc_array, 0)
                     for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
                         if (
-                            np.any(d)
-                            or np.any(t)
+                            np.all(d | t)
                             or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]

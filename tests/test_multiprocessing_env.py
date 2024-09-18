@@ -1,4 +1,4 @@
-from multiprocessing import Pipe, Process
+from multiprocessing import Pipe, Process, Queue
 
 import numpy as np
 import pytest
@@ -41,6 +41,7 @@ def test_worker_custom(enable_autoreset):
 
         remote, parent_remote = Pipe()
         env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+        error_queue = Queue()
 
         def dummy_send(*args):
             remote.close()
@@ -48,7 +49,7 @@ def test_worker_custom(enable_autoreset):
         remote.send = dummy_send
         remote.recv = DummyRecv(cmd, data)
 
-        worker(remote, parent_remote, env_fn_wrapper, enable_autoreset)
+        worker(0, remote, parent_remote, env_fn_wrapper, error_queue, enable_autoreset)
 
 
 @pytest.mark.parametrize("enable_autoreset", [True, False])
@@ -65,16 +66,17 @@ def test_worker_pettingzoo(enable_autoreset):
 
         remote, parent_remote = Pipe()
         env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+        error_queue = Queue()
 
         def dummy_send(*args):
             remote.close()
 
         remote.send = dummy_send
         remote.recv = DummyRecv(cmd, data)
-        worker(remote, parent_remote, env_fn_wrapper, enable_autoreset)
+        worker(0, remote, parent_remote, env_fn_wrapper, error_queue, enable_autoreset)
 
 
-def test_worker_cmd_not_implemented():
+def test_worker_sends_not_implemented_exception():
     cmd = "Command that doesn't exist"
     data = [
         None,
@@ -85,19 +87,21 @@ def test_worker_cmd_not_implemented():
 
     env_fns = [lambda: env for _ in range(2)]
 
-    remote, parent_remote = Pipe()
+    child_remote, parent_remote = Pipe()
     env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+    error_queue = Queue()
 
-    def dummy_send(*args):
-        remote.close()
+    process = Process(
+        target=worker,
+        args=(0, child_remote, parent_remote, env_fn_wrapper, error_queue),
+    )
+    process.start()
+    parent_remote.send((cmd, data))
+    _, success = parent_remote.recv()
 
-    remote.send = dummy_send
-    remote.recv = DummyRecv(cmd, data)
-
-    with pytest.raises(NotImplementedError) as error:
-        worker(remote, parent_remote, env_fn_wrapper)
-
-        assert error is NotImplementedError
+    assert not success
+    index, exctype, value = error_queue.get()
+    assert exctype is NotImplementedError
 
 
 def test_worker_sends_error_message():
@@ -110,14 +114,18 @@ def test_worker_sends_error_message():
 
     parent_remote, child_remote = Pipe()
     env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+    error_queue = Queue()
 
-    process = Process(target=worker, args=(child_remote, parent_remote, env_fn_wrapper))
+    process = Process(
+        target=worker,
+        args=(0, child_remote, parent_remote, env_fn_wrapper, error_queue),
+    )
     process.start()
     parent_remote.send((cmd, data))
-    results = parent_remote.recv()
+    _, success = parent_remote.recv()
 
-    assert results[0] == "error"
-    # remote.send(("close", None))
+    assert not success
+    index, exctype, value = error_queue.get()
 
 
 def test_vecenv():

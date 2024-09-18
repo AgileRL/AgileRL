@@ -311,6 +311,10 @@ class parallel_env_cont(ParallelEnv):
             zip(self.possible_agents, list(range(len(self.possible_agents))))
         )
         self.render_mode = render_mode
+        self.seed = self.dummy_seed
+
+    def dummy_seed(self, seed):
+        pass
 
     def observation_space(self, agent):
         return Box(0, 2, shape=(2,), dtype=float)
@@ -424,6 +428,10 @@ class parallel_env_atari(ParallelEnv):
             zip(self.possible_agents, list(range(len(self.possible_agents))))
         )
         self.render_mode = render_mode
+        self.seed = self.dummy_seed
+
+    def dummy_seed(self, value):
+        pass
 
     def observation_space(self, agent):
         return Box(0, 255, shape=(32, 32, 3), dtype=int)
@@ -836,10 +844,15 @@ def test_subproc_close(
     observations, infos = vec_env.reset()
 
     class DummyRemote:
+        closed = False
+
         def recv(self, *args):
-            return None
+            return None, True
 
         def send(self, *args):
+            pass
+
+        def close(self, *args):
             pass
 
     vec_env.env.parent_remotes = [DummyRemote()]
@@ -1077,6 +1090,8 @@ def test_auto_reset_wrapper(
         env.step(actions)
         mock_reset.assert_called_once
 
+    env.close()
+
 
 @pytest.mark.parametrize(
     "env",
@@ -1096,8 +1111,9 @@ def test_auto_reset_subproc(
         agent: [vec_env.action_space(agent).sample() for n in range(n_envs)]
         for agent in vec_env.agents
     }
-    for _ in range(max_cycles):
+    for i in range(max_cycles):
         *_, trunc, _ = vec_env.step(actions)
+
     assert all(all(t) for t in trunc.values())
 
     *_, trunc, _ = vec_env.step(actions)
@@ -1119,6 +1135,12 @@ def test_exception_throws_from_within_subproc(make_error_env):
     with pytest.raises(Exception):
         vec_env.step(actions)
 
+    vec_env.close()
+
 
 def test_env_defined_action_none_to_nan():
+    pass
+
+
+def test_exception_when_incorrect_num_actions():
     pass

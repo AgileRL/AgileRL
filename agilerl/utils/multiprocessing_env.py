@@ -9,8 +9,9 @@ Original Reference:
 https://github.com/Farama-Foundation/SuperSuit/issues/43#issuecomment-751792111
 """
 
-import traceback
-from multiprocessing import Pipe, Process
+import multiprocessing as mp
+import sys
+from multiprocessing import Pipe
 
 import numpy as np
 from gymnasium.vector.utils import CloudpickleWrapper
@@ -18,7 +19,13 @@ from pettingzoo import ParallelEnv
 
 
 def worker(
-    child_remote, parent_remote, env_fn_wrapper, enable_autoreset=True, env_args={}
+    index,
+    child_remote,
+    parent_remote,
+    env_fn_wrapper,
+    error_queue,
+    enable_autoreset=True,
+    env_args={},
 ):
     """Worker class
 
@@ -29,13 +36,12 @@ def worker(
     env = env_fn_wrapper()
 
     autoreset = False
-    # if not isinstance(env, ParallelEnv):
     if hasattr(env, "parallel_env"):
         env = env.parallel_env(**env_args)
 
-    while True:
-        cmd, data = child_remote.recv()
-        try:
+    try:
+        while True:
+            cmd, data = child_remote.recv()
             if cmd == "step":
                 if autoreset:
                     obs, infos = env.reset()
@@ -66,28 +72,40 @@ def worker(
                 dones = list(dones.values())
                 truncs = list(truncs.values())
                 child_remote.send(
-                    (ob, reward, dones, truncs, info, action_mask, env_defined_actions)
+                    (
+                        (
+                            ob,
+                            reward,
+                            dones,
+                            truncs,
+                            info,
+                            action_mask,
+                            env_defined_actions,
+                        ),
+                        True,
+                    )
                 )
             elif cmd == "reset":
                 obs, infos = env.reset(seed=data, options=None)
                 ob, action_mask = process_observation(obs)
                 info, env_defined_actions = process_info(infos)
-                child_remote.send((ob, info, action_mask, env_defined_actions))
+                child_remote.send(((ob, info, action_mask, env_defined_actions), True))
             elif cmd == "close":
-                env.close()
-                child_remote.close()
+                child_remote.send((None, True))
                 break
             elif cmd == "seed":
-                env.seed(data)
+                env.seed((data, True))
+                child_remote.send((None, True))
             elif cmd == "render":
                 env.render()
             else:
                 raise NotImplementedError
-        except Exception as e:
-            if isinstance(e, NotImplementedError):
-                raise NotImplementedError
-            tb = traceback.format_exc()
-            child_remote.send(("error", e, tb))
+    except Exception:
+        error_queue.put((index,) + sys.exc_info()[:2])
+        child_remote.send((None, False))
+
+    finally:
+        env.close()
 
 
 def process_observation(obs):
@@ -188,6 +206,9 @@ class VecEnv:
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
                 passed_actions_list[env_idx].append(actions[possible_agent][env_idx])
+        assert (
+            len(passed_actions_list) == self.num_envs
+        ), "Number of actions passed to the step function must be equal to the number of vectorized environments"
         self.step_async(passed_actions_list)
         step_wait = self.step_wait()
         return step_wait
@@ -215,20 +236,24 @@ class SubprocVecEnv(VecEnv):
                 self.env, ParallelEnv
             ), "Custom environments must subclass ParallelEnv."
         self.waiting = False
+        ctx = mp.get_context()
         self.observation_space = self.env.observation_space
         self.action_space = self.env.action_space
         self.closed = False
         self.nenvs = len(env_fns)
+        self.error_queue = ctx.Queue()
         self.parent_remotes, self.child_remotes = zip(
             *[Pipe() for _ in range(self.nenvs)]
         )
         self.ps = [
-            Process(
+            ctx.Process(
                 target=worker,
                 args=(
+                    idx,
                     child_remote,
                     parent_remote,
                     CloudpickleWrapper(env_fn),
+                    self.error_queue,
                     enable_autoreset,
                     env_args,
                 ),
@@ -247,11 +272,16 @@ class SubprocVecEnv(VecEnv):
             len(env_fns),
             self.env.possible_agents,
         )
+        # self.close_pipes(self.child_remotes)
 
     # Note: this is not part of the PettingZoo API
     def seed(self, value):
         for i_remote, parent_remote in enumerate(self.parent_remotes):
             parent_remote.send(("seed", value + i_remote))
+        _, successes = zip(
+            *[parent_remote.recv() for parent_remote in self.parent_remotes]
+        )
+        self._raise_if_errors(successes)
 
     def step_async(self, actions):
         for parent_remote, action in zip(self.parent_remotes, actions):
@@ -259,9 +289,16 @@ class SubprocVecEnv(VecEnv):
         self.waiting = True
 
     def step_wait(self):
-        results = [parent_remote.recv() for parent_remote in self.parent_remotes]
-        obs, rews, dones, truncs, infos, action_mask, env_defined_actions = (
-            self.process_results(results, waiting_flag=False)
+        results, successes = zip(
+            *[
+                parent_remote.recv()
+                for parent_remote in self.parent_remotes
+                if parent_remote.poll(1.0)
+            ]
+        )
+        self._raise_if_errors(successes)
+        obs, rews, dones, truncs, infos, action_mask, env_defined_actions = list(
+            zip(*results)
         )
         ret_obs_dict = {
             possible_agent: []
@@ -354,11 +391,11 @@ class SubprocVecEnv(VecEnv):
     def reset(self, seed=None, options=None):
         for parent_remote in self.parent_remotes:
             parent_remote.send(("reset", seed))
-        results = [parent_remote.recv() for parent_remote in self.parent_remotes]
-        obs, infos, action_mask, env_defined_actions = self.process_results(
-            results, waiting_flag=self.waiting
+        results, successes = zip(
+            *[parent_remote.recv() for parent_remote in self.parent_remotes]
         )
-
+        self._raise_if_errors(successes)
+        obs, infos, action_mask, env_defined_actions = zip(*results)
         ret_obs_dict = {
             possible_agent: []
             for idx, possible_agent in enumerate(self.env.possible_agents)
@@ -413,16 +450,21 @@ class SubprocVecEnv(VecEnv):
         self.parent_remotes[0].send(("render", None))
 
     def close(self):
-        if self.closed:
-            return
-        if self.waiting:
-            results = [parent_remote.recv() for parent_remote in self.parent_remotes]
-            self.process_results(results, self.waiting)
+
+        for pipe in self.parent_remotes:
+            if (pipe is not None) and (not pipe.closed):
+                pipe.send(("close", None))
+        successes = []
         for parent_remote in self.parent_remotes:
-            parent_remote.send(("close", None))
-        for p in self.ps:
-            p.join()
-            self.closed = True
+            if (parent_remote is not None) and (not parent_remote.closed):
+                _, success = parent_remote.recv()
+                successes.append(success)
+        self._raise_if_errors(successes)
+
+        for pipe in self.parent_remotes:
+            if pipe is not None:
+                pipe.close()
+        self.join_processes()
 
     def sample_personas(self, is_train, is_val=True, path="./"):
         return self.env.sample_personas(is_train=is_train, is_val=is_val, path=path)
@@ -430,17 +472,6 @@ class SubprocVecEnv(VecEnv):
     def step(self, actions):
         return_val = super().step(actions)
         return return_val
-
-    def process_results(self, results, waiting_flag):
-        if len(results) == 1 and results[0] is None:
-            return
-        self.waiting = waiting_flag
-        zipped_results = list(zip(*results))
-        if "error" in zipped_results[0]:
-            e = zipped_results[1][zipped_results[0].index("error")]
-            tb = zipped_results[2][zipped_results[0].index("error")]
-            raise Exception(f"{e} \nTraceback:\n{tb}")
-        return zipped_results
 
     def handle_env_defined_action_none(self, env_defined_action, agent):
         if env_defined_action is None:
@@ -483,3 +514,29 @@ class SubprocVecEnv(VecEnv):
             new_obs_dict[possible_agent]["observation"] = obs[possible_agent]
             new_obs_dict[possible_agent]["action_mask"] = action_mask[possible_agent]
         return new_obs_dict
+
+    def close_pipes(self, pipes):
+        for pipe in pipes:
+            pipe.close()
+
+    def join_processes(self):
+        for process in self.ps:
+            process.join()
+            self.closed = True
+
+    def _raise_if_errors(self, successes):
+        if all(successes):
+            return
+        num_errors = self.num_envs - sum(successes)
+        assert num_errors > 0
+        for i in range(num_errors):
+            index, exctype, value = self.error_queue.get()
+            # logger.error(
+            #     f"Received the following error from Worker-{index}: {exctype.__name__}: {value}"
+            # )
+            # logger.error(f"Shutting down Worker-{index}.")
+            self.parent_remotes[index].close()
+            # self.parent_remotes[index] = None#
+            if i == num_errors - 1:
+                # logger.error("Raising the last exception back to the main process.")
+                raise exctype(value)
