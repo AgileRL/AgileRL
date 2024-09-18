@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
+from gymnasium.spaces import Discrete
+from pettingzoo import ParallelEnv
 
 import agilerl.training.train_bandits
 import agilerl.training.train_multi_agent
@@ -192,7 +194,7 @@ class DummyBandit:
         return
 
 
-class DummyMultiEnv:
+class DummyMultiEnv(ParallelEnv):
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.state_size = self.state_dims
@@ -202,14 +204,17 @@ class DummyMultiEnv:
         self.possible_agents = ["agent_0", "agent_1"]
         self.metadata = None
         self.observation_space = None
-        self.action_space = None
+        self.info = {
+            agent: {
+                "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
+            }
+            for agent in self.agents
+        }
 
     def reset(self, seed=None, options=None):
-        return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
-            "info_string": None,
-            "agent_mask": {"agent_0": False, "agent_1": True},
-            "env_defined_actions": {"agent_0": np.array([0, 1]), "agent_1": None},
-        }
+        return {
+            agent: np.random.rand(*self.state_dims) for agent in self.agents
+        }, self.info
 
     def step(self, action):
         return (
@@ -217,8 +222,11 @@ class DummyMultiEnv:
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
-            {agent: "info_string" for agent in self.agents},
+            self.info,
         )
+
+    def action_space(self, agent):
+        return Discrete(5)
 
 
 class DummyMultiAgent(DummyAgentOffPolicy):
@@ -230,7 +238,10 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.discrete_actions = False
 
     def get_action(self, *args, **kwargs):
-        return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
+        output = {
+            agent: np.random.randn(self.action_size) for agent in self.agents
+        }, None
+        return output
 
     def learn(self, experiences):
         return {
@@ -240,6 +251,15 @@ class DummyMultiAgent(DummyAgentOffPolicy):
 
     def test(self, env, swap_channels, max_steps, loop):
         return super().test(env, swap_channels, max_steps, loop)
+
+    def get_env_defined_actions(self, info, agents):
+        env_defined_actions = {
+            agent: info[agent].get("env_defined_action", None) for agent in agents
+        }
+
+        if all(eda is None for eda in env_defined_actions.values()):
+            return
+        return env_defined_actions
 
     def save_checkpoint(self, path):
         return super().save_checkpoint(path)
@@ -1007,14 +1027,24 @@ def mocked_multi_env(state_size, action_size):
     mock_env.agents = ["agent_0", "agent_1"]
     mock_env.reset.side_effect = lambda *args: (
         {agent: np.random.rand(*mock_env.state_size) for agent in mock_env.agents},
-        {"info_string": None, "agent_mask": True, "env_defined_actions": True},
+        {
+            agent: {
+                "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
+            }
+            for agent in mock_env.agents
+        },
     )
     mock_env.step.side_effect = lambda *args: (
         {agent: np.random.rand(*mock_env.state_size) for agent in mock_env.agents},
         {agent: np.random.randint(0, 5) for agent in mock_env.agents},
         {agent: np.random.randint(0, 2) for agent in mock_env.agents},
         {agent: np.random.randint(0, 2) for agent in mock_env.agents},
-        {"info_string": None},
+        {
+            agent: {
+                "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
+            }
+            for agent in mock_env.agents
+        },
     )
 
     return mock_env
@@ -2307,7 +2337,7 @@ def test_train_multi_agent_rgb(
 def test_train_multi_agent_rgb_vectorized(
     multi_env, population_multi_agent, multi_memory, tournament, mutations
 ):
-    env = make_multi_agent_vect_envs(multi_env)
+    env = make_multi_agent_vect_envs(multi_env, custom=True)
     env.reset()
     pop, pop_fitnesses = train_multi_agent(
         env,

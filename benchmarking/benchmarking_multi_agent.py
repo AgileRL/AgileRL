@@ -11,7 +11,9 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.wrappers.pettingzoo_wrappers import (
+    DefaultPettingZooVectorizationParallelWrapper,
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -34,8 +36,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator = None
     print(f"DEVICE: {device}")
 
-    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(
-        max_cycles=25, continuous_actions=True
+    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}")
+    env_args = dict(max_cycles=25, continuous_actions=False)
+    env = DefaultPettingZooVectorizationParallelWrapper(
+        env=env, n_envs=INIT_HP["NUM_ENVS"], env_args=env_args
     )
 
     if INIT_HP["CHANNELS_LAST"]:
@@ -46,7 +50,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
 
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
+    # env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
 
     env.reset()
 
@@ -191,7 +195,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
 
 
 if __name__ == "__main__":
-    with open("configs/training/matd3.yaml") as file:
+    with open("configs/training/maddpg.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]

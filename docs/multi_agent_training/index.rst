@@ -66,7 +66,7 @@ are more likely to remain present in the population. The sequence of evolution (
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
     env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -249,7 +249,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.utils.utils import create_population
-    from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+    from agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -283,7 +283,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
     env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -392,19 +392,11 @@ Alternatively, use a custom training loop. Combining all of the above:
                 }
 
             for idx_step in range(evo_steps // num_envs):
-                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
-                env_defined_actions = (
-                    info["env_defined_actions"]
-                    if "env_defined_actions" in info.keys()
-                    else None
-                )
 
                 # Get next action from agent
                 cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
-                    agent_mask=agent_mask,
-                    env_defined_actions=env_defined_actions,
                 )
                 if agent.discrete_actions:
                     action = discrete_action

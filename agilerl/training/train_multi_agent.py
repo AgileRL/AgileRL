@@ -9,7 +9,10 @@ from tqdm import trange
 
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.wrappers.pettingzoo_wrappers import (
+    DefaultPettingZooVectorizationParallelWrapper,
+    PettingZooVectorizationParallelWrapper,
+)
 
 
 def train_multi_agent(
@@ -170,7 +173,13 @@ def train_multi_agent(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
-    if isinstance(env, PettingZooVectorizationParallelWrapper):
+    if isinstance(
+        env,
+        (
+            DefaultPettingZooVectorizationParallelWrapper,
+            PettingZooVectorizationParallelWrapper,
+        ),
+    ):
         is_vectorised = True
         num_envs = env.num_envs
     else:
@@ -252,16 +261,10 @@ def train_multi_agent(
 
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
-                env_defined_actions = (
-                    info["env_defined_actions"]
-                    if "env_defined_actions" in info.keys()
-                    else None
-                )
+                env_defined_actions = agent.get_env_defined_actions(info, agent_ids)
                 cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
-                    agent_mask=agent_mask,
                     env_defined_actions=env_defined_actions,
                 )
                 if agent.discrete_actions:

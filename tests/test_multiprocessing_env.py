@@ -1,10 +1,12 @@
-from multiprocessing import Pipe
+from multiprocessing import Pipe, Process
 
 import numpy as np
 import pytest
+from gymnasium.vector.utils import CloudpickleWrapper
+from pettingzoo.mpe import simple_adversary_v3
 
-from agilerl.utils.multiprocessing_env import CloudpickleWrapper, VecEnv, worker
-from tests.test_vectorization import parallel_env_disc
+from agilerl.utils.multiprocessing_env import VecEnv, worker
+from tests.test_vectorization import error_env, parallel_env_disc
 
 
 class DummyRecv:
@@ -21,7 +23,8 @@ class DummyRecv:
             return self.cmd, self.data
 
 
-def test_worker():
+@pytest.mark.parametrize("enable_autoreset", [True, False])
+def test_worker_custom(enable_autoreset):
     cmds = ["step", "reset", "seed", "render"]
     data_s = [
         np.array([0, 0]),
@@ -45,11 +48,34 @@ def test_worker():
         remote.send = dummy_send
         remote.recv = DummyRecv(cmd, data)
 
-        worker(remote, parent_remote, env_fn_wrapper)
+        worker(remote, parent_remote, env_fn_wrapper, enable_autoreset)
+
+
+@pytest.mark.parametrize("enable_autoreset", [True, False])
+def test_worker_pettingzoo(enable_autoreset):
+    cmds = ["reset"]
+    data_s = [
+        None,
+    ]
+
+    for cmd, data in zip(cmds, data_s):
+        env = simple_adversary_v3
+
+        env_fns = [lambda: env for _ in range(2)]
+
+        remote, parent_remote = Pipe()
+        env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+
+        def dummy_send(*args):
+            remote.close()
+
+        remote.send = dummy_send
+        remote.recv = DummyRecv(cmd, data)
+        worker(remote, parent_remote, env_fn_wrapper, enable_autoreset)
 
 
 def test_worker_cmd_not_implemented():
-    cmd = ["Command that doesn't exist"]
+    cmd = "Command that doesn't exist"
     data = [
         None,
     ]
@@ -74,6 +100,26 @@ def test_worker_cmd_not_implemented():
         assert error is NotImplementedError
 
 
+def test_worker_sends_error_message():
+    cmd = "step"
+    data = 3
+
+    env = error_env()
+
+    env_fns = [lambda: env for _ in range(2)]
+
+    parent_remote, child_remote = Pipe()
+    env_fn_wrapper = CloudpickleWrapper(env_fns[0])
+
+    process = Process(target=worker, args=(child_remote, parent_remote, env_fn_wrapper))
+    process.start()
+    parent_remote.send((cmd, data))
+    results = parent_remote.recv()
+
+    assert results[0] == "error"
+    # remote.send(("close", None))
+
+
 def test_vecenv():
     env = VecEnv(1, ["agent_0"])
 
@@ -84,14 +130,3 @@ def test_vecenv():
     result = env.step({"agent_0": [0]})
 
     assert result is None
-
-
-def test_cpw():
-    def squared(x):
-        return x**2
-
-    CPW = CloudpickleWrapper(squared)
-    pickled = CPW.__getstate__()
-    CPW.__setstate__(pickled)
-
-    assert CPW.x(2) == 4

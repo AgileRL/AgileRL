@@ -12,7 +12,10 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.wrappers.pettingzoo_wrappers import (
+    DefaultPettingZooVectorizationParallelWrapper,
+    PettingZooVectorizationParallelWrapper,
+)
 
 
 class MATD3:
@@ -418,9 +421,57 @@ class MATD3:
             action * -self.min_action[idx][0],
         )
 
-    def get_action(
-        self, states, training=True, agent_mask=None, env_defined_actions=None
-    ):
+    def extract_action_masks(self, states):
+        """Extract observations and action masks into two separate dictionaries
+
+        :param states: Environment observations
+        :type states: Dict[str, Dict[]]
+        """
+        observations = {
+            agent: state.get("observation") if isinstance(state, dict) else state
+            for agent, state in states.items()
+        }
+        action_masks = {
+            agent: state.get("action_mask", None) if isinstance(state, dict) else None
+            for agent, state in states.items()
+        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+
+        return observations, action_masks
+
+    def extract_agent_masks(self, env_defined_actions):
+        agent_masks = None
+        if env_defined_actions is not None:
+            agent_masks = {}
+            for idx, agent in enumerate(env_defined_actions.keys()):
+                # Handle None if environment isn't vectorized
+                if env_defined_actions[agent] is None:
+                    if not self.discrete_actions:
+                        nan_arr = np.empty(self.action_dims[idx])
+                        nan_arr[:] = np.nan
+                    else:
+                        nan_arr = np.array([[np.nan]])
+                    env_defined_actions[agent] = nan_arr
+
+                # Handle discrete actions + env not vectorized
+                if isinstance(env_defined_actions[agent], (int, float)):
+                    env_defined_actions[agent] = np.array(
+                        [[env_defined_actions[agent]]]
+                    )
+
+                # Ensure additional dimension is added in so shapes align for masking
+                if len(env_defined_actions[agent].shape) == 1:
+                    env_defined_actions[agent] = (
+                        env_defined_actions[agent][:, np.newaxis]
+                        if self.discrete_actions
+                        else env_defined_actions[agent][np.newaxis, :]
+                    )
+                agent_masks[agent] = np.where(
+                    np.isnan(env_defined_actions[agent]), 0, 1
+                ).astype(bool)
+
+        return env_defined_actions, agent_masks
+
+    def get_action(self, states, training=True, env_defined_actions=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -429,35 +480,18 @@ class MATD3:
         :type state: Dict[str, numpy.Array]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
-        :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
-        :type agent_mask: Dict[str, bool]
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
-        # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
-        if agent_mask is None:
-            agent_ids = self.agent_ids
-            actors = self.actors
-            state_dims = self.state_dims
-        else:
-            agent_ids = [agent for agent in agent_mask.keys() if agent_mask[agent]]
-            state_dims = [
-                state_dim
-                for state_dim, mask_flag in zip(self.state_dims, agent_mask.keys())
-                if mask_flag
-            ]
-            action_dims_dict = {
-                agent: action_dim
-                for agent, action_dim in zip(self.agent_ids, self.action_dims)
-            }
-            states = {
-                agent: states[agent] for agent in agent_mask.keys() if agent_mask[agent]
-            }
-            actors = [
-                actor
-                for agent, actor in zip(agent_mask.keys(), self.actors)
-                if agent_mask[agent]
-            ]
+        # Process action masks if present
+        states, action_masks = self.extract_action_masks(
+            states=states
+        )  # If no action masking action mask dict = {agent : None ...}
+
+        # Agent masking
+        env_defined_actions, agent_masks = self.extract_agent_masks(
+            env_defined_actions=env_defined_actions
+        )
 
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
@@ -471,7 +505,7 @@ class MATD3:
                 nn.functional.one_hot(state.long(), num_classes=state_dim[0])
                 .float()
                 .squeeze(1)
-                for state, state_dim in zip(states, state_dims)
+                for state, state_dim in zip(states, self.state_dims)
             ]
 
         if self.arch == "mlp":
@@ -490,7 +524,9 @@ class MATD3:
             ]
 
         action_dict = {}
-        for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
+        for idx, (agent_id, state, actor) in enumerate(
+            zip(self.agent_ids, states, self.actors)
+        ):
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
@@ -517,35 +553,36 @@ class MATD3:
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
+                mask = (
+                    1 - np.array(action_masks[agent])
+                    if action_masks[agent] is not None
+                    else None
+                )
+                action = np.ma.array(action, mask=mask)
                 if self.one_hot:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
+                if len(discrete_action_dict[agent].shape) == 1:
+                    discrete_action_dict[agent] = discrete_action_dict[agent][
+                        :, np.newaxis
+                    ]
         else:
             discrete_action_dict = None
 
+        # If using env_defined_actions replace actions
         if env_defined_actions is not None:
-            for agent in env_defined_actions.keys():
-                if not agent_mask[agent]:
-                    if self.discrete_actions:
-                        discrete_action_dict.update({agent: env_defined_actions[agent]})
-                        action = env_defined_actions[agent]
-                        action = (
-                            nn.functional.one_hot(
-                                torch.tensor(action).long(),
-                                num_classes=action_dims_dict[agent],
-                            )
-                            .float()
-                            .squeeze()
-                        )
-                        action_dict.update({agent: action})
-                    else:
-                        action_dict.update({agent: env_defined_actions[agent]})
+            for agent in self.agent_ids:
+                if self.discrete_actions:
+                    discrete_action_dict[agent][agent_masks[agent]] = (
+                        env_defined_actions[agent][agent_masks[agent]]
+                    )
+                else:
+                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
+                        agent_masks[agent]
+                    ]
 
-        return (
-            action_dict,
-            discrete_action_dict,
-        )
+        return (action_dict, discrete_action_dict)
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -854,7 +891,13 @@ class MATD3:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
-        is_vectorised = isinstance(env, PettingZooVectorizationParallelWrapper)
+        is_vectorised = isinstance(
+            env,
+            (
+                DefaultPettingZooVectorizationParallelWrapper,
+                PettingZooVectorizationParallelWrapper,
+            ),
+        )
         with torch.no_grad():
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
@@ -877,18 +920,12 @@ class MATD3:
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                                 for agent_id, s in state.items()
                             }
-                    agent_mask = (
-                        info["agent_mask"] if "agent_mask" in info.keys() else None
-                    )
-                    env_defined_actions = (
-                        info["env_defined_actions"]
-                        if "env_defined_actions" in info.keys()
-                        else None
+                    env_defined_actions = self.get_env_defined_actions(
+                        info, self.agent_ids
                     )
                     cont_actions, discrete_action = self.get_action(
                         state,
                         training=False,
-                        agent_mask=agent_mask,
                         env_defined_actions=env_defined_actions,
                     )
                     if self.discrete_actions:
@@ -1603,3 +1640,15 @@ class MATD3:
             setattr(agent, attribute, checkpoint[attribute])
 
         return agent
+
+    def get_env_defined_actions(self, info, agents):
+        try:
+            env_defined_actions = {
+                agent: info[agent].get("env_defined_action", None) for agent in agents
+            }
+
+            if all(eda is None for eda in env_defined_actions.values()):
+                return
+            return env_defined_actions
+        except Exception:
+            return
