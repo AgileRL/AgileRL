@@ -13,7 +13,7 @@ permissions:
 jobs:
     build:
 
-        runs-on: TeslaT4
+        runs-on: self-hosted
 
         steps:
             - uses: actions/checkout@v4
