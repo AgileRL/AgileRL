@@ -13,8 +13,8 @@ permissions:
 jobs:
     build:
         runs-on: gha-runner-scale-set
-            container:
-              image: 761296822462.dkr.ecr.us-east-1.amazonaws.com/containers/ray/ray-worker:2.34.0-py310-cu121-b6
+        container:
+            image: 761296822462.dkr.ecr.us-east-1.amazonaws.com/containers/ray/ray-worker:2.34.0-py310-cu121-b6
 
         steps:
             - uses: actions/checkout@v4
