@@ -236,10 +236,12 @@ class DummyMultiAgent(DummyAgentOffPolicy):
         self.lr_actor = 0.001
         self.lr_critic = 0.01
         self.discrete_actions = False
+        self.num_envs = 1
 
     def get_action(self, *args, **kwargs):
         output = {
-            agent: np.random.randn(self.action_size) for agent in self.agents
+            agent: np.random.randn(self.num_envs, self.action_size)
+            for agent in self.agents
         }, None
         return output
 
@@ -1021,7 +1023,7 @@ def mocked_bandit_env(state_size, action_size):
 
 @pytest.fixture
 def mocked_multi_env(state_size, action_size):
-    mock_env = MagicMock()
+    mock_env = MagicMock(spec=DummyMultiEnv)
     mock_env.state_size = state_size
     mock_env.action_size = action_size
     mock_env.agents = ["agent_0", "agent_1"]
@@ -2255,9 +2257,11 @@ def test_train_on_policy_save_checkpoint(
         os.remove(f"{checkpoint_path}_{i}_{512}.pt")
 
 
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+@pytest.mark.parametrize(
+    "state_size, action_size, sum_scores", [((6,), 2, True), ((6,), 2, False)]
+)
 def test_train_multi_agent(
-    multi_env, population_multi_agent, multi_memory, tournament, mutations
+    multi_env, population_multi_agent, multi_memory, tournament, mutations, sum_scores
 ):
     pop, pop_fitnesses = train_multi_agent(
         multi_env,
@@ -2274,6 +2278,7 @@ def test_train_multi_agent(
         eval_loop=1,
         tournament=tournament,
         mutation=mutations,
+        sum_scores=sum_scores,
     )
 
     assert len(pop) == len(population_multi_agent)
@@ -2335,9 +2340,17 @@ def test_train_multi_agent_rgb(
 
 @pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
 def test_train_multi_agent_rgb_vectorized(
-    multi_env, population_multi_agent, multi_memory, tournament, mutations
+    multi_env,
+    population_multi_agent,
+    multi_memory,
+    tournament,
+    mutations,
+    state_size,
+    action_size,
 ):
-    env = make_multi_agent_vect_envs(multi_env, custom=True)
+    env = make_multi_agent_vect_envs(multi_env, custom=True, num_envs=4)
+    for agent in population_multi_agent:
+        agent.num_envs = 4
     env.reset()
     pop, pop_fitnesses = train_multi_agent(
         env,
@@ -2355,7 +2368,6 @@ def test_train_multi_agent_rgb_vectorized(
         tournament=tournament,
         mutation=mutations,
     )
-
     assert len(pop) == len(population_multi_agent)
 
 

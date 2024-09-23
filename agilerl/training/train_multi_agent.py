@@ -3,16 +3,12 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.wrappers.pettingzoo_wrappers import (
-    DefaultPettingZooVectorizationParallelWrapper,
-    PettingZooVectorizationParallelWrapper,
-)
 
 
 def train_multi_agent(
@@ -21,6 +17,7 @@ def train_multi_agent(
     algo,
     pop,
     memory,
+    sum_scores=True,
     INIT_HP=None,
     MUT_P=None,
     net_config=None,
@@ -56,6 +53,8 @@ def train_multi_agent(
     :type pop: list[object]
     :param memory: Experience Replay Buffer
     :type memory: object
+    :param sum_scores: Boolean flag indicating whether to sum sub-agents scores, typically True for co-operative environments, defaults to True
+    :type sum_scores: bool, optional
     :param INIT_HP: Dictionary containing initial hyperparameters.
     :type INIT_HP: dict
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
@@ -173,13 +172,7 @@ def train_multi_agent(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
-    if isinstance(
-        env,
-        (
-            DefaultPettingZooVectorizationParallelWrapper,
-            PettingZooVectorizationParallelWrapper,
-        ),
-    ):
+    if hasattr(env, "num_envs"):
         is_vectorised = True
         num_envs = env.num_envs
     else:
@@ -234,7 +227,6 @@ def train_multi_agent(
     if accelerator is None:
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
-
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
@@ -242,7 +234,11 @@ def train_multi_agent(
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
-            scores = np.zeros(num_envs)
+            scores = (
+                np.zeros((num_envs, 1))
+                if sum_scores
+                else np.zeros((num_envs, len(agent_ids)))
+            )
             losses = {agent_id: [] for agent_id in agent_ids}
             completed_episode_scores = []
             steps = 0
@@ -280,8 +276,14 @@ def train_multi_agent(
 
                 # Act in environment
                 next_state, reward, termination, truncation, info = env.step(action)
-
-                scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+                score_increment = (
+                    np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+                    if sum_scores
+                    else np.array(list(reward.values())).transpose()
+                )
+                scores += (
+                    score_increment[:, np.newaxis] if is_vectorised else score_increment
+                )
                 total_steps += num_envs
                 steps += num_envs
 
@@ -377,7 +379,6 @@ def train_multi_agent(
                         pop_critic_loss[agent_idx][agent_id].append(
                             np.mean(critic_losses)
                         )
-
         # Evaluate population
         fitnesses = [
             agent.test(

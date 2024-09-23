@@ -11,10 +11,9 @@ https://github.com/Farama-Foundation/SuperSuit/issues/43#issuecomment-751792111
 
 import multiprocessing as mp
 import sys
-from multiprocessing import Pipe
 
 import numpy as np
-from gymnasium.vector.utils import CloudpickleWrapper
+from gymnasium.vector.utils import CloudpickleWrapper, clear_mpi_env_vars
 from pettingzoo import ParallelEnv
 
 
@@ -134,20 +133,21 @@ def process_observation(obs):
 
 def process_info(infos):
     """Process information dict so we can handle agent masking"""
+    copy_infos = infos.copy()
     env_defined_actions = {
         agent: (
-            infos[agent].pop("env_defined_actions", None)
+            copy_infos[agent].pop("env_defined_actions", None)
             if hasattr(infos[agent], "get")
-            else infos[agent]
+            else copy_infos[agent]
         )
-        for agent in infos.keys()
+        for agent in copy_infos.keys()
     }
     if any(eda is not None for eda in env_defined_actions.values()):
         env_defined_actions = list(env_defined_actions.values())
-        info = list(infos.values())
+        info = list(copy_infos.values())
     else:
         env_defined_actions = None
-        info = list(infos.values())
+        info = list(copy_infos.values())
     return info, env_defined_actions
 
 
@@ -242,37 +242,36 @@ class SubprocVecEnv(VecEnv):
         self.closed = False
         self.nenvs = len(env_fns)
         self.error_queue = ctx.Queue()
-        self.parent_remotes, self.child_remotes = zip(
-            *[Pipe() for _ in range(self.nenvs)]
-        )
-        self.ps = [
-            ctx.Process(
-                target=worker,
-                args=(
-                    idx,
-                    child_remote,
-                    parent_remote,
-                    CloudpickleWrapper(env_fn),
-                    self.error_queue,
-                    enable_autoreset,
-                    env_args,
-                ),
+        with clear_mpi_env_vars():
+            self.parent_remotes, self.child_remotes = zip(
+                *[ctx.Pipe() for _ in range(self.nenvs)]
             )
-            for idx, (child_remote, parent_remote, env_fn) in enumerate(
-                zip(self.child_remotes, self.parent_remotes, env_fns)
-            )
-        ]
-        for p in self.ps:
-            p.daemon = (
-                True  # If the main process crashes, we should not cause things to hang
-            )
-            p.start()
+            self.ps = [
+                ctx.Process(
+                    target=worker,
+                    args=(
+                        idx,
+                        child_remote,
+                        parent_remote,
+                        CloudpickleWrapper(env_fn),
+                        self.error_queue,
+                        enable_autoreset,
+                        env_args,
+                    ),
+                )
+                for idx, (child_remote, parent_remote, env_fn) in enumerate(
+                    zip(self.child_remotes, self.parent_remotes, env_fns)
+                )
+            ]
+            for p in self.ps:
+                p.daemon = True  # If the main process crashes, we should not cause things to hang
+                p.start()
+            self._close_pipes(self.child_remotes)
         VecEnv.__init__(
             self,
             len(env_fns),
             self.env.possible_agents,
         )
-        # self.close_pipes(self.child_remotes)
 
     # Note: this is not part of the PettingZoo API
     def seed(self, value):
@@ -296,6 +295,7 @@ class SubprocVecEnv(VecEnv):
                 if parent_remote.poll(1.0)
             ]
         )
+        self.waiting = False
         self._raise_if_errors(successes)
         obs, rews, dones, truncs, infos, action_mask, env_defined_actions = list(
             zip(*results)
@@ -345,7 +345,7 @@ class SubprocVecEnv(VecEnv):
 
                 if env_defined_actions[0] is not None:
                     ret_env_def_act_dict[possible_agent].append(
-                        self.handle_env_defined_action_none(
+                        self._handle_env_defined_action_none(
                             env_defined_action=env_defined_actions[env_idx][agent_idx],
                             agent=possible_agent,
                         )
@@ -368,15 +368,15 @@ class SubprocVecEnv(VecEnv):
                     op_dict[possible_agent] = np.stack(op_dict[possible_agent])
 
         if action_mask[0] is not None:
-            ret_obs_dict = self.format_obs_dict(
+            ret_obs_dict = self._format_obs_dict(
                 obs=ret_obs_dict, action_mask=ret_action_mask_dict
             )
 
         # Deal with the infos dict
-        ret_infos_dict = self.format_infos_dict(ret_infos_dict)
+        ret_infos_dict = self._format_infos_dict(ret_infos_dict)
 
         if env_defined_actions[0] is not None:
-            ret_infos_dict = self.combine_info_and_eda(
+            ret_infos_dict = self._combine_info_and_eda(
                 env_defined_actions=ret_env_def_act_dict, info=ret_infos_dict
             )
 
@@ -424,7 +424,7 @@ class SubprocVecEnv(VecEnv):
 
                 if env_defined_actions[0] is not None:
                     ret_env_def_act_dict[possible_agent].append(
-                        self.handle_env_defined_action_none(
+                        self._handle_env_defined_action_none(
                             env_defined_action=env_defined_actions[env_idx][agent_idx],
                             agent=possible_agent,
                         )
@@ -436,12 +436,12 @@ class SubprocVecEnv(VecEnv):
                 if len(op_dict[possible_agent]) > 0:
                     op_dict[possible_agent] = np.stack(op_dict[possible_agent])
         if action_mask[0] is not None:
-            ret_obs_dict = self.format_obs_dict(
+            ret_obs_dict = self._format_obs_dict(
                 obs=ret_obs_dict, action_mask=ret_action_mask_dict
             )
-        ret_infos_dict = self.format_infos_dict(ret_infos_dict)
+        ret_infos_dict = self._format_infos_dict(ret_infos_dict)
         if env_defined_actions[0] is not None:
-            ret_infos_dict = self.combine_info_and_eda(
+            ret_infos_dict = self._combine_info_and_eda(
                 env_defined_actions=ret_env_def_act_dict, info=ret_infos_dict
             )
         return (ret_obs_dict, ret_infos_dict)
@@ -450,6 +450,15 @@ class SubprocVecEnv(VecEnv):
         self.parent_remotes[0].send(("render", None))
 
     def close(self):
+        if self.closed:
+            return
+
+        if self.waiting:
+            successes = []
+            for remote in self.parent_remotes:
+                _, success = remote.recv()
+                successes.append()
+            self._raise_if_errors(successes)
 
         for pipe in self.parent_remotes:
             if (pipe is not None) and (not pipe.closed):
@@ -464,7 +473,7 @@ class SubprocVecEnv(VecEnv):
         for pipe in self.parent_remotes:
             if pipe is not None:
                 pipe.close()
-        self.join_processes()
+        self._join_processes()
 
     def sample_personas(self, is_train, is_val=True, path="./"):
         return self.env.sample_personas(is_train=is_train, is_val=is_val, path=path)
@@ -473,7 +482,7 @@ class SubprocVecEnv(VecEnv):
         return_val = super().step(actions)
         return return_val
 
-    def handle_env_defined_action_none(self, env_defined_action, agent):
+    def _handle_env_defined_action_none(self, env_defined_action, agent):
         if env_defined_action is None:
             if hasattr(self.action_space(agent), "n"):
                 action_dim = 1  # self.action_space(possible_agent).n
@@ -483,7 +492,7 @@ class SubprocVecEnv(VecEnv):
             env_defined_action[:] = np.nan
         return env_defined_action
 
-    def format_infos_dict(self, info):
+    def _format_infos_dict(self, info):
         vect_ret_infos_dict = {}
         for agent_idx, possible_agent in enumerate(self.env.possible_agents):
             merged_dict = {key: [] for key in info[possible_agent][0].keys()}
@@ -498,7 +507,7 @@ class SubprocVecEnv(VecEnv):
 
         return vect_ret_infos_dict
 
-    def combine_info_and_eda(self, env_defined_actions, info):
+    def _combine_info_and_eda(self, env_defined_actions, info):
         new_info_dict = {}
         for possible_agent in self.env.possible_agents:
             new_info_dict[possible_agent] = info[possible_agent]
@@ -507,7 +516,7 @@ class SubprocVecEnv(VecEnv):
             ]
         return new_info_dict
 
-    def format_obs_dict(self, obs, action_mask):
+    def _format_obs_dict(self, obs, action_mask):
         new_obs_dict = {}
         for possible_agent in self.env.possible_agents:
             new_obs_dict[possible_agent] = {}
@@ -515,11 +524,11 @@ class SubprocVecEnv(VecEnv):
             new_obs_dict[possible_agent]["action_mask"] = action_mask[possible_agent]
         return new_obs_dict
 
-    def close_pipes(self, pipes):
+    def _close_pipes(self, pipes):
         for pipe in pipes:
             pipe.close()
 
-    def join_processes(self):
+    def _join_processes(self):
         for process in self.ps:
             process.join()
             self.closed = True

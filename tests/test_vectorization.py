@@ -1121,9 +1121,6 @@ def test_auto_reset_subproc(
     vec_env.close()
 
 
-# @pytest.mark.parametrize(
-#         ""
-# )
 def test_exception_throws_from_within_subproc(make_error_env):
     n_envs = 2
     vec_env = PettingZooVectorizationParallelWrapper(make_error_env, n_envs=n_envs)
