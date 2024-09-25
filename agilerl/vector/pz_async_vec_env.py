@@ -3,7 +3,9 @@
 import copy
 import multiprocessing as mp
 import operator
+import sys
 import time
+import traceback
 from collections import defaultdict
 from enum import Enum
 from itertools import accumulate
@@ -411,51 +413,57 @@ def _async_worker(
     parent_pipe.close()
 
     # TODO Ensure the order of the agents is preserved
-    # try:
-    while True:
-        command, data = pipe.recv()
-        if command == "reset":
-            observation, info = env.reset(**data)
-            if shared_memory:
-                write_to_shared_memory(
-                    index=index,
-                    width=obs_width,
-                    shared_memory=shared_memory,
-                    data=observation,
+    try:
+        while True:
+            command, data = pipe.recv()
+            if command == "reset":
+                observation, info = env.reset(**data)
+                if shared_memory:
+                    write_to_shared_memory(
+                        index=index,
+                        width=obs_width,
+                        shared_memory=shared_memory,
+                        data=observation,
+                    )
+                    observation = None
+                    autoreset = False
+                pipe.send(((observation, info), True))
+            elif command == "step":
+                if autoreset:
+                    observation, info = env.reset()
+                    reward = {agent: 0 for agent in agents}
+                    terminated = {agent: False for agent in agents}
+                    truncated = {agent: False for agent in agents}
+                else:
+                    data = {
+                        possible_agent: np.array(data[idx]).squeeze()
+                        for idx, possible_agent in enumerate(agents)
+                    }
+                    observation, reward, terminated, truncated, info = env.step(data)
+                autoreset = all(
+                    [
+                        term | trunc
+                        for term, trunc in zip(terminated.values(), truncated.values())
+                    ]
                 )
-                observation = None
-                autoreset = False
-            pipe.send(((observation, info), True))
-        elif command == "step":
-            if autoreset:
-                observation, info = env.reset()
-                reward = {agent: 0 for agent in agents}
-                terminated = {agent: False for agent in agents}
-                truncated = {agent: False for agent in agents}
-            else:
-                data = {
-                    possible_agent: np.array(data[idx]).squeeze()
-                    for idx, possible_agent in enumerate(agents)
-                }
-                observation, reward, terminated, truncated, info = env.step(data)
-            autoreset = all(
-                [
-                    term | trunc
-                    for term, trunc in zip(terminated.values(), truncated.values())
-                ]
-            )
-            if shared_memory:
-                write_to_shared_memory(
-                    index=index,
-                    width=obs_width,
-                    shared_memory=shared_memory,
-                    data=observation,
-                )
-                observation = None
-            pipe.send(((observation, reward, terminated, truncated, info), True))
+                if shared_memory:
+                    write_to_shared_memory(
+                        index=index,
+                        width=obs_width,
+                        shared_memory=shared_memory,
+                        data=observation,
+                    )
+                    observation = None
+                pipe.send(((observation, reward, terminated, truncated, info), True))
 
-    # except Exception as e:
-    #     ra
+    except (KeyboardInterrupt, Exception):
+        error_type, error_message, _ = sys.exc_info()
+        trace = traceback.format_exc()
+
+        error_queue.put((index, error_type, error_message, trace))
+        pipe.send((None, False))
+    finally:
+        env.close()
 
 
 def create_shared_memory(num_envs, width, dtype, ctx=mp):
