@@ -242,6 +242,7 @@ class SubprocVecEnv(VecEnv):
         self.closed = False
         self.nenvs = len(env_fns)
         self.error_queue = ctx.Queue()
+        self.possible_agents = self.env.possible_agents
         with clear_mpi_env_vars():
             self.parent_remotes, self.child_remotes = zip(
                 *[ctx.Pipe() for _ in range(self.nenvs)]
@@ -270,8 +271,10 @@ class SubprocVecEnv(VecEnv):
         VecEnv.__init__(
             self,
             len(env_fns),
-            self.env.possible_agents,
+            self.possible_agents,
         )
+        self.env.close()
+        del self.env
 
     # Note: this is not part of the PettingZoo API
     def seed(self, value):
@@ -302,38 +305,38 @@ class SubprocVecEnv(VecEnv):
         )
         ret_obs_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
 
         ret_action_mask_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
 
         ret_rews_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
         ret_dones_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
         ret_truncs_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
 
         ret_infos_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
         ret_env_def_act_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
 
         for env_idx, _ in enumerate(obs):
-            for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+            for agent_idx, possible_agent in enumerate(self.possible_agents):
                 if action_mask[0] is not None:
                     ret_action_mask_dict[possible_agent].append(
                         action_mask[env_idx][agent_idx]
@@ -352,7 +355,7 @@ class SubprocVecEnv(VecEnv):
                     )
                 ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
 
-        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+        for agent_idx, possible_agent in enumerate(self.possible_agents):
             for op_dict in [
                 ret_obs_dict,
                 ret_rews_dict,
@@ -398,24 +401,24 @@ class SubprocVecEnv(VecEnv):
         obs, infos, action_mask, env_defined_actions = zip(*results)
         ret_obs_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
         ret_action_mask_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
 
         ret_infos_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
         ret_env_def_act_dict = {
             possible_agent: []
-            for idx, possible_agent in enumerate(self.env.possible_agents)
+            for idx, possible_agent in enumerate(self.possible_agents)
         }
 
         for env_idx, _ in enumerate(obs):
-            for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+            for agent_idx, possible_agent in enumerate(self.possible_agents):
                 if action_mask[0] is not None:
                     ret_action_mask_dict[possible_agent].append(
                         action_mask[env_idx][agent_idx]
@@ -431,7 +434,7 @@ class SubprocVecEnv(VecEnv):
                     )
                 ret_infos_dict[possible_agent].append(infos[env_idx][agent_idx])
 
-        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+        for agent_idx, possible_agent in enumerate(self.possible_agents):
             for op_dict in [ret_obs_dict, ret_infos_dict, ret_env_def_act_dict]:
                 if len(op_dict[possible_agent]) > 0:
                     op_dict[possible_agent] = np.stack(op_dict[possible_agent])
@@ -494,7 +497,7 @@ class SubprocVecEnv(VecEnv):
 
     def _format_infos_dict(self, info):
         vect_ret_infos_dict = {}
-        for agent_idx, possible_agent in enumerate(self.env.possible_agents):
+        for agent_idx, possible_agent in enumerate(self.possible_agents):
             merged_dict = {key: [] for key in info[possible_agent][0].keys()}
             # Collect values for each key from all dictionaries
             for d in info[possible_agent]:
@@ -509,7 +512,7 @@ class SubprocVecEnv(VecEnv):
 
     def _combine_info_and_eda(self, env_defined_actions, info):
         new_info_dict = {}
-        for possible_agent in self.env.possible_agents:
+        for possible_agent in self.possible_agents:
             new_info_dict[possible_agent] = info[possible_agent]
             new_info_dict[possible_agent]["env_defined_actions"] = env_defined_actions[
                 possible_agent
@@ -518,7 +521,7 @@ class SubprocVecEnv(VecEnv):
 
     def _format_obs_dict(self, obs, action_mask):
         new_obs_dict = {}
-        for possible_agent in self.env.possible_agents:
+        for possible_agent in self.possible_agents:
             new_obs_dict[possible_agent] = {}
             new_obs_dict[possible_agent]["observation"] = obs[possible_agent]
             new_obs_dict[possible_agent]["action_mask"] = action_mask[possible_agent]

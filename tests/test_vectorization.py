@@ -108,9 +108,11 @@ class parallel_env_disc(ParallelEnv):
         hands that are played.
         Returns the observations for each agent
         """
+        if seed is not None:
+            np.random.seed(seed)
         self.agents = self.possible_agents[:]
         self.num_moves = 0
-        observations = {agent: NONE for agent in self.agents}
+        observations = {agent: np.random.randint(100) for agent in self.agents}
         infos = {agent: {} for agent in self.agents}
         self.state = observations
 
