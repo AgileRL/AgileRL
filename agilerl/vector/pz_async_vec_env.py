@@ -230,7 +230,7 @@ class AsyncVectorPZEnv(VecEnv):
         self._state = AsyncState.WAITING_RESET
 
     def reset_wait(
-        self, timeout: int | float | None = None
+        self, timeout: int | float | None = 60
     ) -> tuple[dict[AgentID, ObsType], dict[AgentID, dict]]:
         """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results."""
         self._assert_is_running()
@@ -271,7 +271,7 @@ class AsyncVectorPZEnv(VecEnv):
             pipe.send(("step", action))
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout: int | None = None):
+    def step_wait(self, timeout: int | None = 60):
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
             raise NoAsyncCallError(
@@ -311,7 +311,7 @@ class AsyncVectorPZEnv(VecEnv):
             infos,
         )
 
-    def close_extras(self, timeout=None, terminate=False):
+    def close_extras(self, timeout=60, terminate=False):
         timeout = 0 if terminate else timeout
 
         try:
