@@ -1,6 +1,7 @@
 import copy
 import inspect
 import warnings
+from collections import OrderedDict
 
 import dill
 import numpy as np
@@ -72,7 +73,7 @@ class MADDPG:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param torch_compile: the torch compile mode 'default', 'reduce-overhead' or 'max-autotune'
+    :param torch_compile: the torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
     :type torch_compile: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
@@ -185,9 +186,6 @@ class MADDPG:
         self.accelerator = accelerator
         self.torch_compiler = torch_compiler
         self.learn_counter = 0
-        self.CUDA_CACHE_POLICY = (
-            "increase_and_empty"  # None | 'empty' | 'increase_and_empty' | 'increase'
-        )
         self.index = index
         self.scores = []
         self.fitness = []
@@ -367,78 +365,33 @@ class MADDPG:
             if wrap:
                 self.wrap_models()
         else:
-            if not torch_compiler:
-                self.actors = [actor.to(self.device) for actor in self.actors]
-                self.actor_targets = [
-                    actor_target.to(self.device) for actor_target in self.actor_targets
-                ]
-                self.critics = [critic.to(self.device) for critic in self.critics]
-                self.critic_targets = [
-                    critic_target.to(self.device)
-                    for critic_target in self.critic_targets
-                ]
-            else:
+            self.place_models_on_device(self.device)
+            if self.torch_compiler:
                 torch.set_float32_matmul_precision("high")
-                if self.CUDA_CACHE_POLICY.startswith("increase"):
-                    torch._dynamo.config.accumulated_cache_size_limit = 256
-                self.actors = [
-                    torch.compile(a.to(device), mode=torch_compiler)
-                    for a in self.actors
-                ]
-                self.actor_targets = [
-                    torch.compile(at.to(device), mode=torch_compiler)
-                    for at in self.actor_targets
-                ]
-                self.critics = [
-                    torch.compile(c.to(device), mode=torch_compiler)
-                    for c in self.critics
-                ]
-                self.critic_targets = [
-                    torch.compile(ct.to(device), mode=torch_compiler)
-                    for ct in self.critic_targets
-                ]
-                # self.actor_optimizers = [
-                #     torch.compile(opt, mode=torch_compiler) for opt in self.actor_optimizers
-                # ]
-                # self.critic_optimizers = [
-                #     torch.compile(opt, mode=torch_compiler) for opt in self.critic_optimizers
-                # ]
+                self.recompile()
 
         self.criterion = nn.MSELoss()
 
     def recompile(self):
-        self.actors = [
-            (
-                torch.compile(a, mode=self.torch_compiler)
-                if not isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-                else a
-            )
-            for a in self.actors
-        ]
-        self.actor_targets = [
-            (
-                torch.compile(at, mode=self.torch_compiler)
-                if not isinstance(at, torch._dynamo.eval_frame.OptimizedModule)
-                else at
-            )
-            for at in self.actor_targets
-        ]
-        self.critics = [
-            (
-                torch.compile(c, mode=self.torch_compiler)
-                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
-                else c
-            )
-            for c in self.critics
-        ]
-        self.critic_targets = [
-            (
-                torch.compile(ct, mode=self.torch_compiler)
-                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
-                else ct
-            )
-            for ct in self.critic_targets
-        ]
+        """Recompile all models"""
+        self.actors = [self._compile_model(a) for a in self.actors]
+        self.actor_targets = [self._compile_model(at) for at in self.actor_targets]
+        self.critics = [self._compile_model(c) for c in self.critics]
+        self.critic_targets = [self._compile_model(ct) for ct in self.critic_targets]
+
+    def _compile_model(self, model):
+        """Compiles torch model if not already compiled
+
+        :param model: torch model
+        :type model: nn.Module
+        :return: compiled model
+        :rtype: OptimizedModule
+        """
+        return (
+            torch.compile(model, mode=self.torch_compiler)
+            if not isinstance(model, torch._dynamo.eval_frame.OptimizedModule)
+            else model
+        )
 
     def scale_to_action_space(self, action, idx):
         """Scales actions to action space defined by self.min_action and self.max_action.
@@ -573,7 +526,7 @@ class MADDPG:
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
-                discrete_action_dict[agent] = torch.argmax(action, axis=-1)
+                discrete_action_dict[agent] = torch.argmax(action, dim=-1)
 
         if env_defined_actions is None:
             ret = (
@@ -586,8 +539,6 @@ class MADDPG:
                     }
                 ),
             )
-            if self.is_cuda() and self.torch_compiler:
-                self.cuda_cache_policy()
             return ret
 
         for agent in agent_mask.keys():
@@ -608,17 +559,7 @@ class MADDPG:
             else:
                 action_dict.update({agent: env_defined_actions[agent]})
 
-        ret = (
-            (
-                action_dict
-                if not self.discrete_actions
-                else {a: t.cpu().data.numpy() for a, t in action_dict.items()}
-            ),
-            discrete_action_dict,
-        )
-        if self.is_cuda() and self.torch_compiler:
-            self.cuda_cache_policy()
-        return ret
+        return action_dict, discrete_action_dict
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -736,7 +677,7 @@ class MADDPG:
                 self.critic_optimizers,
             )
         ):
-            loss_dict[f"{agent_id}"] = self.learn_individual(
+            loss_dict[f"{agent_id}"] = self._learn_individual(
                 idx,
                 agent_id,
                 actor,
@@ -762,28 +703,9 @@ class MADDPG:
             self.soft_update(actor, actor_target)
             self.soft_update(critic, critic_target)
 
-        if self.is_cuda() and self.torch_compiler:
-            self.cuda_cache_policy()
         return loss_dict
 
-    def cuda_cache_policy(self):
-        """apply cuda cache policy
-        between potential nn.Module optimization re-compiles"""
-        if not self.CUDA_CACHE_POLICY:
-            return
-        self.learn_counter += 1
-        if self.CUDA_CACHE_POLICY.endswith("empty") and self.learn_counter % 600 == 0:
-            torch.cuda.empty_cache()
-            # if self.learn_counter % 1200 == 0:
-            #     print("EMPTY CACHE")
-
-    def is_cuda(self):
-        if isinstance(self.device, str):
-            return self.device == "cuda"
-        if isinstance(self.device, torch.device):
-            return self.device == torch.device("cuda")
-
-    def learn_individual(
+    def _learn_individual(
         self,
         idx,
         agent_id,
@@ -1004,101 +926,49 @@ class MADDPG:
 
         if self.accelerator is not None:
             self.unwrap_models()
-        actors = [actor.clone() for actor in self.actors]
-        actor_targets = [actor_target.clone() for actor_target in self.actor_targets]
-        critics = [critic.clone() for critic in self.critics]
-        critic_targets = [
+
+        # Copy models to clone
+        clone.actors = [actor.clone() for actor in self.actors]
+        clone.actor_targets = [
+            actor_target.clone() for actor_target in self.actor_targets
+        ]
+        clone.critics = [critic.clone() for critic in self.critics]
+        clone.critic_targets = [
             critic_target.clone() for critic_target in self.critic_targets
         ]
-        actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in actors
+        clone.actor_optimizers = [
+            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in clone.actors
         ]
-        critic_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics
+        clone.critic_optimizers = [
+            optim.Adam(critic.parameters(), lr=clone.lr_critic)
+            for critic in clone.critics
         ]
 
+        # Load optimizer state dicts to clone
         for (
             clone_actor_optimizer,
             actor_optimizer,
             clone_critic_optimizer,
             critic_optimizer,
         ) in zip(
-            actor_optimizers,
+            clone.actor_optimizers,
             self.actor_optimizers,
-            critic_optimizers,
+            clone.critic_optimizers,
             self.critic_optimizers,
         ):
             clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
             clone_critic_optimizer.load_state_dict(critic_optimizer.state_dict())
 
-        if self.accelerator is not None:
+        # Compile and accelerator wrap
+        if clone.accelerator is not None:
             if wrap:
-                clone.actors = [self.accelerator.prepare(actor) for actor in actors]
-                clone.actor_targets = [
-                    self.accelerator.prepare(actor_target)
-                    for actor_target in actor_targets
-                ]
-                clone.critics = [self.accelerator.prepare(critic) for critic in critics]
-                clone.critic_targets = [
-                    self.accelerator.prepare(critic_target)
-                    for critic_target in critic_targets
-                ]
-                clone.actor_optimizers = [
-                    self.accelerator.prepare(actor_optimizer)
-                    for actor_optimizer in actor_optimizers
-                ]
-                clone.critic_optimizers = [
-                    self.accelerator.prepare(critic_optimizer)
-                    for critic_optimizer in critic_optimizers
-                ]
-            else:
-                (
-                    clone.actors,
-                    clone.actor_targets,
-                    clone.critics,
-                    clone.critic_targets,
-                    clone.actor_optimizers,
-                    clone.critic_optimizers,
-                ) = (
-                    actors,
-                    actor_targets,
-                    critics,
-                    critic_targets,
-                    actor_optimizers,
-                    critic_optimizers,
-                )
-        elif self.torch_compiler:
-            clone.actors = [
-                torch.compile(actor.to(self.device), mode=self.torch_compiler)
-                for actor in actors
-            ]
-            clone.actor_targets = [
-                torch.compile(actor_target.to(self.device), mode=self.torch_compiler)
-                for actor_target in actor_targets
-            ]
-            clone.critics = [
-                torch.compile(critic.to(self.device), mode=self.torch_compiler)
-                for critic in critics
-            ]
-            clone.critic_targets = [
-                torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
-                for critic_target in critic_targets
-            ]
-            # clone.actor_optimizers = torch.compile(actor_optimizers, mode=self.torch_compiler)
-            # clone.critic_optimizers = torch.compile(critic_optimizers, mode=self.torch_compiler)
-            clone.actor_optimizers = actor_optimizers
-            clone.critic_optimizers = critic_optimizers
+                clone.wrap_models()
+
+        # move to device
         else:
-            clone.actors = [actor.to(self.device) for actor in actors]
-            clone.actor_targets = [
-                actor_target.to(self.device) for actor_target in actor_targets
-            ]
-            clone.critics = [critic.to(self.device) for critic in critics]
-            clone.critic_targets = [
-                critic_target.to(self.device) for critic_target in critic_targets
-            ]
-            clone.actor_optimizers = actor_optimizers
-            clone.critic_optimizers = critic_optimizers
+            clone.place_models_on_device(clone.device)
+            if clone.torch_compiler:
+                clone.recompile()
 
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
@@ -1161,6 +1031,16 @@ class MADDPG:
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
         return attributes
 
+    def place_models_on_device(self, device):
+        self.actors = [actor.to(device) for actor in self.actors]
+        self.actor_targets = [
+            actor_target.to(device) for actor_target in self.actor_targets
+        ]
+        self.critics = [critic.to(device) for critic in self.critics]
+        self.critic_targets = [
+            critic_target.to(device) for critic_target in self.critic_targets
+        ]
+
     def wrap_models(self):
         if self.accelerator is not None:
             self.actors = [self.accelerator.prepare(actor) for actor in self.actors]
@@ -1209,6 +1089,21 @@ class MADDPG:
                 )
             ]
 
+    def remove_compile_prefix(self, state_dict):
+        """Removes _orig_mod prefix on state dict created by torch compile
+
+        :param state_dict: model state dict
+        :type state_dict: dict
+        :return: state dict with prefix removed
+        :rtype: dict
+        """
+        return OrderedDict(
+            [
+                (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                for k, v in state_dict.items()
+            ]
+        )
+
     def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
@@ -1219,20 +1114,27 @@ class MADDPG:
 
         network_info = {
             "actors_init_dict": [actor.init_dict for actor in self.actors],
-            "actors_state_dict": [actor.state_dict() for actor in self.actors],
+            "actors_state_dict": [
+                self.remove_compile_prefix(actor.state_dict()) for actor in self.actors
+            ],
             "actor_targets_init_dict": [
                 actor_target.init_dict for actor_target in self.actor_targets
             ],
             "actor_targets_state_dict": [
-                actor_target.state_dict() for actor_target in self.actor_targets
+                self.remove_compile_prefix(actor_target.state_dict())
+                for actor_target in self.actor_targets
             ],
             "critics_init_dict": [critic.init_dict for critic in self.critics],
-            "critics_state_dict": [critic.state_dict() for critic in self.critics],
+            "critics_state_dict": [
+                self.remove_compile_prefix(critic.state_dict())
+                for critic in self.critics
+            ],
             "critic_targets_init_dict": [
                 critic_target.init_dict for critic_target in self.critic_targets
             ],
             "critic_targets_state_dict": [
-                critic_target.state_dict() for critic_target in self.critic_targets
+                self.remove_compile_prefix(critic_target.state_dict())
+                for critic_target in self.critic_targets
             ],
             "actor_optimizers_state_dict": [
                 actor_optimizer.state_dict()
@@ -1245,6 +1147,7 @@ class MADDPG:
         }
 
         attribute_dict.update(network_info)
+        attribute_dict.pop("accelerator", None)
 
         torch.save(
             attribute_dict,
@@ -1362,6 +1265,14 @@ class MADDPG:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
+        if self.accelerator is not None:
+            self.wrap_models()
+        else:
+            self.place_models_on_device(self.device)
+            if self.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                self.recompile()
+
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
         """Creates agent with properties and network weights loaded from path.
@@ -1446,6 +1357,14 @@ class MADDPG:
                 for idx, _ in enumerate(checkpoint["agent_ids"])
             ]
             agent = cls(**class_init_dict)
+            agent.actors = [
+                MakeEvolvable(**actors_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
+            agent.critics = [
+                MakeEvolvable(**critics_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
             agent.actor_targets = [
                 MakeEvolvable(**actor_targets_init_dict[idx])
                 for idx, _ in enumerate(checkpoint["agent_ids"])
@@ -1506,10 +1425,15 @@ class MADDPG:
         agent.actor_optimizers = actor_optimizer_list
         agent.critic_optimizers = critic_optimizer_list
 
-        if accelerator is not None:
-            agent.wrap_models()
-
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
+
+        if accelerator is not None:
+            agent.wrap_models()
+        else:
+            agent.place_models_on_device(agent.device)
+            if agent.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                agent.recompile()
 
         return agent
