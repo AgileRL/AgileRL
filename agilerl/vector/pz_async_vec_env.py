@@ -53,18 +53,24 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         self.possible_agents = dummy_env.possible_agents
 
         if experience_handler is None:
+            env = env_fns[0]()
             self.experience_handler = PettingZooExperienceHandler(
-                self.env_fns[0], self.num_envs, copy_obs=True
+                env, self.num_envs, copy_obs=True
             )
+            del env
         else:
             self.experience_handler = experience_handler
+
+        ctx = mp.get_context()
+        dummy_env = env_fns[0]()
+        self.experience_handler.detect_space_info(dummy_env)
+        del dummy_env
 
         self.action_space = self._get_action_space
         self.observation_space = self._get_observation_space
         self.single_action_space = self._get_single_action_space
         self.single_observation_space = self._get_single_observation_space
 
-        ctx = mp.get_context()
         # Create the shared memory for sharing observations between subprocesses
         self._obs_buffer = create_shared_memory(
             self.num_envs,
@@ -330,7 +336,6 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
                     process.terminate()
         else:
             for pipe in self.parent_pipes:
-                print(pipe is not None, not pipe.closed)
                 if (pipe is not None) and (not pipe.closed):
                     pipe.send(("close", None))
 
@@ -444,13 +449,16 @@ class PettingZooExperienceHandler:
     :type copy_obs: bool, optional
     """
 
-    def __init__(self, env_fn, num_envs, copy_obs=True):
+    def __init__(self, env, num_envs, copy_obs=True):
         self.num_envs = num_envs
-        dummy_env = env_fn()
+        self.copy = copy_obs
+        self.detect_space_info(env)
+
+    def detect_space_info(self, dummy_env):
+
         self.metadata = dummy_env.metadata
         self.render_mode = dummy_env.render_mode
         self.possible_agents = dummy_env.possible_agents
-        self.copy = copy_obs
 
         try:
             # Collect action space data
@@ -500,7 +508,6 @@ class PettingZooExperienceHandler:
         self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
 
         dummy_env.close()
-        del dummy_env
 
     def get_placeholder_value(self, index, agent, transition_name, shared_memory=None):
         """When an agent is killed, used to obtain a placeholder value to return for associated experience.
@@ -598,7 +605,6 @@ def _async_worker(
     try:
         while True:
             command, data = pipe.recv()
-            print(command)
             if command == "reset":
                 observation, info = env.reset(**data)
                 if shared_memory:

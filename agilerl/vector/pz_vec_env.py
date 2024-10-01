@@ -1,8 +1,5 @@
 from typing import Any
 
-import numpy as np
-from gymnasium.utils import seeding
-
 
 class PettingZooVecEnv:
     """An abstract asynchronous, vectorized environment
@@ -18,9 +15,6 @@ class PettingZooVecEnv:
 
     num_envs: int
 
-    _np_random: np.random.Generator | None = None
-    _np_random_seed: int | None = None
-
     def __init__(self, num_envs, possible_agents):
         self.num_envs = num_envs
         self.agents = possible_agents
@@ -34,8 +28,7 @@ class PettingZooVecEnv:
         be cancelled and step_wait() should not be called
         until step_async() is invoked again.
         """
-        if seed is not None:
-            self._np_random, self._np_random_ = seeding.np_random(seed)
+        pass
 
     def step_async(self, actions):
         """
@@ -90,36 +83,6 @@ class PettingZooVecEnv:
     def close_extras(self, **kwargs: Any):
         """Clean up the extra resources e.g. beyond what's in this base class."""
         pass
-
-    @property
-    def np_random(self) -> np.random.Generator:
-        """Returns the environment's internal :attr:`_np_random` that if not set will initialise with a random seed.
-
-        Returns:
-            Instances of `np.random.Generator`
-        """
-        if self._np_random is None:
-            self._np_random, self._np_random_seed = seeding.np_random()
-        return self._np_random
-
-    @np_random.setter
-    def np_random(self, value: np.random.Generator):
-        self._np_random = value
-        self._np_random_seed = -1
-
-    @property
-    def np_random_seed(self) -> int | None:
-        """Returns the environment's internal :attr:`_np_random_seed` that if not set will first initialise with a random int as seed.
-
-        If :attr:`np_random_seed` was set directly instead of through :meth:`reset` or :meth:`set_np_random_through_seed`,
-        the seed will take the value -1.
-
-        Returns:
-            int: the seed of the current `np_random` or -1, if the seed of the rng is unknown
-        """
-        if self._np_random_seed is None:
-            self._np_random, self._np_random_seed = seeding.np_random()
-        return self._np_random_seed
 
     @property
     def unwrapped(self):
