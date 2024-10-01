@@ -9,21 +9,18 @@ import traceback
 from collections import defaultdict
 from enum import Enum
 from itertools import accumulate
-from multiprocessing import Queue
-from multiprocessing.connection import Connection
-from typing import Any, Dict, TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 from gymnasium import logger
 from gymnasium.error import (
     AlreadyPendingCallError,
     ClosedEnvironmentError,
-    CustomSpaceError,
     NoAsyncCallError,
 )
 from gymnasium.vector.utils import CloudpickleWrapper, batch_space, clear_mpi_env_vars
 
-from agilerl.vector.pz_vec_env import VecEnv
+from agilerl.vector.pz_vec_env import PettingZooVecEnv
 
 AgentID = TypeVar("AgentID")
 ObsType = TypeVar("ObsType")
@@ -38,96 +35,49 @@ class AsyncState(Enum):
     WAITING_CALL = "call"
 
 
-class AsyncVectorPZEnv(VecEnv):
-    """Vectorized PettingZoo environment that runs multiple environments in parallel"""
+class AsyncVectorPettingZooEnv(PettingZooVecEnv):
+    """Vectorized PettingZoo environment that runs multiple environments in parallel
 
-    def __init__(
-        self,
-        env_fns,
-        shared_memory=True,
-        optimize=False,  # Optimize used for Ray framework
-        daemon=True,
-        copy=True,
-    ):
+    :param env_fns: Functions that create the environment
+    :type env_fns: List[Callable]
+    """
+
+    def __init__(self, env_fns, experience_handler=None):
         # Core class attributes
         self.env_fns = env_fns
-        self.shared_memory = shared_memory
+        self.shared_memory = True
         self.num_envs = len(env_fns)
         dummy_env = env_fns[0]()
         self.metadata = dummy_env.metadata
         self.render_mode = dummy_env.render_mode
         self.possible_agents = dummy_env.possible_agents
-        self.copy = copy
 
-        # Collect action space data
-        self.single_action_space_dict = {
-            agent: dummy_env.action_space(agent) for agent in dummy_env.possible_agents
-        }
-        self.action_space_dict = {
-            agent: batch_space(self.single_action_space_dict[agent], self.num_envs)
-            for agent in dummy_env.possible_agents
-        }
-        self.single_action_space = self._get_single_action_space
+        if experience_handler is None:
+            self.experience_handler = PettingZooExperienceHandler(
+                self.env_fns[0], self.num_envs, copy_obs=True
+            )
+        else:
+            self.experience_handler = experience_handler
+
         self.action_space = self._get_action_space
-
-        # Collect observation space data
-        self.single_observation_space_dict = {
-            agent: dummy_env.observation_space(agent)
-            for agent in dummy_env.possible_agents
-        }
-        self.observation_space_dict = {
-            agent: batch_space(self.single_observation_space_dict[agent], self.num_envs)
-            for agent in dummy_env.possible_agents
-        }
-        self.single_observation_space = self._get_single_observation_space
         self.observation_space = self._get_observation_space
-
-        self.indi_obs_widths = {
-            agent: int(np.prod(obs.shape))
-            for agent, obs in self.single_observation_space_dict.items()
-        }
-        self.obs_boundaries = [0] + list(
-            accumulate(self.indi_obs_widths.values(), operator.add)
-        )
-        self.obs_space_width = int(np.sum(list(self.indi_obs_widths.values())))
-
-        print("-----------------------------")
-        print(self.single_observation_space_dict)
-        print(self.indi_obs_widths)
-        print(self.obs_boundaries)
-        print(self.obs_space_width)
-
-        dummy_env.close()
-        del dummy_env
+        self.single_action_space = self._get_single_action_space
+        self.single_observation_space = self._get_single_observation_space
 
         ctx = mp.get_context()
-        # Do we need to also do this for env defined actions and action masks
-        if self.shared_memory:
-            try:
-                # _obs_buffers = {agent : create_shared_memory(
-                #         num_envs=self.num_envs, total_obs_width=self.indi_obs_widths[agent], ctx=ctx, dtype=space.dtype.char
-                #     ) for agent, space in self.single_observation_space_dict.items()
-                # }
-                _obs_buffer = create_shared_memory(
-                    self.num_envs, width=self.obs_space_width, dtype="d", ctx=ctx
-                )
-                self.observations = read_from_shared_memory(
-                    self.obs_space_width, _obs_buffer, self.num_envs, float
-                )
-            except CustomSpaceError as e:
-                raise ValueError(
-                    "Using `AsyncVector(..., shared_memory=True)` caused an error, you can disable this feature with `shared_memory=False` however this is slower."
-                ) from e
-        else:
-            _obs_buffers = None
-            self.observations = np.zeros((self.num_envs, self.obs_space_width))
-
-        # FIXME these should probably all be Wei's special dict interface class -> ArrayDict - dictionary that uses an array for storage
-        self.rewards = np.zeros((self.num_envs, 1))
-        self.terminations = np.zeros((self.num_envs, 1))
-        self.truncations = np.zeros((self.num_envs, 1))
-        self.infos = {}
-
+        # Create the shared memory for sharing observations between subprocesses
+        self._obs_buffer = create_shared_memory(
+            self.num_envs,
+            width=self.experience_handler.total_observation_width,
+            dtype="d",
+            ctx=ctx,
+        )
+        self.observations = read_from_shared_memory(
+            self.experience_handler.total_observation_width,
+            self._obs_buffer,
+            self.num_envs,
+            float,
+        )
         self.parent_pipes, self.processes = [], []
         self.error_queue = ctx.Queue()
 
@@ -143,14 +93,14 @@ class AsyncVectorPZEnv(VecEnv):
                         CloudpickleWrapper(env_fn),
                         child_pipe,
                         parent_pipe,
-                        _obs_buffer,
+                        self._obs_buffer,
                         self.error_queue,
-                        self.obs_space_width,
+                        self.experience_handler,
                     ),
                 )
                 self.parent_pipes.append(parent_pipe)
                 self.processes.append(process)
-                process.daemon = daemon
+                process.daemon = True
                 process.start()
                 child_pipe.close()
         self._state = AsyncState.DEFAULT
@@ -160,27 +110,17 @@ class AsyncVectorPZEnv(VecEnv):
             self.possible_agents,
         )
 
-    @property
-    def np_random_seed(self) -> tuple[int, ...]:
-        """Returns a tuple of np_random seeds for all the wrapped envs."""
-        return self.get_attr("np_random_seed")
-
-    @property
-    def np_random(self) -> tuple[np.random.Generator, ...]:
-        """Returns the tuple of the numpy random number generators for the wrapped envs."""
-        return self.get_attr("np_random")
-
     def _get_single_action_space(self, agent):
-        return self.single_action_space_dict[agent]
+        return self.experience_handler.single_action_space_dict[agent]
 
     def _get_action_space(self, agent):
-        return self.action_space_dict[agent]
+        return self.experience_handler.action_space_dict[agent]
 
     def _get_single_observation_space(self, agent):
-        return self.single_observation_space_dict[agent]
+        return self.experience_handler.single_observation_space_dict[agent]
 
     def _get_observation_space(self, agent):
-        return self.observation_space_dict[agent]
+        return self.experience_handler.observation_space_dict[agent]
 
     def reset(
         self,
@@ -223,7 +163,6 @@ class AsyncVectorPZEnv(VecEnv):
                 f"Calling `reset_async` while waiting for a pending call to `{self._state.value}` to complete",
                 str(self._state.value),
             )
-
         for pipe, env_seed in zip(self.parent_pipes, seed):
             env_kwargs = {"seed": env_seed, "options": options}
             pipe.send(("reset", env_kwargs))
@@ -251,14 +190,12 @@ class AsyncVectorPZEnv(VecEnv):
 
         infos = {}
         results, info_data = zip(*results)
+        # Convert info data to list before passing into key_search function
         for i, info in enumerate(info_data):
-            pass
-            # infos = self._add_info(infos, info, i)
+            infos = self._add_info(infos, info, i)
 
-        if not self.shared_memory:
-            pass
         self._state = AsyncState.DEFAULT
-        return self.pack_observation(self.observations), infos
+        return self.experience_handler.pack_observation(self.observations), infos
 
     def step_async(self, actions):
         self._assert_is_running()
@@ -289,27 +226,90 @@ class AsyncVectorPZEnv(VecEnv):
             defaultdict(list) for _ in range(4)
         )
         successes = []
+        infos = {}
         for env_idx, pipe in enumerate(self.parent_pipes):
             env_step_return, success = pipe.recv()
             successes.append(success)
-            for agent in self.agents:
-                if success:
+            if success:
+                for agent in self.agents:
                     rewards[agent].append(env_step_return[1][agent])
                     terminations[agent].append(env_step_return[2][agent])
                     truncations[agent].append(env_step_return[3][agent])
-                    infos[agent] = self._add_info(
-                        infos, env_step_return[4][agent], None
-                    )
+                infos = self._add_info(infos, env_step_return[4], env_idx)
 
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
         return (
-            self.pack_observation(self.observations),
+            self.experience_handler.pack_observation(self.observations),
             {agent: np.array(rew) for agent, rew in rewards.items()},
             {agent: np.array(term) for agent, term in terminations.items()},
             {agent: np.array(trunc) for agent, trunc in truncations.items()},
             infos,
         )
+
+    def render(self):
+        return self.call("render")
+
+    def call(self, name, *args, **kwargs):
+        self.call_async(name, *args, **kwargs)
+        return self.call_wait()
+
+    def call_async(self, name, *args, **kwargs):
+        self._assert_is_running()
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError(
+                f"Calling `call_async` while waiting for a pending call to `{self._state.value}` to complete.",
+                str(self._state.value),
+            )
+
+        for pipe in self.parent_pipes:
+            pipe.send(("_call", (name, args, kwargs)))
+        self._state = AsyncState.WAITING_CALL
+
+    def call_wait(self, timeout: int | float | None = 60):
+        """Error: The call to :meth:`call_wait` has timed out after timeout second(s)."""
+        self._assert_is_running()
+        if self._state != AsyncState.WAITING_CALL:
+            raise NoAsyncCallError(
+                "Calling `call_wait` without any prior call to `call_async`.",
+                AsyncState.WAITING_CALL.value,
+            )
+
+        if not self._poll_pipe_envs(timeout):
+            self._state = AsyncState.DEFAULT
+            raise mp.TimeoutError(
+                f"The call to `call_wait` has timed out after {timeout} second(s)."
+            )
+
+        results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        self._raise_if_errors(successes)
+        self._state = AsyncState.DEFAULT
+        return results
+
+    def get_attr(self, name: str):
+        return self.call(name)
+
+    def set_attr(self, name: str, values: list[Any] | tuple[Any] | object):
+        """Sets an attribute of the sub-environments."""
+        self._assert_is_running()
+        if not isinstance(values, (list, tuple)):
+            values = [values for _ in range(self.num_envs)]
+        if len(values) != self.num_envs:
+            raise ValueError(
+                "Values must be a list or tuple with length equal to the number of environments. "
+                f"Got `{len(values)}` values for {self.num_envs} environments."
+            )
+
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError(
+                f"Calling `set_attr` while waiting for a pending call to `{self._state.value}` to complete.",
+                str(self._state.value),
+            )
+
+        for pipe, value in zip(self.parent_pipes, values):
+            pipe.send(("_setattr", (name, value)))
+        _, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        self._raise_if_errors(successes)
 
     def close_extras(self, timeout=60, terminate=False):
         timeout = 0 if terminate else timeout
@@ -330,8 +330,10 @@ class AsyncVectorPZEnv(VecEnv):
                     process.terminate()
         else:
             for pipe in self.parent_pipes:
+                print(pipe is not None, not pipe.closed)
                 if (pipe is not None) and (not pipe.closed):
                     pipe.send(("close", None))
+
             for pipe in self.parent_pipes:
                 if (pipe is not None) and (not pipe.closed):
                     pipe.recv()
@@ -341,15 +343,6 @@ class AsyncVectorPZEnv(VecEnv):
                 pipe.close()
         for process in self.processes:
             process.join()
-
-    def pack_observation(self, observation):
-        obs_dict = {}
-        obs_copy = copy.deepcopy(observation) if self.copy else observation
-        for idx, agent in enumerate(self.agents):
-            obs_dict[agent] = obs_copy[
-                :, self.obs_boundaries[idx] : self.obs_boundaries[idx + 1]
-            ]
-        return obs_dict
 
     def _poll_pipe_envs(self, timeout: int | None = None):
         self._assert_is_running()
@@ -395,33 +388,223 @@ class AsyncVectorPZEnv(VecEnv):
                 f"Trying to operate on `{type(self).__name__}`, after a call to `close()`."
             )
 
+    def _add_info(self, vector_infos, env_info, env_num):
+        """
+        Compile a vectorized information dictionary
+        """
+
+        for key, value in env_info.items():
+            # If value is a dictionary, then we apply the `_add_info` recursively.
+            if isinstance(value, dict):
+                array = self._add_info(vector_infos.get(key, {}), value, env_num)
+            # Otherwise, we are a base case to group the data
+            else:
+                # If the key doesn't exist in the vector infos, then we can create an array of that batch type
+                if key not in vector_infos:
+                    if type(value) in [int, float, bool] or issubclass(
+                        type(value), np.number
+                    ):
+                        array = np.zeros(self.num_envs, dtype=type(value))
+                    elif isinstance(value, np.ndarray):
+                        # We assume that all instances of the np.array info are of the same shape
+                        array = np.zeros(
+                            (self.num_envs, *value.shape), dtype=value.dtype
+                        )
+                    else:
+                        # For unknown objects, we use a Numpy object array
+                        array = np.full(self.num_envs, fill_value=None, dtype=object)
+                # Otherwise, just use the array that already exists
+                else:
+                    array = vector_infos[key]
+
+                # Assign the data in the `env_num` position
+                #   We only want to run this for the base-case data (not recursive data forcing the ugly function structure)
+                array[env_num] = value
+
+            # Get the array mask and if it doesn't already exist then create a zero bool array
+            array_mask = vector_infos.get(
+                f"_{key}", np.zeros(self.num_envs, dtype=np.bool_)
+            )
+            array_mask[env_num] = True
+
+            # Update the vector info with the updated data and mask information
+            vector_infos[key], vector_infos[f"_{key}"] = array, array_mask
+
+        return vector_infos
+
+
+class PettingZooExperienceHandler:
+    """Class for formatting experiences when being returned by a vectorized environment
+
+    :param env_fn: Function that returns environment instance when called
+    :type env_fn: Callable
+    :param num_envs: Number of environments to vectorize
+    :type num_envs: int
+    :param copy_obs: Boolean flag to indicate whether to copy observations or not, defaults to True
+    :type copy_obs: bool, optional
+    """
+
+    def __init__(self, env_fn, num_envs, copy_obs=True):
+        self.num_envs = num_envs
+        dummy_env = env_fn()
+        self.metadata = dummy_env.metadata
+        self.render_mode = dummy_env.render_mode
+        self.possible_agents = dummy_env.possible_agents
+        self.copy = copy_obs
+
+        try:
+            # Collect action space data
+            self.single_action_space_dict = {
+                agent: dummy_env.action_space(agent)
+                for agent in dummy_env.possible_agents
+            }
+            self.action_space_dict = {
+                agent: batch_space(self.single_action_space_dict[agent], self.num_envs)
+                for agent in dummy_env.possible_agents
+            }
+
+            # Collect observation space data
+            self.single_observation_space_dict = {
+                agent: dummy_env.observation_space(agent)
+                for agent in dummy_env.possible_agents
+            }
+            self.observation_space_dict = {
+                agent: batch_space(
+                    self.single_observation_space_dict[agent], self.num_envs
+                )
+                for agent in dummy_env.possible_agents
+            }
+
+            # Width of each agents flattened observations
+            self.observation_widths = {
+                agent: int(np.prod(obs.shape))
+                for agent, obs in self.single_observation_space_dict.items()
+            }
+            # Cumulative widths of the flattened observations
+            self.observation_boundaries = [0] + list(
+                accumulate(self.observation_widths.values(), operator.add)
+            )
+        except Exception as e:
+            raise ValueError(
+                "Unable to calculate observation dimensions from current observation space type."
+            ) from e
+
+        # Total width of all agents observations, flattened and concatenated
+        self.total_observation_width = int(
+            np.sum(list(self.observation_widths.values()))
+        )
+        dummy_env.reset()
+
+        # This is the gospel order of agents
+        self.agents = dummy_env.possible_agents[:]
+        self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
+
+        dummy_env.close()
+        del dummy_env
+
+    def get_placeholder_value(self, index, agent, transition_name, shared_memory=None):
+        """When an agent is killed, used to obtain a placeholder value to return for associated experience.
+
+        :param index: Subprocess index
+        :type index: int
+        :param agent: Agent ID
+        :type agent: str
+        :param transition_name: Name of the transition
+        :type transition_name: str
+        :param shared_memory: Shared memory object
+        :type shared_memory: mp.RawArray
+        """
+        if transition_name == "reward":
+            return 0
+        if transition_name == "truncation" or transition_name == "termination":
+            return True
+        if transition_name == "info":
+            return {}
+        if transition_name == "observation":
+            return self.read_obs_from_shared_memory(shared_memory, agent, index)
+
+    def pack_observation(self, observation):
+        """Pack the observation into a dictionary before returning back to the training loop"""
+        obs_dict = {}
+        obs_copy = copy.deepcopy(observation) if self.copy else observation
+        for idx, agent in enumerate(self.agents):
+            obs_dict[agent] = obs_copy[
+                :,
+                self.observation_boundaries[idx] : self.observation_boundaries[idx + 1],
+            ].astype(self.observation_space_dict[agent].dtype)
+        return obs_dict
+
+    def process_transition(self, index, transitions, shared_memory, transition_names):
+        transition_list = list(transitions)
+        for transition, name in zip(transition_list, transition_names):
+            transition = {
+                agent: (
+                    transition[agent]
+                    if agent in transition.keys()
+                    else self.get_placeholder_value(index, agent, name, shared_memory)
+                )
+                for agent in self.agents
+            }
+        return transition_list
+
+    def read_obs_from_shared_memory(self, shared_memory, agent, index):
+        """
+        Function to read previous timesteps state from the shared memory buffer if a sub-agent has been 'killed'
+        in the environment. This then acts as a placeholder when returning vectorized observations.
+        """
+        agent_idx = self.agent_index_map[agent]
+        start_index = (
+            index * self.total_observation_width
+        ) + self.observation_boundaries[agent_idx]
+        end_index = (
+            index * self.total_observation_width
+        ) + self.observation_boundaries[agent_idx + 1]
+        buffer = np.frombuffer(shared_memory).astype(
+            self.observation_space_dict[agent].dtype
+        )
+        return buffer[start_index:end_index]
+
 
 def _async_worker(
-    index: int,
-    env_fn: callable,
-    pipe: Connection,
-    parent_pipe: Connection,
-    shared_memory: Dict[str, mp.Array],
-    error_queue: Queue,
-    obs_width: int,
+    index,
+    env_fn,
+    pipe,
+    parent_pipe,
+    shared_memory,
+    error_queue,
+    experience_handler,
 ):
+    """
+    :param index: Subprocess index
+    :type index: int
+    :param env_fn: Function to call environment
+    :type env_fn: callable
+    :param pipe: Child pipe object for sending data to the main process
+    :type pipe: Connection
+    :param parent_pipe: Parent pipe object
+    :type parent_pipe: Connection
+    :param shared_memory: Shared memory object
+    :shared_memory: mp.RawArray
+    :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
+    :type error_queue: mp.Queue
+    :param experience_handler: Experience handler object to handle and format experiences
+    :type experience_handler: PettingZooExperienceHandler,
+    """
     env = env_fn()
-    # observation_space = env.observation_space
-    # action_space = env.action_space
     agents = env.possible_agents[:]
     autoreset = False
     parent_pipe.close()
 
-    # TODO Ensure the order of the agents is preserved
     try:
         while True:
             command, data = pipe.recv()
+            print(command)
             if command == "reset":
                 observation, info = env.reset(**data)
                 if shared_memory:
                     write_to_shared_memory(
                         index=index,
-                        width=obs_width,
+                        width=experience_handler.total_observation_width,
                         shared_memory=shared_memory,
                         data=observation,
                     )
@@ -430,7 +613,9 @@ def _async_worker(
                 pipe.send(((observation, info), True))
             elif command == "step":
                 if autoreset:
-                    observation, info = env.reset()
+                    observation, info = experience_handler.process_transition(
+                        index, env.reset(), shared_memory, ["observation", "info"]
+                    )
                     reward = {agent: 0 for agent in agents}
                     terminated = {agent: False for agent in agents}
                     truncated = {agent: False for agent in agents}
@@ -439,7 +624,21 @@ def _async_worker(
                         possible_agent: np.array(data[idx]).squeeze()
                         for idx, possible_agent in enumerate(agents)
                     }
-                    observation, reward, terminated, truncated, info = env.step(data)
+                    transition = env.step(data)
+                    observation, reward, terminated, truncated, info = (
+                        experience_handler.process_transition(
+                            index,
+                            transition,
+                            shared_memory,
+                            [
+                                "observation",
+                                "reward",
+                                "terminated",
+                                "truncated",
+                                "info",
+                            ],
+                        )
+                    )
                 autoreset = all(
                     [
                         term | trunc
@@ -447,33 +646,68 @@ def _async_worker(
                     ]
                 )
                 if shared_memory:
+                    # Add in logic here to separate observations and action masks
                     write_to_shared_memory(
                         index=index,
-                        width=obs_width,
+                        width=experience_handler.total_observation_width,
                         shared_memory=shared_memory,
                         data=observation,
                     )
                     observation = None
+
                 pipe.send(((observation, reward, terminated, truncated, info), True))
+
+            elif command == "close":
+                pipe.send((None, True))
+                break
+            elif command == "_call":
+                name, args, kwargs = data
+                if name in ["reset", "step", "close", "_setattr", "_check_spaces"]:
+                    raise ValueError(
+                        f"Trying to call function `{name}` with `call`, use `{name}` directly instead."
+                    )
+                attr = getattr(env, name)
+                if callable(attr):
+                    pipe.send((attr(*args, **kwargs), True))
+                else:
+                    pipe.send((attr, True))
+            elif command == "_setattr":
+                name, value = data
+                setattr(env, name, value)
+                pipe.send((None, True))
+            else:
+                raise RuntimeError(
+                    f"Received unknown command `{command}`. Must be one of [`reset`, `step`, `close`, `_call`, `_setattr`, `_check_spaces`]."
+                )
 
     except (KeyboardInterrupt, Exception):
         error_type, error_message, _ = sys.exc_info()
         trace = traceback.format_exc()
-
         error_queue.put((index, error_type, error_message, trace))
         pipe.send((None, False))
+
     finally:
         env.close()
 
 
 def create_shared_memory(num_envs, width, dtype, ctx=mp):
-    return ctx.Array(dtype, num_envs * int(width))
+    """
+    Create a RawArray to write observations to.
+
+    :param num_envs: Number of environments to vectorise
+    :type num_envs: int
+    :param width: Width of the array
+    :type width: int
+    :param dtype: Array data type
+    :type dtype: str
+    :param ctx: Multiprocessing context
+    :type ctx: Context # FIXME
+    """
+    return ctx.RawArray(dtype, num_envs * int(width))
 
 
 def read_from_shared_memory(width, shared_memory, num_envs, dtype):
-    return np.frombuffer(shared_memory.get_obj(), dtype=dtype).reshape(
-        (num_envs, width)
-    )
+    return np.frombuffer(shared_memory).reshape((num_envs, width)).astype(dtype)
 
 
 def write_to_shared_memory(
@@ -482,7 +716,7 @@ def write_to_shared_memory(
     shared_memory,
     data,
 ):
-    destination = np.frombuffer(shared_memory.get_obj(), dtype=float)
+    destination = np.frombuffer(shared_memory, dtype=np.float32)
     np.copyto(destination[index * width : (index + 1) * width], dict_to_1d_array(data))
 
 
@@ -498,11 +732,4 @@ def dict_to_1d_array(input_dict):
             result.append(value)
         else:
             raise TypeError(f"Unsupported type: {type(value)}")
-    return np.array(result)
-
-
-# class ExperienceHandler:
-#     """Class to handle observation/action reshaping/reformatting"""
-
-#     def __init__(self, env, experience_type):
-#         if experience_type == "action":
+    return np.array(result, dtype=np.float32)

@@ -4,7 +4,7 @@ import numpy as np
 from gymnasium.utils import seeding
 
 
-class VecEnv:
+class PettingZooVecEnv:
     """An abstract asynchronous, vectorized environment
 
     References:
@@ -60,8 +60,6 @@ class VecEnv:
         pass
 
     def step(self, actions):
-        print("ACTIONS")
-        print(actions)
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
@@ -127,15 +125,3 @@ class VecEnv:
     def unwrapped(self):
         """Return the base environment."""
         return self
-
-    def _add_info(self, vector_infos, indi_info, idx):
-        """Handle env defined actions"""
-        pass
-        # indi_info = {
-        #     "agent_0": {"env_defined_actions" : np.array()}
-        # }
-        # for key, value in indi_info.items():
-        #     if key not in vector_infos.keys():
-        #         vector_infos[key] = {}
-        #     if "env_defined_actions" in value.keys():
-        #         vector_infos[key]["env_defined_actions"] = np.zeros((self.num_envs, ))

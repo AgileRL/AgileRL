@@ -36,9 +36,7 @@ def test_worker_custom(enable_autoreset):
     for cmd, data in zip(cmds, data_s):
         env = parallel_env_disc()
         env.reset()
-
         env_fns = [lambda: env for _ in range(2)]
-
         remote, parent_remote = Pipe()
         env_fn_wrapper = CloudpickleWrapper(env_fns[0])
         error_queue = Queue()
