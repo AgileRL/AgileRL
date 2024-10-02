@@ -127,14 +127,12 @@ class MADDPG:
         assert (max_action is not None) == (
             min_action is not None
         ), "Max and min actions must both be supplied, or both be None."
-        print("MAX ACTION", max_action)
-        print("MIN ACTION", min_action)
-        # if max_action is not None and min_action is not None:
-        #     for x, n in zip(max_action, min_action):
-        #         x, n = x[0], n[0]
-        #         assert x > n, "Max action must be greater than min action."
-        #         assert x > 0, "Max action must be greater than zero."
-        #         assert n <= 0, "Min action must be less than or equal to zero."
+        if max_action is not None and min_action is not None:
+            for x, n in zip(max_action, min_action):
+                x, n = x[0], n[0]
+                assert x > n, "Max action must be greater than min action."
+                assert x > 0, "Max action must be greater than zero."
+                assert n <= 0, "Min action must be less than or equal to zero."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."

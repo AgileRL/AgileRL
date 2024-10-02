@@ -172,3 +172,7 @@ class DefaultPettingZooVectorizationParallelWrapper(PettingZooParallelWrapper):
             env_args=env_args,
         )
         return
+
+
+# class PettingZooVectorWrapper:
+#     def __init__(env, n_envs):

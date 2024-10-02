@@ -1,6 +1,5 @@
 """An async vector pettingzoo environment"""
 
-import copy
 import multiprocessing as mp
 import operator
 import sys
@@ -42,7 +41,7 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
     :type env_fns: List[Callable]
     """
 
-    def __init__(self, env_fns, experience_handler=None):
+    def __init__(self, env_fns, experience_spec=None):
         # Core class attributes
         self.env_fns = env_fns
         self.shared_memory = True
@@ -52,18 +51,18 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         self.render_mode = dummy_env.render_mode
         self.possible_agents = dummy_env.possible_agents
 
-        if experience_handler is None:
+        if experience_spec is None:
             env = env_fns[0]()
-            self.experience_handler = PettingZooExperienceHandler(
+            self.experience_spec = PettingZooExperienceSpec(
                 env, self.num_envs, copy_obs=True
             )
             del env
         else:
-            self.experience_handler = experience_handler
+            self.experience_spec = experience_spec
 
         ctx = mp.get_context()
         dummy_env = env_fns[0]()
-        self.experience_handler.detect_space_info(dummy_env)
+        self.experience_spec.detect_space_info(dummy_env)
         del dummy_env
 
         self.action_space = self._get_action_space
@@ -72,18 +71,15 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         self.single_observation_space = self._get_single_observation_space
 
         # Create the shared memory for sharing observations between subprocesses
-        self._obs_buffer = create_shared_memory(
-            self.num_envs,
-            width=self.experience_handler.total_observation_width,
-            dtype="d",
-            ctx=ctx,
+        self._obs_buffer = SharedMemory(
+            num_envs=self.num_envs, exp_spec=self.experience_spec, context=ctx
         )
-        self.observations = read_from_shared_memory(
-            self.experience_handler.total_observation_width,
-            self._obs_buffer,
-            self.num_envs,
-            float,
+        self.observations = Observations(
+            shared_memory=self._obs_buffer.shared_memory,
+            exp_spec=self.experience_spec,
+            num_envs=self.num_envs,
         )
+
         self.parent_pipes, self.processes = [], []
         self.error_queue = ctx.Queue()
 
@@ -99,9 +95,9 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
                         CloudpickleWrapper(env_fn),
                         child_pipe,
                         parent_pipe,
-                        self._obs_buffer,
+                        self.observations,
                         self.error_queue,
-                        self.experience_handler,
+                        self.experience_spec,
                     ),
                 )
                 self.parent_pipes.append(parent_pipe)
@@ -117,16 +113,16 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         )
 
     def _get_single_action_space(self, agent):
-        return self.experience_handler.single_action_space_dict[agent]
+        return self.experience_spec.single_action_space[agent]
 
     def _get_action_space(self, agent):
-        return self.experience_handler.action_space_dict[agent]
+        return self.experience_spec.action_space[agent]
 
     def _get_single_observation_space(self, agent):
-        return self.experience_handler.single_observation_space_dict[agent]
+        return self.experience_spec.single_observation_space[agent]
 
     def _get_observation_space(self, agent):
-        return self.experience_handler.observation_space_dict[agent]
+        return self.experience_spec.observation_space[agent]
 
     def reset(
         self,
@@ -191,17 +187,19 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
                 f"The call to `reset_wait` has timed out after {timeout} second(s)."
             )
 
-        results, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
+        info_data, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
         self._raise_if_errors(successes)
 
         infos = {}
-        results, info_data = zip(*results)
         # Convert info data to list before passing into key_search function
         for i, info in enumerate(info_data):
             infos = self._add_info(infos, info, i)
 
         self._state = AsyncState.DEFAULT
-        return self.experience_handler.pack_observation(self.observations), infos
+        return (
+            self.observations,
+            infos,
+        )  # self.experience_spec.pack_observation(self.observations), infos
 
     def step_async(self, actions):
         self._assert_is_running()
@@ -238,15 +236,15 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
             successes.append(success)
             if success:
                 for agent in self.agents:
-                    rewards[agent].append(env_step_return[1][agent])
-                    terminations[agent].append(env_step_return[2][agent])
-                    truncations[agent].append(env_step_return[3][agent])
-                infos = self._add_info(infos, env_step_return[4], env_idx)
+                    rewards[agent].append(env_step_return[0][agent])
+                    terminations[agent].append(env_step_return[1][agent])
+                    truncations[agent].append(env_step_return[2][agent])
+                infos = self._add_info(infos, env_step_return[3], env_idx)
 
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
         return (
-            self.experience_handler.pack_observation(self.observations),
+            self.observations,
             {agent: np.array(rew) for agent, rew in rewards.items()},
             {agent: np.array(term) for agent, term in terminations.items()},
             {agent: np.array(trunc) for agent, trunc in truncations.items()},
@@ -438,7 +436,7 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         return vector_infos
 
 
-class PettingZooExperienceHandler:
+class PettingZooExperienceSpec:
     """Class for formatting experiences when being returned by a vectorized environment
 
     :param env_fn: Function that returns environment instance when called
@@ -462,31 +460,34 @@ class PettingZooExperienceHandler:
 
         try:
             # Collect action space data
-            self.single_action_space_dict = {
+            self.single_action_space = {
                 agent: dummy_env.action_space(agent)
                 for agent in dummy_env.possible_agents
             }
-            self.action_space_dict = {
-                agent: batch_space(self.single_action_space_dict[agent], self.num_envs)
+            self.action_space = {
+                agent: batch_space(self.single_action_space[agent], self.num_envs)
                 for agent in dummy_env.possible_agents
             }
 
             # Collect observation space data
-            self.single_observation_space_dict = {
+            self.single_observation_space = {
                 agent: dummy_env.observation_space(agent)
                 for agent in dummy_env.possible_agents
             }
-            self.observation_space_dict = {
-                agent: batch_space(
-                    self.single_observation_space_dict[agent], self.num_envs
-                )
+            self.observation_space = {
+                agent: batch_space(self.single_observation_space[agent], self.num_envs)
                 for agent in dummy_env.possible_agents
+            }
+
+            self.observation_shapes = {
+                agent: space.shape if space.shape != () else (1,)
+                for agent, space in self.single_observation_space.items()
             }
 
             # Width of each agents flattened observations
             self.observation_widths = {
                 agent: int(np.prod(obs.shape))
-                for agent, obs in self.single_observation_space_dict.items()
+                for agent, obs in self.single_observation_space.items()
             }
             # Cumulative widths of the flattened observations
             self.observation_boundaries = [0] + list(
@@ -509,17 +510,15 @@ class PettingZooExperienceHandler:
 
         dummy_env.close()
 
-    def get_placeholder_value(self, index, agent, transition_name, shared_memory=None):
+    def get_placeholder_value(self, agent, transition_name, observations=None):
         """When an agent is killed, used to obtain a placeholder value to return for associated experience.
 
-        :param index: Subprocess index
-        :type index: int
         :param agent: Agent ID
         :type agent: str
         :param transition_name: Name of the transition
         :type transition_name: str
-        :param shared_memory: Shared memory object
-        :type shared_memory: mp.RawArray
+        :param observations: Observations numpy array backed by RawArray
+        :type shared_memory: Observations
         """
         if transition_name == "reward":
             return 0
@@ -528,48 +527,145 @@ class PettingZooExperienceHandler:
         if transition_name == "info":
             return {}
         if transition_name == "observation":
-            return self.read_obs_from_shared_memory(shared_memory, agent, index)
+            return observations[agent]
 
-    def pack_observation(self, observation):
-        """Pack the observation into a dictionary before returning back to the training loop"""
-        obs_dict = {}
-        obs_copy = copy.deepcopy(observation) if self.copy else observation
-        for idx, agent in enumerate(self.agents):
-            obs_dict[agent] = obs_copy[
-                :,
-                self.observation_boundaries[idx] : self.observation_boundaries[idx + 1],
-            ].astype(self.observation_space_dict[agent].dtype)
-        return obs_dict
-
-    def process_transition(self, index, transitions, shared_memory, transition_names):
+    def process_transition(self, transitions, observations, transition_names):
         transition_list = list(transitions)
         for transition, name in zip(transition_list, transition_names):
             transition = {
                 agent: (
                     transition[agent]
                     if agent in transition.keys()
-                    else self.get_placeholder_value(index, agent, name, shared_memory)
+                    else self.get_placeholder_value(agent, name, observations)
                 )
                 for agent in self.agents
             }
         return transition_list
 
-    def read_obs_from_shared_memory(self, shared_memory, agent, index):
-        """
-        Function to read previous timesteps state from the shared memory buffer if a sub-agent has been 'killed'
-        in the environment. This then acts as a placeholder when returning vectorized observations.
-        """
-        agent_idx = self.agent_index_map[agent]
-        start_index = (
-            index * self.total_observation_width
-        ) + self.observation_boundaries[agent_idx]
-        end_index = (
-            index * self.total_observation_width
-        ) + self.observation_boundaries[agent_idx + 1]
-        buffer = np.frombuffer(shared_memory).astype(
-            self.observation_space_dict[agent].dtype
+    def dict_to_1d_array(self, input_dict):
+        result = []
+        for value in input_dict.values():
+            if isinstance(value, np.ndarray):
+                result.extend(value.flatten())
+            elif isinstance(value, list):
+                result.extend(value)
+            elif isinstance(value, (int, float)):
+                result.append(value)
+            else:
+                raise TypeError(f"Unsupported type: {type(value)}")
+        return np.array(result, dtype=np.float32)
+
+
+class Observations:
+    def __init__(self, shared_memory, exp_spec, num_envs):
+        self.exp_spec = exp_spec
+        self.num_envs = num_envs
+        self.obs_view = np.frombuffer(shared_memory, dtype=np.float32).reshape(
+            (num_envs, exp_spec.total_observation_width)
         )
-        return buffer[start_index:end_index]
+
+    def __getitem__(self, key):
+        """
+        Get agent observation given a key (agent_id)
+        """
+        agent_idx = self.exp_spec.agent_index_map[key]
+        return (
+            self.obs_view[
+                :,
+                self.exp_spec.observation_boundaries[
+                    agent_idx
+                ] : self.exp_spec.observation_boundaries[agent_idx + 1],
+            ]
+            .view(dtype=self.exp_spec.single_observation_space[key].dtype)
+            .reshape((self.num_envs,) + self.exp_spec.observation_shapes[key])
+        )
+
+    def __str__(self):
+        """"""
+        my_dic = {
+            agent: self.obs_view[
+                :,
+                self.exp_spec.observation_boundaries[
+                    agent_idx
+                ] : self.exp_spec.observation_boundaries[agent_idx + 1],
+            ]
+            .view(dtype=self.exp_spec.single_observation_space[agent].dtype)
+            .reshape((self.num_envs,) + (self.exp_spec.observation_shapes[agent]))
+            for agent, agent_idx in self.exp_spec.agent_index_map.items()
+        }
+        return f"{my_dic}"
+
+    def set_env_obs(self, index, observation):
+        self.obs_view[index, :] = observation
+
+    def get_env_obs(self, index):
+        return self.obs_view[index, :]
+
+    def get_agent_obs(self, agent, flat=True):
+        agent_idx = self.exp_spec.agent_index_map[agent]
+        obs = self.obs_view[
+            :,
+            self.exp_spec.observation_boundaries[
+                agent_idx
+            ] : self.exp_spec.observation_boundaries[agent_idx + 1],
+        ]
+        if flat:
+            return obs.astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
+        return obs.reshape(
+            (self.num_envs,) + (self.exp_spec.observation_shapes[agent])
+        ).astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __contains__(self, key):  # key is agent_id
+        return key in self.exp_spec.agent_index_map.keys()
+
+    def __len__(self):
+        return len(self.exp_spec.agents)
+
+    def __iterate_kv(self):
+        for key in self.exp_spec.agents:
+            yield (key, self.__getitem__(key))
+
+    def __iter__(self):
+        return self.__iterate_kv()
+
+    def keys(self):
+        for k, _ in self.__iterate_kv():
+            yield k
+
+    def values(self):
+        for _, v in self.__iterate_kv():
+            yield v
+
+    def items(self):
+        return self.__iterate_kv()
+
+    def get(self, key):
+        try:
+            return self.__getitem__(key)
+        except KeyError:
+            return None
+
+
+class SharedMemory:
+    """Class to hold the shared memory object that each of the subprocesses will write their observation to.
+
+    :param num_envs: Number of environments to vectorize
+    :type num_envs: int
+    :param exp_spec: Experience specification
+    :type exp_spec: PettingZooExperienceSpec
+    :param context: Multiprocessing context
+    :type context: BaseContext
+
+    """
+
+    def __init__(self, num_envs, exp_spec, context):
+        self.total_bytes = (
+            np.dtype(np.float32).itemsize * exp_spec.total_observation_width * num_envs
+        )
+        self.shared_memory = context.RawArray("c", self.total_bytes)
 
 
 def _async_worker(
@@ -577,9 +673,10 @@ def _async_worker(
     env_fn,
     pipe,
     parent_pipe,
-    shared_memory,
+    observations,
+    # shared_memory,
     error_queue,
-    experience_handler,
+    experience_spec,
 ):
     """
     :param index: Subprocess index
@@ -594,8 +691,8 @@ def _async_worker(
     :shared_memory: mp.RawArray
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
-    :param experience_handler: Experience handler object to handle and format experiences
-    :type experience_handler: PettingZooExperienceHandler,
+    :param experience_spec: Experience handler object to handle and format experiences
+    :type experience_spec: PettingZooExperienceSpec,
     """
     env = env_fn()
     agents = env.possible_agents[:]
@@ -606,21 +703,17 @@ def _async_worker(
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                observation, info = env.reset(**data)
-                if shared_memory:
-                    write_to_shared_memory(
-                        index=index,
-                        width=experience_handler.total_observation_width,
-                        shared_memory=shared_memory,
-                        data=observation,
-                    )
-                    observation = None
-                    autoreset = False
-                pipe.send(((observation, info), True))
+                observation, info = experience_spec.process_transition(
+                    env.reset(**data), observations, ["observation", "info"]
+                )
+                observations.set_env_obs(
+                    index, experience_spec.dict_to_1d_array(observation)
+                )
+                pipe.send(((info), True))
             elif command == "step":
                 if autoreset:
-                    observation, info = experience_handler.process_transition(
-                        index, env.reset(), shared_memory, ["observation", "info"]
+                    observation, info = experience_spec.process_transition(
+                        env.reset(), observations, ["observation", "info"]
                     )
                     reward = {agent: 0 for agent in agents}
                     terminated = {agent: False for agent in agents}
@@ -632,10 +725,9 @@ def _async_worker(
                     }
                     transition = env.step(data)
                     observation, reward, terminated, truncated, info = (
-                        experience_handler.process_transition(
-                            index,
+                        experience_spec.process_transition(
                             transition,
-                            shared_memory,
+                            observations,
                             [
                                 "observation",
                                 "reward",
@@ -651,17 +743,10 @@ def _async_worker(
                         for term, trunc in zip(terminated.values(), truncated.values())
                     ]
                 )
-                if shared_memory:
-                    # Add in logic here to separate observations and action masks
-                    write_to_shared_memory(
-                        index=index,
-                        width=experience_handler.total_observation_width,
-                        shared_memory=shared_memory,
-                        data=observation,
-                    )
-                    observation = None
-
-                pipe.send(((observation, reward, terminated, truncated, info), True))
+                observations.set_env_obs(
+                    index, experience_spec.dict_to_1d_array(observation)
+                )
+                pipe.send(((reward, terminated, truncated, info), True))
 
             elif command == "close":
                 pipe.send((None, True))
@@ -696,46 +781,36 @@ def _async_worker(
         env.close()
 
 
-def create_shared_memory(num_envs, width, dtype, ctx=mp):
-    """
-    Create a RawArray to write observations to.
+# def create_shared_memory(num_envs, width, dtype, ctx=mp):
+#     """
+#     Create a RawArray to write observations to.
 
-    :param num_envs: Number of environments to vectorise
-    :type num_envs: int
-    :param width: Width of the array
-    :type width: int
-    :param dtype: Array data type
-    :type dtype: str
-    :param ctx: Multiprocessing context
-    :type ctx: Context # FIXME
-    """
-    return ctx.RawArray(dtype, num_envs * int(width))
-
-
-def read_from_shared_memory(width, shared_memory, num_envs, dtype):
-    return np.frombuffer(shared_memory).reshape((num_envs, width)).astype(dtype)
+#     :param num_envs: Number of environments to vectorise
+#     :type num_envs: int
+#     :param width: Width of the array
+#     :type width: int
+#     :param dtype: Array data type
+#     :type dtype: str
+#     :param ctx: Multiprocessing context
+#     :type ctx: Context # FIXME
+#     """
+#     return ctx.RawArray(dtype, num_envs * int(width))
 
 
-def write_to_shared_memory(
-    index,
-    width,
-    shared_memory,
-    data,
-):
-    destination = np.frombuffer(shared_memory, dtype=np.float32)
-    np.copyto(destination[index * width : (index + 1) * width], dict_to_1d_array(data))
+# def create_shared_memory_2(num_envs, width, ctx=mp):
+#     size = num_envs * width
+#     return ctx.RawArray("c", size)
 
 
-def dict_to_1d_array(input_dict):
-    input_dict_copy = input_dict.copy()
-    result = []
-    for value in input_dict_copy.values():
-        if isinstance(value, np.ndarray):
-            result.extend(value.flatten())
-        elif isinstance(value, list):
-            result.extend(value)
-        elif isinstance(value, (int, float)):
-            result.append(value)
-        else:
-            raise TypeError(f"Unsupported type: {type(value)}")
-    return np.array(result, dtype=np.float32)
+# def read_from_shared_memory(width, shared_memory, num_envs, dtype):
+#     return np.frombuffer(shared_memory, dtype=np.float32).reshape((num_envs, width))
+
+
+# def write_to_shared_memory(
+#     index,
+#     width,
+#     shared_memory,
+#     data,
+# ):
+#     destination = np.frombuffer(shared_memory, dtype=np.float32)
+#     np.copyto(destination[index * width : (index + 1) * width], dict_to_1d_array(data))

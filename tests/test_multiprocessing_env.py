@@ -6,7 +6,7 @@ from gymnasium.vector.utils import CloudpickleWrapper
 from pettingzoo.mpe import simple_adversary_v3
 
 from agilerl.utils.multiprocessing_env import VecEnv, worker
-from tests.test_vectorization import error_env, parallel_env_disc
+from tests._test_vectorization import error_env, parallel_env_disc
 
 
 class DummyRecv:

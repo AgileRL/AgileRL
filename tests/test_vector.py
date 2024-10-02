@@ -19,14 +19,16 @@ from gymnasium.error import (
 )
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector.utils import CloudpickleWrapper
+from pettingzoo.atari import space_invaders_v2
 from pettingzoo.mpe import simple_speaker_listener_v4
 
 from agilerl.vector.pz_async_vec_env import (
     AsyncState,
     AsyncVectorPettingZooEnv,
-    PettingZooExperienceHandler,
+    Observations,
+    PettingZooExperienceSpec,
+    SharedMemory,
     _async_worker,
-    dict_to_1d_array,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 from tests.pz_vector_test_utils import CustomSpace, GenericTestEnv, term_env
@@ -56,28 +58,29 @@ def actions_to_list_helper(actions):
 
 
 @pytest.fixture
-def pz_experience_handler(env_fns):
+def pz_experience_spec(env_fns):
     env = env_fns[0]()
-    return PettingZooExperienceHandler(env, 8)
+    return PettingZooExperienceSpec(env, 8)
 
 
 @pytest.mark.parametrize("use_exp_handler", [True, False])
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(8)]]
 )
-def test_create_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_fns):
+def test_create_async_pz_vector_env(pz_experience_spec, use_exp_handler, env_fns):
     if use_exp_handler:
-        exp_handler = pz_experience_handler
+        exp_handler = pz_experience_spec
     else:
         exp_handler = None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=exp_handler)
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=exp_handler)
     if exp_handler is not None:
-        assert pz_experience_handler.single_action_space_dict
-        assert pz_experience_handler.action_space_dict
-        assert pz_experience_handler.single_observation_space_dict
-        assert pz_experience_handler.observation_space_dict
-        assert pz_experience_handler.observation_widths
-        assert pz_experience_handler.observation_boundaries
+        assert pz_experience_spec.single_action_space
+        assert pz_experience_spec.action_space
+        assert pz_experience_spec.single_observation_space
+        assert pz_experience_spec.observation_space
+        assert pz_experience_spec.observation_widths
+        assert pz_experience_spec.observation_boundaries
+        assert pz_experience_spec.observation_shapes
     assert env.num_envs == 8
     env.reset()
     env.close()
@@ -88,11 +91,9 @@ def test_create_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(8)]]
 )
-def test_reset_async_pz_vector_env(
-    seed, pz_experience_handler, use_exp_handler, env_fns
-):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_reset_async_pz_vector_env(seed, pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     agents = env.possible_agents[:]
     observations, infos = env.reset(seed=seed)
     env.close()
@@ -110,7 +111,7 @@ def test_reset_async_pz_vector_env(
 
     try:
         env_fns = [simple_speaker_listener_v4.parallel_env for _ in range(8)]
-        env = AsyncVectorPettingZooEnv(env_fns, experience_handler)
+        env = AsyncVectorPettingZooEnv(env_fns, experience_spec)
     finally:
         env.close()
     for agent in agents:
@@ -135,9 +136,9 @@ def test_reset_async_pz_vector_env(
         ]
     ],
 )
-def test_render_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_render_async_pz_vector_env(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     assert env.render_mode == "rgb_array"
 
     env.reset()
@@ -160,15 +161,15 @@ def test_render_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_
     ],
 )
 def test_step_async_pz_vector_env(
-    use_single_action_space, use_exp_handler, pz_experience_handler, env_fns
+    use_single_action_space, use_exp_handler, pz_experience_spec, env_fns
 ):
     try:
         env_fns = [
             lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
             for _ in range(8)
         ]
-        experience_handler = pz_experience_handler if use_exp_handler else None
-        env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+        experience_spec = pz_experience_spec if use_exp_handler else None
+        env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
         env.reset()
         if use_single_action_space:
             actions = {
@@ -220,9 +221,9 @@ def test_step_async_pz_vector_env(
         ]
     ],
 )
-def test_call_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_call_async_pz_vector_env(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     env = AsyncVectorPettingZooEnv(env_fns)
     env.reset()
 
@@ -253,9 +254,9 @@ def test_call_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_fn
         ]
     ],
 )
-def test_get_attr_async_pz_vector_env(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_get_attr_async_pz_vector_env(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     env.set_attr("test_attribute", [1, 2])
     test_attribute = env.get_attr("test_attribute")
     assert test_attribute == (1, 2)
@@ -272,9 +273,9 @@ def test_get_attr_async_pz_vector_env(pz_experience_handler, use_exp_handler, en
         ]
     ],
 )
-def test_set_attr_make_values_list(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_set_attr_make_values_list(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
 
     env.set_attr(name="test", values=1)
     env.close()
@@ -313,7 +314,7 @@ def test_async_vector_subenv_error(use_exp_handler):
         lambda: GenericTestEnv(reset_func=raise_error_reset, step_func=raise_error_step)
     ]
     exp_handler = (
-        PettingZooExperienceHandler(env_list[0](), 2) if use_exp_handler else None
+        PettingZooExperienceSpec(env_list[0](), 2) if use_exp_handler else None
     )
     envs = AsyncVectorPettingZooEnv(env_list * 2, exp_handler)
 
@@ -326,7 +327,7 @@ def test_async_vector_subenv_error(use_exp_handler):
         lambda: GenericTestEnv(reset_func=raise_error_reset, step_func=raise_error_step)
     ]
     exp_handler = (
-        PettingZooExperienceHandler(env_list[0](), 3) if use_exp_handler else None
+        PettingZooExperienceSpec(env_list[0](), 3) if use_exp_handler else None
     )
     envs = AsyncVectorPettingZooEnv(env_list * 3, exp_handler)
 
@@ -346,7 +347,7 @@ def test_custom_space_error(use_exp_handler):
     ] * num_envs
     with pytest.raises(ValueError):
         exp_handler = (
-            PettingZooExperienceHandler(env_fns[0](), num_envs)
+            PettingZooExperienceSpec(env_fns[0](), num_envs)
             if use_exp_handler
             else None
         )
@@ -357,9 +358,9 @@ def test_custom_space_error(use_exp_handler):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_reset_async_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_reset_async_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
@@ -373,9 +374,9 @@ def test_reset_async_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_reset_wait_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_reset_wait_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     with pytest.raises(NoAsyncCallError):
         env.reset_async()
@@ -389,9 +390,9 @@ def test_reset_wait_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_step_async_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_step_async_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.WAITING_RESET
     with pytest.raises(AlreadyPendingCallError):
@@ -404,9 +405,9 @@ def test_step_async_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_step_wait_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_step_wait_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.DEFAULT
     with pytest.raises(NoAsyncCallError):
@@ -419,9 +420,9 @@ def test_step_wait_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_call_async_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_call_async_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
@@ -434,9 +435,9 @@ def test_call_async_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_call_wait_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_call_wait_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.DEFAULT
     with pytest.raises(NoAsyncCallError):
@@ -449,9 +450,9 @@ def test_call_wait_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_call_exception_worker(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_call_exception_worker(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     with pytest.raises(ValueError):
         env.call("reset")
@@ -463,9 +464,9 @@ def test_call_exception_worker(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_set_attr_val_error(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_set_attr_val_error(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     with pytest.raises(ValueError):
         env.set_attr("test", values=[1, 2, 3])
@@ -477,9 +478,9 @@ def test_set_attr_val_error(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_set_attr_exception(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_set_attr_exception(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(AlreadyPendingCallError):
@@ -492,9 +493,9 @@ def test_set_attr_exception(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_close_extras_warning(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_close_extras_warning(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     env.reset_async()
     env._state = AsyncState.WAITING_RESET
     with patch.object(gym.logger, "warn") as mock_logger_warn:
@@ -507,9 +508,9 @@ def test_close_extras_warning(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_close_extras_terminate(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_close_extras_terminate(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     env.reset_async()
     env._state = AsyncState.WAITING_RESET
     env.close_extras(terminate=True)
@@ -522,9 +523,9 @@ def test_close_extras_terminate(pz_experience_handler, use_exp_handler, env_fns)
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_poll_pipe_envs(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_poll_pipe_envs(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env.parent_pipes[0] = None
     result = env._poll_pipe_envs(timeout=1)
@@ -537,9 +538,9 @@ def test_poll_pipe_envs(pz_experience_handler, use_exp_handler, env_fns):
 @pytest.mark.parametrize(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
-def test_assert_is_running(pz_experience_handler, use_exp_handler, env_fns):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+def test_assert_is_running(pz_experience_spec, use_exp_handler, env_fns):
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env.closed = True
     with pytest.raises(ClosedEnvironmentError):
@@ -553,10 +554,10 @@ def test_assert_is_running(pz_experience_handler, use_exp_handler, env_fns):
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
 def test_step_wait_timeout_async_pz_vector_env(
-    pz_experience_handler, use_exp_handler, env_fns
+    pz_experience_spec, use_exp_handler, env_fns
 ):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.WAITING_STEP
     with pytest.raises(mp.TimeoutError):
@@ -572,10 +573,10 @@ def test_step_wait_timeout_async_pz_vector_env(
     "env_fns", [[lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]]
 )
 def test_call_wait_timeout_async_pz_vector_env(
-    pz_experience_handler, use_exp_handler, env_fns
+    pz_experience_spec, use_exp_handler, env_fns
 ):
-    experience_handler = pz_experience_handler if use_exp_handler else None
-    env = AsyncVectorPettingZooEnv(env_fns, experience_handler=experience_handler)
+    experience_spec = pz_experience_spec if use_exp_handler else None
+    env = AsyncVectorPettingZooEnv(env_fns, experience_spec=experience_spec)
     pids = [p.pid for p in env.processes]
     env._state = AsyncState.WAITING_CALL
     with pytest.raises(mp.TimeoutError):
@@ -593,7 +594,7 @@ def test_get_placeholder_value(transition_name):
     env_fns = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]
     env = AsyncVectorPettingZooEnv(env_fns)
     if transition_name != "observation":
-        val = env.experience_handler.get_placeholder_value(0, "agent", transition_name)
+        val = env.experience_spec.get_placeholder_value("agent", transition_name)
         if transition_name == "reward":
             assert val == 0
         if transition_name == "truncation" or transition_name == "termination":
@@ -602,35 +603,34 @@ def test_get_placeholder_value(transition_name):
             assert val == {}
     else:
         env.reset()
-        output = env.experience_handler.get_placeholder_value(
-            index=0,
+        output = env.experience_spec.get_placeholder_value(
             agent="speaker_0",
             transition_name=transition_name,
-            shared_memory=env._obs_buffer,
+            observations=env.observations,
         )
         assert isinstance(output, np.ndarray)
     env.close()
 
 
-def test_read_obs_from_shared_memory():
-    shared_memory = mp.RawArray("d", 28)  # width 16
-    env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
-    exp_handler = PettingZooExperienceHandler(env_fn(), 2)
+# def test_read_obs_from_shared_memory():
+#     shared_memory = mp.RawArray("d", 28)  # width 16
+#     env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
+#     exp_handler = PettingZooExperienceSpec(env_fn(), 2)
 
-    # Write to the shared memory object
-    destination = np.frombuffer(shared_memory, dtype=float)
-    np.copyto(
-        destination[:3], 3 * np.ones((1, 3), dtype=np.float32)
-    )  # shapes of simple speaker listener obs
-    np.copyto(destination[3:14], 4 * np.ones((1, 11), dtype=np.float32))
+#     # Write to the shared memory object
+#     destination = np.frombuffer(shared_memory, dtype=float)
+#     np.copyto(
+#         destination[:3], 3 * np.ones((1, 3), dtype=np.float32)
+#     )  # shapes of simple speaker listener obs
+#     np.copyto(destination[3:14], 4 * np.ones((1, 11), dtype=np.float32))
 
-    speaker_obs = exp_handler.read_obs_from_shared_memory(shared_memory, "speaker_0", 0)
+#     speaker_obs = exp_handler.read_obs_from_shared_memory(shared_memory, "speaker_0", 0)
 
-    listener_obs = exp_handler.read_obs_from_shared_memory(
-        shared_memory, "listener_0", 0
-    )
-    assert np.all(speaker_obs == 3 * np.ones((1, 3)))
-    assert np.all(listener_obs == 4 * np.ones((1, 11)))
+#     listener_obs = exp_handler.read_obs_from_shared_memory(
+#         shared_memory, "listener_0", 0
+#     )
+#     assert np.all(speaker_obs == 3 * np.ones((1, 3)))
+#     assert np.all(listener_obs == 4 * np.ones((1, 11)))
 
 
 def test_add_info_dictionaries():
@@ -708,23 +708,23 @@ def test_create_experience_handler():
         lambda: simple_speaker_listener_v4.parallel_env() for _ in range(num_envs)
     ]
     env = simple_speaker_listener_v4.parallel_env()
-    experience_handler = PettingZooExperienceHandler(env_fns[0](), num_envs)
+    experience_spec = PettingZooExperienceSpec(env_fns[0](), num_envs)
 
-    assert experience_handler.single_action_space_dict == {
+    assert experience_spec.single_action_space == {
         agent: env.action_space(agent) for agent in env.possible_agents
     }
-    assert experience_handler.single_observation_space_dict == {
+    assert experience_spec.single_observation_space == {
         agent: env.observation_space(agent) for agent in env.possible_agents
     }
-    assert experience_handler.observation_widths == {
+    assert experience_spec.observation_widths == {
         agent: int(np.prod(obs.shape))
-        for agent, obs in experience_handler.single_observation_space_dict.items()
+        for agent, obs in experience_spec.single_observation_space.items()
     }
-    assert experience_handler.observation_boundaries == [0] + list(
-        accumulate(experience_handler.observation_widths.values(), operator.add)
+    assert experience_spec.observation_boundaries == [0] + list(
+        accumulate(experience_spec.observation_widths.values(), operator.add)
     )
-    assert experience_handler.total_observation_width == int(
-        np.sum(list(experience_handler.observation_widths.values()))
+    assert experience_spec.total_observation_width == int(
+        np.sum(list(experience_spec.observation_widths.values()))
     )
 
 
@@ -732,7 +732,9 @@ def test_worker_reset():
     env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
     env = env_fn()
     env.reset()
-    exp_handler = PettingZooExperienceHandler(env_fn(), 3)
+    exp_handler = PettingZooExperienceSpec(env_fn(), 3)
+    shared_memory = SharedMemory(3, exp_handler, mp)
+    observations = Observations(shared_memory.shared_memory, exp_handler, 3)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -742,7 +744,7 @@ def test_worker_reset():
             CloudpickleWrapper(env_fn),
             child_pipe,
             parent_pipe,
-            None,
+            observations,
             queue,
             exp_handler,
         ),
@@ -753,18 +755,17 @@ def test_worker_reset():
     results, success = parent_pipe.recv()
     assert success
     assert len(results) == 2
-    for dic in results:
-        assert list(sorted(dic.keys())) == sorted(env.aec_env.agents)
+    assert list(sorted(results.keys())) == sorted(env.aec_env.agents)
     parent_pipe.close()
     p.terminate()
     p.join()
 
 
-@pytest.mark.parametrize("env_type", ["PZ"])
-def test_worker_step(env_type):
+def test_worker_step_simple():
+    num_envs = 1
     env_fn = [
         lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-        for _ in range(1)
+        for _ in range(num_envs)
     ]
 
     vec_env = AsyncVectorPettingZooEnv(env_fn)
@@ -773,7 +774,9 @@ def test_worker_step(env_type):
     actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
     vec_env.close()
     actions = actions_to_list_helper(actions)
-    exp_handler = PettingZooExperienceHandler(env_fn[0](), 1)
+    exp_handler = PettingZooExperienceSpec(env_fn[0](), num_envs)
+    shared_memory = SharedMemory(num_envs, exp_handler, mp)
+    observations = Observations(shared_memory.shared_memory, exp_handler, num_envs)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -783,7 +786,7 @@ def test_worker_step(env_type):
             CloudpickleWrapper(env_fn[0]),
             child_pipe,
             parent_pipe,
-            None,
+            observations,
             queue,
             exp_handler,
         ),
@@ -801,13 +804,13 @@ def test_worker_step(env_type):
     for dic in results:
         assert list(sorted(dic.keys())) == sorted(vec_env.agents)
 
-    states, rewards, term, trunc, _ = results
+    rewards, term, trunc, _ = results
 
     # state check
-    assert states["speaker_0"].shape == (3,)
-    assert states["listener_0"].shape == (11,)
-    assert isinstance(states["speaker_0"], np.ndarray)
-    assert isinstance(states["listener_0"], np.ndarray)
+    assert observations["speaker_0"].shape == (num_envs,) + (3,)
+    assert observations["listener_0"].shape == (num_envs,) + (11,)
+    assert isinstance(observations["speaker_0"], np.ndarray)
+    assert isinstance(observations["listener_0"], np.ndarray)
 
     # rewards check
     assert isinstance(rewards["speaker_0"], float)
@@ -827,14 +830,16 @@ def test_worker_step(env_type):
 
 
 def test_worker_step_autoreset():
-    env_fn = [lambda: term_env() for _ in range(1)]
+    num_envs = 1
+    env_fn = [lambda: term_env() for _ in range(num_envs)]
     vec_env = AsyncVectorPettingZooEnv(env_fn)
     vec_env.reset()
-
     actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
     vec_env.close()
     actions = actions_to_list_helper(actions)
-    exp_handler = PettingZooExperienceHandler(env_fn[0](), 1)
+    exp_handler = PettingZooExperienceSpec(env_fn[0](), num_envs)
+    shared_memory = SharedMemory(num_envs, exp_handler, mp)
+    observations = Observations(shared_memory.shared_memory, exp_handler, num_envs)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -844,7 +849,7 @@ def test_worker_step_autoreset():
             CloudpickleWrapper(env_fn[0]),
             child_pipe,
             parent_pipe,
-            None,
+            observations,
             queue,
             exp_handler,
         ),
@@ -871,10 +876,15 @@ def test_worker_step_autoreset():
 
 
 def test_worker_runtime_error():
-    env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
+    num_envs = 1
+    env_fn = [
+        lambda: simple_speaker_listener_v4.parallel_env() for _ in range(num_envs)
+    ][0]
     env = env_fn()
     env.reset()
-    exp_handler = PettingZooExperienceHandler(env_fn(), 3)
+    exp_handler = PettingZooExperienceSpec(env_fn(), num_envs)
+    shared_memory = SharedMemory(num_envs, exp_handler, mp)
+    observations = Observations(shared_memory.shared_memory, exp_handler, num_envs)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -884,7 +894,7 @@ def test_worker_runtime_error():
             CloudpickleWrapper(env_fn),
             child_pipe,
             parent_pipe,
-            None,
+            observations,
             queue,
             exp_handler,
         ),
@@ -909,7 +919,9 @@ def test_worker_runtime_error():
     [({"agent_0": 6}), ({"agent_0": np.array([1, 0, 1])}), ({"agent_0": [2, 3, 4]})],
 )
 def test_dict_to_1d_array(input_dict):
-    output = dict_to_1d_array(input_dict)
+    env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
+    exp_handler = PettingZooExperienceSpec(env_fn(), 3)
+    output = exp_handler.dict_to_1d_array(input_dict)
     assert isinstance(output, np.ndarray)
 
 
@@ -920,13 +932,72 @@ def test_dict_to_1d_array(input_dict):
     ],
 )
 def test_dict_to_1d_array_error(input_dict):
+    env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
+    exp_handler = PettingZooExperienceSpec(env_fn(), 1)
     with pytest.raises(TypeError):
-        dict_to_1d_array(input_dict)
+        exp_handler.dict_to_1d_array(input_dict)
+
+
+def test_observations_vector():
+    num_envs = 1
+    agents = ["speaker_0", "listener_0"]
+    env_fn = [
+        lambda: simple_speaker_listener_v4.parallel_env() for _ in range(num_envs)
+    ][0]
+    exp_handler = PettingZooExperienceSpec(env_fn(), num_envs)
+    shared_memory = SharedMemory(num_envs, exp_handler, mp)
+    observations = Observations(
+        shared_memory.shared_memory, exp_spec=exp_handler, num_envs=num_envs
+    )
+
+    assert (
+        observations.__str__()
+        == observations.__repr__()
+        == "{'speaker_0': array([[0., 0., 0.]], dtype=float32), 'listener_0': array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]], dtype=float32)}"
+    )
+    observations.set_env_obs(0, np.ones((1, 14), dtype=np.float32))
+    assert np.all(observations.get_env_obs(0) == np.ones((1, 14), dtype=np.float32))
+    assert "speaker_0" in observations
+    assert len(observations) == 2
+    keys = []
+    vals = []
+    for key, val in observations.items():
+        keys.append(key)
+        vals.append(val)
+    assert keys == ["speaker_0", "listener_0"]
+    assert np.all(np.concatenate(vals, axis=1) == np.ones((1, 14), dtype=np.float32))
+    assert list(observations.keys()) == agents
+    assert np.all(
+        np.concatenate(list(observations.values()), axis=1)
+        == np.ones((1, 14), dtype=np.float32)
+    )
+    assert np.all(observations.get("speaker_0") == np.ones((1, 3), dtype=np.float32))
+    assert observations.get("agent") is None
+    assert (
+        str(next(iter(observations)))
+        == "('speaker_0', array([[1., 1., 1.]], dtype=float32))"
+    )
+
+
+def test_observations_image():
+    num_envs = 1
+    env_fn = [lambda: space_invaders_v2.parallel_env() for _ in range(num_envs)][0]
+    exp_handler = PettingZooExperienceSpec(env_fn(), num_envs)
+    shared_memory = SharedMemory(num_envs, exp_handler, mp)
+    observations = Observations(
+        shared_memory.shared_memory, exp_spec=exp_handler, num_envs=num_envs
+    )
+    assert observations.get_agent_obs("first_0", flat=True).shape == (
+        1,
+        exp_handler.observation_widths["first_0"],
+    )
+    assert (
+        observations.get_agent_obs("first_0", flat=False).shape
+        == (1,) + exp_handler.observation_shapes["first_0"]
+    )
 
 
 # Test for pz_vec_env.py
-
-
 def test_vec_env_reset():
     vec_env = PettingZooVecEnv(3, ["agent_0"])
     vec_env.reset()
