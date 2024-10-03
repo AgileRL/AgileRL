@@ -12,10 +12,7 @@ from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
-from agilerl.wrappers.pettingzoo_wrappers import (
-    DefaultPettingZooVectorizationParallelWrapper,
-    PettingZooVectorizationParallelWrapper,
-)
+from agilerl.vector.pz_async_vec_env import AsyncVectorPettingZooEnv
 
 
 def make_vect_envs(env_name, num_envs=1):
@@ -31,19 +28,16 @@ def make_vect_envs(env_name, num_envs=1):
     )
 
 
-def make_multi_agent_vect_envs(env, custom, num_envs=1):
+def make_multi_agent_vect_envs(env, env_kwargs, num_envs=1):
     """Returns async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
     :type env: pettingzoo.utils.env.ParallelEnv
-    :param custom: Boolean flag to indicate if PZ environment is custom or not
-    :type custom: bool
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     """
-    if custom:
-        return PettingZooVectorizationParallelWrapper(env, num_envs)
-    return DefaultPettingZooVectorizationParallelWrapper(env, num_envs)
+    env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
+    return AsyncVectorPettingZooEnv(env_fns=env_fns)
 
 
 def make_skill_vect_envs(env_name, skill, num_envs=1):

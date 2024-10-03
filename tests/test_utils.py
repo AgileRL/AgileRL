@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import gymnasium as gym
 import numpy as np
+from pettingzoo.mpe import simple_speaker_listener_v4
 
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
@@ -22,8 +23,6 @@ from agilerl.utils.utils import (
     print_hyperparams,
 )
 from agilerl.wrappers.learning import Skill
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
-from tests.test_train import DummyMultiEnv
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -83,10 +82,10 @@ def test_returns_asyncvectorenv_object():
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
 def test_returns_asyncvectorenv_object_multiagent():
     num_envs = 3
-    env = DummyMultiEnv([4], 4)
-    env = make_multi_agent_vect_envs(env, num_envs=num_envs, custom=True)
+    env = simple_speaker_listener_v4.parallel_env
+    env_kwargs = {"continuous_actions": False}
+    env = make_multi_agent_vect_envs(env, env_kwargs, num_envs=num_envs)
     env.close()
-    assert isinstance(env, PettingZooVectorizationParallelWrapper)
     assert env.num_envs == num_envs
 
 
