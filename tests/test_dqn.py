@@ -940,16 +940,25 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
 
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        None,
+        Accelerator(),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the DQN agent
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
+    dqn = DQN(
+        state_dim=[4],
+        action_dim=2,
+        one_hot=False,
+        device=device,
+        accelerator=accelerator,
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"

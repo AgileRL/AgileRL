@@ -1,3 +1,6 @@
+from collections import OrderedDict
+
+import torch
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 
@@ -29,11 +32,35 @@ def chkpt_attribute_to_device(chkpt_dict, device):
     return chkpt_dict
 
 
-def clip_mod(key_words_dict):
-    """clip torch dynamo (eval_frame) Optimized Module prefix
-    The prefix is added when the corresponding nn.Module (MARL algos)
-    is "modified" by torch.compile
-    :param key_words_dict: the compiled module's state_dict
-    :type key_words_dict: str
+def compile_model(model, mode: str | None = "default"):
+    """Compiles torch model if not already compiled
+
+    :param model: torch model
+    :type model: nn.Module
+    :param mode: torch compile mode, defaults to "default"
+    :type mode: str, optional
+    :return: compiled model
+    :rtype: OptimizedModule
     """
-    return {k.split(".", 1)[1]: v for k, v in key_words_dict.items()}
+    return (
+        torch.compile(model, mode=mode)
+        if not isinstance(model, torch._dynamo.eval_frame.OptimizedModule)
+        and mode is not None
+        else model
+    )
+
+
+def remove_compile_prefix(state_dict):
+    """Removes _orig_mod prefix on state dict created by torch compile
+
+    :param state_dict: model state dict
+    :type state_dict: dict
+    :return: state dict with prefix removed
+    :rtype: dict
+    """
+    return OrderedDict(
+        [
+            (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+            for k, v in state_dict.items()
+        ]
+    )

@@ -1,6 +1,7 @@
 import copy
 import inspect
 import warnings
+from collections import OrderedDict
 
 import dill
 import numpy as np
@@ -10,7 +11,11 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import clip_mod, unwrap_optimizer
+from agilerl.utils.algo_utils import (
+    compile_model,
+    remove_compile_prefix,
+    unwrap_optimizer,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
@@ -190,10 +195,6 @@ class MATD3:
         self.device = device
         self.accelerator = accelerator
         self.torch_compiler = torch_compiler
-        self.CUDA_CACHE_POLICY = (
-            "empty"  # None | 'empty' | 'increase_and_empty' | 'increase'
-        )
-        self.cache_counter = 0
         self.index = index
         self.policy_freq = policy_freq
         self.scores = []
@@ -411,100 +412,26 @@ class MATD3:
             if wrap:
                 self.wrap_models()
         else:
-            if not torch_compiler:
-                self.actors = [actor.to(self.device) for actor in self.actors]
-                self.actor_targets = [
-                    actor_target.to(self.device) for actor_target in self.actor_targets
-                ]
-                self.critics_1 = [critic.to(self.device) for critic in self.critics_1]
-                self.critic_targets_1 = [
-                    critic_target.to(self.device)
-                    for critic_target in self.critic_targets_1
-                ]
-                self.critics_2 = [critic.to(self.device) for critic in self.critics_2]
-                self.critic_targets_2 = [
-                    critic_target.to(self.device)
-                    for critic_target in self.critic_targets_2
-                ]
-            else:
+            self.place_models_on_device(self.device)
+            if self.torch_compiler:
                 torch.set_float32_matmul_precision("high")
-                if self.CUDA_CACHE_POLICY.startswith("increase"):
-                    torch._dynamo.config.accumulated_cache_size_limit = 256
-                self.actors = [
-                    torch.compile(a.to(device), mode=torch_compiler)
-                    for a in self.actors
-                ]
-                self.actor_targets = [
-                    torch.compile(at.to(self.device), mode=torch_compiler)
-                    for at in self.actor_targets
-                ]
-                self.critics_1 = [
-                    torch.compile(c.to(self.device), mode=torch_compiler)
-                    for c in self.critics_1
-                ]
-                self.critic_targets_1 = [
-                    torch.compile(ct.to(self.device), mode=torch_compiler)
-                    for ct in self.critic_targets_1
-                ]
-                self.critics_2 = [
-                    torch.compile(c.to(self.device), mode=torch_compiler)
-                    for c in self.critics_2
-                ]
-                self.critic_targets_2 = [
-                    torch.compile(ct.to(self.device), mode=torch_compiler)
-                    for ct in self.critic_targets_2
-                ]
+                self.recompile()
 
         self.criterion = nn.MSELoss()
 
     def recompile(self):
-        self.actors = [
-            (
-                torch.compile(a, mode=self.torch_compiler)
-                if not isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
-                else a
-            )
-            for a in self.actors
-        ]
+        """Recompile all models"""
+        self.actors = [compile_model(a, self.torch_compiler) for a in self.actors]
         self.actor_targets = [
-            (
-                torch.compile(at, mode=self.torch_compiler)
-                if not isinstance(at, torch._dynamo.eval_frame.OptimizedModule)
-                else at
-            )
-            for at in self.actor_targets
+            compile_model(at, self.torch_compiler) for at in self.actor_targets
         ]
-        self.critics_1 = [
-            (
-                torch.compile(c, mode=self.torch_compiler)
-                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
-                else c
-            )
-            for c in self.critics_1
-        ]
+        self.critics_1 = [compile_model(c, self.torch_compiler) for c in self.critics_1]
         self.critic_targets_1 = [
-            (
-                torch.compile(ct, mode=self.torch_compiler)
-                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
-                else ct
-            )
-            for ct in self.critic_targets_1
+            compile_model(ct, self.torch_compiler) for ct in self.critic_targets_1
         ]
-        self.critics_2 = [
-            (
-                torch.compile(c, mode=self.torch_compiler)
-                if not isinstance(c, torch._dynamo.eval_frame.OptimizedModule)
-                else c
-            )
-            for c in self.critics_2
-        ]
+        self.critics_2 = [compile_model(c, self.torch_compiler) for c in self.critics_2]
         self.critic_targets_2 = [
-            (
-                torch.compile(ct, mode=self.torch_compiler)
-                if not isinstance(ct, torch._dynamo.eval_frame.OptimizedModule)
-                else ct
-            )
-            for ct in self.critic_targets_2
+            compile_model(ct, self.torch_compiler) for ct in self.critic_targets_2
         ]
 
     def scale_to_action_space(self, action, idx):
@@ -557,6 +484,7 @@ class MATD3:
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
+
         # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
         if agent_mask is None:
             agent_ids = self.agent_ids
@@ -639,7 +567,7 @@ class MATD3:
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
-                discrete_action_dict[agent] = torch.argmax(action, axis=-1)
+                discrete_action_dict[agent] = torch.argmax(action, dim=-1)
 
         if env_defined_actions is None:
             ret = (
@@ -652,8 +580,6 @@ class MATD3:
                     }
                 ),
             )
-            if self.is_cuda() and self.torch_compiler:
-                self.cuda_cache_policy()
             return ret
 
         for agent in agent_mask.keys():
@@ -674,17 +600,7 @@ class MATD3:
             else:
                 action_dict.update({agent: env_defined_actions[agent]})
 
-        ret = (
-            (
-                action_dict
-                if not self.discrete_actions
-                else {a: t.cpu().data.numpy() for a, t in action_dict.items()}
-            ),
-            discrete_action_dict,
-        )
-        if self.device == "cuda":
-            self.cuda_cache_policy()
-        return ret
+        return action_dict, discrete_action_dict
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -705,9 +621,12 @@ class MATD3:
             )
             self.current_noise[idx] = noise
         else:
-            noise = self.sample_gaussian[idx].normal_(
-                self.mean_noise[idx], self.expl_noise[idx]
+            torch.normal(
+                self.mean_noise[idx],
+                self.expl_noise[idx],
+                out=self.sample_gaussian[idx],
             )
+            noise = self.sample_gaussian[idx]
         return noise
 
     def reset_action_noise(self, indices):
@@ -742,40 +661,41 @@ class MATD3:
                 )
             }
         next_actions = []
-        if self.arch == "mlp":
-            for i, agent_id_label in enumerate(self.agent_ids):
-                unscaled_actions = self.actor_targets[i](
-                    next_states[agent_id_label]
-                ).detach_()
-                if not self.discrete_actions:
-                    scaled_actions = torch.where(
-                        unscaled_actions > 0,
-                        unscaled_actions * self.max_action[i][0],
-                        unscaled_actions * -self.min_action[i][0],
+        with torch.no_grad():
+            if self.arch == "mlp":
+                for i, agent_id_label in enumerate(self.agent_ids):
+                    unscaled_actions = self.actor_targets[i](
+                        next_states[agent_id_label]
                     )
-                    next_actions.append(scaled_actions)
-                else:
-                    next_actions.append(unscaled_actions)
-            action_values = list(actions.values())
-            state_values = list(states.values())
-            input_combined = torch.cat(state_values + action_values, 1)
-        elif self.arch == "cnn":
-            for i, agent_id_label in enumerate(self.agent_ids):
-                unscaled_actions = self.actor_targets[i](
-                    next_states[agent_id_label].unsqueeze(2)
-                ).detach_()
-                if not self.discrete_actions:
-                    scaled_actions = torch.where(
-                        unscaled_actions > 0,
-                        unscaled_actions * self.max_action[i][0],
-                        unscaled_actions * -self.min_action[i][0],
+                    if not self.discrete_actions:
+                        scaled_actions = torch.where(
+                            unscaled_actions > 0,
+                            unscaled_actions * self.max_action[i][0],
+                            unscaled_actions * -self.min_action[i][0],
+                        )
+                        next_actions.append(scaled_actions)
+                    else:
+                        next_actions.append(unscaled_actions)
+                action_values = list(actions.values())
+                state_values = list(states.values())
+                input_combined = torch.cat(state_values + action_values, 1)
+            elif self.arch == "cnn":
+                for i, agent_id_label in enumerate(self.agent_ids):
+                    unscaled_actions = self.actor_targets[i](
+                        next_states[agent_id_label].unsqueeze(2)
                     )
-                    next_actions.append(scaled_actions)
-                else:
-                    next_actions.append(unscaled_actions)
-            stacked_states = torch.stack(list(states.values()), dim=2)
-            stacked_actions = torch.cat(list(actions.values()), dim=1)
-            stacked_next_states = torch.stack(list(next_states.values()), dim=2)
+                    if not self.discrete_actions:
+                        scaled_actions = torch.where(
+                            unscaled_actions > 0,
+                            unscaled_actions * self.max_action[i][0],
+                            unscaled_actions * -self.min_action[i][0],
+                        )
+                        next_actions.append(scaled_actions)
+                    else:
+                        next_actions.append(unscaled_actions)
+                stacked_states = torch.stack(list(states.values()), dim=2)
+                stacked_actions = torch.cat(list(actions.values()), dim=1)
+                stacked_next_states = torch.stack(list(next_states.values()), dim=2)
 
         if self.arch == "mlp":
             next_input_combined = torch.cat(
@@ -788,7 +708,6 @@ class MATD3:
         for idx, (
             agent_id,
             actor,
-            actor_target,
             critic_1,
             critic_target_1,
             critic_2,
@@ -800,7 +719,6 @@ class MATD3:
             zip(
                 self.agent_ids,
                 self.actors,
-                self.actor_targets,
                 self.critics_1,
                 self.critic_targets_1,
                 self.critics_2,
@@ -811,26 +729,26 @@ class MATD3:
             )
         ):
             loss_dict[f"{agent_id}"] = self.learn_individual(
-                agent_id,
                 idx,
+                agent_id,
+                actor,
                 critic_1,
+                critic_target_1,
                 critic_2,
+                critic_target_2,
+                actor_optimizer,
+                critic_1_optimizer,
+                critic_2_optimizer,
                 input_combined if self.arch == "mlp" else None,
                 stacked_states if self.arch == "cnn" else None,
                 stacked_actions if self.arch == "cnn" else None,
-                critic_target_1,
-                critic_target_2,
                 next_input_combined if self.arch == "mlp" else None,
                 stacked_next_states if self.arch == "cnn" else None,
                 stacked_next_actions if self.arch == "cnn" else None,
-                rewards,
-                dones,
-                critic_1_optimizer,
-                critic_2_optimizer,
-                actor,
                 states,
                 actions,
-                actor_optimizer,
+                rewards,
+                dones,
             )
 
         if self.learn_counter[agent_id] % self.policy_freq == 0:
@@ -853,49 +771,30 @@ class MATD3:
                 self.soft_update(critic_1, critic_target_1)
                 self.soft_update(critic_2, critic_target_2)
 
-        if self.is_cuda() and self.torch_compiler:
-            self.cuda_cache_policy()
         return loss_dict
-
-    def cuda_cache_policy(self):
-        """apply cuda cache policy
-        between potential nn.Module optimization re-compiles"""
-        if not self.CUDA_CACHE_POLICY:
-            return
-        self.cache_counter += 1
-        if self.CUDA_CACHE_POLICY.endswith("empty") and self.cache_counter % 600 == 0:
-            torch.cuda.empty_cache()
-            # if self.learn_counter % 1200 == 0:
-            #     print("EMPTY CACHE")
-
-    def is_cuda(self):
-        if isinstance(self.device, str):
-            return self.device == "cuda"
-        if isinstance(self.device, torch.device):
-            return self.device == torch.device("cuda")
 
     def learn_individual(
         self,
-        agent_id,
         idx,
+        agent_id,
+        actor,
         critic_1,
+        critic_target_1,
         critic_2,
+        critic_target_2,
+        actor_optimizer,
+        critic_1_optimizer,
+        critic_2_optimizer,
         input_combined,
         stacked_states,
         stacked_actions,
-        critic_target_1,
-        critic_target_2,
         next_input_combined,
         stacked_next_states,
         stacked_next_actions,
-        rewards,
-        dones,
-        critic_1_optimizer,
-        critic_2_optimizer,
-        actor,
         states,
         actions,
-        actor_optimizer,
+        rewards,
+        dones,
     ):
         """Inner call to each agent for the learning/algo training
         steps, up until the soft updates. Applies all forward/backward props
@@ -918,41 +817,42 @@ class MATD3:
             else:
                 q_value_1 = critic_1(stacked_states, stacked_actions)
                 q_value_2 = critic_2(stacked_states, stacked_actions)
-        if self.arch == "mlp":
-            if self.accelerator is not None:
-                with critic_target_1.no_sync():
+
+        with torch.no_grad():
+            if self.arch == "mlp":
+                if self.accelerator is not None:
+                    with critic_target_1.no_sync():
+                        q_value_next_state_1 = critic_target_1(next_input_combined)
+                    with critic_target_2.no_sync():
+                        q_value_next_state_2 = critic_target_2(next_input_combined)
+                else:
                     q_value_next_state_1 = critic_target_1(next_input_combined)
-                with critic_target_2.no_sync():
                     q_value_next_state_2 = critic_target_2(next_input_combined)
-            else:
-                q_value_next_state_1 = critic_target_1(next_input_combined)
-                q_value_next_state_2 = critic_target_2(next_input_combined)
-        elif self.arch == "cnn":
-            if self.accelerator is not None:
-                with critic_target_1.no_sync():
+            elif self.arch == "cnn":
+                if self.accelerator is not None:
+                    with critic_target_1.no_sync():
+                        q_value_next_state_1 = critic_target_1(
+                            stacked_next_states, stacked_next_actions
+                        )
+                    with critic_target_2.no_sync():
+                        q_value_next_state_2 = critic_target_2(
+                            stacked_next_states, stacked_next_actions
+                        )
+                else:
                     q_value_next_state_1 = critic_target_1(
                         stacked_next_states, stacked_next_actions
                     )
-                with critic_target_2.no_sync():
                     q_value_next_state_2 = critic_target_2(
                         stacked_next_states, stacked_next_actions
                     )
-            else:
-                q_value_next_state_1 = critic_target_1(
-                    stacked_next_states, stacked_next_actions
-                )
-                q_value_next_state_2 = critic_target_2(
-                    stacked_next_states, stacked_next_actions
-                )
+
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
         y_j = (
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
         )
 
-        critic_loss = self.criterion(q_value_1, y_j.detach_()) + self.criterion(
-            q_value_2, y_j.detach_()
-        )
+        critic_loss = self.criterion(q_value_1, y_j) + self.criterion(q_value_2, y_j)
 
         # critic loss backprop
         critic_1_optimizer.zero_grad()
@@ -1027,7 +927,7 @@ class MATD3:
                 actor_loss.backward()
             actor_optimizer.step()
 
-        return actor_loss if not actor_loss else actor_loss.item(), critic_loss.item()
+        return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
 
     def soft_update(self, net, target):
         """Soft updates target network."""
@@ -1113,7 +1013,7 @@ class MATD3:
         self.fitness.append(mean_fit)
         return mean_fit
 
-    def clone(self, index=None, wrap=True, compile=True):
+    def clone(self, index=None, wrap=True):
         """Returns cloned agent identical to self.
 
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
@@ -1121,30 +1021,38 @@ class MATD3:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
-        actors = [actor.clone() for actor in self.actors]
-        actor_targets = [actor_target.clone() for actor_target in self.actor_targets]
-        critics_1 = [critic.clone() for critic in self.critics_1]
-        critic_targets_1 = [
+
+        # Copy models to clone
+        clone.actors = [actor.clone() for actor in self.actors]
+        clone.actor_targets = [
+            actor_target.clone() for actor_target in self.actor_targets
+        ]
+        clone.critics_1 = [critic.clone() for critic in self.critics_1]
+        clone.critic_targets_1 = [
             critic_target.clone() for critic_target in self.critic_targets_1
         ]
-        critics_2 = [critic.clone() for critic in self.critics_2]
-        critic_targets_2 = [
+        clone.critics_2 = [critic.clone() for critic in self.critics_2]
+        clone.critic_targets_2 = [
             critic_target.clone() for critic_target in self.critic_targets_2
         ]
-        actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in actors
+        clone.actor_optimizers = [
+            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in clone.actors
         ]
-        critic_1_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_1
+        clone.critic_1_optimizers = [
+            optim.Adam(critic.parameters(), lr=clone.lr_critic)
+            for critic in clone.critics_1
         ]
-        critic_2_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_2
+        clone.critic_2_optimizers = [
+            optim.Adam(critic.parameters(), lr=clone.lr_critic)
+            for critic in clone.critics_2
         ]
 
+        # Load optimizer state dicts to clone
         for (
             clone_actor_optimizer,
             actor_optimizer,
@@ -1153,120 +1061,29 @@ class MATD3:
             clone_critic_2_optimizer,
             critic_2_optimizer,
         ) in zip(
-            actor_optimizers,
+            clone.actor_optimizers,
             self.actor_optimizers,
-            critic_1_optimizers,
+            clone.critic_1_optimizers,
             self.critic_1_optimizers,
-            critic_2_optimizers,
+            clone.critic_2_optimizers,
             self.critic_2_optimizers,
         ):
             clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
             clone_critic_1_optimizer.load_state_dict(critic_1_optimizer.state_dict())
             clone_critic_2_optimizer.load_state_dict(critic_2_optimizer.state_dict())
 
-        if self.accelerator is not None:
+        # Compile and accelerator wrap
+        if clone.accelerator is not None:
             if wrap:
-                clone.actors = [self.accelerator.prepare(actor) for actor in actors]
-                clone.actor_targets = [
-                    self.accelerator.prepare(actor_target)
-                    for actor_target in actor_targets
-                ]
-                clone.critics_1 = [
-                    self.accelerator.prepare(critic) for critic in critics_1
-                ]
-                clone.critic_targets_1 = [
-                    self.accelerator.prepare(critic_target)
-                    for critic_target in critic_targets_1
-                ]
-                clone.critics_2 = [
-                    self.accelerator.prepare(critic) for critic in critics_2
-                ]
-                clone.critic_targets_2 = [
-                    self.accelerator.prepare(critic_target)
-                    for critic_target in critic_targets_2
-                ]
-                clone.actor_optimizers = [
-                    self.accelerator.prepare(actor_optimizer)
-                    for actor_optimizer in actor_optimizers
-                ]
-                clone.critic_1_optimizers = [
-                    self.accelerator.prepare(critic_optimizer)
-                    for critic_optimizer in critic_1_optimizers
-                ]
-                clone.critic_2_optimizers = [
-                    self.accelerator.prepare(critic_optimizer)
-                    for critic_optimizer in critic_2_optimizers
-                ]
-            else:
-                (
-                    clone.actors,
-                    clone.actor_targets,
-                    clone.critics_1,
-                    clone.critic_targets_1,
-                    clone.critics_2,
-                    clone.critic_targets_2,
-                    clone.actor_optimizers,
-                    clone.critic_1_optimizers,
-                    clone.critic_2_optimizers,
-                ) = (
-                    actors,
-                    actor_targets,
-                    critics_1,
-                    critic_targets_1,
-                    critics_2,
-                    critic_targets_2,
-                    actor_optimizers,
-                    critic_1_optimizers,
-                    critic_2_optimizers,
-                )
-        # elif compile:
-        #     clone.actors = [
-        #         torch.compile(actor.to(self.device), mode=self.torch_compiler)
-        #         for actor in actors
-        #     ]
-        #     clone.actor_targets = [
-        #         torch.compile(actor_target.to(self.device), mode=self.torch_compiler)
-        #         for actor_target in actor_targets
-        #     ]
-        #     clone.critics_1 = [
-        #         torch.compile(critic.to(self.device), mode=self.torch_compiler)
-        #         for critic in critics_1
-        #     ]
-        #     clone.critic_targets_1 = [
-        #         torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
-        #         for critic_target in critic_targets_1
-        #     ]
-        #     clone.critics_2 = [
-        #         torch.compile(critic.to(self.device), mode=self.torch_compiler)
-        #         for critic in critics_2
-        #     ]
-        #     clone.critic_targets_2 = [
-        #         torch.compile(critic_target.to(self.device), mode=self.torch_compiler)
-        #         for critic_target in critic_targets_2
-        #     ]
-        #     clone.actor_optimizers = actor_optimizers
-        #     clone.critic_1_optimizers = critic_1_optimizers
-        #     clone.critic_2_optimizers = critic_1_optimizers
-        else:
-            clone.actors = [actor.to(self.device) for actor in actors]
-            clone.actor_targets = [
-                actor_target.to(self.device) for actor_target in actor_targets
-            ]
-            clone.critics_1 = [critic.to(self.device) for critic in critics_1]
-            clone.critic_targets_1 = [
-                critic_target.to(self.device) for critic_target in critic_targets_1
-            ]
-            clone.critics_2 = [critic.to(self.device) for critic in critics_2]
-            clone.critic_targets_2 = [
-                critic_target.to(self.device) for critic_target in critic_targets_2
-            ]
-            clone.actor_optimizers = actor_optimizers
-            clone.critic_1_optimizers = critic_1_optimizers
-            clone.critic_2_optimizers = critic_2_optimizers
+                clone.wrap_models()
 
-        for (
-            attribute
-        ) in self.inspect_attributes().keys():  # no to device implies no models
+        # move to device
+        else:
+            clone.place_models_on_device(clone.device)
+            if clone.torch_compiler:
+                clone.recompile()
+
+        for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
                 if isinstance(attr, torch.Tensor) or isinstance(
@@ -1296,11 +1113,6 @@ class MATD3:
         if index is not None:
             clone.index = index
 
-        if not compile:
-            return clone
-
-        clone.torch_compiler = compile
-        clone.recompile()
         return clone
 
     def inspect_attributes(self, input_args_only=False):
@@ -1309,12 +1121,12 @@ class MATD3:
         guarded_attributes = [
             "actors",
             "critics_1",
+            "critics_2",
             "actor_targets",
             "critic_targets_1",
+            "critic_targets_2",
             "actor_optimizers",
             "critic_1_optimizers",
-            "critics_2",
-            "critic_targets_2",
             "critic_2_optimizers",
         ]
 
@@ -1335,6 +1147,20 @@ class MATD3:
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
 
         return attributes
+
+    def place_models_on_device(self, device):
+        self.actors = [actor.to(device) for actor in self.actors]
+        self.actor_targets = [
+            actor_target.to(device) for actor_target in self.actor_targets
+        ]
+        self.critics_1 = [critic.to(device) for critic in self.critics_1]
+        self.critic_targets_1 = [
+            critic_target.to(device) for critic_target in self.critic_targets_1
+        ]
+        self.critics_2 = [critic.to(device) for critic in self.critics_2]
+        self.critic_targets_2 = [
+            critic_target.to(device) for critic_target in self.critic_targets_2
+        ]
 
     def wrap_models(self):
         if self.accelerator is not None:
@@ -1410,102 +1236,79 @@ class MATD3:
                 )
             ]
 
+    def remove_compile_prefix(self, state_dict):
+        """Removes _orig_mod prefix on state dict created by torch compile
+
+        :param state_dict: model state dict
+        :type state_dict: dict
+        :return: state dict with prefix removed
+        :rtype: dict
+        """
+        return OrderedDict(
+            [
+                (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                for k, v in state_dict.items()
+            ]
+        )
+
     def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
         :type path: string
         """
-        attribute_dict = self.inspect_attributes()  # will not return guarded attr
+        attribute_dict = self.inspect_attributes()
 
-        # guarded attr:
         network_info = {
             "actors_init_dict": [actor.init_dict for actor in self.actors],
             "actors_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in actor.state_dict().items()
-                    ]
-                )
-                for actor in self.actors
+                remove_compile_prefix(actor.state_dict()) for actor in self.actors
             ],
             "actor_targets_init_dict": [
                 actor_target.init_dict for actor_target in self.actor_targets
             ],
             "actor_targets_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in actor_target.state_dict().items()
-                    ]
-                )
+                remove_compile_prefix(actor_target.state_dict())
                 for actor_target in self.actor_targets
             ],
-            "actor_optimizers_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in actor_optimizer.state_dict().items()
-                    ]
-                )
-                for actor_optimizer in self.actor_optimizers
-            ],
-            "critics_1_init_dict": [critic_1.init_dict for critic_1 in self.critics_1],
+            "critics_1_init_dict": [critic.init_dict for critic in self.critics_1],
             "critics_1_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in critic_1.state_dict().items()
-                    ]
-                )
-                for critic_1 in self.critics_1
+                remove_compile_prefix(critic.state_dict()) for critic in self.critics_1
             ],
             "critic_targets_1_init_dict": [
-                critic_target_1.init_dict for critic_target_1 in self.critic_targets_1
+                critic_target.init_dict for critic_target in self.critic_targets_1
             ],
             "critic_targets_1_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in critic_target_1.state_dict().items()
-                    ]
-                )
-                for critic_target_1 in self.critic_targets_1
+                remove_compile_prefix(critic_target.state_dict())
+                for critic_target in self.critic_targets_1
             ],
-            "critic_1_optimizers_state_dict": [
-                critic_1_optimizer.state_dict()
-                for critic_1_optimizer in self.critic_1_optimizers
-            ],
-            "critics_2_init_dict": [critic_2.init_dict for critic_2 in self.critics_2],
+            "critics_2_init_dict": [critic.init_dict for critic in self.critics_2],
             "critics_2_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in critic_2.state_dict().items()
-                    ]
-                )
-                for critic_2 in self.critics_2
+                remove_compile_prefix(critic.state_dict()) for critic in self.critics_2
             ],
             "critic_targets_2_init_dict": [
-                critic_target_2.init_dict for critic_target_2 in self.critic_targets_2
+                critic_target.init_dict for critic_target in self.critic_targets_2
             ],
             "critic_targets_2_state_dict": [
-                dict(
-                    [
-                        (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
-                        for k, v in critic_target_2.state_dict().items()
-                    ]
-                )
-                for critic_target_2 in self.critic_targets_2
+                remove_compile_prefix(critic_target.state_dict())
+                for critic_target in self.critic_targets_2
+            ],
+            "actor_optimizers_state_dict": [
+                actor_optimizer.state_dict()
+                for actor_optimizer in self.actor_optimizers
+            ],
+            "critic_1_optimizers_state_dict": [
+                critic_optimizer.state_dict()
+                for critic_optimizer in self.critic_1_optimizers
             ],
             "critic_2_optimizers_state_dict": [
-                critic_2_optimizer.state_dict()
-                for critic_2_optimizer in self.critic_2_optimizers
+                critic_optimizer.state_dict()
+                for critic_optimizer in self.critic_2_optimizers
             ],
         }
 
         attribute_dict.update(network_info)
+        attribute_dict.pop("accelerator", None)
 
         torch.save(
             attribute_dict,
@@ -1621,49 +1424,22 @@ class MATD3:
                 self.critic_2_optimizers,
             )
         ):
-            try:
-                actor.load_state_dict(checkpoint["actors_state_dict"][idx])
-                actor_list.append(actor)
-                actor_target.load_state_dict(
-                    checkpoint["actor_targets_state_dict"][idx]
-                )
-                actor_target_list.append(actor_target)
-                critic_1.load_state_dict(checkpoint["critics_1_state_dict"][idx])
-                critic_1_list.append(critic_1)
-                critic_2.load_state_dict(checkpoint["critics_2_state_dict"][idx])
-                critic_2_list.append(critic_2)
-                critic_target_1.load_state_dict(
-                    checkpoint["critic_targets_1_state_dict"][idx]
-                )
-                critic_target_1_list.append(critic_target_1)
-                critic_target_2.load_state_dict(
-                    checkpoint["critic_targets_2_state_dict"][idx]
-                )
-                critic_target_2_list.append(critic_target_2)
-            except Exception:
-                actor.load_state_dict(clip_mod(checkpoint["actors_state_dict"][idx]))
-                actor_list.append(actor)
-                actor_target.load_state_dict(
-                    clip_mod(checkpoint["actor_targets_state_dict"][idx])
-                )
-                actor_target_list.append(actor_target)
-                critic_1.load_state_dict(
-                    clip_mod(checkpoint["critics_1_state_dict"][idx])
-                )
-                critic_1_list.append(critic_1)
-                critic_2.load_state_dict(
-                    clip_mod(checkpoint["critics_2_state_dict"][idx])
-                )
-                critic_2_list.append(critic_2)
-                critic_target_1.load_state_dict(
-                    clip_mod(checkpoint["critic_targets_1_state_dict"][idx])
-                )
-                critic_target_1_list.append(critic_target_1)
-                critic_target_2.load_state_dict(
-                    clip_mod(checkpoint["critic_targets_2_state_dict"][idx])
-                )
-                critic_target_2_list.append(critic_target_2)
-
+            actor.load_state_dict(checkpoint["actors_state_dict"][idx])
+            actor_list.append(actor)
+            actor_target.load_state_dict(checkpoint["actor_targets_state_dict"][idx])
+            actor_target_list.append(actor_target)
+            critic_1.load_state_dict(checkpoint["critics_1_state_dict"][idx])
+            critic_1_list.append(critic_1)
+            critic_2.load_state_dict(checkpoint["critics_2_state_dict"][idx])
+            critic_2_list.append(critic_2)
+            critic_target_1.load_state_dict(
+                checkpoint["critic_targets_1_state_dict"][idx]
+            )
+            critic_target_1_list.append(critic_target_1)
+            critic_target_2.load_state_dict(
+                checkpoint["critic_targets_2_state_dict"][idx]
+            )
+            critic_target_2_list.append(critic_target_2)
             actor_optimizer.load_state_dict(
                 checkpoint["actor_optimizers_state_dict"][idx]
             )
@@ -1688,13 +1464,16 @@ class MATD3:
         self.critic_2_optimizers = critic_2_optimizer_list
 
         for attribute in checkpoint.keys():
-            if attribute == "torch_compiler":
-                continue
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
-        if self.torch_compiler:
-            self.recompile()
+        if self.accelerator is not None:
+            self.wrap_models()
+        else:
+            self.place_models_on_device(self.device)
+            if self.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                self.recompile()
 
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
@@ -1813,6 +1592,18 @@ class MATD3:
                 ],
             ]
             agent = cls(**class_init_dict)
+            agent.actors = [
+                MakeEvolvable(**actors_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
+            agent.critics_1 = [
+                MakeEvolvable(**critics_1_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
+            agent.critics_2 = [
+                MakeEvolvable(**critics_2_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
             agent.actor_targets = [
                 MakeEvolvable(**actor_targets_init_dict[idx])
                 for idx, _ in enumerate(checkpoint["agent_ids"])
@@ -1870,36 +1661,18 @@ class MATD3:
                 agent.critic_2_optimizers,
             )
         ):
-            try:
-                actor.load_state_dict(actors_state_dict[idx])
-                actor_list.append(actor)
-                actor_target.load_state_dict(actor_targets_state_dict[idx])
-                actor_target_list.append(actor_target)
-                critic_1.load_state_dict(critics_1_state_dict[idx])
-                critic_1_list.append(critic_1)
-                critic_2.load_state_dict(critics_2_state_dict[idx])
-                critic_2_list.append(critic_2)
-                critic_target_1.load_state_dict(critic_targets_1_state_dict[idx])
-                critic_target_1_list.append(critic_target_1)
-                critic_target_2.load_state_dict(critic_targets_2_state_dict[idx])
-                critic_target_2_list.append(critic_target_2)
-            except Exception:
-                actor.load_state_dict(clip_mod(actors_state_dict[idx]))
-                actor_list.append(actor)
-                actor_target.load_state_dict(clip_mod(actor_targets_state_dict[idx]))
-                actor_target_list.append(actor_target)
-                critic_1.load_state_dict(clip_mod(critics_1_state_dict[idx]))
-                critic_1_list.append(critic_1)
-                critic_2.load_state_dict(clip_mod(critics_2_state_dict[idx]))
-                critic_2_list.append(critic_2)
-                critic_target_1.load_state_dict(
-                    clip_mod(critic_targets_1_state_dict[idx])
-                )
-                critic_target_1_list.append(critic_target_1)
-                critic_target_2.load_state_dict(
-                    clip_mod(critic_targets_2_state_dict[idx])
-                )
-                critic_target_2_list.append(critic_target_2)
+            actor.load_state_dict(actors_state_dict[idx])
+            actor_list.append(actor)
+            actor_target.load_state_dict(actor_targets_state_dict[idx])
+            actor_target_list.append(actor_target)
+            critic_1.load_state_dict(critics_1_state_dict[idx])
+            critic_1_list.append(critic_1)
+            critic_2.load_state_dict(critics_2_state_dict[idx])
+            critic_2_list.append(critic_2)
+            critic_target_1.load_state_dict(critic_targets_1_state_dict[idx])
+            critic_target_1_list.append(critic_target_1)
+            critic_target_2.load_state_dict(critic_targets_2_state_dict[idx])
+            critic_target_2_list.append(critic_target_2)
             actor_optimizer.load_state_dict(actor_optimizers_state_dict[idx])
             actor_optimizer_list.append(actor_optimizer)
             critic_1_optimizer.load_state_dict(critic_1_optimizers_state_dict[idx])
@@ -1917,13 +1690,15 @@ class MATD3:
         agent.critic_1_optimizers = critic_1_optimizer_list
         agent.critic_2_optimizers = critic_2_optimizer_list
 
-        if accelerator is not None:
-            agent.wrap_models()
-
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
 
-        if agent.torch_compiler:
-            agent.recompile()
+        if accelerator is not None:
+            agent.wrap_models()
+        else:
+            agent.place_models_on_device(agent.device)
+            if agent.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                agent.recompile()
 
         return agent

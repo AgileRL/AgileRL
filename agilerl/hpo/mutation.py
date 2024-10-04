@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import clip_mod
+from agilerl.utils.algo_utils import remove_compile_prefix
 
 
 class Mutations:
@@ -294,7 +294,7 @@ class Mutations:
                         and individual.torch_compiler
                     ):
                         ind_target.load_state_dict(
-                            clip_mod(offspring_actor.state_dict())
+                            remove_compile_prefix(offspring_actor.state_dict())
                         )
                     else:
                         ind_target.load_state_dict(offspring_actor.state_dict())
@@ -340,7 +340,7 @@ class Mutations:
                             and individual.torch_compiler
                         ):
                             ind_target.load_state_dict(
-                                clip_mod(offspring_critic.state_dict())
+                                remove_compile_prefix(offspring_critic.state_dict())
                             )
                         else:
                             ind_target.load_state_dict(offspring_critic.state_dict())
