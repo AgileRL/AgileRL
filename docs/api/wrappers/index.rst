@@ -6,4 +6,4 @@ Wrappers
 
    make_evolvable
    learning
-   pettingzoo_parallel_vectorization
+   pettingzoo

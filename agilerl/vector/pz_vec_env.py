@@ -61,8 +61,7 @@ class PettingZooVecEnv:
             len(passed_actions_list) == self.num_envs
         ), "Number of actions passed to the step function must be equal to the number of vectorized environments"
         self.step_async(passed_actions_list)
-        step_wait = self.step_wait()
-        return step_wait
+        return self.step_wait()
 
     def render(self):
         """Returns the rendered frames from the parallel environments."""

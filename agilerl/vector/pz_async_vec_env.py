@@ -6,6 +6,7 @@ import sys
 import time
 import traceback
 from collections import defaultdict
+from copy import deepcopy
 from enum import Enum
 from itertools import accumulate
 from typing import Any, TypeVar
@@ -34,14 +35,16 @@ class AsyncState(Enum):
     WAITING_CALL = "call"
 
 
-class AsyncVectorPettingZooEnv(PettingZooVecEnv):
+class AsyncPettingZooVecEnv(PettingZooVecEnv):
     """Vectorized PettingZoo environment that runs multiple environments in parallel
 
     :param env_fns: Functions that create the environment
     :type env_fns: List[Callable]
+    :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
+    :type copy: bool, optional
     """
 
-    def __init__(self, env_fns, experience_spec=None):
+    def __init__(self, env_fns, experience_spec=None, copy=True):
         # Core class attributes
         self.env_fns = env_fns
         self.shared_memory = True
@@ -50,12 +53,11 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         self.metadata = dummy_env.metadata
         self.render_mode = dummy_env.render_mode
         self.possible_agents = dummy_env.possible_agents
+        self.copy = copy
 
         if experience_spec is None:
             env = env_fns[0]()
-            self.experience_spec = PettingZooExperienceSpec(
-                env, self.num_envs, copy_obs=True
-            )
+            self.experience_spec = PettingZooExperienceSpec(env, self.num_envs)
             del env
         else:
             self.experience_spec = experience_spec
@@ -197,7 +199,14 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
 
         self._state = AsyncState.DEFAULT
         return (
-            self.observations,
+            (
+                {
+                    agent: deepcopy(self.observations[agent])
+                    for agent in self.observations.keys()
+                }
+                if self.copy
+                else self.observations
+            ),
             infos,
         )  # self.experience_spec.pack_observation(self.observations), infos
 
@@ -244,7 +253,14 @@ class AsyncVectorPettingZooEnv(PettingZooVecEnv):
         self._raise_if_errors(successes)
         self._state = AsyncState.DEFAULT
         return (
-            self.observations,
+            (
+                {
+                    agent: deepcopy(self.observations[agent])
+                    for agent in self.observations.keys()
+                }
+                if self.copy
+                else self.observations
+            ),
             {agent: np.array(rew) for agent, rew in rewards.items()},
             {agent: np.array(term) for agent, term in terminations.items()},
             {agent: np.array(trunc) for agent, trunc in truncations.items()},
@@ -443,13 +459,10 @@ class PettingZooExperienceSpec:
     :type env_fn: Callable
     :param num_envs: Number of environments to vectorize
     :type num_envs: int
-    :param copy_obs: Boolean flag to indicate whether to copy observations or not, defaults to True
-    :type copy_obs: bool, optional
     """
 
-    def __init__(self, env, num_envs, copy_obs=True):
+    def __init__(self, env, num_envs):
         self.num_envs = num_envs
-        self.copy = copy_obs
         self.detect_space_info(env)
 
     def detect_space_info(self, dummy_env):
@@ -576,7 +589,7 @@ class Observations:
                     agent_idx
                 ] : self.exp_spec.observation_boundaries[agent_idx + 1],
             ]
-            .view(dtype=self.exp_spec.single_observation_space[key].dtype)
+            .astype(dtype=self.exp_spec.single_observation_space[key].dtype)
             .reshape((self.num_envs,) + self.exp_spec.observation_shapes[key])
         )
 
@@ -589,14 +602,14 @@ class Observations:
                     agent_idx
                 ] : self.exp_spec.observation_boundaries[agent_idx + 1],
             ]
-            .view(dtype=self.exp_spec.single_observation_space[agent].dtype)
+            .astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
             .reshape((self.num_envs,) + (self.exp_spec.observation_shapes[agent]))
             for agent, agent_idx in self.exp_spec.agent_index_map.items()
         }
         return f"{my_dic}"
 
     def set_env_obs(self, index, observation):
-        self.obs_view[index, :] = observation
+        np.copyto(self.obs_view[index, :], observation)
 
     def get_env_obs(self, index):
         return self.obs_view[index, :]
@@ -709,6 +722,7 @@ def _async_worker(
                 observations.set_env_obs(
                     index, experience_spec.dict_to_1d_array(observation)
                 )
+                autoreset = False
                 pipe.send(((info), True))
             elif command == "step":
                 if autoreset:
@@ -779,38 +793,3 @@ def _async_worker(
 
     finally:
         env.close()
-
-
-# def create_shared_memory(num_envs, width, dtype, ctx=mp):
-#     """
-#     Create a RawArray to write observations to.
-
-#     :param num_envs: Number of environments to vectorise
-#     :type num_envs: int
-#     :param width: Width of the array
-#     :type width: int
-#     :param dtype: Array data type
-#     :type dtype: str
-#     :param ctx: Multiprocessing context
-#     :type ctx: Context # FIXME
-#     """
-#     return ctx.RawArray(dtype, num_envs * int(width))
-
-
-# def create_shared_memory_2(num_envs, width, ctx=mp):
-#     size = num_envs * width
-#     return ctx.RawArray("c", size)
-
-
-# def read_from_shared_memory(width, shared_memory, num_envs, dtype):
-#     return np.frombuffer(shared_memory, dtype=np.float32).reshape((num_envs, width))
-
-
-# def write_to_shared_memory(
-#     index,
-#     width,
-#     shared_memory,
-#     data,
-# ):
-#     destination = np.frombuffer(shared_memory, dtype=np.float32)
-#     np.copyto(destination[index * width : (index + 1) * width], dict_to_1d_array(data))

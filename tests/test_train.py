@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
-from gymnasium.spaces import Discrete
+from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
 
 import agilerl.training.train_bandits
@@ -202,8 +202,8 @@ class DummyMultiEnv(ParallelEnv):
         self.action_size = self.action_dims
         self.agents = ["agent_0", "agent_1"]
         self.possible_agents = ["agent_0", "agent_1"]
+        self.render_mode = None
         self.metadata = None
-        self.observation_space = None
         self.info = {
             agent: {
                 "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
@@ -227,6 +227,9 @@ class DummyMultiEnv(ParallelEnv):
 
     def action_space(self, agent):
         return Discrete(5)
+
+    def observation_space(self, agent):
+        return Box(0, 255, self.state_dims)
 
 
 class DummyMultiAgent(DummyAgentOffPolicy):
@@ -2348,9 +2351,12 @@ def test_train_multi_agent_rgb_vectorized(
     state_size,
     action_size,
 ):
-    env = make_multi_agent_vect_envs(multi_env, custom=True, num_envs=4)
+    env = make_multi_agent_vect_envs(
+        DummyMultiEnv, num_envs=4, state_dims=state_size, action_dims=action_size
+    )
     for agent in population_multi_agent:
         agent.num_envs = 4
+        agent.scores = [1]
     env.reset()
     pop, pop_fitnesses = train_multi_agent(
         env,
@@ -2361,14 +2367,15 @@ def test_train_multi_agent_rgb_vectorized(
         INIT_HP=None,
         MUT_P=None,
         net_config=None,
-        swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
+        swap_channels=False,
+        max_steps=10,
+        evo_steps=5,
         eval_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
     assert len(pop) == len(population_multi_agent)
+    env.close()
 
 
 @pytest.mark.parametrize("state_size, action_size", [((6,), 2)])

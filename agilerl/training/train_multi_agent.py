@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
@@ -254,7 +254,6 @@ def train_multi_agent(
                         agent_id: np.moveaxis(s, [-1], [-3])
                         for agent_id, s in state.items()
                     }
-
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 env_defined_actions = agent.get_env_defined_actions(info, agent_ids)
@@ -344,22 +343,26 @@ def train_multi_agent(
                 state = next_state
 
                 reset_noise_indices = []
-                term_array = np.array(list(termination.values())).transpose()
-                trunc_array = np.array(list(truncation.values())).transpose()
+                # Find which agents are "done" - i.e. terminated or truncated
+                dones = {
+                    agent: termination[agent] | truncation[agent]
+                    for agent in agent.agents
+                }
                 if not is_vectorised:
-                    term_array = np.expand_dims(term_array, 0)
-                    trunc_array = np.expand_dims(trunc_array, 0)
-                for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
-                    if np.any(d) or np.any(t):
-                        completed_episode_scores.append(scores[idx])
-                        agent.scores.append(scores[idx])
-                        scores[idx] = 0
-                        reset_noise_indices.append(idx)
+                    dones = {agent: np.array([done]) for agent, done in dones.items()}
 
+                for idx, agent_dones in enumerate(zip(*dones.values())):
+                    if all(agent_dones):
+                        completed_score = (
+                            float(scores[idx]) if sum_scores else list(scores[idx])
+                        )
+                        completed_episode_scores.append(completed_score)
+                        agent.scores.append(completed_score)
+                        scores[idx].fill(0)
+                        reset_noise_indices.append(idx)
                         if not is_vectorised:
                             state, info = env.reset()
                 agent.reset_action_noise(reset_noise_indices)
-
             pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps

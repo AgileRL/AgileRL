@@ -236,7 +236,6 @@ class MADDPG:
                 ), "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
                                 type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
-
             # model
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
                 self.actors = []
@@ -497,7 +496,6 @@ class MADDPG:
                         self.min_action[idx][0], self.max_action[idx][0]
                     )
             action_dict[agent_id] = action
-
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
@@ -529,7 +527,6 @@ class MADDPG:
                     action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
                         agent_masks[agent]
                     ]
-
         return (action_dict, discrete_action_dict)
 
     def action_noise(self, idx):
@@ -789,7 +786,6 @@ class MADDPG:
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
         """
-
         with torch.no_grad():
             rewards = []
             if hasattr(env, "num_envs"):
@@ -832,21 +828,24 @@ class MADDPG:
                         action = cont_actions
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
-                    state, reward, done, trunc, info = env.step(action)
+                    state, reward, term, trunc, info = env.step(action)
                     scores += np.sum(
                         np.array(list(reward.values())).transpose(), axis=-1
                     )
-                    done_array = np.array(list(done.values())).transpose()
-                    trunc_array = np.array(list(trunc.values())).transpose()
+                    dones = {
+                        agent: term[agent] | trunc[agent] for agent in self.agent_ids
+                    }
                     if not is_vectorised:
-                        done_array = np.expand_dims(done_array, 0)
-                        trunc_array = np.expand_dims(trunc_array, 0)
-                    for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
+                        dones = {
+                            agent: np.array([done]) for agent, done in dones.items()
+                        }
+
+                    for idx, agent_dones in enumerate(zip(*dones.values())):
                         if (
-                            np.all(d | t)
+                            np.all(agent_dones)
                             or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:
-                            completed_episode_scores[idx] = scores[idx]
+                            completed_episode_scores[idx] = scores[idx].copy()
                             finished[idx] = 1
                 rewards.append(np.mean(completed_episode_scores))
         mean_fit = np.mean(rewards)
