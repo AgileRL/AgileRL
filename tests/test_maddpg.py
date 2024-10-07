@@ -1329,7 +1329,7 @@ def test_maddpg_learns_from_experiences_mlp_distributed(
             [2, 2],
             ["agent_0", "agent_1"],
             False,
-            None,
+            "default",
         ),
     ],
 )

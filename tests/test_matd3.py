@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.networks.custom_components import GumbelSoftmax
@@ -238,9 +239,9 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
 
 
 @pytest.mark.parametrize(
-    "net_config, accelerator_flag, state_dims",
+    "net_config, accelerator_flag, state_dims, compile_mode",
     [
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)]),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)], None),
         (
             {
                 "arch": "cnn",
@@ -252,6 +253,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
             },
             False,
             [(3, 32, 32), (3, 32, 32)],
+            None,
         ),
         (
             {
@@ -264,11 +266,39 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
             },
             True,
             [(3, 32, 32), (3, 32, 32)],
+            None,
+        ),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)], "default"),
+        (
+            {
+                "arch": "cnn",
+                "hidden_size": [8],
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+                "normalize": False,
+            },
+            False,
+            [(3, 32, 32), (3, 32, 32)],
+            "default",
+        ),
+        (
+            {
+                "arch": "cnn",
+                "hidden_size": [8],
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+                "normalize": False,
+            },
+            True,
+            [(3, 32, 32), (3, 32, 32)],
+            "default",
         ),
     ],
 )
 def test_initialize_matd3_with_net_config(
-    net_config, accelerator_flag, state_dims, device
+    net_config, accelerator_flag, state_dims, device, compile_mode
 ):
     action_dims = [2, 2]
     one_hot = False
@@ -297,6 +327,7 @@ def test_initialize_matd3_with_net_config(
         accelerator=accelerator,
         device=device,
         policy_freq=policy_freq,
+        torch_compiler=compile_mode,
     )
     net_config.update({"output_activation": "Softmax"})
     assert matd3.state_dims == state_dims
@@ -326,20 +357,14 @@ def test_initialize_matd3_with_net_config(
     else:
         evo_type = EvolvableCNN
         assert matd3.arch == "cnn"
-    assert all(isinstance(actor, evo_type) for actor in matd3.actors)
-    assert all(isinstance(critic_1, evo_type) for critic_1 in matd3.critics_1)
-    assert all(isinstance(critic_2, evo_type) for critic_2 in matd3.critics_2)
-    assert all(
-        isinstance(actor_target, evo_type) for actor_target in matd3.actor_targets
-    )
-    assert all(
-        isinstance(critic_target_1, evo_type)
-        for critic_target_1 in matd3.critic_targets_1
-    )
-    assert all(
-        isinstance(critic_target_2, evo_type)
-        for critic_target_2 in matd3.critic_targets_2
-    )
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
+    else:
+        assert all(isinstance(actor, evo_type) for actor in matd3.actors)
+        assert all(isinstance(critic, evo_type) for critic in matd3.critics_1)
+        assert all(isinstance(critic, evo_type) for critic in matd3.critics_2)
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
@@ -370,14 +395,22 @@ def test_initialize_matd3_with_net_config(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, accelerator_flag",
+    "state_dims, action_dims, accelerator_flag, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], True),
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
     ],
 )
 def test_initialize_matd3_with_mlp_networks(
-    mlp_actor, mlp_critic, state_dims, action_dims, accelerator_flag, device
+    mlp_actor,
+    mlp_critic,
+    state_dims,
+    action_dims,
+    accelerator_flag,
+    device,
+    compile_mode,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
@@ -410,10 +443,16 @@ def test_initialize_matd3_with_mlp_networks(
         device=device,
         accelerator=accelerator,
         policy_freq=2,
+        torch_compiler=compile_mode,
     )
-    assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
-    assert all(isinstance(critic_1, MakeEvolvable) for critic_1 in matd3.critics_1)
-    assert all(isinstance(critic_2, MakeEvolvable) for critic_2 in matd3.critics_2)
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
+    else:
+        assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
+        assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
+        assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
     assert matd3.net_config is None
     assert matd3.arch == "mlp"
     assert matd3.state_dims == state_dims
@@ -461,14 +500,22 @@ def test_initialize_matd3_with_mlp_networks(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, accelerator_flag",
+    "state_dims, action_dims, accelerator_flag, compile_mode",
     [
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False, None),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True, None),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True, "default"),
     ],
 )
 def test_initialize_matd3_with_cnn_networks(
-    cnn_actor, cnn_critic, state_dims, action_dims, accelerator_flag, device
+    cnn_actor,
+    cnn_critic,
+    state_dims,
+    action_dims,
+    accelerator_flag,
+    device,
+    compile_mode,
 ):
     if accelerator_flag:
         accelerator = Accelerator()
@@ -515,10 +562,16 @@ def test_initialize_matd3_with_cnn_networks(
         device=device,
         accelerator=accelerator,
         policy_freq=2,
+        torch_compiler=compile_mode,
     )
-    assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
-    assert all(isinstance(critic_1, MakeEvolvable) for critic_1 in matd3.critics_1)
-    assert all(isinstance(critic_2, MakeEvolvable) for critic_2 in matd3.critics_2)
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
+    else:
+        assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
+        assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
+        assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
     assert matd3.net_config is None
     assert matd3.arch == "cnn"
     assert matd3.state_dims == state_dims
@@ -565,14 +618,19 @@ def test_initialize_matd3_with_cnn_networks(
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize(
-    "state_dims, action_dims, net",
+    "state_dims, action_dims, net, compile_mode",
     [
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn"),
+        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp", None),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn", None),
+        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp", "default"),
+        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn", "default"),
     ],
 )
-def test_initialize_matd3_with_evo_networks(state_dims, action_dims, net, device):
+def test_initialize_matd3_with_evo_networks(
+    state_dims, action_dims, net, device, compile_mode, accelerator
+):
     if net == "mlp":
         evo_actors = [
             EvolvableMLP(
@@ -643,16 +701,25 @@ def test_initialize_matd3_with_evo_networks(state_dims, action_dims, net, device
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
+        torch_compiler=compile_mode,
+        accelerator=accelerator,
     )
-    assert all(
-        isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in matd3.actors
-    )
-    assert all(
-        isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in matd3.critics_1
-    )
-    assert all(
-        isinstance(critic, (EvolvableMLP, EvolvableCNN)) for critic in matd3.critics_2
-    )
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
+        assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
+    else:
+        assert all(
+            isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in matd3.actors
+        )
+        assert all(
+            isinstance(critic, (EvolvableMLP, EvolvableCNN))
+            for critic in matd3.critics_1
+        )
+        assert all(
+            isinstance(critic, (EvolvableMLP, EvolvableCNN))
+            for critic in matd3.critics_2
+        )
     if net == "mlp":
         assert matd3.arch == "mlp"
     else:
@@ -672,29 +739,46 @@ def test_initialize_matd3_with_evo_networks(state_dims, action_dims, net, device
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
-    assert all(
-        isinstance(actor_optimizer, optim.Adam)
-        for actor_optimizer in matd3.actor_optimizers
-    )
-    assert all(
-        isinstance(critic_1_optimizer, optim.Adam)
-        for critic_1_optimizer in matd3.critic_1_optimizers
-    )
-    assert all(
-        isinstance(critic_2_optimizer, optim.Adam)
-        for critic_2_optimizer in matd3.critic_2_optimizers
-    )
+    if accelerator is None:
+        assert all(
+            isinstance(actor_optimizer, optim.Adam)
+            for actor_optimizer in matd3.actor_optimizers
+        )
+        assert all(
+            isinstance(critic_optimizer, optim.Adam)
+            for critic_optimizer in matd3.critic_1_optimizers
+        )
+        assert all(
+            isinstance(critic_optimizer, optim.Adam)
+            for critic_optimizer in matd3.critic_2_optimizers
+        )
+    else:
+        assert all(
+            isinstance(actor_optimizer, AcceleratedOptimizer)
+            for actor_optimizer in matd3.actor_optimizers
+        )
+        assert all(
+            isinstance(critic_optimizer, AcceleratedOptimizer)
+            for critic_optimizer in matd3.critic_1_optimizers
+        )
+        assert all(
+            isinstance(critic_optimizer, AcceleratedOptimizer)
+            for critic_optimizer in matd3.critic_2_optimizers
+        )
 
     assert isinstance(matd3.criterion, nn.MSELoss)
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims",
+    "state_dims, action_dims, compile_mode",
     [
-        ([[4] for _ in range(2)], [2 for _ in range(2)]),
+        ([[4] for _ in range(2)], [2 for _ in range(2)], None),
+        ([[4] for _ in range(2)], [2 for _ in range(2)], "default"),
     ],
 )
-def test_initialize_matd3_with_incorrect_evo_networks(state_dims, action_dims, device):
+def test_initialize_matd3_with_incorrect_evo_networks(
+    state_dims, action_dims, compile_mode
+):
     evo_actors = []
     evo_critics = []
 
@@ -710,17 +794,19 @@ def test_initialize_matd3_with_incorrect_evo_networks(state_dims, action_dims, d
             discrete_actions=True,
             actor_networks=evo_actors,
             critic_networks=evo_critics,
+            torch_compiler=compile_mode,
         )
         assert matd3
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims",
+    "state_dims, action_dims, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)]),
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], None),
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], "default"),
     ],
 )
-def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device):
+def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device, compile_mode):
     warning_string = "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
@@ -738,6 +824,7 @@ def test_matd3_init_warning(mlp_actor, state_dims, action_dims, device):
             discrete_actions=True,
             actor_networks=evo_actors,
             device=device,
+            torch_compiler=compile_mode,
         )
 
 
@@ -809,22 +896,28 @@ def test_matd3_init_with_compile_error(mode):
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, one_hot, compile",
+    "training, state_dims, action_dims, discrete_actions, one_hot, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, True),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, True),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, False),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, "default"),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, "default"),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, "default"),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, "default"),
     ],
 )
 def test_matd3_get_action_mlp(
-    training, state_dims, action_dims, discrete_actions, one_hot, compile, device
+    training, state_dims, action_dims, discrete_actions, one_hot, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1"]
     if one_hot:
@@ -849,7 +942,7 @@ def test_matd3_get_action_mlp(
         min_action=[[-1], [-1]],
         discrete_actions=discrete_actions,
         device=device,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
@@ -882,17 +975,20 @@ def test_matd3_get_action_mlp(
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile",
+    "training, state_dims, action_dims, discrete_actions, compile_mode",
     [
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, False),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, True),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, False),
+        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
+        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
+        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
+        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
+        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
     ],
 )
 def test_matd3_get_action_cnn(
-    training, state_dims, action_dims, discrete_actions, compile, device
+    training, state_dims, action_dims, discrete_actions, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
@@ -917,7 +1013,7 @@ def test_matd3_get_action_cnn(
         min_action=[[-1], [0]],
         discrete_actions=discrete_actions,
         device=device,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
@@ -949,17 +1045,20 @@ def test_matd3_get_action_cnn(
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile",
+    "training, state_dims, action_dims, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
     ],
 )
 def test_matd3_get_action_distributed(
-    training, state_dims, action_dims, discrete_actions, compile
+    training, state_dims, action_dims, discrete_actions, compile_mode
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
@@ -976,7 +1075,7 @@ def test_matd3_get_action_distributed(
         min_action=[[-1], [-1]],
         discrete_actions=discrete_actions,
         accelerator=accelerator,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     new_actors = [
         DummyEvolvableMLP(
@@ -1019,22 +1118,23 @@ def test_matd3_get_action_distributed(
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile",
+    "training, state_dims, action_dims, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
     ],
 )
 def test_matd3_get_action_agent_masking(
-    training, state_dims, action_dims, discrete_actions, compile, device
+    training, state_dims, action_dims, discrete_actions, compile_mode, device
 ):
     agent_ids = ["agent_0", "agent_1"]
-    state = {
-        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
-    }
+    state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
     agent_mask = {"agent_0": False, "agent_1": True}
     if discrete_actions:
         env_defined_actions = {"agent_0": 1, "agent_1": None}
@@ -1050,7 +1150,7 @@ def test_matd3_get_action_agent_masking(
         min_action=[[-1], [-1]],
         discrete_actions=discrete_actions,
         device=device,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     cont_actions, discrete_action = matd3.get_action(
         state, training, agent_mask=agent_mask, env_defined_actions=env_defined_actions
@@ -1063,14 +1163,16 @@ def test_matd3_get_action_agent_masking(
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile",
+    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
     [
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, False),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, False),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, False),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, False),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, True),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, True),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, None),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, None),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, None),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, None),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
     ],
 )
 def test_matd3_learns_from_experiences_mlp(
@@ -1081,8 +1183,8 @@ def test_matd3_learns_from_experiences_mlp(
     action_dims,
     agent_ids,
     one_hot,
-    compile,
     device,
+    compile_mode,
 ):
     action_dims = [2, 2]
     agent_ids = ["agent_0", "agent_1"]
@@ -1098,7 +1200,7 @@ def test_matd3_learns_from_experiences_mlp(
         discrete_actions=discrete_actions,
         device=device,
         policy_freq=policy_freq,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     actors = matd3.actors
     actor_targets = matd3.actor_targets
@@ -1163,14 +1265,16 @@ def no_sync(self):
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile",
+    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
     [
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, False),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, False),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, False),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, False),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, True),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, True),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, None),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, None),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, None),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, None),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
+        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
+        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
     ],
 )
 def test_matd3_learns_from_experiences_mlp_distributed(
@@ -1181,7 +1285,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
     action_dims,
     agent_ids,
     one_hot,
-    compile,
+    compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
     action_dims = [2, 2]
@@ -1198,7 +1302,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
         discrete_actions=discrete_actions,
         accelerator=accelerator,
         policy_freq=policy_freq,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
 
     for (
@@ -1275,7 +1379,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile",
+    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
     [
         (
             [(3, 32, 32), (3, 32, 32)],
@@ -1284,7 +1388,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
             [2, 2],
             ["agent_0", "agent_1"],
             False,
-            False,
+            None,
         ),
         (
             [(3, 32, 32), (3, 32, 32)],
@@ -1293,16 +1397,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
             [2, 2],
             ["agent_0", "agent_1"],
             False,
-            False,
-        ),
-        (
-            [(3, 32, 32), (3, 32, 32)],
-            True,
-            64,
-            [2, 2],
-            ["agent_0", "agent_1"],
-            False,
-            True,
+            "default",
         ),
     ],
 )
@@ -1314,8 +1409,8 @@ def test_matd3_learns_from_experiences_cnn(
     action_dims,
     agent_ids,
     one_hot,
-    compile,
     device,
+    compile_mode,
 ):
     action_dims = [2, 2]
     agent_ids = ["agent_0", "agent_1"]
@@ -1340,7 +1435,7 @@ def test_matd3_learns_from_experiences_cnn(
         discrete_actions=discrete_actions,
         device=device,
         policy_freq=policy_freq,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     actors = matd3.actors
     actor_targets = matd3.actor_targets
@@ -1393,9 +1488,8 @@ def test_matd3_learns_from_experiences_cnn(
         assert old_critic_2_state_dict != str(updated_critic_2.state_dict())
 
 
-# @pytest.mark.skip
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile",
+    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
     [
         (
             [(3, 32, 32), (3, 32, 32)],
@@ -1404,7 +1498,7 @@ def test_matd3_learns_from_experiences_cnn(
             [2, 2],
             ["agent_0", "agent_1"],
             False,
-            False,
+            None,
         ),
         (
             [(3, 32, 32), (3, 32, 32)],
@@ -1413,7 +1507,7 @@ def test_matd3_learns_from_experiences_cnn(
             [2, 2],
             ["agent_0", "agent_1"],
             False,
-            False,
+            None,
         ),
         (
             [(3, 32, 32), (3, 32, 32)],
@@ -1422,7 +1516,16 @@ def test_matd3_learns_from_experiences_cnn(
             [2, 2],
             ["agent_0", "agent_1"],
             False,
+            "default",
+        ),
+        (
+            [(3, 32, 32), (3, 32, 32)],
             True,
+            64,
+            [2, 2],
+            ["agent_0", "agent_1"],
+            False,
+            "default",
         ),
     ],
 )
@@ -1434,8 +1537,8 @@ def test_matd3_learns_from_experiences_cnn_distributed(
     action_dims,
     agent_ids,
     one_hot,
-    compile,
     device,
+    compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
     action_dims = [2, 2]
@@ -1461,7 +1564,7 @@ def test_matd3_learns_from_experiences_cnn_distributed(
         discrete_actions=discrete_actions,
         accelerator=accelerator,
         policy_freq=policy_freq,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
 
     for (
@@ -1539,7 +1642,8 @@ def test_matd3_learns_from_experiences_cnn_distributed(
         assert old_critic_2_state_dict != str(updated_critic_2.state_dict())
 
 
-def test_matd3_soft_update(device):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_matd3_soft_update(device, compile_mode):
     state_dims = [(6,), (6,)]
     action_dims = [2, 2]
     accelerator = None
@@ -1555,6 +1659,7 @@ def test_matd3_soft_update(device):
         discrete_actions=False,
         accelerator=accelerator,
         device=device,
+        torch_compiler=compile_mode,
     )
 
     for (
@@ -1610,8 +1715,8 @@ def test_matd3_soft_update(device):
         )
 
 
-@pytest.mark.parametrize("compile", [True, False])
-def test_matd3_algorithm_test_loop(device, compile):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_matd3_algorithm_test_loop(device, compile_mode):
     state_dims = [(6,), (6,)]
     action_dims = [2, 2]
     accelerator = None
@@ -1630,14 +1735,14 @@ def test_matd3_algorithm_test_loop(device, compile):
         discrete_actions=True,
         accelerator=accelerator,
         device=device,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     mean_score = matd3.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
 
-@pytest.mark.parametrize("compile", [True, False])
-def test_matd3_algorithm_test_loop_cnn(device, compile):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_matd3_algorithm_test_loop_cnn(device, compile_mode):
     env_state_dims = [(32, 32, 3), (32, 32, 3)]
     agent_state_dims = [(3, 32, 32), (3, 32, 32)]
     net_config = {
@@ -1663,14 +1768,14 @@ def test_matd3_algorithm_test_loop_cnn(device, compile):
         discrete_actions=False,
         accelerator=accelerator,
         device=device,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     mean_score = matd3.test(env, max_steps=10, swap_channels=True)
     assert isinstance(mean_score, float)
 
 
-@pytest.mark.parametrize("compile", [True, False])
-def test_matd3_algorithm_test_loop_cnn_vectorized(device, compile):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_matd3_algorithm_test_loop_cnn_vectorized(device, compile_mode):
     env_state_dims = [(32, 32, 3), (32, 32, 3)]
     agent_state_dims = [(3, 32, 32), (3, 32, 32)]
     net_config = {
@@ -1696,24 +1801,24 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device, compile):
         discrete_actions=False,
         accelerator=accelerator,
         device=device,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     mean_score = matd3.test(env, max_steps=10, swap_channels=True)
     assert isinstance(mean_score, float)
 
 
 @pytest.mark.parametrize(
-    "accelerator_flag, wrap, compile",
+    "accelerator_flag, wrap, compile_mode",
     [
-        (False, True, False),
-        (True, True, False),
-        (True, False, False),
-        (False, True, True),
-        (True, True, True),
-        (True, False, True),
+        (False, True, None),
+        (True, True, None),
+        (True, False, None),
+        (False, True, "default"),
+        (True, True, "default"),
+        (True, False, "default"),
     ],
 )
-def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile):
+def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode):
     # Clones the agent and returns an identical copy.
     state_dims = [(4,), (4,)]
     action_dims = [2, 2]
@@ -1766,7 +1871,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile):
         critic_networks=critic_networks,
         device=device,
         accelerator=accelerator,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
         wrap=wrap,
     )
 
@@ -1794,7 +1899,6 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile):
     assert clone_agent.accelerator == matd3.accelerator
 
     assert clone_agent.torch_compiler == matd3.torch_compiler
-    assert clone_agent.CUDA_CACHE_POLICY == matd3.CUDA_CACHE_POLICY
 
     for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
         assert str(clone_actor.state_dict()) == str(actor.state_dict())
@@ -1825,7 +1929,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile):
     assert clone_agent.critic_networks == matd3.critic_networks
 
 
-def test_clone_new_index():
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_clone_new_index(compile_mode):
     state_dims = [(4,), (4,)]
     action_dims = [2, 2]
     one_hot = False
@@ -1844,15 +1949,15 @@ def test_clone_new_index():
         max_action,
         min_action,
         discrete_actions,
+        torch_compiler=compile_mode,
     )
     clone_agent = matd3.clone(index=100)
 
     assert clone_agent.index == 100
 
 
-@pytest.mark.parametrize("compiled", [True, False])
-@pytest.mark.parametrize("compile", [True, False])
-def test_clone_after_learning(compiled, compile):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_clone_after_learning(compile_mode):
     state_dims = [(4,), (4,)]
     action_dims = [2, 2]
     one_hot = False
@@ -1873,7 +1978,7 @@ def test_clone_after_learning(compiled, compile):
         min_action,
         discrete_actions,
         batch_size=batch_size,
-        torch_compiler="default" if compiled else None,
+        torch_compiler=compile_mode,
     )
 
     states = {
@@ -1893,7 +1998,7 @@ def test_clone_after_learning(compiled, compile):
 
     experiences = states, actions, rewards, next_states, dones
     matd3.learn(experiences)
-    clone_agent = matd3.clone(compile="default" if compile else None)
+    clone_agent = matd3.clone()
     assert isinstance(clone_agent, MATD3)
     assert clone_agent.state_dims == matd3.state_dims
     assert clone_agent.action_dims == matd3.action_dims
@@ -1915,40 +2020,36 @@ def test_clone_after_learning(compiled, compile):
     assert clone_agent.device == matd3.device
     assert clone_agent.accelerator == matd3.accelerator
 
-    assert clone_agent.torch_compiler == "default" if compile else None
-    assert matd3.torch_compiler == "default" if compiled else None
-    assert clone_agent.CUDA_CACHE_POLICY == matd3.CUDA_CACHE_POLICY
+    assert clone_agent.torch_compiler == compile_mode
+    assert matd3.torch_compiler == compile_mode
 
-    if compiled == compile:
-        for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
-            assert str(clone_actor.state_dict()) == str(actor.state_dict())
-        for clone_critic_1, critic_1 in zip(clone_agent.critics_1, matd3.critics_1):
-            assert str(clone_critic_1.state_dict()) == str(critic_1.state_dict())
-        for clone_actor_target, actor_target in zip(
-            clone_agent.actor_targets, matd3.actor_targets
-        ):
-            assert str(clone_actor_target.state_dict()) == str(
-                actor_target.state_dict()
-            )
-        for clone_critic_target_1, critic_target_1 in zip(
-            clone_agent.critic_targets_1, matd3.critic_targets_1
-        ):
-            assert str(clone_critic_target_1.state_dict()) == str(
-                critic_target_1.state_dict()
-            )
+    for clone_actor, actor in zip(clone_agent.actors, matd3.actors):
+        assert str(clone_actor.state_dict()) == str(actor.state_dict())
+    for clone_critic_1, critic_1 in zip(clone_agent.critics_1, matd3.critics_1):
+        assert str(clone_critic_1.state_dict()) == str(critic_1.state_dict())
+    for clone_actor_target, actor_target in zip(
+        clone_agent.actor_targets, matd3.actor_targets
+    ):
+        assert str(clone_actor_target.state_dict()) == str(actor_target.state_dict())
+    for clone_critic_target_1, critic_target_1 in zip(
+        clone_agent.critic_targets_1, matd3.critic_targets_1
+    ):
+        assert str(clone_critic_target_1.state_dict()) == str(
+            critic_target_1.state_dict()
+        )
 
-        for clone_critic_2, critic_2 in zip(clone_agent.critics_2, matd3.critics_2):
-            assert str(clone_critic_2.state_dict()) == str(critic_2.state_dict())
+    for clone_critic_2, critic_2 in zip(clone_agent.critics_2, matd3.critics_2):
+        assert str(clone_critic_2.state_dict()) == str(critic_2.state_dict())
 
-        for clone_critic_target_2, critic_target_2 in zip(
-            clone_agent.critic_targets_2, matd3.critic_targets_2
-        ):
-            assert str(clone_critic_target_2.state_dict()) == str(
-                critic_target_2.state_dict()
-            )
+    for clone_critic_target_2, critic_target_2 in zip(
+        clone_agent.critic_targets_2, matd3.critic_targets_2
+    ):
+        assert str(clone_critic_target_2.state_dict()) == str(
+            critic_target_2.state_dict()
+        )
 
-        assert clone_agent.actor_networks == matd3.actor_networks
-        assert clone_agent.critic_networks == matd3.critic_networks
+    assert clone_agent.actor_networks == matd3.actor_networks
+    assert clone_agent.critic_networks == matd3.critic_networks
 
     for clone_actor_opt, actor_opt in zip(
         clone_agent.actor_optimizers, matd3.actor_optimizers
@@ -1964,10 +2065,20 @@ def test_clone_after_learning(compiled, compile):
         assert str(clone_critic_opt_2) == str(critic_opt_2)
 
 
-@pytest.mark.parametrize("checkpoint_compile", [True, False])
-@pytest.mark.parametrize("loaded_compile", [True, False])
+@pytest.mark.parametrize(
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator, compile_mode",
+    [
+        (None, None),
+        (Accelerator(), None),
+        (None, "default"),
+        (Accelerator(), "default"),
+    ],
+)
 def test_matd3_save_load_checkpoint_correct_data_and_format(
-    tmpdir, checkpoint_compile, loaded_compile
+    tmpdir, device, accelerator, compile_mode
 ):
     net_config = {"arch": "mlp", "hidden_size": [32, 32]}
     # Initialize the ddpg agent
@@ -1985,7 +2096,9 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
         min_action=[[-1]],
         net_config=net_config,
         discrete_actions=True,
-        torch_compiler="default" if checkpoint_compile else None,
+        torch_compiler=compile_mode,
+        device=device,
+        accelerator=accelerator,
     )
 
     # Save the checkpoint to a file
@@ -2039,58 +2152,52 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
         max_action=[(1,)],
         min_action=[(-1,)],
         discrete_actions=True,
-        torch_compiler="default" if loaded_compile else None,
+        torch_compiler=compile_mode,
+        device=device,
+        accelerator=accelerator,
     )
     loaded_matd3.load_checkpoint(checkpoint_path)
     # Check if properties and weights are loaded correctly
     assert loaded_matd3.net_config == net_config
-    # checkpoint compile will overwrite the loaded compile
-    if not loaded_compile:
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
+        assert all(
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in loaded_matd3.actor_targets
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_1
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in loaded_matd3.critic_targets_1
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_2
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in loaded_matd3.critic_targets_2
+        )
+    else:
         assert all(isinstance(actor, EvolvableMLP) for actor in loaded_matd3.actors)
         assert all(
             isinstance(actor_target, EvolvableMLP)
             for actor_target in loaded_matd3.actor_targets
         )
         assert all(
-            isinstance(critic_1, EvolvableMLP) for critic_1 in loaded_matd3.critics_1
+            isinstance(critic, EvolvableMLP) for critic in loaded_matd3.critics_1
         )
         assert all(
-            isinstance(critic_target_1, EvolvableMLP)
-            for critic_target_1 in loaded_matd3.critic_targets_1
+            isinstance(critic_target, EvolvableMLP)
+            for critic_target in loaded_matd3.critic_targets_1
         )
         assert all(
-            isinstance(critic_2, EvolvableMLP) for critic_2 in loaded_matd3.critics_2
+            isinstance(critic, EvolvableMLP) for critic in loaded_matd3.critics_2
         )
         assert all(
-            isinstance(critic_target_2, EvolvableMLP)
-            for critic_target_2 in loaded_matd3.critic_targets_2
-        )
-    else:
-        # TODO check EvolvableMLP in detail (class attributes and values except for the wrapped networks)
-        #   because this isn't state_dict
-        assert all(
-            isinstance(actor, torch._dynamo.eval_frame.OptimizedModule)
-            for actor in loaded_matd3.actors
-        )
-        assert all(
-            isinstance(actor_target, torch._dynamo.eval_frame.OptimizedModule)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic_1, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_1 in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target_1, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_target_1 in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic_2, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_2 in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target_2, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_target_2 in loaded_matd3.critic_targets_2
+            isinstance(critic_target, EvolvableMLP)
+            for critic_target in loaded_matd3.critic_targets_2
         )
     assert matd3.lr_actor == 0.001
     assert matd3.lr_critic == 0.01
@@ -2120,10 +2227,20 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     assert matd3.policy_freq == 2
 
 
-@pytest.mark.parametrize("checkpoint_compile", [True, False])
-@pytest.mark.parametrize("loaded_compile", [True, False])
+@pytest.mark.parametrize(
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator, compile_mode",
+    [
+        (None, None),
+        (Accelerator(), None),
+        (None, "default"),
+        (Accelerator(), "default"),
+    ],
+)
 def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
-    tmpdir, checkpoint_compile, loaded_compile
+    tmpdir, device, accelerator, compile_mode
 ):
     net_config_cnn = {
         "arch": "cnn",
@@ -2146,7 +2263,9 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
         min_action=[[-1]],
         discrete_actions=True,
         policy_freq=policy_freq,
-        torch_compiler="default" if checkpoint_compile else None,
+        torch_compiler=compile_mode,
+        device=device,
+        accelerator=accelerator,
     )
 
     # Save the checkpoint to a file
@@ -2196,59 +2315,53 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
         max_action=[(1,)],
         min_action=[(-1,)],
         discrete_actions=True,
-        torch_compiler="default" if loaded_compile else None,
+        torch_compiler=compile_mode,
+        device=device,
+        accelerator=accelerator,
     )
     loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert loaded_matd3.net_config == net_config_cnn
-    # checkpoint compile will overwrite the loaded compile
-    if not loaded_compile:
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
+        assert all(
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in loaded_matd3.actor_targets
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_1
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in loaded_matd3.critic_targets_1
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_2
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in loaded_matd3.critic_targets_2
+        )
+    else:
         assert all(isinstance(actor, EvolvableCNN) for actor in loaded_matd3.actors)
         assert all(
             isinstance(actor_target, EvolvableCNN)
             for actor_target in loaded_matd3.actor_targets
         )
         assert all(
-            isinstance(critic_1, EvolvableCNN) for critic_1 in loaded_matd3.critics_1
+            isinstance(critic, EvolvableCNN) for critic in loaded_matd3.critics_1
         )
         assert all(
-            isinstance(critic_target_1, EvolvableCNN)
-            for critic_target_1 in loaded_matd3.critic_targets_1
+            isinstance(critic_target, EvolvableCNN)
+            for critic_target in loaded_matd3.critic_targets_1
         )
         assert all(
-            isinstance(critic_2, EvolvableCNN) for critic_2 in loaded_matd3.critics_2
+            isinstance(critic, EvolvableCNN) for critic in loaded_matd3.critics_2
         )
         assert all(
-            isinstance(critic_target_2, EvolvableCNN)
-            for critic_target_2 in loaded_matd3.critic_targets_2
-        )
-    else:
-        # TODO check EvolvableMLP in detail (class attributes and values except for the wrapped networks)
-        #   because this isn't state_dict
-        assert all(
-            isinstance(actor, torch._dynamo.eval_frame.OptimizedModule)
-            for actor in loaded_matd3.actors
-        )
-        assert all(
-            isinstance(actor_target, torch._dynamo.eval_frame.OptimizedModule)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic_1, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_1 in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target_1, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_target_1 in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic_2, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_2 in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target_2, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_target_2 in loaded_matd3.critic_targets_2
+            isinstance(critic_target, EvolvableCNN)
+            for critic_target in loaded_matd3.critic_targets_2
         )
     assert matd3.lr_actor == 0.001
     assert matd3.lr_critic == 0.01
@@ -2279,37 +2392,35 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
 
 
 @pytest.mark.parametrize(
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator, compile_mode",
+    [
+        (None, None),
+        (Accelerator(), None),
+        (None, "default"),
+        (Accelerator(), "default"),
+    ],
+)
+@pytest.mark.parametrize(
     "state_dims, action_dims",
     [
         (
-            [
-                [
-                    6,
-                ]
-            ],
+            [[6]],
             [2],
-        ),
-        (
-            [
-                [
-                    6,
-                ]
-            ],
-            [2],
-        ),
+        )
     ],
 )
-@pytest.mark.parametrize("checkpoint_compile", [True, False])
-@pytest.mark.parametrize("loaded_compile", [True, False])
 def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     tmpdir,
     state_dims,
     action_dims,
     mlp_actor,
     mlp_critic,
-    checkpoint_compile,
-    loaded_compile,
     device,
+    compile_mode,
+    accelerator,
 ):
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
@@ -2335,8 +2446,9 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         discrete_actions=True,
         actor_networks=evo_actors,
         critic_networks=evo_critics,
-        torch_compiler="default" if checkpoint_compile else None,
         device=device,
+        torch_compiler=compile_mode,
+        accelerator=accelerator,
     )
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -2385,59 +2497,52 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
         max_action=[(1,)],
         min_action=[(-1,)],
         discrete_actions=True,
-        torch_compiler="default" if loaded_compile else None,
+        device=device,
+        torch_compiler=compile_mode,
+        accelerator=accelerator,
     )
     loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    # checkpoint compile will overwrite the loaded compile
-
-    if not loaded_compile:
+    if compile_mode is not None and accelerator is None:
+        assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
+        assert all(
+            isinstance(actor_target, OptimizedModule)
+            for actor_target in loaded_matd3.actor_targets
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_1
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in loaded_matd3.critic_targets_1
+        )
+        assert all(
+            isinstance(critic, OptimizedModule) for critic in loaded_matd3.critics_2
+        )
+        assert all(
+            isinstance(critic_target, OptimizedModule)
+            for critic_target in loaded_matd3.critic_targets_2
+        )
+    else:
         assert all(isinstance(actor, MakeEvolvable) for actor in loaded_matd3.actors)
         assert all(
             isinstance(actor_target, MakeEvolvable)
             for actor_target in loaded_matd3.actor_targets
         )
         assert all(
-            isinstance(critic_1, MakeEvolvable) for critic_1 in loaded_matd3.critics_1
+            isinstance(critic, MakeEvolvable) for critic in loaded_matd3.critics_1
         )
         assert all(
-            isinstance(critic_target_1, MakeEvolvable)
-            for critic_target_1 in loaded_matd3.critic_targets_1
+            isinstance(critic_target, MakeEvolvable)
+            for critic_target in loaded_matd3.critic_targets_1
         )
         assert all(
-            isinstance(critic_2, MakeEvolvable) for critic_2 in loaded_matd3.critics_2
+            isinstance(critic, MakeEvolvable) for critic in loaded_matd3.critics_2
         )
         assert all(
-            isinstance(critic_target_2, MakeEvolvable)
-            for critic_target_2 in loaded_matd3.critic_targets_2
-        )
-    else:
-        # TODO check EvolvableMLP in detail (class attributes and values except for the wrapped networks)
-        #   because this isn't state_dict
-        assert all(
-            isinstance(actor, torch._dynamo.eval_frame.OptimizedModule)
-            for actor in loaded_matd3.actors
-        )
-        assert all(
-            isinstance(actor_target, torch._dynamo.eval_frame.OptimizedModule)
-            for actor_target in loaded_matd3.actor_targets
-        )
-        assert all(
-            isinstance(critic_1, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_1 in loaded_matd3.critics_1
-        )
-        assert all(
-            isinstance(critic_target_1, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_target_1 in loaded_matd3.critic_targets_1
-        )
-        assert all(
-            isinstance(critic_2, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_2 in loaded_matd3.critics_2
-        )
-        assert all(
-            isinstance(critic_target_2, torch._dynamo.eval_frame.OptimizedModule)
-            for critic_target_2 in loaded_matd3.critic_targets_2
+            isinstance(critic_target, MakeEvolvable)
+            for critic_target in loaded_matd3.critic_targets_2
         )
     assert matd3.lr_actor == 0.001
     assert matd3.lr_critic == 0.01
@@ -2467,8 +2572,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     assert matd3.policy_freq == 2
 
 
-@pytest.mark.parametrize("compile", [True, False])
-def test_matd3_unwrap_models(compile):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_matd3_unwrap_models(compile_mode):
     state_dims = [(6,), (6,)]
     action_dims = [2, 2]
     accelerator = Accelerator()
@@ -2482,7 +2587,7 @@ def test_matd3_unwrap_models(compile):
         min_action=[[-1], [-1]],
         discrete_actions=True,
         accelerator=accelerator,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     matd3.unwrap_models()
     for (
@@ -2509,8 +2614,8 @@ def test_matd3_unwrap_models(compile):
 
 
 # Returns the input action scaled to the action space defined by self.min_action and self.max_action.
-@pytest.mark.parametrize("compile", [True, False])
-def test_action_scaling(compile):
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+def test_action_scaling(compile_mode):
     action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     max_actions = [(1,), (2,), (1,), (2,), (2,)]
     min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
@@ -2524,7 +2629,7 @@ def test_action_scaling(compile):
         one_hot=False,
         max_action=max_actions,
         min_action=min_actions,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
     )
     matd3.actors[0].mlp_output_activation = "Tanh"
     scaled_action = matd3.scale_to_action_space(action, idx=0)
@@ -2566,16 +2671,19 @@ def test_action_scaling(compile):
 
 
 @pytest.mark.parametrize(
-    "device, accelerator, compile",
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator, compile_mode",
     [
-        ("cpu", None, False),
-        ("cpu", Accelerator(), False),
-        ("cpu", None, True),
-        ("cpu", Accelerator(), True),
+        (None, None),
+        (Accelerator(), None),
+        (None, "default"),
+        (Accelerator(), "default"),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained(device, accelerator, compile, tmpdir):
+def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     # Initialize the matd3 agent
     matd3 = MATD3(
         state_dims=[[4], [4]],
@@ -2586,7 +2694,9 @@ def test_load_from_pretrained(device, accelerator, compile, tmpdir):
         max_action=[[1], [1]],
         min_action=[[-1], [-1]],
         discrete_actions=True,
-        torch_compiler="default" if compile else None,
+        torch_compiler=compile_mode,
+        accelerator=accelerator,
+        device=device,
     )
 
     # Save the checkpoint to a file
@@ -2634,38 +2744,35 @@ def test_load_from_pretrained(device, accelerator, compile, tmpdir):
         matd3.critics_2,
         matd3.critic_targets_2,
     ):
-        if not compile:
+        if compile_mode is not None and accelerator is None:
+            assert isinstance(new_actor, OptimizedModule)
+            assert isinstance(new_actor_target, OptimizedModule)
+            assert isinstance(new_critic_1, OptimizedModule)
+            assert isinstance(new_critic_target_1, OptimizedModule)
+            assert isinstance(new_critic_2, OptimizedModule)
+            assert isinstance(new_critic_target_2, OptimizedModule)
+        else:
             assert isinstance(new_actor, EvolvableMLP)
             assert isinstance(new_actor_target, EvolvableMLP)
             assert isinstance(new_critic_1, EvolvableMLP)
             assert isinstance(new_critic_target_1, EvolvableMLP)
             assert isinstance(new_critic_2, EvolvableMLP)
             assert isinstance(new_critic_target_2, EvolvableMLP)
-        else:
-            assert isinstance(new_actor, torch._dynamo.eval_frame.OptimizedModule)
-            assert isinstance(
-                new_actor_target, torch._dynamo.eval_frame.OptimizedModule
-            )
-            assert isinstance(new_critic_1, torch._dynamo.eval_frame.OptimizedModule)
-            assert isinstance(
-                new_critic_target_1, torch._dynamo.eval_frame.OptimizedModule
-            )
-            assert isinstance(new_critic_2, torch._dynamo.eval_frame.OptimizedModule)
-            assert isinstance(
-                new_critic_target_2, torch._dynamo.eval_frame.OptimizedModule
-            )
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
-        assert str(new_actor_target.to("cpu").state_dict()) == str(
-            actor_target.state_dict()
-        )
-        assert str(new_critic_1.to("cpu").state_dict()) == str(critic_1.state_dict())
-        assert str(new_critic_target_1.to("cpu").state_dict()) == str(
-            critic_target_1.state_dict()
-        )
-        assert str(new_critic_2.to("cpu").state_dict()) == str(critic_2.state_dict())
-        assert str(new_critic_target_2.to("cpu").state_dict()) == str(
-            critic_target_2.state_dict()
-        )
+
+        new_actor_sd = str(new_actor.state_dict())
+        new_actor_target_sd = str(new_actor_target.state_dict())
+        new_critic_1_sd = str(new_critic_1.state_dict())
+        new_critic_target_1_sd = str(new_critic_target_1.state_dict())
+        new_critic_2_sd = str(new_critic_2.state_dict())
+        new_critic_target_2_sd = str(new_critic_target_2.state_dict())
+
+        assert new_actor_sd == str(actor.state_dict())
+        assert new_actor_target_sd == str(actor_target.state_dict())
+        assert new_critic_1_sd == str(critic_1.state_dict())
+        assert new_critic_target_1_sd == str(critic_target_1.state_dict())
+        assert new_critic_2_sd == str(critic_2.state_dict())
+        assert new_critic_target_2_sd == str(critic_target_2.state_dict())
+
     assert new_matd3.batch_size == matd3.batch_size
     assert new_matd3.learn_step == matd3.learn_step
     assert new_matd3.gamma == matd3.gamma
@@ -2678,16 +2785,19 @@ def test_load_from_pretrained(device, accelerator, compile, tmpdir):
 
 
 @pytest.mark.parametrize(
-    "device, accelerator, compile",
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator, compile_mode",
     [
-        ("cpu", None, False),
-        ("cpu", Accelerator(), False),
-        ("cpu", None, True),
-        ("cpu", Accelerator(), True),
+        (None, None),
+        (Accelerator(), None),
+        (None, "default"),
+        (Accelerator(), "default"),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
-def test_load_from_pretrained_cnn(device, accelerator, compile, tmpdir):
+def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     # Initialize the matd3 agent
     matd3 = MATD3(
         state_dims=[[3, 32, 32], [3, 32, 32]],
@@ -2706,6 +2816,9 @@ def test_load_from_pretrained_cnn(device, accelerator, compile, tmpdir):
             "stride_size": [1],
             "normalize": False,
         },
+        torch_compiler=compile_mode,
+        accelerator=accelerator,
+        device=device,
     )
 
     # Save the checkpoint to a file
@@ -2753,24 +2866,35 @@ def test_load_from_pretrained_cnn(device, accelerator, compile, tmpdir):
         matd3.critics_2,
         matd3.critic_targets_2,
     ):
-        assert isinstance(new_actor, EvolvableCNN)
-        assert isinstance(new_actor_target, EvolvableCNN)
-        assert isinstance(new_critic_1, EvolvableCNN)
-        assert isinstance(new_critic_target_1, EvolvableCNN)
-        assert isinstance(new_critic_2, EvolvableCNN)
-        assert isinstance(new_critic_target_2, EvolvableCNN)
-        assert str(new_actor.to("cpu").state_dict()) == str(actor.state_dict())
-        assert str(new_actor_target.to("cpu").state_dict()) == str(
-            actor_target.state_dict()
-        )
-        assert str(new_critic_1.to("cpu").state_dict()) == str(critic_1.state_dict())
-        assert str(new_critic_target_1.to("cpu").state_dict()) == str(
-            critic_target_1.state_dict()
-        )
-        assert str(new_critic_2.to("cpu").state_dict()) == str(critic_2.state_dict())
-        assert str(new_critic_target_2.to("cpu").state_dict()) == str(
-            critic_target_2.state_dict()
-        )
+        if compile_mode is not None and accelerator is None:
+            assert isinstance(new_actor, OptimizedModule)
+            assert isinstance(new_actor_target, OptimizedModule)
+            assert isinstance(new_critic_1, OptimizedModule)
+            assert isinstance(new_critic_target_1, OptimizedModule)
+            assert isinstance(new_critic_2, OptimizedModule)
+            assert isinstance(new_critic_target_2, OptimizedModule)
+        else:
+            assert isinstance(new_actor, EvolvableCNN)
+            assert isinstance(new_actor_target, EvolvableCNN)
+            assert isinstance(new_critic_1, EvolvableCNN)
+            assert isinstance(new_critic_target_1, EvolvableCNN)
+            assert isinstance(new_critic_2, EvolvableCNN)
+            assert isinstance(new_critic_target_2, EvolvableCNN)
+
+        new_actor_sd = str(new_actor.state_dict())
+        new_actor_target_sd = str(new_actor_target.state_dict())
+        new_critic_1_sd = str(new_critic_1.state_dict())
+        new_critic_target_1_sd = str(new_critic_target_1.state_dict())
+        new_critic_2_sd = str(new_critic_2.state_dict())
+        new_critic_target_2_sd = str(new_critic_target_2.state_dict())
+
+        assert new_actor_sd == str(actor.state_dict())
+        assert new_actor_target_sd == str(actor_target.state_dict())
+        assert new_critic_1_sd == str(critic_1.state_dict())
+        assert new_critic_target_1_sd == str(critic_target_1.state_dict())
+        assert new_critic_2_sd == str(critic_2.state_dict())
+        assert new_critic_target_2_sd == str(critic_target_2.state_dict())
+
     assert new_matd3.batch_size == matd3.batch_size
     assert new_matd3.learn_step == matd3.learn_step
     assert new_matd3.gamma == matd3.gamma
@@ -2783,8 +2907,21 @@ def test_load_from_pretrained_cnn(device, accelerator, compile, tmpdir):
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor",
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor, compile_mode",
     [
+        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
+        (
+            [[4, 210, 160], [4, 210, 160]],
+            [2, 2],
+            "cnn",
+            torch.randn(1, 4, 2, 210, 160),
+            torch.randn(1, 4, 2, 210, 160),
+            torch.randn(1, 2),
+            None,
+        ),
         (
             [[4], [4]],
             [2, 2],
@@ -2792,6 +2929,7 @@ def test_load_from_pretrained_cnn(device, accelerator, compile, tmpdir):
             torch.randn(1, 4),
             torch.randn(1, 6),
             None,
+            "default",
         ),
         (
             [[4, 210, 160], [4, 210, 160]],
@@ -2800,6 +2938,7 @@ def test_load_from_pretrained_cnn(device, accelerator, compile, tmpdir):
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 2),
+            "default",
         ),
     ],
 )
@@ -2816,6 +2955,8 @@ def test_load_from_pretrained_networks(
     critic_input_tensor,
     secondary_input_tensor,
     tmpdir,
+    compile_mode,
+    device,
 ):
     one_hot = False
     if arch == "mlp":
@@ -2847,6 +2988,7 @@ def test_load_from_pretrained_networks(
             [critic_network, copy.deepcopy(critic_network)],
             [copy.deepcopy(critic_network), copy.deepcopy(critic_network)],
         ],
+        torch_compiler=compile_mode,
     )
 
     # Save the checkpoint to a file
@@ -2854,7 +2996,7 @@ def test_load_from_pretrained_networks(
     matd3.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_matd3 = MATD3.load(checkpoint_path)
+    new_matd3 = MATD3.load(checkpoint_path, device=device)
 
     # Check if properties and weights are loaded correctly
     assert new_matd3.state_dims == matd3.state_dims
