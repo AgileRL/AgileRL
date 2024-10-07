@@ -3,8 +3,8 @@ import minari
 import pytest
 import torch
 from accelerate import Accelerator
-from minari.data_collector import DataCollector
-from minari.dataset.minari_dataset import MinariDataset
+from minari import MinariDataset
+from minari.data_collector import EpisodeBuffer
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils import minari_utils
@@ -35,35 +35,50 @@ def create_dataset_return_timesteps(dataset_id, env_id):
     if dataset_id in local_datasets:
         minari.delete_dataset(dataset_id)
 
-    env = DataCollector(env)
+    env = gym.make(env_id)
 
     num_episodes = 10
-
-    env.reset(seed=42)
     total_timesteps = 0
-    for _ in range(num_episodes):
+
+    observation, info = env.reset()
+    episode_buffer = EpisodeBuffer(observations=observation, infos=info)
+    for episode in range(num_episodes):
         terminated = False
         truncated = False
         while not terminated and not truncated:
             total_timesteps += 1
-            action = env.action_space.sample()  # Choose random actions
-            _, _, terminated, truncated, _ = env.step(action)
-        env.reset()
+            observation, reward, terminated, truncated, info = env.step(action)
+            episode_buffer = episode_buffer.add_step_data(
+                {
+                    "observation": observation,
+                    "action": action,
+                    "reward": reward,
+                    "termination": terminated,
+                    "truncation": truncated,
+                    "info": info,
+                }
+            )
+
+        buffer.append(episode_buffer)
+
+        observation, _ = env.reset()
+        episode_buffer = EpisodeBuffer(observations=observation)
 
     # Create Minari dataset and store locally
     env.create_dataset(
         dataset_id=dataset_id,
         algorithm_name="random_policy",
-        author="WillDudley",
-        author_email="wdudley@farama.org",
+        author="agile-rl",
+        code_permalink="https://github.com/AgileRL/AgileRL",
+        description="Random policy data collection for tests",
     )
 
     return total_timesteps
 
 
 @pytest.mark.parametrize(
-    "dataset_id, env_id",
-    [("cartpole-test-v0", "CartPole-v1")],
+    "dataset_id,env_id",
+    [("cartpole/test-v0", "CartPole-v1")],
 )
 def test_minari_to_agile_dataset(dataset_id, env_id):
     """Test create agile dataset from minari dataset."""
@@ -76,7 +91,7 @@ def test_minari_to_agile_dataset(dataset_id, env_id):
 
 @pytest.mark.parametrize(
     "dataset_id,env_id",
-    [("cartpole-test-v0", "CartPole-v1")],
+    [("cartpole/test-v0", "CartPole-v1")],
 )
 def test_minari_to_agile_buffer(dataset_id, env_id):
     """Test create agile buffer from minari dataset."""
@@ -97,7 +112,7 @@ def test_minari_to_agile_buffer(dataset_id, env_id):
 
 @pytest.mark.parametrize(
     "dataset_id",
-    [("cartpole-test-v0")],
+    [("cartpole/test-v0")],
 )
 def test_load_minari_dataset_errors(dataset_id):
     # test load a dataset absent in local
