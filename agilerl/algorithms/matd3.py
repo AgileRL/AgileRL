@@ -1,6 +1,7 @@
 import copy
 import inspect
 import warnings
+from collections import OrderedDict
 
 import dill
 import numpy as np
@@ -10,7 +11,11 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import unwrap_optimizer
+from agilerl.utils.algo_utils import (
+    compile_model,
+    remove_compile_prefix,
+    unwrap_optimizer,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
@@ -74,6 +79,8 @@ class MATD3:
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
+    :param torch_compile: the torch compile mode 'default', 'reduce-overhead' or 'max-autotune'
+    :type torch_compile: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -108,6 +115,7 @@ class MATD3:
         critic_networks=None,
         device="cpu",
         accelerator=None,
+        torch_compiler=None,
         wrap=True,
     ):
         assert isinstance(state_dims, list), "State dimensions must be a list."
@@ -159,6 +167,12 @@ class MATD3:
             warnings.warn(
                 "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
             )
+        if torch_compiler:
+            assert torch_compiler in [
+                "default",
+                "reduce-overhead",
+                "max-autotune",
+            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
@@ -180,6 +194,7 @@ class MATD3:
         self.mut = mut
         self.device = device
         self.accelerator = accelerator
+        self.torch_compiler = torch_compiler
         self.index = index
         self.policy_freq = policy_freq
         self.scores = []
@@ -193,11 +208,15 @@ class MATD3:
 
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
+        self.sample_gaussian = [
+            torch.zeros(*(vect_noise_dim, action_dims[idx])).to(device)
+            for idx in range(self.n_agents)
+        ]
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, list)
             else [
-                expl_noise * np.ones((vect_noise_dim, action_dim))
+                expl_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
                 for action_dim in self.action_dims
             ]
         )
@@ -205,15 +224,17 @@ class MATD3:
             mean_noise
             if isinstance(mean_noise, list)
             else [
-                mean_noise * np.ones((vect_noise_dim, action_dim))
+                mean_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
                 for action_dim in self.action_dims
             ]
         )
         self.current_noise = [
-            np.zeros((vect_noise_dim, action_dim)) for action_dim in self.action_dims
+            torch.zeros(*(vect_noise_dim, action_dim)).to(device)
+            for action_dim in self.action_dims
         ]
         self.theta = theta
         self.dt = dt
+        self.sqdt = dt ** (0.5)
 
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
@@ -391,20 +412,27 @@ class MATD3:
             if wrap:
                 self.wrap_models()
         else:
-            self.actors = [actor.to(self.device) for actor in self.actors]
-            self.actor_targets = [
-                actor_target.to(self.device) for actor_target in self.actor_targets
-            ]
-            self.critics_1 = [critic.to(self.device) for critic in self.critics_1]
-            self.critic_targets_1 = [
-                critic_target.to(self.device) for critic_target in self.critic_targets_1
-            ]
-            self.critics_2 = [critic.to(self.device) for critic in self.critics_2]
-            self.critic_targets_2 = [
-                critic_target.to(self.device) for critic_target in self.critic_targets_2
-            ]
+            self.place_models_on_device(self.device)
+            if self.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                self.recompile()
 
         self.criterion = nn.MSELoss()
+
+    def recompile(self):
+        """Recompile all models"""
+        self.actors = [compile_model(a, self.torch_compiler) for a in self.actors]
+        self.actor_targets = [
+            compile_model(at, self.torch_compiler) for at in self.actor_targets
+        ]
+        self.critics_1 = [compile_model(c, self.torch_compiler) for c in self.critics_1]
+        self.critic_targets_1 = [
+            compile_model(ct, self.torch_compiler) for ct in self.critic_targets_1
+        ]
+        self.critics_2 = [compile_model(c, self.torch_compiler) for c in self.critics_2]
+        self.critic_targets_2 = [
+            compile_model(ct, self.torch_compiler) for ct in self.critic_targets_2
+        ]
 
     def scale_to_action_space(self, action, idx):
         """Scales actions to action space defined by self.min_action and self.max_action.
@@ -412,11 +440,33 @@ class MATD3:
         :param action: Action to be scaled
         :type action: numpy.ndarray
         """
-        return np.where(
-            action > 0,
-            action * self.max_action[idx][0],
-            action * -self.min_action[idx][0],
-        )
+        mlp_output_activation = self.actors[idx].mlp_output_activation
+        if mlp_output_activation in ["Tanh"]:
+            pre_scaled_min = -1
+            pre_scaled_max = 1
+        elif mlp_output_activation in ["Sigmoid", "Softmax", "GumbelSoftmax"]:
+            pre_scaled_min = 0
+            pre_scaled_max = 1
+        else:
+            return torch.where(
+                action > 0,
+                action * self.max_action[idx][0],
+                action * -self.min_action[idx][0],
+            )
+
+        if not (
+            isinstance(self.min_action[idx][0], (np.ndarray, torch.Tensor))
+            or isinstance(self.max_action[idx][0], (np.ndarray, torch.Tensor))
+        ):
+            if (
+                pre_scaled_min == self.min_action[idx][0]
+                and pre_scaled_max == self.max_action[idx][0]
+            ):
+                return action
+
+        return self.min_action[idx][0] + (
+            self.max_action[idx][0] - self.min_action[idx][0]
+        ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
 
     def get_action(
         self, states, training=True, agent_mask=None, env_defined_actions=None
@@ -434,6 +484,7 @@ class MATD3:
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
+
         # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
         if agent_mask is None:
             agent_ids = self.agent_ids
@@ -490,62 +541,66 @@ class MATD3:
             ]
 
         action_dict = {}
+
         for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
-                    action_values = actor(state)
+                    actions = actor(state)
             else:
                 with torch.no_grad():
-                    action_values = actor(state)
+                    actions = actor(state)
             actor.train()
-
-            if self.discrete_actions:
-                action = action_values.cpu().data.numpy()
+            if self.discrete_actions and training:
+                actions = torch.clamp(actions + self.action_noise(idx), 0, 1)
+            elif not self.discrete_actions:
+                actions = self.scale_to_action_space(actions, idx)
                 if training:
-                    action = (action + self.action_noise(idx)).clip(0, 1)
-            else:
-                action = self.scale_to_action_space(
-                    action_values.cpu().data.numpy(), idx
-                )
-                if training:
-                    action = (action + self.action_noise(idx)).clip(
-                        self.min_action[idx][0], self.max_action[idx][0]
+                    actions = torch.clamp(
+                        actions + self.action_noise(idx),
+                        self.min_action[idx][0],
+                        self.max_action[idx][0],
                     )
-            action_dict[agent_id] = action
+            action_dict[agent_id] = actions
 
+        discrete_action_dict = None
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
-                if self.one_hot:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-                else:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-        else:
-            discrete_action_dict = None
+                discrete_action_dict[agent] = torch.argmax(action, dim=-1)
 
-        if env_defined_actions is not None:
-            for agent in env_defined_actions.keys():
-                if not agent_mask[agent]:
-                    if self.discrete_actions:
-                        discrete_action_dict.update({agent: env_defined_actions[agent]})
-                        action = env_defined_actions[agent]
-                        action = (
-                            nn.functional.one_hot(
-                                torch.tensor(action).long(),
-                                num_classes=action_dims_dict[agent],
-                            )
-                            .float()
-                            .squeeze()
-                        )
-                        action_dict.update({agent: action})
-                    else:
-                        action_dict.update({agent: env_defined_actions[agent]})
+        if env_defined_actions is None:
+            ret = (
+                {a: t.cpu().data.numpy() for a, t in action_dict.items()},
+                (
+                    discrete_action_dict
+                    if discrete_action_dict is None
+                    else {
+                        a: t.cpu().data.numpy() for a, t in discrete_action_dict.items()
+                    }
+                ),
+            )
+            return ret
 
-        return (
-            action_dict,
-            discrete_action_dict,
-        )
+        for agent in agent_mask.keys():
+            if agent_mask[agent]:
+                continue
+            if self.discrete_actions:
+                action = env_defined_actions[agent]
+                action = (
+                    nn.functional.one_hot(
+                        torch.tensor(action).long(),
+                        num_classes=action_dims_dict[agent],
+                    )
+                    .float()
+                    .squeeze()
+                )
+                action_dict.update({agent: action})
+                discrete_action_dict.update({agent: env_defined_actions[agent]})
+            else:
+                action_dict.update({agent: env_defined_actions[agent]})
+
+        return action_dict, discrete_action_dict
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -562,18 +617,17 @@ class MATD3:
                 + self.theta
                 * (self.mean_noise[idx] - self.current_noise[idx])
                 * self.dt
-                + self.expl_noise[idx]
-                * np.sqrt(self.dt)
-                * np.random.normal(size=(self.vect_noise_dim, self.action_dims[idx]))
+                + self.expl_noise[idx] * self.sqdt * self.sample_gaussian[idx].normal_()
             )
             self.current_noise[idx] = noise
         else:
-            noise = np.random.normal(
+            torch.normal(
                 self.mean_noise[idx],
                 self.expl_noise[idx],
-                size=(self.vect_noise_dim, self.action_dims[idx]),
+                out=self.sample_gaussian[idx],
             )
-        return noise.astype(np.float32)
+            noise = self.sample_gaussian[idx]
+        return noise
 
     def reset_action_noise(self, indices):
         """Reset action noise."""
@@ -588,11 +642,72 @@ class MATD3:
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
         """
+        states, actions, rewards, next_states, dones = experiences
+        if self.one_hot:
+            states = {
+                agent_id: nn.functional.one_hot(state.long(), num_classes=state_dim[0])
+                .float()
+                .squeeze(1)
+                for (agent_id, state), state_dim in zip(states.items(), self.state_dims)
+            }
+            next_states = {
+                agent_id: nn.functional.one_hot(
+                    next_state.long(), num_classes=state_dim[0]
+                )
+                .float()
+                .squeeze(1)
+                for (agent_id, next_state), state_dim in zip(
+                    next_states.items(), self.state_dims
+                )
+            }
+        next_actions = []
+        with torch.no_grad():
+            if self.arch == "mlp":
+                for i, agent_id_label in enumerate(self.agent_ids):
+                    unscaled_actions = self.actor_targets[i](
+                        next_states[agent_id_label]
+                    )
+                    if not self.discrete_actions:
+                        scaled_actions = torch.where(
+                            unscaled_actions > 0,
+                            unscaled_actions * self.max_action[i][0],
+                            unscaled_actions * -self.min_action[i][0],
+                        )
+                        next_actions.append(scaled_actions)
+                    else:
+                        next_actions.append(unscaled_actions)
+                action_values = list(actions.values())
+                state_values = list(states.values())
+                input_combined = torch.cat(state_values + action_values, 1)
+            elif self.arch == "cnn":
+                for i, agent_id_label in enumerate(self.agent_ids):
+                    unscaled_actions = self.actor_targets[i](
+                        next_states[agent_id_label].unsqueeze(2)
+                    )
+                    if not self.discrete_actions:
+                        scaled_actions = torch.where(
+                            unscaled_actions > 0,
+                            unscaled_actions * self.max_action[i][0],
+                            unscaled_actions * -self.min_action[i][0],
+                        )
+                        next_actions.append(scaled_actions)
+                    else:
+                        next_actions.append(unscaled_actions)
+                stacked_states = torch.stack(list(states.values()), dim=2)
+                stacked_actions = torch.cat(list(actions.values()), dim=1)
+                stacked_next_states = torch.stack(list(next_states.values()), dim=2)
+
+        if self.arch == "mlp":
+            next_input_combined = torch.cat(
+                list(next_states.values()) + next_actions, 1
+            )
+        elif self.arch == "cnn":
+            stacked_next_actions = torch.cat(next_actions, dim=1)
+
         loss_dict = {}
         for idx, (
             agent_id,
             actor,
-            actor_target,
             critic_1,
             critic_target_1,
             critic_2,
@@ -604,7 +719,6 @@ class MATD3:
             zip(
                 self.agent_ids,
                 self.actors,
-                self.actor_targets,
                 self.critics_1,
                 self.critic_targets_1,
                 self.critics_2,
@@ -614,204 +728,28 @@ class MATD3:
                 self.critic_2_optimizers,
             )
         ):
-            states, actions, rewards, next_states, dones = experiences
-
-            if self.one_hot:
-                states = {
-                    agent_id: nn.functional.one_hot(
-                        state.long(), num_classes=state_dim[0]
-                    )
-                    .float()
-                    .squeeze(1)
-                    for (agent_id, state), state_dim in zip(
-                        states.items(), self.state_dims
-                    )
-                }
-                next_states = {
-                    agent_id: nn.functional.one_hot(
-                        next_state.long(), num_classes=state_dim[0]
-                    )
-                    .float()
-                    .squeeze(1)
-                    for (agent_id, next_state), state_dim in zip(
-                        next_states.items(), self.state_dims
-                    )
-                }
-
-            if self.arch == "mlp":
-                action_values = list(actions.values())
-                state_values = list(states.values())
-                input_combined = torch.cat(state_values + action_values, 1)
-                if self.accelerator is not None:
-                    with critic_1.no_sync():
-                        q_value_1 = critic_1(input_combined)
-                    with critic_2.no_sync():
-                        q_value_2 = critic_2(input_combined)
-                else:
-                    q_value_1 = critic_1(input_combined)
-                    q_value_2 = critic_2(input_combined)
-                next_actions = []
-                for i, agent_id_label in enumerate(self.agent_ids):
-                    unscaled_actions = self.actor_targets[i](
-                        next_states[agent_id_label]
-                    ).detach_()
-                    if not self.discrete_actions:
-                        scaled_actions = torch.where(
-                            unscaled_actions > 0,
-                            unscaled_actions * self.max_action[i][0],
-                            unscaled_actions * -self.min_action[i][0],
-                        )
-                        next_actions.append(scaled_actions)
-                    else:
-                        next_actions.append(unscaled_actions)
-
-            elif self.arch == "cnn":
-                stacked_states = torch.stack(list(states.values()), dim=2)
-                stacked_actions = torch.cat(list(actions.values()), dim=1)
-                if self.accelerator is not None:
-                    with critic_1.no_sync():
-                        q_value_1 = critic_1(stacked_states, stacked_actions)
-                    with critic_2.no_sync():
-                        q_value_2 = critic_2(stacked_states, stacked_actions)
-                else:
-                    q_value_1 = critic_1(stacked_states, stacked_actions)
-                    q_value_2 = critic_2(stacked_states, stacked_actions)
-                next_actions = []
-                for i, agent_id_label in enumerate(self.agent_ids):
-                    unscaled_actions = self.actor_targets[i](
-                        next_states[agent_id_label].unsqueeze(2)
-                    ).detach_()
-                    if not self.discrete_actions:
-                        scaled_actions = torch.where(
-                            unscaled_actions > 0,
-                            unscaled_actions * self.max_action[i][0],
-                            unscaled_actions * -self.min_action[i][0],
-                        )
-                        next_actions.append(scaled_actions)
-                    else:
-                        next_actions.append(unscaled_actions)
-
-            if self.arch == "mlp":
-                next_input_combined = torch.cat(
-                    list(next_states.values()) + next_actions, 1
-                )
-                if self.accelerator is not None:
-                    with critic_target_1.no_sync():
-                        q_value_next_state_1 = critic_target_1(next_input_combined)
-                    with critic_target_2.no_sync():
-                        q_value_next_state_2 = critic_target_2(next_input_combined)
-                else:
-                    q_value_next_state_1 = critic_target_1(next_input_combined)
-                    q_value_next_state_2 = critic_target_2(next_input_combined)
-            elif self.arch == "cnn":
-                stacked_next_states = torch.stack(list(next_states.values()), dim=2)
-                stacked_next_actions = torch.cat(next_actions, dim=1)
-                if self.accelerator is not None:
-                    with critic_target_1.no_sync():
-                        q_value_next_state_1 = critic_target_1(
-                            stacked_next_states, stacked_next_actions
-                        )
-                    with critic_target_2.no_sync():
-                        q_value_next_state_2 = critic_target_2(
-                            stacked_next_states, stacked_next_actions
-                        )
-                else:
-                    q_value_next_state_1 = critic_target_1(
-                        stacked_next_states, stacked_next_actions
-                    )
-                    q_value_next_state_2 = critic_target_2(
-                        stacked_next_states, stacked_next_actions
-                    )
-            q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
-
-            y_j = (
-                rewards[agent_id]
-                + (1 - dones[agent_id]) * self.gamma * q_value_next_state
+            loss_dict[f"{agent_id}"] = self.learn_individual(
+                idx,
+                agent_id,
+                actor,
+                critic_1,
+                critic_target_1,
+                critic_2,
+                critic_target_2,
+                actor_optimizer,
+                critic_1_optimizer,
+                critic_2_optimizer,
+                input_combined if self.arch == "mlp" else None,
+                stacked_states if self.arch == "cnn" else None,
+                stacked_actions if self.arch == "cnn" else None,
+                next_input_combined if self.arch == "mlp" else None,
+                stacked_next_states if self.arch == "cnn" else None,
+                stacked_next_actions if self.arch == "cnn" else None,
+                states,
+                actions,
+                rewards,
+                dones,
             )
-
-            critic_loss = self.criterion(q_value_1, y_j.detach_()) + self.criterion(
-                q_value_2, y_j.detach_()
-            )
-
-            # critic loss backprop
-            critic_1_optimizer.zero_grad()
-            critic_2_optimizer.zero_grad()
-            if self.accelerator is not None:
-                self.accelerator.backward(critic_loss)
-            else:
-                critic_loss.backward()
-            critic_1_optimizer.step()
-            critic_2_optimizer.step()
-
-            actor_loss = None
-
-            # update actor and targets every policy_freq learn steps
-            self.learn_counter[agent_id] += 1
-            if self.learn_counter[agent_id] % self.policy_freq == 0:
-                if self.arch == "mlp":
-                    if self.accelerator is not None:
-                        with actor.no_sync():
-                            action = actor(states[agent_id])
-                    else:
-                        action = actor(states[agent_id])
-                    if not self.discrete_actions:
-                        action = torch.where(
-                            action > 0,
-                            action * self.max_action[idx][0],
-                            action * -self.min_action[idx][0],
-                        )
-                    detached_actions = copy.deepcopy(actions)
-                    detached_actions[agent_id] = action
-                    input_combined = torch.cat(
-                        list(states.values()) + list(detached_actions.values()), 1
-                    )
-                    if self.accelerator is not None:
-                        with critic_1.no_sync():
-                            actor_loss = -critic_1(input_combined).mean()
-                    else:
-                        actor_loss = -critic_1(input_combined).mean()
-
-                elif self.arch == "cnn":
-                    if self.accelerator is not None:
-                        with actor.no_sync():
-                            action = actor(states[agent_id].unsqueeze(2))
-                    else:
-                        action = actor(states[agent_id].unsqueeze(2))
-                    if not self.discrete_actions:
-                        action = torch.where(
-                            action > 0,
-                            action * self.max_action[idx][0],
-                            action * -self.min_action[idx][0],
-                        )
-                    detached_actions = copy.deepcopy(actions)
-                    detached_actions[agent_id] = action
-                    stacked_detached_actions = torch.cat(
-                        list(detached_actions.values()), dim=1
-                    )
-                    if self.accelerator is not None:
-                        with critic_1.no_sync():
-                            actor_loss = -critic_1(
-                                stacked_states, stacked_detached_actions
-                            ).mean()
-                    else:
-                        actor_loss = -critic_1(
-                            stacked_states, stacked_detached_actions
-                        ).mean()
-
-                # actor loss backprop
-                actor_optimizer.zero_grad()
-                if self.accelerator is not None:
-                    self.accelerator.backward(actor_loss)
-                else:
-                    actor_loss.backward()
-                actor_optimizer.step()
-
-            if hasattr(actor_loss, "item"):
-                actor_loss = actor_loss.item()
-            else:
-                actor_loss = None
-            critic_loss = critic_loss.item()
-            loss_dict[f"{agent_id}"] = actor_loss, critic_loss
 
         if self.learn_counter[agent_id] % self.policy_freq == 0:
             for (
@@ -834,6 +772,162 @@ class MATD3:
                 self.soft_update(critic_2, critic_target_2)
 
         return loss_dict
+
+    def learn_individual(
+        self,
+        idx,
+        agent_id,
+        actor,
+        critic_1,
+        critic_target_1,
+        critic_2,
+        critic_target_2,
+        actor_optimizer,
+        critic_1_optimizer,
+        critic_2_optimizer,
+        input_combined,
+        stacked_states,
+        stacked_actions,
+        next_input_combined,
+        stacked_next_states,
+        stacked_next_actions,
+        states,
+        actions,
+        rewards,
+        dones,
+    ):
+        """Inner call to each agent for the learning/algo training
+        steps, up until the soft updates. Applies all forward/backward props
+        """
+        if self.arch == "mlp":
+            if self.accelerator is not None:
+                with critic_1.no_sync():
+                    q_value_1 = critic_1(input_combined)
+                with critic_2.no_sync():
+                    q_value_2 = critic_2(input_combined)
+            else:
+                q_value_1 = critic_1(input_combined)
+                q_value_2 = critic_2(input_combined)
+        elif self.arch == "cnn":
+            if self.accelerator is not None:
+                with critic_1.no_sync():
+                    q_value_1 = critic_1(stacked_states, stacked_actions)
+                with critic_2.no_sync():
+                    q_value_2 = critic_2(stacked_states, stacked_actions)
+            else:
+                q_value_1 = critic_1(stacked_states, stacked_actions)
+                q_value_2 = critic_2(stacked_states, stacked_actions)
+
+        with torch.no_grad():
+            if self.arch == "mlp":
+                if self.accelerator is not None:
+                    with critic_target_1.no_sync():
+                        q_value_next_state_1 = critic_target_1(next_input_combined)
+                    with critic_target_2.no_sync():
+                        q_value_next_state_2 = critic_target_2(next_input_combined)
+                else:
+                    q_value_next_state_1 = critic_target_1(next_input_combined)
+                    q_value_next_state_2 = critic_target_2(next_input_combined)
+            elif self.arch == "cnn":
+                if self.accelerator is not None:
+                    with critic_target_1.no_sync():
+                        q_value_next_state_1 = critic_target_1(
+                            stacked_next_states, stacked_next_actions
+                        )
+                    with critic_target_2.no_sync():
+                        q_value_next_state_2 = critic_target_2(
+                            stacked_next_states, stacked_next_actions
+                        )
+                else:
+                    q_value_next_state_1 = critic_target_1(
+                        stacked_next_states, stacked_next_actions
+                    )
+                    q_value_next_state_2 = critic_target_2(
+                        stacked_next_states, stacked_next_actions
+                    )
+
+        q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
+
+        y_j = (
+            rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
+        )
+
+        critic_loss = self.criterion(q_value_1, y_j) + self.criterion(q_value_2, y_j)
+
+        # critic loss backprop
+        critic_1_optimizer.zero_grad()
+        critic_2_optimizer.zero_grad()
+        if self.accelerator is not None:
+            self.accelerator.backward(critic_loss)
+        else:
+            critic_loss.backward()
+        critic_1_optimizer.step()
+        critic_2_optimizer.step()
+
+        actor_loss = None
+
+        # update actor and targets every policy_freq learn steps
+        self.learn_counter[agent_id] += 1
+        if self.learn_counter[agent_id] % self.policy_freq == 0:
+            if self.arch == "mlp":
+                if self.accelerator is not None:
+                    with actor.no_sync():
+                        action = actor(states[agent_id])
+                else:
+                    action = actor(states[agent_id])
+                if not self.discrete_actions:
+                    action = torch.where(
+                        action > 0,
+                        action * self.max_action[idx][0],
+                        action * -self.min_action[idx][0],
+                    )
+                detached_actions = copy.deepcopy(actions)
+                detached_actions[agent_id] = action
+                input_combined = torch.cat(
+                    list(states.values()) + list(detached_actions.values()), 1
+                )
+                if self.accelerator is not None:
+                    with critic_1.no_sync():
+                        actor_loss = -critic_1(input_combined).mean()
+                else:
+                    actor_loss = -critic_1(input_combined).mean()
+
+            elif self.arch == "cnn":
+                if self.accelerator is not None:
+                    with actor.no_sync():
+                        action = actor(states[agent_id].unsqueeze(2))
+                else:
+                    action = actor(states[agent_id].unsqueeze(2))
+                if not self.discrete_actions:
+                    action = torch.where(
+                        action > 0,
+                        action * self.max_action[idx][0],
+                        action * -self.min_action[idx][0],
+                    )
+                detached_actions = copy.deepcopy(actions)
+                detached_actions[agent_id] = action
+                stacked_detached_actions = torch.cat(
+                    list(detached_actions.values()), dim=1
+                )
+                if self.accelerator is not None:
+                    with critic_1.no_sync():
+                        actor_loss = -critic_1(
+                            stacked_states, stacked_detached_actions
+                        ).mean()
+                else:
+                    actor_loss = -critic_1(
+                        stacked_states, stacked_detached_actions
+                    ).mean()
+
+            # actor loss backprop
+            actor_optimizer.zero_grad()
+            if self.accelerator is not None:
+                self.accelerator.backward(actor_loss)
+            else:
+                actor_loss.backward()
+            actor_optimizer.step()
+
+        return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
 
     def soft_update(self, net, target):
         """Soft updates target network."""
@@ -927,30 +1021,38 @@ class MATD3:
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
-        actors = [actor.clone() for actor in self.actors]
-        actor_targets = [actor_target.clone() for actor_target in self.actor_targets]
-        critics_1 = [critic.clone() for critic in self.critics_1]
-        critic_targets_1 = [
+
+        # Copy models to clone
+        clone.actors = [actor.clone() for actor in self.actors]
+        clone.actor_targets = [
+            actor_target.clone() for actor_target in self.actor_targets
+        ]
+        clone.critics_1 = [critic.clone() for critic in self.critics_1]
+        clone.critic_targets_1 = [
             critic_target.clone() for critic_target in self.critic_targets_1
         ]
-        critics_2 = [critic.clone() for critic in self.critics_2]
-        critic_targets_2 = [
+        clone.critics_2 = [critic.clone() for critic in self.critics_2]
+        clone.critic_targets_2 = [
             critic_target.clone() for critic_target in self.critic_targets_2
         ]
-        actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in actors
+        clone.actor_optimizers = [
+            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in clone.actors
         ]
-        critic_1_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_1
+        clone.critic_1_optimizers = [
+            optim.Adam(critic.parameters(), lr=clone.lr_critic)
+            for critic in clone.critics_1
         ]
-        critic_2_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic) for critic in critics_2
+        clone.critic_2_optimizers = [
+            optim.Adam(critic.parameters(), lr=clone.lr_critic)
+            for critic in clone.critics_2
         ]
 
+        # Load optimizer state dicts to clone
         for (
             clone_actor_optimizer,
             actor_optimizer,
@@ -959,88 +1061,27 @@ class MATD3:
             clone_critic_2_optimizer,
             critic_2_optimizer,
         ) in zip(
-            actor_optimizers,
+            clone.actor_optimizers,
             self.actor_optimizers,
-            critic_1_optimizers,
+            clone.critic_1_optimizers,
             self.critic_1_optimizers,
-            critic_2_optimizers,
+            clone.critic_2_optimizers,
             self.critic_2_optimizers,
         ):
             clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
             clone_critic_1_optimizer.load_state_dict(critic_1_optimizer.state_dict())
             clone_critic_2_optimizer.load_state_dict(critic_2_optimizer.state_dict())
 
-        if self.accelerator is not None:
+        # Compile and accelerator wrap
+        if clone.accelerator is not None:
             if wrap:
-                clone.actors = [self.accelerator.prepare(actor) for actor in actors]
-                clone.actor_targets = [
-                    self.accelerator.prepare(actor_target)
-                    for actor_target in actor_targets
-                ]
-                clone.critics_1 = [
-                    self.accelerator.prepare(critic) for critic in critics_1
-                ]
-                clone.critic_targets_1 = [
-                    self.accelerator.prepare(critic_target)
-                    for critic_target in critic_targets_1
-                ]
-                clone.critics_2 = [
-                    self.accelerator.prepare(critic) for critic in critics_2
-                ]
-                clone.critic_targets_2 = [
-                    self.accelerator.prepare(critic_target)
-                    for critic_target in critic_targets_2
-                ]
-                clone.actor_optimizers = [
-                    self.accelerator.prepare(actor_optimizer)
-                    for actor_optimizer in actor_optimizers
-                ]
-                clone.critic_1_optimizers = [
-                    self.accelerator.prepare(critic_optimizer)
-                    for critic_optimizer in critic_1_optimizers
-                ]
-                clone.critic_2_optimizers = [
-                    self.accelerator.prepare(critic_optimizer)
-                    for critic_optimizer in critic_2_optimizers
-                ]
-            else:
-                (
-                    clone.actors,
-                    clone.actor_targets,
-                    clone.critics_1,
-                    clone.critic_targets_1,
-                    clone.critics_2,
-                    clone.critic_targets_2,
-                    clone.actor_optimizers,
-                    clone.critic_1_optimizers,
-                    clone.critic_2_optimizers,
-                ) = (
-                    actors,
-                    actor_targets,
-                    critics_1,
-                    critic_targets_1,
-                    critics_2,
-                    critic_targets_2,
-                    actor_optimizers,
-                    critic_1_optimizers,
-                    critic_2_optimizers,
-                )
+                clone.wrap_models()
+
+        # move to device
         else:
-            clone.actors = [actor.to(self.device) for actor in actors]
-            clone.actor_targets = [
-                actor_target.to(self.device) for actor_target in actor_targets
-            ]
-            clone.critics_1 = [critic.to(self.device) for critic in critics_1]
-            clone.critic_targets_1 = [
-                critic_target.to(self.device) for critic_target in critic_targets_1
-            ]
-            clone.critics_2 = [critic.to(self.device) for critic in critics_2]
-            clone.critic_targets_2 = [
-                critic_target.to(self.device) for critic_target in critic_targets_2
-            ]
-            clone.actor_optimizers = actor_optimizers
-            clone.critic_1_optimizers = critic_1_optimizers
-            clone.critic_2_optimizers = critic_2_optimizers
+            clone.place_models_on_device(clone.device)
+            if clone.torch_compiler:
+                clone.recompile()
 
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
@@ -1080,12 +1121,12 @@ class MATD3:
         guarded_attributes = [
             "actors",
             "critics_1",
+            "critics_2",
             "actor_targets",
             "critic_targets_1",
+            "critic_targets_2",
             "actor_optimizers",
             "critic_1_optimizers",
-            "critics_2",
-            "critic_targets_2",
             "critic_2_optimizers",
         ]
 
@@ -1106,6 +1147,20 @@ class MATD3:
             attributes = {k: v for k, v in attributes if k not in guarded_attributes}
 
         return attributes
+
+    def place_models_on_device(self, device):
+        self.actors = [actor.to(device) for actor in self.actors]
+        self.actor_targets = [
+            actor_target.to(device) for actor_target in self.actor_targets
+        ]
+        self.critics_1 = [critic.to(device) for critic in self.critics_1]
+        self.critic_targets_1 = [
+            critic_target.to(device) for critic_target in self.critic_targets_1
+        ]
+        self.critics_2 = [critic.to(device) for critic in self.critics_2]
+        self.critic_targets_2 = [
+            critic_target.to(device) for critic_target in self.critic_targets_2
+        ]
 
     def wrap_models(self):
         if self.accelerator is not None:
@@ -1181,6 +1236,21 @@ class MATD3:
                 )
             ]
 
+    def remove_compile_prefix(self, state_dict):
+        """Removes _orig_mod prefix on state dict created by torch compile
+
+        :param state_dict: model state dict
+        :type state_dict: dict
+        :return: state dict with prefix removed
+        :rtype: dict
+        """
+        return OrderedDict(
+            [
+                (k.split(".", 1)[1], v) if k.startswith("_orig_mod") else (k, v)
+                for k, v in state_dict.items()
+            ]
+        )
+
     def save_checkpoint(self, path):
         """Saves a checkpoint of agent properties and network weights to path.
 
@@ -1191,50 +1261,54 @@ class MATD3:
 
         network_info = {
             "actors_init_dict": [actor.init_dict for actor in self.actors],
-            "actors_state_dict": [actor.state_dict() for actor in self.actors],
+            "actors_state_dict": [
+                remove_compile_prefix(actor.state_dict()) for actor in self.actors
+            ],
             "actor_targets_init_dict": [
                 actor_target.init_dict for actor_target in self.actor_targets
             ],
             "actor_targets_state_dict": [
-                actor_target.state_dict() for actor_target in self.actor_targets
+                remove_compile_prefix(actor_target.state_dict())
+                for actor_target in self.actor_targets
+            ],
+            "critics_1_init_dict": [critic.init_dict for critic in self.critics_1],
+            "critics_1_state_dict": [
+                remove_compile_prefix(critic.state_dict()) for critic in self.critics_1
+            ],
+            "critic_targets_1_init_dict": [
+                critic_target.init_dict for critic_target in self.critic_targets_1
+            ],
+            "critic_targets_1_state_dict": [
+                remove_compile_prefix(critic_target.state_dict())
+                for critic_target in self.critic_targets_1
+            ],
+            "critics_2_init_dict": [critic.init_dict for critic in self.critics_2],
+            "critics_2_state_dict": [
+                remove_compile_prefix(critic.state_dict()) for critic in self.critics_2
+            ],
+            "critic_targets_2_init_dict": [
+                critic_target.init_dict for critic_target in self.critic_targets_2
+            ],
+            "critic_targets_2_state_dict": [
+                remove_compile_prefix(critic_target.state_dict())
+                for critic_target in self.critic_targets_2
             ],
             "actor_optimizers_state_dict": [
                 actor_optimizer.state_dict()
                 for actor_optimizer in self.actor_optimizers
             ],
-            "critics_1_init_dict": [critic_1.init_dict for critic_1 in self.critics_1],
-            "critics_1_state_dict": [
-                critic_1.state_dict() for critic_1 in self.critics_1
-            ],
-            "critic_targets_1_init_dict": [
-                critic_target_1.init_dict for critic_target_1 in self.critic_targets_1
-            ],
-            "critic_targets_1_state_dict": [
-                critic_target_1.state_dict()
-                for critic_target_1 in self.critic_targets_1
-            ],
             "critic_1_optimizers_state_dict": [
-                critic_1_optimizer.state_dict()
-                for critic_1_optimizer in self.critic_1_optimizers
-            ],
-            "critics_2_init_dict": [critic_2.init_dict for critic_2 in self.critics_2],
-            "critics_2_state_dict": [
-                critic_2.state_dict() for critic_2 in self.critics_2
-            ],
-            "critic_targets_2_init_dict": [
-                critic_target_2.init_dict for critic_target_2 in self.critic_targets_2
-            ],
-            "critic_targets_2_state_dict": [
-                critic_target_2.state_dict()
-                for critic_target_2 in self.critic_targets_2
+                critic_optimizer.state_dict()
+                for critic_optimizer in self.critic_1_optimizers
             ],
             "critic_2_optimizers_state_dict": [
-                critic_2_optimizer.state_dict()
-                for critic_2_optimizer in self.critic_2_optimizers
+                critic_optimizer.state_dict()
+                for critic_optimizer in self.critic_2_optimizers
             ],
         }
 
         attribute_dict.update(network_info)
+        attribute_dict.pop("accelerator", None)
 
         torch.save(
             attribute_dict,
@@ -1393,6 +1467,14 @@ class MATD3:
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
 
+        if self.accelerator is not None:
+            self.wrap_models()
+        else:
+            self.place_models_on_device(self.device)
+            if self.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                self.recompile()
+
     @classmethod
     def load(cls, path, device="cpu", accelerator=None):
         """Creates agent with properties and network weights loaded from path.
@@ -1510,6 +1592,18 @@ class MATD3:
                 ],
             ]
             agent = cls(**class_init_dict)
+            agent.actors = [
+                MakeEvolvable(**actors_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
+            agent.critics_1 = [
+                MakeEvolvable(**critics_1_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
+            agent.critics_2 = [
+                MakeEvolvable(**critics_2_init_dict[idx])
+                for idx, _ in enumerate(checkpoint["agent_ids"])
+            ]
             agent.actor_targets = [
                 MakeEvolvable(**actor_targets_init_dict[idx])
                 for idx, _ in enumerate(checkpoint["agent_ids"])
@@ -1596,10 +1690,15 @@ class MATD3:
         agent.critic_1_optimizers = critic_1_optimizer_list
         agent.critic_2_optimizers = critic_2_optimizer_list
 
-        if accelerator is not None:
-            agent.wrap_models()
-
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])
+
+        if accelerator is not None:
+            agent.wrap_models()
+        else:
+            agent.place_models_on_device(agent.device)
+            if agent.torch_compiler:
+                torch.set_float32_matmul_precision("high")
+                agent.recompile()
 
         return agent

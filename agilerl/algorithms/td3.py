@@ -780,7 +780,8 @@ class TD3:
             "critic_2",
             "actor_target",
             "critic_target_1",
-            "critic_target_2" "actor_optimizer",
+            "critic_target_2",
+            "actor_optimizer",
             "critic_1_optimizer",
             "critic_2_optimizer",
         ]

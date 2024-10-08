@@ -342,6 +342,28 @@ def test_returns_expected_action_mask():
     assert action == 1
 
 
+def test_returns_expected_action_mask_vectorized():
+    accelerator = Accelerator()
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    dqn = DQN(state_dim, action_dim, one_hot, accelerator=accelerator)
+    state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
+
+    action_mask = np.array([[0, 1], [1, 0]])
+
+    epsilon = 0
+    action = dqn.get_action(state, epsilon, action_mask)
+
+    assert np.array_equal(action, [1, 0])
+
+    epsilon = 1
+    action = dqn.get_action(state, epsilon, action_mask)
+
+    assert np.array_equal(action, [1, 0])
+
+
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
     state_dim = [4]
@@ -940,16 +962,23 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
 
 @pytest.mark.parametrize(
-    "device, accelerator",
+    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
+)
+@pytest.mark.parametrize(
+    "accelerator",
     [
-        ("cpu", None),
-        ("cpu", Accelerator()),
+        None,
+        Accelerator(),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the DQN agent
-    dqn = DQN(state_dim=[4], action_dim=2, one_hot=False)
+    dqn = DQN(
+        state_dim=[4],
+        action_dim=2,
+        one_hot=False,
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
