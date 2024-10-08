@@ -428,7 +428,7 @@ class PPO:
             pre_scaled_max - pre_scaled_min
         )
 
-    def get_action(self, state, action=None, grad=False):
+    def get_action(self, state, action=None, grad=False, action_mask=None):
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -437,6 +437,8 @@ class PPO:
         :type action: torch.Tensor(), optional
         :param grad: Calculate gradients on actions, defaults to False
         :type grad: bool, optional
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
         """
         state = self.prepare_state(state)
 
@@ -454,6 +456,9 @@ class PPO:
             state_values = self.critic(state).squeeze(-1)
 
         if self.discrete_actions:
+            if action_mask is not None:
+                action_mask = torch.from_numpy(action_mask)
+                action_values *= action_mask
             dist = Categorical(action_values)
         else:
             cov_mat = torch.diag(self.action_var).unsqueeze(dim=0)

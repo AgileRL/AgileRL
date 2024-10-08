@@ -239,23 +239,22 @@ class DQN:
                 inv_mask = 1 - action_mask
 
                 available_actions = np.ma.array(
-                    np.arange(0, self.action_dim), mask=inv_mask
+                    np.tile(np.arange(0, self.action_dim), (len(state), 1)),
+                    mask=inv_mask,
                 ).compressed()
-                action = np.random.choice(available_actions, size=state.size()[0])
+                action = np.random.choice(available_actions, size=len(state))
 
         else:
             self.actor.eval()
             with torch.no_grad():
-                action_values = self.actor(state)
+                action_values = self.actor(state).cpu().data.numpy()
             self.actor.train()
 
             if action_mask is None:
-                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
+                action = np.argmax(action_values, axis=-1)
             else:
                 inv_mask = 1 - action_mask
-                masked_action_values = np.ma.array(
-                    action_values.cpu().data.numpy(), mask=inv_mask
-                )
+                masked_action_values = np.ma.array(action_values, mask=inv_mask)
                 action = np.argmax(masked_action_values, axis=-1)
 
         return action

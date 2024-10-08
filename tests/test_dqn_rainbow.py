@@ -347,6 +347,22 @@ def test_returns_expected_action_one_hot(accelerator):
     assert action == 1
 
 
+def test_returns_expected_action_mask_vectorized():
+    accelerator = Accelerator()
+    state_dim = [4]
+    action_dim = 2
+    one_hot = False
+
+    dqn = RainbowDQN(state_dim, action_dim, one_hot, accelerator=accelerator)
+    state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
+
+    action_mask = np.array([[0, 1], [1, 0]])
+
+    action = dqn.get_action(state, action_mask)
+
+    assert np.array_equal(action, [1, 0])
+
+
 @pytest.mark.parametrize(
     "accelerator, net_config, state_dim",
     [
