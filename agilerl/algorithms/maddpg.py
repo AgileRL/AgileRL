@@ -553,7 +553,7 @@ class MADDPG:
                         self.min_action[idx][0],
                         self.max_action[idx][0],
                     )
-            action_dict[agent_id] = actions
+            action_dict[agent_id] = actions.cpu().numpy()
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():

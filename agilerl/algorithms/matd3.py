@@ -602,7 +602,7 @@ class MATD3:
                         self.min_action[idx][0],
                         self.max_action[idx][0],
                     )
-            action_dict[agent_id] = actions
+            action_dict[agent_id] = actions.cpu().numpy()
 
         discrete_action_dict = None
         if self.discrete_actions:
