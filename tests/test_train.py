@@ -46,7 +46,7 @@ class DummyEnv:
             self.n_envs = 1
 
     def reset(self):
-        return np.random.rand(*self.state_size), "info_string"
+        return np.random.rand(*self.state_size), {}
 
     def step(self, action):
         return (
@@ -54,7 +54,7 @@ class DummyEnv:
             np.random.randint(0, 5, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
-            "info_string",
+            {},
         )
 
 
@@ -958,7 +958,7 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
         mock_env.num_envs = 1
 
     def reset():
-        return np.random.rand(*mock_env.state_size), "info_string"
+        return np.random.rand(*mock_env.state_size), {}
 
     mock_env.reset.side_effect = reset
 
@@ -968,7 +968,7 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
             np.random.randint(0, 5, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
-            "info_string",
+            {},
         )
 
     mock_env.step.side_effect = step
