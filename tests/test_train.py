@@ -48,7 +48,7 @@ class DummyEnv:
             self.n_envs = 1
 
     def reset(self):
-        return np.random.rand(*self.state_size), "info_string"
+        return np.random.rand(*self.state_size), {}
 
     def step(self, action):
         return (
@@ -56,7 +56,7 @@ class DummyEnv:
             np.random.randint(0, 5, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
-            "info_string",
+            {},
         )
 
 
@@ -92,7 +92,7 @@ class DummyAgentOffPolicy:
         self.mut = "mutation"
         self.index = 1
 
-    def get_action(self, *args):
+    def get_action(self, *args, **kwargs):
         return np.random.rand(self.action_size)
 
     def learn(self, experiences, n_step=False, per=False):
@@ -134,7 +134,7 @@ class DummyAgentOnPolicy(DummyAgentOffPolicy):
     def learn(self, *args, **kwargs):
         return random.random()
 
-    def get_action(self, *args):
+    def get_action(self, *args, **kwargs):
         return tuple(np.random.randn(self.action_size) for _ in range(4))
 
     def test(self, env, swap_channels, max_steps, loop):
@@ -572,8 +572,8 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = lambda state: np.random.randint(
-        env.action_size, size=(1,)
+    mock_agent.get_action.side_effect = (
+        lambda state, *args, **kwargs: np.random.randint(env.action_size, size=(1,))
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     if algo in [RainbowDQN]:
@@ -614,7 +614,7 @@ def mocked_agent_on_policy(env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = lambda state: tuple(
+    mock_agent.get_action.side_effect = lambda state, *args, **kwargs: tuple(
         np.random.randn(env.action_size) for _ in range(4)
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
@@ -643,8 +643,8 @@ def mocked_bandit(bandit_env, algo):
     mock_agent.fitness = []
     mock_agent.mut = "mutation"
     mock_agent.index = 1
-    mock_agent.get_action.side_effect = lambda state: np.random.randint(
-        bandit_env.action_size
+    mock_agent.get_action.side_effect = (
+        lambda state, *args, **kwargs: np.random.randint(bandit_env.action_size)
     )
     mock_agent.test.side_effect = lambda *args, **kwargs: np.random.uniform(0, 400)
     mock_agent.learn.side_effect = lambda experiences: random.random()
@@ -986,7 +986,7 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
         mock_env.num_envs = 1
 
     def reset():
-        return np.random.rand(*mock_env.state_size), "info_string"
+        return np.random.rand(*mock_env.state_size), {}
 
     mock_env.reset.side_effect = reset
 
@@ -996,7 +996,7 @@ def mocked_env(state_size, action_size, vect=True, num_envs=2):
             np.random.randint(0, 5, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
             np.random.randint(0, 2, mock_env.num_envs),
-            "info_string",
+            {},
         )
 
     mock_env.step.side_effect = step

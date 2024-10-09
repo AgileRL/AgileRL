@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.utils.algo_utils import remove_compile_prefix
 
 
 class Mutations:
@@ -262,7 +263,6 @@ class Mutations:
         mutation_choice = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
-
         # If not mutating elite member of population (first in list from tournament selection),
         # set this as the first mutation choice
         if not self.mutate_elite:
@@ -272,43 +272,98 @@ class Mutations:
         for mutation, individual in zip(mutation_choice, population):
             # Call mutation function for each individual
             individual = mutation(individual)
-
+            if hasattr(individual, "torch_compiler") and individual.torch_compiler:
+                individual.recompile()
             if self.multi_agent:
                 offspring_actors = getattr(individual, self.algo["actor"]["eval"])
-
                 # Reinitialise target network with frozen weights due to potential
                 # mutation in architecture of value network
                 ind_targets = [
-                    type(offspring_actor)(**offspring_actor.init_dict)
+                    (
+                        type(offspring_actor._orig_mod)(**offspring_actor.init_dict)
+                        if isinstance(
+                            offspring_actor, torch._dynamo.eval_frame.OptimizedModule
+                        )
+                        else type(offspring_actor)(**offspring_actor.init_dict)
+                    )
                     for offspring_actor in offspring_actors
                 ]
-
                 for ind_target, offspring_actor in zip(ind_targets, offspring_actors):
-                    ind_target.load_state_dict(offspring_actor.state_dict())
+                    if (
+                        hasattr(individual, "torch_compiler")
+                        and individual.torch_compiler
+                    ):
+                        ind_target.load_state_dict(
+                            remove_compile_prefix(offspring_actor.state_dict())
+                        )
+                    else:
+                        ind_target.load_state_dict(offspring_actor.state_dict())
 
                 if self.accelerator is None:
                     ind_targets = [
                         ind_target.to(self.device) for ind_target in ind_targets
                     ]
+                if hasattr(individual, "torch_compiler") and individual.torch_compiler:
+                    ind_targets = [
+                        (
+                            torch.compile(ind_target, mode=individual.torch_compiler)
+                            if not isinstance(
+                                ind_target, torch._dynamo.eval_frame.OptimizedModule
+                            )
+                            else ind_target
+                        )
+                        for ind_target in ind_targets
+                    ]
                 setattr(individual, self.algo["actor"]["target"], ind_targets)
-
                 # If algorithm has critics, reinitialize their respective target networks
                 # too
                 for critics_list in self.algo["critics"]:
                     offspring_critics = getattr(individual, critics_list["eval"])
                     ind_targets = [
-                        type(offspring_critic)(**offspring_critic.init_dict)
+                        (
+                            type(offspring_critic._orig_mod)(
+                                **offspring_critic.init_dict
+                            )
+                            if isinstance(
+                                offspring_critic,
+                                torch._dynamo.eval_frame.OptimizedModule,
+                            )
+                            else type(offspring_critic)(**offspring_critic.init_dict)
+                        )
                         for offspring_critic in offspring_critics
                     ]
-
                     for ind_target, offspring_critic in zip(
                         ind_targets, offspring_critics
                     ):
-                        ind_target.load_state_dict(offspring_critic.state_dict())
+                        if (
+                            hasattr(individual, "torch_compiler")
+                            and individual.torch_compiler
+                        ):
+                            ind_target.load_state_dict(
+                                remove_compile_prefix(offspring_critic.state_dict())
+                            )
+                        else:
+                            ind_target.load_state_dict(offspring_critic.state_dict())
 
                     if self.accelerator is None:
                         ind_targets = [
                             ind_target.to(self.device) for ind_target in ind_targets
+                        ]
+                    if (
+                        hasattr(individual, "torch_compiler")
+                        and individual.torch_compiler
+                    ):
+                        ind_targets = [
+                            (
+                                torch.compile(
+                                    ind_target, mode=individual.torch_compiler
+                                )
+                                if not isinstance(
+                                    ind_target, torch._dynamo.eval_frame.OptimizedModule
+                                )
+                                else ind_target
+                            )
+                            for ind_target in ind_targets
                         ]
                     setattr(individual, critics_list["target"], ind_targets)
             else:
@@ -342,9 +397,7 @@ class Mutations:
                             setattr(
                                 individual, critic["target"], ind_target.to(self.device)
                             )
-
             mutated_population.append(individual)
-
         return mutated_population
 
     def reinit_opt(self, individual):

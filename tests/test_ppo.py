@@ -39,7 +39,7 @@ class DummyEnv:
             self.n_envs = 1
 
     def reset(self):
-        return np.random.rand(*self.state_size), "info_string"
+        return np.random.rand(*self.state_size), {}
 
     def step(self, action):
         return (
@@ -47,7 +47,7 @@ class DummyEnv:
             np.random.randint(0, 5, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
-            "info_string",
+            {},
         )
 
 
@@ -554,6 +554,23 @@ def test_returns_expected_action(
         assert len(action) == action_dim
         for act in action:
             assert isinstance(act, np.float32)
+
+
+@pytest.mark.parametrize(
+    "state_dim, action_dim, one_hot, discrete_actions, accelerator",
+    [
+        ([4], 2, False, True, None),
+    ],
+)
+def test_returns_expected_action_mask_vectorized(build_ppo):
+
+    state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
+
+    action_mask = np.array([[0, 1], [1, 0]])
+
+    action, _, _, _ = build_ppo.get_action(state, action_mask=action_mask)
+
+    assert np.array_equal(action, [1, 0])
 
 
 # learns from experiences and updates network parameters

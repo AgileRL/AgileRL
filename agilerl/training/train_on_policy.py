@@ -211,7 +211,7 @@ def train_on_policy(
             accelerator.wait_for_everyone()
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
+            state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
@@ -233,13 +233,16 @@ def train_on_policy(
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
                     # Get next action from agent
-                    action, log_prob, _, value = agent.get_action(state)
+                    action_mask = info.get("action_mask", None)
+                    action, log_prob, _, value = agent.get_action(
+                        state, action_mask=action_mask
+                    )
 
                     if not is_vectorised:
                         action = action[0]
                         log_prob = log_prob[0]
                         value = value[0]
-                    next_state, reward, done, trunc, _ = env.step(
+                    next_state, reward, done, trunc, info = env.step(
                         action
                     )  # Act in environment
 

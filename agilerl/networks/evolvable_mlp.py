@@ -361,7 +361,6 @@ class EvolvableMLP(nn.Module):
             "rainbow": self.rainbow,
             "noise_std": self.noise_std,
             "device": self.device,
-            "accelerator": self.accelerator,
         }
         return init_dict
 

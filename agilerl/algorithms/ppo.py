@@ -428,7 +428,7 @@ class PPO:
             pre_scaled_max - pre_scaled_min
         )
 
-    def get_action(self, state, action=None, grad=False):
+    def get_action(self, state, action=None, grad=False, action_mask=None):
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -437,6 +437,8 @@ class PPO:
         :type action: torch.Tensor(), optional
         :param grad: Calculate gradients on actions, defaults to False
         :type grad: bool, optional
+        :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
+        :type action_mask: numpy.ndarray, optional
         """
         state = self.prepare_state(state)
 
@@ -454,6 +456,9 @@ class PPO:
             state_values = self.critic(state).squeeze(-1)
 
         if self.discrete_actions:
+            if action_mask is not None:
+                action_mask = torch.from_numpy(action_mask)
+                action_values *= action_mask
             dist = Categorical(action_values)
         else:
             cov_mat = torch.diag(self.action_var).unsqueeze(dim=0)
@@ -652,7 +657,7 @@ class PPO:
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, _ = env.reset()
+                state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
@@ -660,8 +665,9 @@ class PPO:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action, _, _, _ = self.get_action(state)
-                    state, reward, done, trunc, _ = env.step(action)
+                    action_mask = info.get("action_mask", None)
+                    action, _, _, _ = self.get_action(state, action_mask=action_mask)
+                    state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

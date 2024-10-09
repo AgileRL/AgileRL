@@ -1,13 +1,14 @@
 import os
+import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
@@ -128,6 +129,8 @@ def train_multi_agent(
                       be saved unless 'checkpoint' is defined."
         )
 
+    start_time = time.time()
+
     if wb:
         if not hasattr(wandb, "api"):
             if wandb_api_key is not None:
@@ -166,7 +169,6 @@ def train_multi_agent(
                 # track hyperparameters and run metadata
                 config=config_dict,
             )
-
     if accelerator is not None:
         accel_temp_models_path = f"models/{env_name}"
         if accelerator.is_main_process:
@@ -325,6 +327,7 @@ def train_multi_agent(
                         loss = agent.learn(experiences)
                         for agent_id in agent_ids:
                             losses[agent_id].append(loss[agent_id])
+
                 # Handle num_envs > learn step; learn multiple times per step in env
                 elif (
                     len(memory) >= agent.batch_size and memory.counter > learning_delay
@@ -371,7 +374,6 @@ def train_multi_agent(
 
             agent.steps[-1] += steps
             pop_episode_scores.append(completed_episode_scores)
-
             if len(losses[agent_ids[0]]) > 0:
                 if all([losses[a_id] for a_id in agent_ids]):
                     for agent_id in agent_ids:
@@ -498,7 +500,6 @@ def train_multi_agent(
                         f"indi_fitness_agent_{idx}": agent.fitness[-1],
                     }
                 )
-
         # Update step counter
         for agent in pop:
             agent.steps.append(agent.steps[-1])
@@ -580,6 +581,25 @@ def train_multi_agent(
             muts = [agent.mut for agent in pop]
             pbar.update(0)
 
+            print()
+            print(
+                "DateTime, now, H:m:s-u",
+                datetime.now().hour,
+                ":",
+                datetime.now().minute,
+                ":",
+                datetime.now().second,
+                "-",
+                datetime.now().microsecond,
+            )
+            total_time = time.time() - start_time
+            print(
+                "Steps",
+                total_steps / total_time,
+                "per sec,",
+                total_steps / (total_time / 60),
+                "per min.",
+            )
             print(
                 f"""
                 --- Global Steps {total_steps} ---

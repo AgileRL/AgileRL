@@ -613,7 +613,6 @@ class EvolvableCNN(nn.Module):
             "noise_std": self.noise_std,
             "output_vanish": self.output_vanish,
             "device": self.device,
-            "accelerator": self.accelerator,
         }
         return init_dict
 
