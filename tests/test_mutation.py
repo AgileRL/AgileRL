@@ -630,7 +630,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "Rainbow DQN",
@@ -654,7 +654,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "DDPG",
@@ -678,7 +678,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "TD3",
@@ -702,7 +702,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "PPO",
@@ -726,7 +726,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "CQN",
@@ -750,7 +750,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "ILQL",
@@ -774,7 +774,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "NeuralUCB",
@@ -798,7 +798,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "NeuralTS",
@@ -822,7 +822,7 @@ def test_mutation_applies_random_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
     ],
 )
@@ -884,7 +884,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "Rainbow DQN",
@@ -908,7 +908,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "DDPG",
@@ -932,7 +932,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "TD3",
@@ -956,7 +956,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "PPO",
@@ -980,7 +980,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "CQN",
@@ -1004,7 +1004,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "ILQL",
@@ -1028,7 +1028,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "NeuralUCB",
@@ -1052,7 +1052,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
         (
             "NeuralTS",
@@ -1076,7 +1076,7 @@ def test_mutation_applies_no_mutations(
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
+            Accelerator(),
         ),
     ],
 )
@@ -1097,8 +1097,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         1,
         ["batch_size", "lr", "learn_step"],
         0.1,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]

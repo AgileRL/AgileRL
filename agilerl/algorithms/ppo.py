@@ -657,7 +657,7 @@ class PPO:
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, _ = env.reset()
+                state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
@@ -665,8 +665,9 @@ class PPO:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action, _, _, _ = self.get_action(state)
-                    state, reward, done, trunc, _ = env.step(action)
+                    action_mask = info.get("action_mask", None)
+                    action, _, _, _ = self.get_action(state, action_mask=action_mask)
+                    state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

@@ -253,7 +253,7 @@ def train_off_policy(
             accelerator.wait_for_everyone()
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
-            state = env.reset()[0]  # Reset environment at start of episode
+            state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores, losses = [], []
             steps = 0
@@ -270,9 +270,13 @@ def train_off_policy(
 
                 # Get next action from agent
                 if algo in ["DQN"]:
-                    action = agent.get_action(state, epsilon)
+                    action_mask = info.get("action_mask", None)
+                    action = agent.get_action(state, epsilon, action_mask=action_mask)
                     # Decay epsilon for exploration
                     epsilon = max(eps_end, epsilon * eps_decay)
+                if algo in ["Rainbow DQN"]:
+                    action_mask = info.get("action_mask", None)
+                    action = agent.get_action(state, action_mask=action_mask)
                 else:
                     action = agent.get_action(state)
 
@@ -286,7 +290,7 @@ def train_off_policy(
                     action = action[0]
 
                 # Act in environment
-                next_state, reward, done, trunc, _ = env.step(action)
+                next_state, reward, done, trunc, info = env.step(action)
                 scores += np.array(reward)
 
                 if not is_vectorised:

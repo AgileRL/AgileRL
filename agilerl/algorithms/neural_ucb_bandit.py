@@ -398,8 +398,7 @@ class NeuralUCB:
                 if isinstance(attr, torch.Tensor) or isinstance(
                     clone_attr, torch.Tensor
                 ):
-                    if not torch.equal(attr, clone_attr):
-                        setattr(clone, attribute, torch.clone(getattr(self, attribute)))
+                    setattr(clone, attribute, torch.clone(getattr(self, attribute)))
                 elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
                     if not np.array_equal(attr, clone_attr):
                         setattr(

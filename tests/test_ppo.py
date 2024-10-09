@@ -39,7 +39,7 @@ class DummyEnv:
             self.n_envs = 1
 
     def reset(self):
-        return np.random.rand(*self.state_size), "info_string"
+        return np.random.rand(*self.state_size), {}
 
     def step(self, action):
         return (
@@ -47,7 +47,7 @@ class DummyEnv:
             np.random.randint(0, 5, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
             np.random.randint(0, 2, self.n_envs),
-            "info_string",
+            {},
         )
 
 
