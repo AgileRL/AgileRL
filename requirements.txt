@@ -12,7 +12,7 @@ minari[all]==0.5.0
 numpy==1.26.4
 omegaconf==2.3.0
 pandas==2.0.3
-pettingzoo[all]==1.23.1
+pettingzoo[atari]==1.23.1
 pre-commit==3.4.0
 pygame==2.6.0
 redis==4.4.4
