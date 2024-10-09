@@ -4,6 +4,7 @@ Authors: Michael (https://github.com/mikepratt1), Nick (https://github.com/nicku
 """
 
 import os
+from copy import deepcopy
 
 import numpy as np
 import supersuit as ss
@@ -12,12 +13,7 @@ from pettingzoo.atari import space_invaders_v2
 from tqdm import trange
 
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
-from agilerl.wrappers.pettingzoo_wrappers import (
-    DefaultPettingZooVectorizationParallelWrapper,
-)
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,7 +30,7 @@ if __name__ == "__main__":
 
     # Define the initial hyperparameters
     INIT_HP = {
-        "POPULATION_SIZE": 2,
+        "POPULATION_SIZE": 1,
         "ALGO": "MADDPG",  # Algorithm
         # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
         "CHANNELS_LAST": True,
@@ -52,17 +48,18 @@ if __name__ == "__main__":
         "TAU": 0.01,  # For soft update of target parameters
     }
 
-    num_envs = 8
+    num_envs = 1
     # Define the space invaders environment as a parallel environment
     env = space_invaders_v2.parallel_env()
-    if INIT_HP["CHANNELS_LAST"]:
-        # Environment processing for image based observations
-        env = ss.frame_skip_v0(env, 4)
-        env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
-        env = ss.color_reduction_v0(env, mode="B")
-        env = ss.resize_v1(env, x_size=84, y_size=84)
-        env = ss.frame_stack_v1(env, 4)
-    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+
+    # Environment processing for image based observations
+    env = ss.frame_skip_v0(env, 4)
+    env = ss.clip_reward_v0(env, lower_bound=-1, upper_bound=1)
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84)
+    env = ss.frame_stack_v1(env, 4)
+
+    # env = AsyncPettingZooVecEnv([lambda : env for _ in range(num_envs)])
     env.reset()
 
     # Configure the multi-agent algo input arguments
@@ -115,46 +112,11 @@ if __name__ == "__main__":
         device=device,
     )
 
-    # Instantiate a tournament selection object (used for HPO)
-    tournament = TournamentSelection(
-        tournament_size=2,  # Tournament selection size
-        elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POPULATION_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
-    )
-
-    # Instantiate a mutations object (used for HPO)
-    mutations = Mutations(
-        algo=INIT_HP["ALGO"],
-        no_mutation=0.2,  # Probability of no mutation
-        architecture=0.2,  # Probability of architecture mutation
-        new_layer_prob=0.2,  # Probability of new layer mutation
-        parameters=0.2,  # Probability of parameter mutation
-        activation=0,  # Probability of activation function mutation
-        rl_hp=0.2,  # Probability of RL hyperparameter mutation
-        rl_hp_selection=[
-            "lr",
-            "learn_step",
-            "batch_size",
-        ],  # RL hyperparams selected for mutation
-        mutation_sd=0.1,  # Mutation strength
-        # Define search space for each hyperparameter
-        min_lr=0.00001,
-        max_lr=0.01,
-        min_learn_step=1,
-        max_learn_step=120,
-        min_batch_size=8,
-        max_batch_size=64,
-        agent_ids=INIT_HP["AGENT_IDS"],  # Agent IDs
-        arch=NET_CONFIG["arch"],  # MLP or CNN
-        rand_seed=1,
-        device=device,
-    )
-
     # Define training loop parameters
+    agent_ids = deepcopy(env.agents)
     max_steps = 4500  # Max steps (default: 2000000)
     learning_delay = 500  # Steps before starting learning
-    evo_steps = 10000  # Evolution frequency
+    training_steps = 10000  # Frequency at which we evaluate training score
     eval_steps = None  # Evaluation steps per episode - go until done
     eval_loop = 1  # Number of evaluation episodes
     elite = pop[0]  # Assign a placeholder "elite" agent
@@ -168,7 +130,7 @@ if __name__ == "__main__":
         pop_episode_scores = []
         for agent in pop:  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
-            scores = np.zeros(num_envs)
+            scores = np.zeros((num_envs, len(agent_ids)))
             completed_episode_scores = []
             steps = 0
             if INIT_HP["CHANNELS_LAST"]:
@@ -177,20 +139,11 @@ if __name__ == "__main__":
                     for agent_id, s in state.items()
                 }
 
-            for idx_step in range(evo_steps // num_envs):
-                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
-                env_defined_actions = (
-                    info["env_defined_actions"]
-                    if "env_defined_actions" in info.keys()
-                    else None
-                )
+            for idx_step in range(training_steps // num_envs):
 
                 # Get next action from agent
                 cont_actions, discrete_action = agent.get_action(
-                    states=state,
-                    training=True,
-                    agent_mask=agent_mask,
-                    env_defined_actions=env_defined_actions,
+                    states=state, training=True, infos=info
                 )
                 if agent.discrete_actions:
                     action = discrete_action
@@ -198,7 +151,11 @@ if __name__ == "__main__":
                     action = cont_actions
 
                 # Act in environment
+                action = {
+                    agent: env.action_space(agent).sample() for agent in env.agents
+                }
                 next_state, reward, termination, truncation, info = env.step(action)
+                print(reward)
 
                 scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
                 total_steps += num_envs
@@ -258,7 +215,7 @@ if __name__ == "__main__":
                         reset_noise_indices.append(idx)
                 agent.reset_action_noise(reset_noise_indices)
 
-            pbar.update(evo_steps // len(pop))
+            pbar.update(training_steps // len(pop))
 
             agent.steps[-1] += steps
             pop_episode_scores.append(completed_episode_scores)
@@ -291,8 +248,8 @@ if __name__ == "__main__":
         )
 
         # Tournament selection and population mutation
-        elite, pop = tournament.select(pop)
-        pop = mutations.mutation(pop)
+        # elite, pop = tournament.select(pop)
+        # pop = mutations.mutation(pop)
 
         # Update step counter
         for agent in pop:

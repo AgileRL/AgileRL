@@ -429,9 +429,14 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         array = np.zeros(
                             (self.num_envs, *value.shape), dtype=value.dtype
                         )
+                    elif value is None:
+                        array = np.full(
+                            self.num_envs, fill_value=np.nan, dtype=np.float32
+                        )
                     else:
                         # For unknown objects, we use a Numpy object array
                         array = np.full(self.num_envs, fill_value=None, dtype=object)
+
                 # Otherwise, just use the array that already exists
                 else:
                     array = vector_infos[key]

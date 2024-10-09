@@ -34,7 +34,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
     print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
-    env_kwargs = dict(max_cycles=25, continuous_actions=True)
+    env_kwargs = dict(max_cycles=25, continuous_actions=False)
     env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
 
     if INIT_HP["CHANNELS_LAST"]:
@@ -44,8 +44,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.color_reduction_v0(env, mode="B")
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
-
-    # env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
 
     env.reset()
     # Configure the multi-agent algo input arguments
@@ -172,6 +170,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         INIT_HP["ALGO"],
         agent_pop,
         memory=memory,
+        sum_scores=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         net_config=NET_CONFIG,

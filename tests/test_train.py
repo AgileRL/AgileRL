@@ -235,7 +235,7 @@ class DummyMultiEnv(ParallelEnv):
 class DummyMultiAgent(DummyAgentOffPolicy):
     def __init__(self, batch_size, env, *args):
         super().__init__(batch_size, env, *args)
-        self.agents = ["agent_0", "agent_1"]
+        self.agent_ids = ["agent_0", "agent_1"]
         self.lr_actor = 0.001
         self.lr_critic = 0.01
         self.discrete_actions = False
@@ -244,7 +244,7 @@ class DummyMultiAgent(DummyAgentOffPolicy):
     def get_action(self, *args, **kwargs):
         output = {
             agent: np.random.randn(self.num_envs, self.action_size)
-            for agent in self.agents
+            for agent in self.agent_ids
         }, None
         return output
 
@@ -254,8 +254,11 @@ class DummyMultiAgent(DummyAgentOffPolicy):
             "agent_1": (random.random(), random.random()),
         }
 
-    def test(self, env, swap_channels, max_steps, loop):
-        return super().test(env, swap_channels, max_steps, loop)
+    def test(self, env, swap_channels, max_steps, loop, sum_scores):
+        rand_int = np.random.uniform(0, 400)
+        rand_int = (rand_int / 2, rand_int / 2) if not sum_scores else rand_int
+        self.fitness.append(rand_int)
+        return rand_int
 
     def get_env_defined_actions(self, info, agents):
         env_defined_actions = {
@@ -659,7 +662,7 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.learn_step = 1
     mock_agent.batch_size = 5
     mock_agent.lr = 0.1
-    mock_agent.agents = ["agent_0", "agent_1"]
+    mock_agent.agent_ids = ["agent_0", "agent_1"]
     mock_agent.state_size = multi_env.state_size
     mock_agent.action_size = multi_env.action_size
     mock_agent.scores = []
@@ -672,7 +675,7 @@ def mocked_multi_agent(multi_env, algo):
     def get_action(*args, **kwargs):
         return {
             agent: np.random.randn(mock_agent.action_size)
-            for agent in mock_agent.agents
+            for agent in mock_agent.agent_ids
         }, None
 
     mock_agent.get_action.side_effect = get_action

@@ -18,7 +18,6 @@ def check_delete_dataset(dataset_id: str):
     """
     # check dataset name is present in local database
     local_datasets = minari.list_local_datasets()
-
     assert dataset_id in local_datasets
 
     # delete dataset and check that it's no longer present in local database
@@ -28,7 +27,7 @@ def check_delete_dataset(dataset_id: str):
 
 
 def create_dataset_return_timesteps(dataset_id, env_id):
-    env = gym.make(env_id)
+    buffer = []
 
     # delete the test dataset if it already exists
     local_datasets = minari.list_local_datasets()
@@ -45,7 +44,9 @@ def create_dataset_return_timesteps(dataset_id, env_id):
     for episode in range(num_episodes):
         terminated = False
         truncated = False
+
         while not terminated and not truncated:
+            action = env.action_space.sample()  # User-defined policy function
             total_timesteps += 1
             observation, reward, terminated, truncated, info = env.step(action)
             episode_buffer = episode_buffer.add_step_data(
@@ -65,8 +66,10 @@ def create_dataset_return_timesteps(dataset_id, env_id):
         episode_buffer = EpisodeBuffer(observations=observation)
 
     # Create Minari dataset and store locally
-    env.create_dataset(
+    minari.create_dataset_from_buffers(
         dataset_id=dataset_id,
+        env=env,
+        buffer=buffer,
         algorithm_name="random_policy",
         author="agile-rl",
         code_permalink="https://github.com/AgileRL/AgileRL",

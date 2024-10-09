@@ -369,24 +369,32 @@ class MADDPG:
             action * -self.min_action[idx][0],
         )
 
-    def extract_action_masks(self, states):
+    def extract_action_masks(self, infos):
         """Extract observations and action masks into two separate dictionaries
 
         :param states: Environment observations
         :type states: Dict[str, Dict[]]
         """
-        observations = {
-            agent: state.get("observation") if isinstance(state, dict) else state
-            for agent, state in states.items()
-        }
         action_masks = {
-            agent: state.get("action_mask", None) if isinstance(state, dict) else None
-            for agent, state in states.items()
+            agent: info.get("action_mask", None) if isinstance(info, dict) else None
+            for agent, info in infos.items()
+            if agent in self.agent_ids
         }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
 
-        return observations, action_masks
+        return action_masks
 
-    def extract_agent_masks(self, env_defined_actions):
+    def extract_agent_masks(self, infos):
+        if all(not info for agent, info in infos.items() if agent in self.agent_ids):
+            return None, None
+        env_defined_actions = {
+            agent: (
+                info.get("env_defined_actions", None)
+                if isinstance(info, dict)
+                else None
+            )
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }
         agent_masks = None
         if env_defined_actions is not None:
             agent_masks = {}
@@ -419,7 +427,29 @@ class MADDPG:
 
         return env_defined_actions, agent_masks
 
-    def get_action(self, states, training=True, env_defined_actions=None):
+    def process_infos(self, infos):
+        if infos is None:
+            infos = {agent: {} for agent in self.agent_ids}
+        env_defined_actions, agent_masks = self.extract_agent_masks(infos)
+        action_masks = self.extract_action_masks(infos)
+        return action_masks, env_defined_actions, agent_masks
+
+    def key_in_nested_dict(self, nested_dict, target):
+        """Helper function to determine if key is in nested dictionary
+
+        :param nested_dict: Nested dictionary
+        :type nested_dict: Dict[str, Dict[str, ...]]
+        :param target: Target string
+        :type target: str
+        """
+        for k, v in nested_dict.items():
+            if k == target:
+                return True
+            if isinstance(v, dict):
+                return self.key_in_nested_dict(v, target)
+        return False
+
+    def get_action(self, states, training=True, infos=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -428,18 +458,13 @@ class MADDPG:
         :type state: Dict[str, numpy.Array]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
-        :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
-        :type env_defined_actions: Dict[str, np.array]
+        :param infos: Information dictionary returned by env.step(actions)
+        :type infos: Dict[str, Dict[str, ...]]
         """
-        # Process action masks if present
-        states, action_masks = self.extract_action_masks(
-            states=states
-        )  # If no action masking action mask dict = {agent : None ...}
-
-        # Agent masking
-        env_defined_actions, agent_masks = self.extract_agent_masks(
-            env_defined_actions=env_defined_actions
-        )
+        assert not self.key_in_nested_dict(
+            states, "action_mask"
+        ), "AgileRL requires action masks to be defined in the information dictionary."
+        action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
@@ -774,7 +799,7 @@ class MADDPG:
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(self, env, swap_channels=False, max_steps=None, loop=3, sum_scores=True):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -785,6 +810,8 @@ class MADDPG:
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
+        :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
+        :type sum_scores: book, optional
         """
         with torch.no_grad():
             rewards = []
@@ -797,8 +824,16 @@ class MADDPG:
 
             for i in range(loop):
                 state, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
+                scores = (
+                    np.zeros((num_envs, 1))
+                    if sum_scores
+                    else np.zeros((num_envs, len(self.agent_ids)))
+                )
+                completed_episode_scores = (
+                    np.zeros((num_envs, 1))
+                    if sum_scores
+                    else np.zeros((num_envs, len(self.agent_ids)))
+                )
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
@@ -814,13 +849,10 @@ class MADDPG:
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                                 for agent_id, s in state.items()
                             }
-                    env_defined_actions = self.get_env_defined_actions(
-                        info, self.agent_ids
-                    )
                     cont_actions, discrete_action = self.get_action(
                         state,
                         training=False,
-                        env_defined_actions=env_defined_actions,
+                        infos=info,
                     )
                     if self.discrete_actions:
                         action = discrete_action
@@ -829,9 +861,20 @@ class MADDPG:
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
                     state, reward, term, trunc, info = env.step(action)
-                    scores += np.sum(
-                        np.array(list(reward.values())).transpose(), axis=-1
+                    score_increment = (
+                        (
+                            np.sum(
+                                np.array(list(reward.values())).transpose(), axis=-1
+                            )[:, np.newaxis]
+                            if is_vectorised
+                            else np.sum(
+                                np.array(list(reward.values())).transpose(), axis=-1
+                            )
+                        )
+                        if sum_scores
+                        else np.array(list(reward.values())).transpose()
                     )
+                    scores += score_increment
                     dones = {
                         agent: term[agent] | trunc[agent] for agent in self.agent_ids
                     }
@@ -845,10 +888,11 @@ class MADDPG:
                             np.all(agent_dones)
                             or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:
-                            completed_episode_scores[idx] = scores[idx].copy()
+                            completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
-                rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+                rewards.append(np.mean(completed_episode_scores, axis=0))
+        mean_fit = np.mean(rewards, axis=0)
+        mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)
         return mean_fit
 
@@ -1353,15 +1397,3 @@ class MADDPG:
             setattr(agent, attribute, checkpoint[attribute])
 
         return agent
-
-    def get_env_defined_actions(self, info, agents):
-        try:
-            env_defined_actions = {
-                agent: info[agent].get("env_defined_action", None) for agent in agents
-            }
-
-            if all(eda is None for eda in env_defined_actions.values()):
-                return
-            return env_defined_actions
-        except Exception:
-            return

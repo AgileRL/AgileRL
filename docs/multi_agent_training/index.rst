@@ -27,7 +27,8 @@ Population Creation
 
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
-are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below.
+are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below. At present, evolutionary
+hyper-parameter tuning is only compatible with cooperative multi-agent environments.
 
 .. code-block:: python
 

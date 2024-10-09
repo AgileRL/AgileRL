@@ -300,25 +300,6 @@ def test_env_order_preserved():
     env.close()
 
 
-def test_observations_updated():
-    max_cycles = 25
-    env_fns = [
-        lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
-        for _ in range(2)
-    ]
-    env = AsyncPettingZooVecEnv(env_fns)
-    obs, info = env.reset(seed=123)
-    for _ in range(max_cycles):
-        actions = {
-            agent: [env.single_action_space(agent).sample() for _ in range(2)]
-            for agent in env.agents
-        }
-        next_obs, rew, term, trunc, info = env.step(actions)
-
-        print(list(next_obs.values()))
-    assert False
-
-
 def raise_error_reset(self, seed=None, options=None):
     if seed == 1:
         raise ValueError("Error in reset")
@@ -709,13 +690,13 @@ def test_add_info_unknown_objects():
     info_list = [
         {"agent_0": "string"},
         {"agent_1": "string"},
+        {"agent_2": None},
     ]
     env_fns = [lambda: GenericTestEnv() for _ in range(3)]
     env = AsyncPettingZooVecEnv(env_fns)
     vector_infos = {"agent_0": {}}
     for i, info in enumerate(info_list):
         vector_infos = env._add_info(vector_infos, info, i)
-
     env.close()
 
 
