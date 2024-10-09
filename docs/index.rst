@@ -79,6 +79,7 @@ Contents
    api/train
    api/utils/index
    api/wrappers/index
+   apr/vector/index
 
 .. toctree::
    :caption: Development

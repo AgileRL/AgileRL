@@ -1,5 +1,5 @@
 Vector
-=========
+======
 
 .. toctree::
    :maxdepth: 1

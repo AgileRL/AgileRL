@@ -10,7 +10,7 @@ import torch.optim as optim
 
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.utils.algo_utils import unwrap_optimizer
+from agilerl.utils.algo_utils import key_in_nested_dict, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
@@ -434,21 +434,6 @@ class MADDPG:
         action_masks = self.extract_action_masks(infos)
         return action_masks, env_defined_actions, agent_masks
 
-    def key_in_nested_dict(self, nested_dict, target):
-        """Helper function to determine if key is in nested dictionary
-
-        :param nested_dict: Nested dictionary
-        :type nested_dict: Dict[str, Dict[str, ...]]
-        :param target: Target string
-        :type target: str
-        """
-        for k, v in nested_dict.items():
-            if k == target:
-                return True
-            if isinstance(v, dict):
-                return self.key_in_nested_dict(v, target)
-        return False
-
     def get_action(self, states, training=True, infos=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
@@ -461,7 +446,7 @@ class MADDPG:
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
         """
-        assert not self.key_in_nested_dict(
+        assert not key_in_nested_dict(
             states, "action_mask"
         ), "AgileRL requires action masks to be defined in the information dictionary."
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
