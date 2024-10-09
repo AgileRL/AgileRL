@@ -3,9 +3,8 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-from tqdm import trange
-
 import wandb
+from tqdm import trange
 
 
 def train_on_policy(
