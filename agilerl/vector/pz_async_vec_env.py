@@ -50,8 +50,16 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.shared_memory = True
         self.num_envs = len(env_fns)
         dummy_env = env_fns[0]()
-        self.metadata = dummy_env.metadata
-        self.render_mode = dummy_env.render_mode
+        self.metadata = (
+            dummy_env.metadata
+            if hasattr(dummy_env, "metadata")
+            else dummy_env.unwrapped.metadata
+        )
+        self.render_mode = (
+            dummy_env.render_mode
+            if hasattr(dummy_env, "render_mode")
+            else dummy_env.unwrapped.render_mode
+        )
         self.possible_agents = dummy_env.possible_agents
         self.copy = copy
 
@@ -472,8 +480,16 @@ class PettingZooExperienceSpec:
 
     def detect_space_info(self, dummy_env):
 
-        self.metadata = dummy_env.metadata
-        self.render_mode = dummy_env.render_mode
+        self.metadata = (
+            dummy_env.metadata
+            if hasattr(dummy_env, "metadata")
+            else dummy_env.unwrapped.metadata
+        )
+        self.render_mode = (
+            dummy_env.render_mode
+            if hasattr(dummy_env, "render_mode")
+            else dummy_env.unwrapped.render_mode
+        )
         self.possible_agents = dummy_env.possible_agents
 
         try:
