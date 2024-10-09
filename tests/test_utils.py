@@ -84,7 +84,7 @@ def test_returns_asyncvectorenv_object_multiagent():
     num_envs = 3
     env = simple_speaker_listener_v4.parallel_env
     env_kwargs = {"continuous_actions": False}
-    env = make_multi_agent_vect_envs(env, env_kwargs, num_envs=num_envs)
+    env = make_multi_agent_vect_envs(env, num_envs=num_envs, **env_kwargs)
     env.close()
     assert env.num_envs == num_envs
 
