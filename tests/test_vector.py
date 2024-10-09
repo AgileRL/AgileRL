@@ -19,8 +19,8 @@ from gymnasium.error import (
 )
 from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from gymnasium.vector.utils import CloudpickleWrapper
-from pettingzoo.atari import space_invaders_v2
 from pettingzoo.mpe import simple_speaker_listener_v4
+from pettingzoo.sisl import pursuit_v4
 
 from agilerl.vector.pz_async_vec_env import (
     AsyncPettingZooVecEnv,
@@ -979,19 +979,19 @@ def test_observations_vector():
 
 def test_observations_image():
     num_envs = 1
-    env_fn = [lambda: space_invaders_v2.parallel_env() for _ in range(num_envs)][0]
+    env_fn = [lambda: pursuit_v4.parallel_env() for _ in range(num_envs)][0]
     exp_handler = PettingZooExperienceSpec(env_fn(), num_envs)
     shared_memory = SharedMemory(num_envs, exp_handler, mp)
     observations = Observations(
         shared_memory.shared_memory, exp_spec=exp_handler, num_envs=num_envs
     )
-    assert observations.get_agent_obs("first_0", flat=True).shape == (
+    assert observations.get_agent_obs("pursuer_0", flat=True).shape == (
         1,
-        exp_handler.observation_widths["first_0"],
+        exp_handler.observation_widths["pursuer_0"],
     )
     assert (
-        observations.get_agent_obs("first_0", flat=False).shape
-        == (1,) + exp_handler.observation_shapes["first_0"]
+        observations.get_agent_obs("pursuer_0", flat=False).shape
+        == (1,) + exp_handler.observation_shapes["pursuer_0"]
     )
 
 

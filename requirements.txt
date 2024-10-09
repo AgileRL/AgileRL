@@ -16,6 +16,7 @@ pandas==2.0.3
 pettingzoo==1.23.1
 pre-commit==3.4.0
 pygame==2.6.0
+pymunk>=6.2.0
 redis==4.4.4
 scipy==1.12.0
 SuperSuit==3.9.0
