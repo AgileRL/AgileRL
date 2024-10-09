@@ -224,6 +224,7 @@ class CQN:
             state = state.to(self.accelerator.device)
 
         if self.one_hot:
+
             state = (
                 nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
                 .float()
@@ -238,27 +239,29 @@ class CQN:
         # epsilon-greedy
         if random.random() < epsilon:
             if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=state.size()[0])
+                action = np.random.randint(0, self.action_dim, size=len(state))
             else:
-                inv_mask = 1 - action_mask
+                action = np.argmax(
+                    (
+                        np.random.uniform(0, 1, (len(state), self.action_dim))
+                        * action_mask
+                    ),
+                    axis=1,
+                )
 
-                available_actions = np.ma.array(
-                    np.arange(0, self.action_dim), mask=inv_mask
-                ).compressed()
-                action = np.random.choice(available_actions, size=state.size()[0])
         else:
             self.actor.eval()
             with torch.no_grad():
-                action_values = self.actor(state)
+                action_values = self.actor(state).cpu().data.numpy()
             self.actor.train()
+
             if action_mask is None:
-                action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
+                action = np.argmax(action_values, axis=-1)
             else:
                 inv_mask = 1 - action_mask
-                masked_action_values = np.ma.array(
-                    action_values.cpu().data.numpy(), mask=inv_mask
-                )
+                masked_action_values = np.ma.array(action_values, mask=inv_mask)
                 action = np.argmax(masked_action_values, axis=-1)
+
         return action
 
     def learn(self, experiences):
@@ -342,7 +345,7 @@ class CQN:
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, _ = env.reset()
+                state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
@@ -350,8 +353,9 @@ class CQN:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.get_action(state, epsilon=0)
-                    state, reward, done, trunc, _ = env.step(action)
+                    action_mask = info.get("action_mask", None)
+                    action = self.get_action(state, epsilon=0, action_mask=action_mask)
+                    state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

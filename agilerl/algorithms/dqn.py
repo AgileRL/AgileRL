@@ -234,15 +234,15 @@ class DQN:
         # epsilon-greedy
         if random.random() < epsilon:
             if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=state.size()[0])
+                action = np.random.randint(0, self.action_dim, size=len(state))
             else:
-                inv_mask = 1 - action_mask
-
-                available_actions = np.ma.array(
-                    np.tile(np.arange(0, self.action_dim), (len(state), 1)),
-                    mask=inv_mask,
-                ).compressed()
-                action = np.random.choice(available_actions, size=len(state))
+                action = np.argmax(
+                    (
+                        np.random.uniform(0, 1, (len(state), self.action_dim))
+                        * action_mask
+                    ),
+                    axis=1,
+                )
 
         else:
             self.actor.eval()
@@ -335,7 +335,7 @@ class DQN:
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for i in range(loop):
-                state, _ = env.reset()
+                state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
@@ -343,8 +343,9 @@ class DQN:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.get_action(state, epsilon=0)
-                    state, reward, done, trunc, _ = env.step(action)
+                    action_mask = info.get("action_mask", None)
+                    action = self.get_action(state, epsilon=0, action_mask=action_mask)
+                    state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):

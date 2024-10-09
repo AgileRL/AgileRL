@@ -566,7 +566,7 @@ class RainbowDQN:
             rewards = []
             num_envs = env.num_envs if hasattr(env, "num_envs") else 1
             for _ in range(loop):
-                state, _ = env.reset()
+                state, info = env.reset()
                 scores = np.zeros(num_envs)
                 completed_episode_scores = np.zeros(num_envs)
                 finished = np.zeros(num_envs)
@@ -574,8 +574,11 @@ class RainbowDQN:
                 while not np.all(finished):
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
-                    action = self.get_action(state, training=False)
-                    state, reward, done, trunc, _ = env.step(action)
+                    action_mask = info.get("action_mask", None)
+                    action = self.get_action(
+                        state, training=False, action_mask=action_mask
+                    )
+                    state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):
