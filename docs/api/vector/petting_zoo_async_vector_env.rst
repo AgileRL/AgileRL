@@ -1,14 +1,17 @@
-Petting Zoo Vector Environment
-==============================
+Petting Zoo Async Vector Environment
+====================================
 
 Class for vectorizing pettingzoo parallel environments, for both custom and default pettingzoo parallel environments.
 
 .. code-block:: python
+
+  # Default pettingzoo environment
   from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
   from pettingzoo.mpe import simple_speaker_listener_v4
 
   num_envs = 4
-  vec_env = AsyncPettingZooVecEnv([lambda : simple_speaker_listener_v4.parallel_env() for _ in range(num_envs)])
+  env = simple_speaker_listener_v4.parallel_env()
+  vec_env = AsyncPettingZooVecEnv([lambda : env for _ in range(num_envs)])
   observations, infos = vec_env.reset()
   for step in range(25):
       actions = {
@@ -21,10 +24,11 @@ Class for vectorizing pettingzoo parallel environments, for both custom and defa
 
 .. code-block:: python
 
+    # Custom pettingzoo environment
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
     env = CustomEnv()
     num_envs = 4
-    AsyncPettingZooVecEnv([lambda : CustomEnv() for _ in range(num_envs)])
+    AsyncPettingZooVecEnv([lambda : env for _ in range(num_envs)])
     observations, infos = vec_env.reset()
     for step in range(25):
         actions = {

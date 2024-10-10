@@ -9,7 +9,7 @@ from collections import defaultdict
 from copy import deepcopy
 from enum import Enum
 from itertools import accumulate
-from typing import Any, TypeVar
+from typing import TypeVar
 
 import numpy as np
 from gymnasium import logger
@@ -27,7 +27,7 @@ ObsType = TypeVar("ObsType")
 
 
 class AsyncState(Enum):
-    """The AsyncVectorEnv possible states given the different actions/"""
+    """The AsyncVectorEnv possible states given the different actions."""
 
     DEFAULT = "default"
     WAITING_RESET = "reset"
@@ -39,7 +39,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     """Vectorized PettingZoo environment that runs multiple environments in parallel
 
     :param env_fns: Functions that create the environment
-    :type env_fns: List[Callable]
+    :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
     """
@@ -123,43 +123,67 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
 
     def _get_single_action_space(self, agent):
+        """Get an agents single action space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
         return self.experience_spec.single_action_space[agent]
 
     def _get_action_space(self, agent):
+        """Get an agents action space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
         return self.experience_spec.action_space[agent]
 
     def _get_single_observation_space(self, agent):
+        """Get an agents single observation space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
         return self.experience_spec.single_observation_space[agent]
 
     def _get_observation_space(self, agent):
+        """Get an agents observation space
+
+        :param agent: Name of agent
+        :type agent: str
+        """
         return self.experience_spec.observation_space[agent]
 
     def reset(
         self,
         *,
-        seed: int | list[int] | None = None,
-        options: dict[str, Any] | None = None,
-    ) -> tuple[dict[AgentID, ObsType], dict[AgentID, dict]]:
-        """Resets all sub-environments in parallel and return a batch of concatenated observations and info.
+        seed=None,
+        options=None,
+    ):
+        """
+        Reset all the environments and return two dictionaries of batched observations and infos.
 
-        Args:
-            seed: The environment reset seeds
-            options: If to return the options
-
-        Returns:
-            A batch of observations and info from the vectorized environment.
+        :param seed: Random seed, defaults to None
+        :type seed: None | int, optional
+        :param options: Options dictionary
+        :type options: dict[str, Any]
         """
         self.reset_async(seed=seed, options=options)
         return self.reset_wait()
 
     def reset_async(
         self,
-        seed: int | list[int] | None = None,
-        options: dict | None = None,
+        seed=None,
+        options=None,
     ):
         """Send calls to the :obj:`reset` methods of the sub-environments.
 
         To get the results of these calls, you may invoke :meth:`reset_wait`.
+
+        :param seed: Random seed, defaults to None
+        :type seed: None | int, optional
+        :param options: Options dictionary
+        :type options: dict[str, Any]
         """
         self._assert_is_running()
         if seed is None:
@@ -180,10 +204,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("reset", env_kwargs))
         self._state = AsyncState.WAITING_RESET
 
-    def reset_wait(
-        self, timeout: int | float | None = 60
-    ) -> tuple[dict[AgentID, ObsType], dict[AgentID, dict]]:
-        """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results."""
+    def reset_wait(self, timeout=60):
+        """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results.
+
+        :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to ``reset_wait`` never times out, defaults to 60
+        :type timeout: int | float | None, optional
+        """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
             raise NoAsyncCallError(
@@ -219,6 +245,16 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )  # self.experience_spec.pack_observation(self.observations), infos
 
     def step_async(self, actions):
+        """
+        Tell all the environments to start taking a step
+        with the given actions.
+        Call step_wait() to get the results of the step.
+        You should not call this if a step_async run is
+        already pending.
+
+        :param actions: List of lists of length num_envs, each sub list contains actions for each agent in a given environment
+        :type actions: list[list[int | float | np.ndarray]]
+        """
         self._assert_is_running()
         if self._state != AsyncState.DEFAULT:
             raise AlreadyPendingCallError(
@@ -229,7 +265,14 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("step", action))
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout: int | None = 60):
+    def step_wait(self, timeout=60):
+        """
+        Wait for the calls to :obj:`step` in each sub-environment to finish.
+
+        :param timeout: Number of seconds before the call to ``step_wait`` times out. If `None`, the call to ``step_wait`` never times out, defaults to 60
+        :type timeout: int | float | None, optional
+        """
+
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
             raise NoAsyncCallError(
@@ -276,13 +319,38 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         )
 
     def render(self):
+        """
+        Returns the rendered frames from the parallel environments.
+
+        """
+
         return self.call("render")
 
     def call(self, name, *args, **kwargs):
+        """
+        Call a method from each parallel environment with args and kwargs.
+
+        :param name: Name of the method or property to call
+        :type name: str
+        :param *args: Position arguments to apply to the method call.
+        :type *args: Any
+        :param **kwargs: Keyword arguments to apply to the method call.
+        :type **kwargs: Any
+        """
         self.call_async(name, *args, **kwargs)
         return self.call_wait()
 
     def call_async(self, name, *args, **kwargs):
+        """
+        Calls the method with name asynchronously and apply args and kwargs to the method.
+
+        :param name: Name of the method or property to call
+        :type name: str
+        :param *args: Position arguments to apply to the method call.
+        :type *args: Any
+        :param **kwargs: Keyword arguments to apply to the method call.
+        :type **kwargs: Any
+        """
         self._assert_is_running()
         if self._state != AsyncState.DEFAULT:
             raise AlreadyPendingCallError(
@@ -294,8 +362,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("_call", (name, args, kwargs)))
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout: int | float | None = 60):
-        """Error: The call to :meth:`call_wait` has timed out after timeout second(s)."""
+    def call_wait(self, timeout=60):
+        """Calls all parent pipes and waits for the results.
+
+        :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default), the call to :meth:`call_wait` never times out, defaults to 60
+        :type timeout: int | float | None, optional
+        """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_CALL:
             raise NoAsyncCallError(
@@ -314,11 +386,25 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self._state = AsyncState.DEFAULT
         return results
 
-    def get_attr(self, name: str):
+    def get_attr(self, name):
+        """
+        Get a property from each parallel environment.
+
+        :param name: Name of property to get from each individual environment
+        :type name: str
+        """
         return self.call(name)
 
-    def set_attr(self, name: str, values: list[Any] | tuple[Any] | object):
-        """Sets an attribute of the sub-environments."""
+    def set_attr(self, name, values):
+        """Sets an attribute of the sub-environments.
+
+        :param name: Name of the property to be set in each individual environment.
+        :type name: str
+        :param values: Values of the property to be set to. If ``values`` is a list or
+            tuple, then it corresponds to the values for each individual
+            environment, otherwise a single value is set for all environments.
+        :type values: list[Any] | tuple[Any] | object
+        """
         self._assert_is_running()
         if not isinstance(values, (list, tuple)):
             values = [values for _ in range(self.num_envs)]
@@ -340,6 +426,16 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self._raise_if_errors(successes)
 
     def close_extras(self, timeout=60, terminate=False):
+        """
+        Close the environments & clean up the extra resources (processes and pipes).
+
+        :param timeout: Number of seconds before the call to :meth:`close` times out. If ``None``,
+                the call to :meth:`close` never times out. If the call to :meth:`close`
+                times out, then all processes are terminated, defaults to 60
+        :type timeout: int | float | None, optional
+        :param terminate: If ``True``, then the :meth:`close` operation is forced and all processes are terminated, defaults to False
+        :type terminate: bool, optional
+        """
         timeout = 0 if terminate else timeout
 
         try:
@@ -551,8 +647,8 @@ class PettingZooExperienceSpec:
         :type agent: str
         :param transition_name: Name of the transition
         :type transition_name: str
-        :param observations: Observations numpy array backed by RawArray
-        :type shared_memory: Observations
+        :param observations: Observations numpy array backed by RawArray, defaults to None
+        :type observations: agilerl.vector.pz_async_vec_env.Observations, optional
         """
         if transition_name == "reward":
             return 0
@@ -591,6 +687,18 @@ class PettingZooExperienceSpec:
 
 
 class Observations:
+    """
+    Class for storing observations with a dictionary interface
+
+    :param shared_memory: A RawArray that all envs write observations to.
+    :type shared_memory: multiprocessing.RawArray
+    :param exp_spec: Experience specification
+    :type exp_spec: agilerl.vector.pz_async_vec_env.PettingZooExperienceSpec
+    :param num_envs: Number of environments
+    :type num_envs: int
+
+    """
+
     def __init__(self, shared_memory, exp_spec, num_envs):
         self.exp_spec = exp_spec
         self.num_envs = num_envs
@@ -721,8 +829,8 @@ def _async_worker(
     :type pipe: Connection
     :param parent_pipe: Parent pipe object
     :type parent_pipe: Connection
-    :param shared_memory: Shared memory object
-    :shared_memory: mp.RawArray
+    :param observations: Observations class that holds arrays backed by the shared memory.
+    :type observations: agilerl.vector.pz_async_vec_env.Observations
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param experience_spec: Experience handler object to handle and format experiences

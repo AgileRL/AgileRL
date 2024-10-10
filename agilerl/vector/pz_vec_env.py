@@ -7,6 +7,11 @@ class PettingZooVecEnv:
     References:
         https://github.com/openai/baselines/tree/master/baselines/common/vec_env
         https://github.com/Farama-Foundation/Gymnasium/blob/main/gymnasium/vector/vector_env.py
+
+    :param num_envs: Number of environments to vectorize
+    :type num_envs: int
+    :param possible_agents: List of possible agents
+    :type possible_agents: list[str]
     """
 
     metadata: dict[str, Any] = {}
@@ -22,11 +27,12 @@ class PettingZooVecEnv:
 
     def reset(self, seed=None, options=None):
         """
-        Reset all the environments and return an array of
-        observations, or a tuple of observation arrays.
-        If step_async is still doing work, that work will
-        be cancelled and step_wait() should not be called
-        until step_async() is invoked again.
+        Reset all the environments and return two dictionaries of batched observations and infos.
+
+        :param seed: Random seed, defaults to None
+        :type seed: None | int, optional
+        :param options: Options dictionary
+        :type options: dict[str, Any]
         """
         pass
 
@@ -37,22 +43,24 @@ class PettingZooVecEnv:
         Call step_wait() to get the results of the step.
         You should not call this if a step_async run is
         already pending.
+
+        :param actions: List of lists of length num_envs, each sub list contains actions for each agent in a given environment
+        :type actions: list[list[int | float | np.ndarray]]
         """
         pass
 
     def step_wait(self):
         """
         Wait for the step taken with step_async().
-        Returns (obs, rews, dones, infos):
-         - obs: an array of observations, or a tuple of
-                arrays of observations.
-         - rews: an array of rewards
-         - dones: an array of "episode done" booleans
-         - infos: a sequence of info objects
         """
         pass
 
     def step(self, actions):
+        """Take an action for each parallel environment
+
+        :param actions: Dictionary of vectorized actions for each agent.
+        :type actions: dict[str, np.ndarray]
+        """
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:

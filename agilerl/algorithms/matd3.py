@@ -471,8 +471,8 @@ class MATD3:
     def extract_action_masks(self, infos):
         """Extract observations and action masks into two separate dictionaries
 
-        :param states: Environment observations
-        :type states: Dict[str, Dict[]]
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
         """
         action_masks = {
             agent: info.get("action_mask", None) if isinstance(info, dict) else None
@@ -483,6 +483,11 @@ class MATD3:
         return action_masks
 
     def extract_agent_masks(self, infos):
+        """Extract env_defined_actions from info dictionary and determine agent masks
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
         if all(not info for agent, info in infos.items() if agent in self.agent_ids):
             return None, None
         env_defined_actions = {
@@ -527,6 +532,12 @@ class MATD3:
         return env_defined_actions, agent_masks
 
     def process_infos(self, infos):
+        """
+        Process the information, extract env_defined_actions, action_masks and agent_masks
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
         env_defined_actions, agent_masks = self.extract_agent_masks(infos)

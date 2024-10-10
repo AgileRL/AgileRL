@@ -52,13 +52,12 @@ For agents that you wish not to be masked, the ``env_defined_actions`` should be
 then provide 'env_defined_actions' as a numpy array with a single value. For example, an action space of type ``Discrete(5)`` may have an
 ``env_defined_action`` of ``np.array([4])``. For an environment with continuous actions spaces (e.g. ``Box(0, 1, (5,))``) then the shape of the
 array should be the size of the action space (``np.array([0.5, 0.5, 0.5, 0.5, 0.5])``). Agent masking is handled automatically by the AgileRL
-multi-agent training function, but can be implemented in a custom loop as follows:
+multi-agent training function by passing the info dictionary into the agents get_action method:
 
 .. code-block:: python
 
-    env_defined_actions = {agent: info[agent]["env_defined_actions"] for agent in env.agents}
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.get_action(state, env_defined_actions=env_defined_actions)
+    cont_actions, discrete_action = agent.get_action(state, infos=info)
     if agent.discrete_actions:
         action = discrete_action
     else:
@@ -75,31 +74,31 @@ Example
     from tqdm import trange
 
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    from agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
     env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
     env.reset()
 
     # Configure the multi-agent algo input arguments
     try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
         one_hot = True
     except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
         one_hot = False
     try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
+        action_dim = [env.single_action_space(agent).n for agent in env.agents]
         discrete_actions = True
         max_action = None
         min_action = None
     except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
         discrete_actions = False
-        max_action = [env.action_space(agent).high for agent in env.agents]
-        min_action = [env.action_space(agent).low for agent in env.agents]
+        max_action = [env.single_action_space(agent).high for agent in env.agents]
+        min_action = [env.single_action_space(agent).low for agent in env.agents]
 
     channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     n_agents = env.num_agents
@@ -137,12 +136,12 @@ Example
             state = {agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in state.items()}
 
         for _ in range(1000):
-            env_defined_actions = {agent: info[agent]["env_defined_actions"] for agent in env.agents}
+
             # Get next action from agent
             cont_actions, discrete_action = agent.get_action(
                 states=state,
                 training=True,
-                env_defined_actions=env_defined_actions,
+                infos=info,
             )
             if agent.discrete_actions:
                 action = discrete_action

@@ -28,7 +28,7 @@ Population Creation
 To perform evolutionary HPO, we require a population of agents. Individuals in this population will share experiences but learn individually, allowing us to
 determine the efficacy of certain hyperparameters. Individual agents which learn best are more likely to survive until the next generation, and so their hyperparameters
 are more likely to remain present in the population. The sequence of evolution (tournament selection followed by mutation) is detailed further below. At present, evolutionary
-hyper-parameter tuning is only compatible with cooperative multi-agent environments.
+hyper-parameter tuning is only compatible with **cooperative** multi-agent environments.
 
 .. code-block:: python
 
@@ -67,26 +67,26 @@ hyper-parameter tuning is only compatible with cooperative multi-agent environme
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
     env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
     env.reset()
 
     # Configure the multi-agent algo input arguments
     try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
         one_hot = True
     except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
         one_hot = False
     try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
+        action_dim = [env.single_action_space(agent).n for agent in env.agents]
         INIT_HP["DISCRETE_ACTIONS"] = True
         INIT_HP["MAX_ACTION"] = None
         INIT_HP["MIN_ACTION"] = None
     except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
         INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
-        INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
+        INIT_HP["MAX_ACTION"] = [env.single_action_space(agent).high for agent in env.agents]
+        INIT_HP["MIN_ACTION"] = [env.single_action_space(agent).low for agent in env.agents]
 
     # Not applicable to MPE environments, used when images are used for observations (Atari environments)
     if INIT_HP["CHANNELS_LAST"]:
@@ -218,7 +218,7 @@ for multi-agent environments) it is easiest to use our training function, which 
     trained_pop, pop_fitnesses = train_multi_agent(
         env=env,  # Pettingzoo-style environment
         env_name='simple_speaker_listener_v4',  # Environment name
-        algo="MADDPG,  # Algorithm
+        algo="MADDPG",  # Algorithm
         pop=agent_pop,  # Population of agents
         memory=memory,  # Replay buffer
         INIT_HP=INIT_HP,  # IINIT_HP dictionary
@@ -398,6 +398,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                 cont_actions, discrete_action = agent.get_action(
                     states=state,
                     training=True,
+                    infos=info
                 )
                 if agent.discrete_actions:
                     action = discrete_action

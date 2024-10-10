@@ -1,4 +1,4 @@
-Petting Zoo Vector Environment
+Petting Zoo Vector Base Class
 ==============================
 
 Base class for vectorized pettingzoo environments.
