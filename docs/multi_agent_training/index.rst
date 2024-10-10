@@ -250,8 +250,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.utils.utils import create_population
-    from agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
-
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -284,7 +283,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     num_envs = 8
     # Define the simple speaker listener environment as a parallel environment
     env = simple_speaker_listener_v4.parallel_env(continuous_actions=True)
-    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
     env.reset()
 
     # Configure the multi-agent algo input arguments

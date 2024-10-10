@@ -5,7 +5,7 @@ Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 
 MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
 in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This
-enables superior performance when compared to MATD3.
+enables superior performance when compared to MADDPG.
 
 * MATD3 paper: https://arxiv.org/abs/1910.01465
 

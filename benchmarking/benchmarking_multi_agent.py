@@ -34,7 +34,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
     print(f"DEVICE: {device}")
 
     env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
-    env_kwargs = dict(max_cycles=25, continuous_actions=False)
+    env_kwargs = dict(max_cycles=25, continuous_actions=True)
     env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
 
     if INIT_HP["CHANNELS_LAST"]:
@@ -162,6 +162,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
         accelerator=accelerator,
+        torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
 
     train_multi_agent(
@@ -192,7 +193,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
 
 
 if __name__ == "__main__":
-    with open("configs/training/maddpg.yaml") as file:
+    with open("configs/training/matd3.yaml") as file:
         config = yaml.safe_load(file)
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
