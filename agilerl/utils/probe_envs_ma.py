@@ -54,8 +54,8 @@ class ConstantRewardImageEnv:
         self.num_agents = len(self.agents)
 
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),
@@ -63,7 +63,7 @@ class ConstantRewardImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))}
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))}
         ]
         self.sample_actions = [
             {"agent_0": np.array([[0.2, 0.8]]), "agent_1": np.array([[0.8, 0.2]])}
@@ -75,8 +75,8 @@ class ConstantRewardImageEnv:
 
     def step(self, action):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         reward = {"agent_0": 1, "agent_1": 0}  # Constant reward of 1
         terminated = {"agent_0": True, "agent_1": True}
@@ -86,8 +86,8 @@ class ConstantRewardImageEnv:
 
     def reset(self):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         info = {}
         return observation, info
@@ -140,8 +140,8 @@ class ConstantRewardContActionsImageEnv:
         self.num_agents = len(self.agents)
 
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Box(0.0, 1.0, (1,)),
@@ -149,7 +149,7 @@ class ConstantRewardContActionsImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))}
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))}
         ]
         self.sample_actions = [
             {"agent_0": np.array([[0.0]]), "agent_1": np.array([[1.0]])}
@@ -161,8 +161,8 @@ class ConstantRewardContActionsImageEnv:
 
     def step(self, action):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         reward = {"agent_0": 1, "agent_1": 0}  # Constant reward
         terminated = {"agent_0": True, "agent_1": True}
@@ -172,8 +172,8 @@ class ConstantRewardContActionsImageEnv:
 
     def reset(self):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         info = {}
         return observation, info
@@ -241,12 +241,12 @@ class ObsDependentRewardImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),
@@ -254,8 +254,8 @@ class ObsDependentRewardImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[0.2, 0.8]]), "agent_1": np.array([[0.8, 0.2]])},
@@ -282,8 +282,8 @@ class ObsDependentRewardImageEnv:
     def reset(self):
         self.last_obs = random.choice(
             [
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
             ]
         )
         info = {}
@@ -353,8 +353,8 @@ class ObsDependentRewardContActionsImageEnv:
 
         self.last_obs = {"agent_0": np.array([0]), "agent_1": np.array([0])}
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Box(0.0, 1.0, (1,)),
@@ -362,8 +362,8 @@ class ObsDependentRewardContActionsImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[0.2]]), "agent_1": np.array([[0.0]])},
@@ -390,8 +390,8 @@ class ObsDependentRewardContActionsImageEnv:
     def reset(self):
         self.last_obs = random.choice(
             [
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
             ]
         )
         info = {}
@@ -456,12 +456,12 @@ class DiscountedRewardImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),
@@ -469,8 +469,8 @@ class DiscountedRewardImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[0.2, 0.8]]), "agent_1": np.array([[0.8, 0.2]])},
@@ -483,7 +483,7 @@ class DiscountedRewardImageEnv:
         self.policy_values = [None, None]
 
     def step(self, action):
-        observation = {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))}
+        observation = {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))}
         reward = (
             {"agent_0": 1, "agent_1": 0.5}
             if np.mean(self.last_obs["agent_0"]) == 1
@@ -496,15 +496,15 @@ class DiscountedRewardImageEnv:
         truncated = {"agent_0": False, "agent_1": False}
         info = {}
         self.last_obs = {
-            "agent_0": np.ones((3, 32, 32)),
-            "agent_1": np.ones((3, 32, 32)),
+            "agent_0": np.ones((1, 3, 3)),
+            "agent_1": np.ones((1, 3, 3)),
         }
         return observation, reward, terminated, truncated, info
 
     def reset(self):
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         info = {}
         return self.last_obs, info
@@ -568,12 +568,12 @@ class DiscountedRewardContActionsImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Box(0.0, 1.0, (1,)),
@@ -581,8 +581,8 @@ class DiscountedRewardContActionsImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[0.2]]), "agent_1": np.array([[0.4]])},
@@ -595,7 +595,7 @@ class DiscountedRewardContActionsImageEnv:
         self.policy_values = [None, None]
 
     def step(self, action):
-        observation = {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))}
+        observation = {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))}
         reward = (
             {"agent_0": 1, "agent_1": 0.5}
             if np.mean(self.last_obs["agent_0"]) == 1
@@ -608,15 +608,15 @@ class DiscountedRewardContActionsImageEnv:
         truncated = {"agent_0": False, "agent_1": False}
         info = {}
         self.last_obs = {
-            "agent_0": np.ones((3, 32, 32)),
-            "agent_1": np.ones((3, 32, 32)),
+            "agent_0": np.ones((1, 3, 3)),
+            "agent_1": np.ones((1, 3, 3)),
         }
         return observation, reward, terminated, truncated, info
 
     def reset(self):
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         info = {}
         return self.last_obs, info
@@ -677,12 +677,12 @@ class FixedObsPolicyImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 0.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 0.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 0.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 0.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),
@@ -690,7 +690,7 @@ class FixedObsPolicyImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[1.0, 0.0]]), "agent_1": np.array([[0.0, 1.0]])},
@@ -704,8 +704,8 @@ class FixedObsPolicyImageEnv:
 
     def step(self, action):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         reward = {
             "agent_0": [1, -1][action["agent_0"]],
@@ -718,8 +718,8 @@ class FixedObsPolicyImageEnv:
 
     def reset(self):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         info = {}
         return observation, info
@@ -778,12 +778,12 @@ class FixedObsPolicyContActionsImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 0.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 0.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 0.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 0.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Box(0.0, 1.0, (1,)),
@@ -791,7 +791,7 @@ class FixedObsPolicyContActionsImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[1.0]]), "agent_1": np.array([[0.0]])},
@@ -803,8 +803,8 @@ class FixedObsPolicyContActionsImageEnv:
 
     def step(self, action):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         reward = {
             "agent_0": -((1 - action["agent_0"]) ** 2),
@@ -817,8 +817,8 @@ class FixedObsPolicyContActionsImageEnv:
 
     def reset(self):
         observation = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         info = {}
         return observation, info
@@ -897,22 +897,22 @@ class PolicyImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),
             "agent_1": spaces.Discrete(2),
         }
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[1.0, 0.0]]), "agent_1": np.array([[1.0, 0.0]])},
@@ -947,10 +947,10 @@ class PolicyImageEnv:
     def reset(self):
         self.last_obs = random.choice(
             [
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
             ]
         )
         info = {}
@@ -1051,24 +1051,24 @@ class PolicyContActionsImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Box(0.0, 1.0, (2,)),
             "agent_1": spaces.Box(0.0, 1.0, (2,)),
         }
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[1.0, 0.0]]), "agent_1": np.array([[0.0, 1.0]])},
@@ -1122,10 +1122,10 @@ class PolicyContActionsImageEnv:
     def reset(self):
         self.last_obs = random.choice(
             [
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
             ]
         )
         info = {}
@@ -1224,12 +1224,12 @@ class MultiPolicyImageEnv:
         self.num_agents = len(self.agents)
 
         self.last_obs = {
-            "agent_0": np.zeros((3, 32, 32)),
-            "agent_1": np.zeros((3, 32, 32)),
+            "agent_0": np.zeros((1, 3, 3)),
+            "agent_1": np.zeros((1, 3, 3)),
         }
         self.observation_space = {
-            "agent_0": spaces.Box(0.0, 1.0, (3, 32, 32)),
-            "agent_1": spaces.Box(0.0, 1.0, (3, 32, 32)),
+            "agent_0": spaces.Box(0.0, 1.0, (1, 3, 3)),
+            "agent_1": spaces.Box(0.0, 1.0, (1, 3, 3)),
         }
         self.action_space = {
             "agent_0": spaces.Discrete(2),
@@ -1237,14 +1237,14 @@ class MultiPolicyImageEnv:
         }
 
         self.sample_obs = [
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
-            {"agent_0": np.zeros((1, 3, 32, 32)), "agent_1": np.ones((1, 3, 32, 32))},
-            {"agent_0": np.ones((1, 3, 32, 32)), "agent_1": np.zeros((1, 3, 32, 32))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
+            {"agent_0": np.zeros((1, 1, 3, 3)), "agent_1": np.ones((1, 1, 3, 3))},
+            {"agent_0": np.ones((1, 1, 3, 3)), "agent_1": np.zeros((1, 1, 3, 3))},
         ]
         self.sample_actions = [
             {"agent_0": np.array([[1.0, 0.0]]), "agent_1": np.array([[1.0, 0.0]])},
@@ -1295,10 +1295,10 @@ class MultiPolicyImageEnv:
     def reset(self):
         self.last_obs = random.choice(
             [
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
-                {"agent_0": np.zeros((3, 32, 32)), "agent_1": np.ones((3, 32, 32))},
-                {"agent_0": np.ones((3, 32, 32)), "agent_1": np.zeros((3, 32, 32))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
+                {"agent_0": np.zeros((1, 3, 3)), "agent_1": np.ones((1, 3, 3))},
+                {"agent_0": np.ones((1, 3, 3)), "agent_1": np.zeros((1, 3, 3))},
             ]
         )
         info = {}

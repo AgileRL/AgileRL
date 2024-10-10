@@ -32,6 +32,22 @@ def chkpt_attribute_to_device(chkpt_dict, device):
     return chkpt_dict
 
 
+def key_in_nested_dict(nested_dict, target):
+    """Helper function to determine if key is in nested dictionary
+
+    :param nested_dict: Nested dictionary
+    :type nested_dict: Dict[str, Dict[str, ...]]
+    :param target: Target string
+    :type target: str
+    """
+    for k, v in nested_dict.items():
+        if k == target:
+            return True
+        if isinstance(v, dict):
+            return key_in_nested_dict(v, target)
+    return False
+
+
 def compile_model(model, mode: str | None = "default"):
     """Compiles torch model if not already compiled
 

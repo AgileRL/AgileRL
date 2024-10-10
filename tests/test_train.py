@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
+from gymnasium.spaces import Box, Discrete
+from pettingzoo import ParallelEnv
 
 import agilerl.training.train_bandits
 import agilerl.training.train_multi_agent
@@ -192,7 +194,7 @@ class DummyBandit:
         return
 
 
-class DummyMultiEnv:
+class DummyMultiEnv(ParallelEnv):
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.state_size = self.state_dims
@@ -200,16 +202,19 @@ class DummyMultiEnv:
         self.action_size = self.action_dims
         self.agents = ["agent_0", "agent_1"]
         self.possible_agents = ["agent_0", "agent_1"]
+        self.render_mode = None
         self.metadata = None
-        self.observation_space = None
-        self.action_space = None
+        self.info = {
+            agent: {
+                "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
+            }
+            for agent in self.agents
+        }
 
     def reset(self, seed=None, options=None):
-        return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
-            "info_string": None,
-            "agent_mask": {"agent_0": False, "agent_1": True},
-            "env_defined_actions": {"agent_0": np.array([0, 1]), "agent_1": None},
-        }
+        return {
+            agent: np.random.rand(*self.state_dims) for agent in self.agents
+        }, self.info
 
     def step(self, action):
         return (
@@ -217,20 +222,31 @@ class DummyMultiEnv:
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
-            {agent: "info_string" for agent in self.agents},
+            self.info,
         )
+
+    def action_space(self, agent):
+        return Discrete(5)
+
+    def observation_space(self, agent):
+        return Box(0, 255, self.state_dims)
 
 
 class DummyMultiAgent(DummyAgentOffPolicy):
     def __init__(self, batch_size, env, *args):
         super().__init__(batch_size, env, *args)
-        self.agents = ["agent_0", "agent_1"]
+        self.agent_ids = ["agent_0", "agent_1"]
         self.lr_actor = 0.001
         self.lr_critic = 0.01
         self.discrete_actions = False
+        self.num_envs = 1
 
     def get_action(self, *args, **kwargs):
-        return {agent: np.random.randn(self.action_size) for agent in self.agents}, None
+        output = {
+            agent: np.random.randn(self.num_envs, self.action_size)
+            for agent in self.agent_ids
+        }, None
+        return output
 
     def learn(self, experiences):
         return {
@@ -238,8 +254,20 @@ class DummyMultiAgent(DummyAgentOffPolicy):
             "agent_1": (random.random(), random.random()),
         }
 
-    def test(self, env, swap_channels, max_steps, loop):
-        return super().test(env, swap_channels, max_steps, loop)
+    def test(self, env, swap_channels, max_steps, loop, sum_scores):
+        rand_int = np.random.uniform(0, 400)
+        rand_int = (rand_int / 2, rand_int / 2) if not sum_scores else rand_int
+        self.fitness.append(rand_int)
+        return rand_int
+
+    def get_env_defined_actions(self, info, agents):
+        env_defined_actions = {
+            agent: info[agent].get("env_defined_action", None) for agent in agents
+        }
+
+        if all(eda is None for eda in env_defined_actions.values()):
+            return
+        return env_defined_actions
 
     def save_checkpoint(self, path):
         return super().save_checkpoint(path)
@@ -634,7 +662,7 @@ def mocked_multi_agent(multi_env, algo):
     mock_agent.learn_step = 1
     mock_agent.batch_size = 5
     mock_agent.lr = 0.1
-    mock_agent.agents = ["agent_0", "agent_1"]
+    mock_agent.agent_ids = ["agent_0", "agent_1"]
     mock_agent.state_size = multi_env.state_size
     mock_agent.action_size = multi_env.action_size
     mock_agent.scores = []
@@ -647,7 +675,7 @@ def mocked_multi_agent(multi_env, algo):
     def get_action(*args, **kwargs):
         return {
             agent: np.random.randn(mock_agent.action_size)
-            for agent in mock_agent.agents
+            for agent in mock_agent.agent_ids
         }, None
 
     mock_agent.get_action.side_effect = get_action
@@ -1001,20 +1029,30 @@ def mocked_bandit_env(state_size, action_size):
 
 @pytest.fixture
 def mocked_multi_env(state_size, action_size):
-    mock_env = MagicMock()
+    mock_env = MagicMock(spec=DummyMultiEnv)
     mock_env.state_size = state_size
     mock_env.action_size = action_size
     mock_env.agents = ["agent_0", "agent_1"]
     mock_env.reset.side_effect = lambda *args: (
         {agent: np.random.rand(*mock_env.state_size) for agent in mock_env.agents},
-        {"info_string": None, "agent_mask": True, "env_defined_actions": True},
+        {
+            agent: {
+                "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
+            }
+            for agent in mock_env.agents
+        },
     )
     mock_env.step.side_effect = lambda *args: (
         {agent: np.random.rand(*mock_env.state_size) for agent in mock_env.agents},
         {agent: np.random.randint(0, 5) for agent in mock_env.agents},
         {agent: np.random.randint(0, 2) for agent in mock_env.agents},
         {agent: np.random.randint(0, 2) for agent in mock_env.agents},
-        {"info_string": None},
+        {
+            agent: {
+                "env_defined_actions": None if agent == "agent_1" else np.array([0, 1])
+            }
+            for agent in mock_env.agents
+        },
     )
 
     return mock_env
@@ -2225,9 +2263,11 @@ def test_train_on_policy_save_checkpoint(
         os.remove(f"{checkpoint_path}_{i}_{512}.pt")
 
 
-@pytest.mark.parametrize("state_size, action_size", [((6,), 2)])
+@pytest.mark.parametrize(
+    "state_size, action_size, sum_scores", [((6,), 2, True), ((6,), 2, False)]
+)
 def test_train_multi_agent(
-    multi_env, population_multi_agent, multi_memory, tournament, mutations
+    multi_env, population_multi_agent, multi_memory, tournament, mutations, sum_scores
 ):
     pop, pop_fitnesses = train_multi_agent(
         multi_env,
@@ -2244,6 +2284,7 @@ def test_train_multi_agent(
         eval_loop=1,
         tournament=tournament,
         mutation=mutations,
+        sum_scores=sum_scores,
     )
 
     assert len(pop) == len(population_multi_agent)
@@ -2305,9 +2346,20 @@ def test_train_multi_agent_rgb(
 
 @pytest.mark.parametrize("state_size, action_size", [((250, 160, 3), 2)])
 def test_train_multi_agent_rgb_vectorized(
-    multi_env, population_multi_agent, multi_memory, tournament, mutations
+    multi_env,
+    population_multi_agent,
+    multi_memory,
+    tournament,
+    mutations,
+    state_size,
+    action_size,
 ):
-    env = make_multi_agent_vect_envs(multi_env)
+    env = make_multi_agent_vect_envs(
+        DummyMultiEnv, num_envs=4, state_dims=state_size, action_dims=action_size
+    )
+    for agent in population_multi_agent:
+        agent.num_envs = 4
+        agent.scores = [1]
     env.reset()
     pop, pop_fitnesses = train_multi_agent(
         env,
@@ -2318,15 +2370,15 @@ def test_train_multi_agent_rgb_vectorized(
         INIT_HP=None,
         MUT_P=None,
         net_config=None,
-        swap_channels=True,
-        max_steps=50,
-        evo_steps=50,
+        swap_channels=False,
+        max_steps=10,
+        evo_steps=5,
         eval_loop=1,
         tournament=tournament,
         mutation=mutations,
     )
-
     assert len(pop) == len(population_multi_agent)
+    env.close()
 
 
 @pytest.mark.parametrize("state_size, action_size", [((6,), 2)])

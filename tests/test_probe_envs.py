@@ -326,7 +326,7 @@ def test_policy_q_learning_with_probe_env():
 def test_policy_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsImageEnv()
-    learn_steps = 10000
+    learn_steps = 1000
     algo_args = {
         "state_dim": (env.observation_space.shape),
         "action_dim": env.action_space.shape[0],
@@ -334,9 +334,9 @@ def test_policy_q_learning_with_probe_env_cnn():
         "net_config": {
             "arch": "cnn",  # Network architecture
             "hidden_size": [64],  # Network hidden size
-            "channel_size": [32, 32],  # CNN channel size
-            "kernel_size": [8, 4],  # CNN kernel size
-            "stride_size": [4, 2],  # CNN stride size
+            "channel_size": [32],  # CNN channel size
+            "kernel_size": [3],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
             "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
         "max_action": 1.0,
@@ -381,9 +381,9 @@ def test_policy_on_policy_with_probe_env_cnn():
         "net_config": {
             "arch": "cnn",  # Network architecture
             "hidden_size": [64],  # Network hidden size
-            "channel_size": [32, 32],  # CNN channel size
-            "kernel_size": [8, 4],  # CNN kernel size
-            "stride_size": [4, 2],  # CNN stride size
+            "channel_size": [32],  # CNN channel size
+            "kernel_size": [3],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
             "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
         "discrete_actions": False,

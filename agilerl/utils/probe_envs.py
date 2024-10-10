@@ -31,14 +31,14 @@ class ConstantRewardEnv(gym.Env):
 
 class ConstantRewardImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 0.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 0.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
-        self.sample_obs = [np.zeros((1, 3, 32, 32))]
+        self.sample_obs = [np.zeros((1, 1, 3, 3))]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         reward = 1  # Constant reward of 1
         terminated = True
         truncated = False
@@ -46,7 +46,7 @@ class ConstantRewardImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
 
@@ -77,16 +77,16 @@ class ConstantRewardContActionsEnv(gym.Env):
 
 class ConstantRewardContActionsImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 0.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 0.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.sample_obs = [np.zeros((1, 3, 32, 32))]
+        self.sample_obs = [np.zeros((1, 1, 3, 3))]
         self.sample_actions = [[[1.0]]]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[1.0]]  # Correct V value to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         reward = 1  # Constant reward of 1
         terminated = True
         truncated = False
@@ -94,7 +94,7 @@ class ConstantRewardContActionsImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
 
@@ -124,10 +124,10 @@ class ObsDependentRewardEnv(gym.Env):
 
 class ObsDependentRewardImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
-        self.last_obs = np.ones((3, 32, 32))
-        self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
+        self.last_obs = np.ones((1, 3, 3))
+        self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
 
@@ -142,7 +142,7 @@ class ObsDependentRewardImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        self.last_obs = random.choice([np.zeros((3, 32, 32)), np.ones((3, 32, 32))])
+        self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
 
@@ -174,10 +174,10 @@ class ObsDependentRewardContActionsEnv(gym.Env):
 
 class ObsDependentRewardContActionsImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = np.ones((3, 32, 32))
-        self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
+        self.last_obs = np.ones((1, 3, 3))
+        self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
@@ -194,7 +194,7 @@ class ObsDependentRewardContActionsImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        self.last_obs = random.choice([np.zeros((3, 32, 32)), np.ones((3, 32, 32))])
+        self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
 
@@ -225,24 +225,24 @@ class DiscountedRewardEnv(gym.Env):
 
 class DiscountedRewardImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(1)
-        self.last_obs = np.zeros((3, 32, 32))
-        self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
+        self.last_obs = np.zeros((1, 3, 3))
+        self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
 
     def step(self, action):
-        observation = np.ones((3, 32, 32))
+        observation = np.ones((1, 3, 3))
         reward = np.mean(self.last_obs)  # Reward depends on observation
         terminated = int(np.mean(self.last_obs))  # Terminate after second step
         truncated = False
         info = {}
-        self.last_obs = np.ones((3, 32, 32))
+        self.last_obs = np.ones((1, 3, 3))
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        self.last_obs = np.zeros((3, 32, 32))
+        self.last_obs = np.zeros((1, 3, 3))
         info = {}
         return self.last_obs, info
 
@@ -275,26 +275,26 @@ class DiscountedRewardContActionsEnv(gym.Env):
 
 class DiscountedRewardContActionsImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = np.zeros((3, 32, 32))
-        self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
+        self.last_obs = np.zeros((1, 3, 3))
+        self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
 
     def step(self, action):
-        observation = np.ones((3, 32, 32))
+        observation = np.ones((1, 3, 3))
         reward = np.mean(self.last_obs)  # Reward depends on observation
         terminated = int(np.mean(self.last_obs))  # Terminate after second step
         truncated = False
         info = {}
-        self.last_obs = np.ones((3, 32, 32))
+        self.last_obs = np.ones((1, 3, 3))
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        self.last_obs = np.zeros((3, 32, 32))
+        self.last_obs = np.zeros((1, 3, 3))
         info = {}
         return self.last_obs, info
 
@@ -325,14 +325,14 @@ class FixedObsPolicyEnv(gym.Env):
 
 class FixedObsPolicyImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 0.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 0.0, (1, 3, 3))
         self.action_space = spaces.Discrete(2)
-        self.sample_obs = [np.zeros((1, 3, 32, 32))]
+        self.sample_obs = [np.zeros((1, 1, 3, 3))]
         self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [None]  # Correct V values to learn, s table
 
     def step(self, action):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         if isinstance(action, (np.ndarray, list)):
             action = action[0]
         reward = [-1, 1][action]  # Reward depends on action
@@ -342,7 +342,7 @@ class FixedObsPolicyImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
 
@@ -373,16 +373,16 @@ class FixedObsPolicyContActionsEnv(gym.Env):
 
 class FixedObsPolicyContActionsImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.sample_obs = [np.zeros((1, 3, 32, 32))]
+        self.sample_obs = [np.zeros((1, 1, 3, 3))]
         self.sample_actions = [np.array([[1.0]])]
         self.q_values = np.array([[0.0]])  # Correct Q values to learn, s x a table
         self.v_values = [None]  # Correct V values to learn, s table
         self.policy_values = [[1.0]]  # Correct policy to learn
 
     def step(self, action):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         reward = -((1 - action[0]) ** 2)  # Reward depends on action
         terminated = True
         truncated = False
@@ -390,7 +390,7 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        observation = np.zeros((3, 32, 32))
+        observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
 
@@ -425,10 +425,10 @@ class PolicyEnv(gym.Env):
 
 class PolicyImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Discrete(2)
-        self.last_obs = np.ones((3, 32, 32))
-        self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
+        self.last_obs = np.ones((1, 3, 3))
+        self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.q_values = [
             [1.0, -1.0],
             [-1.0, 1.0],
@@ -446,7 +446,7 @@ class PolicyImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        self.last_obs = random.choice([np.zeros((3, 32, 32)), np.ones((3, 32, 32))])
+        self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
 
@@ -481,14 +481,14 @@ class PolicyContActionsEnv(gym.Env):
 
 class PolicyContActionsImageEnvSimple(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (1,))
-        self.last_obs = np.zeros((3, 32, 32))
+        self.last_obs = np.zeros((1, 3, 3))
         self.sample_obs = [
-            np.zeros((1, 3, 32, 32)),
-            np.zeros((1, 3, 32, 32)),
-            np.ones((1, 3, 32, 32)),
-            np.ones((1, 3, 32, 32)),
+            np.zeros((1, 1, 3, 3)),
+            np.zeros((1, 1, 3, 3)),
+            np.ones((1, 1, 3, 3)),
+            np.ones((1, 1, 3, 3)),
         ]
         self.sample_actions = [
             np.array([[0.0]]),
@@ -512,11 +512,11 @@ class PolicyContActionsImageEnvSimple(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        # self.last_obs = random.choice([np.zeros((3, 32, 32)), np.ones((3, 32, 32))])
+        # self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         if int(np.mean(self.last_obs)):
-            self.last_obs = np.zeros((3, 32, 32))
+            self.last_obs = np.zeros((1, 3, 3))
         else:
-            self.last_obs = np.ones((3, 32, 32))
+            self.last_obs = np.ones((1, 3, 3))
 
         info = {}
         return self.last_obs, info
@@ -524,10 +524,10 @@ class PolicyContActionsImageEnvSimple(gym.Env):
 
 class PolicyContActionsImageEnv(gym.Env):
     def __init__(self):
-        self.observation_space = spaces.Box(0.0, 1.0, (3, 32, 32))
+        self.observation_space = spaces.Box(0.0, 1.0, (1, 3, 3))
         self.action_space = spaces.Box(0.0, 1.0, (2,))
-        self.last_obs = np.zeros((3, 32, 32))
-        self.sample_obs = [np.zeros((1, 3, 32, 32)), np.ones((1, 3, 32, 32))]
+        self.last_obs = np.zeros((1, 3, 3))
+        self.sample_obs = [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
         self.sample_actions = [np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]])]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
         self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
@@ -545,7 +545,7 @@ class PolicyContActionsImageEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def reset(self):
-        self.last_obs = random.choice([np.zeros((3, 32, 32)), np.ones((3, 32, 32))])
+        self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
         info = {}
         return self.last_obs, info
 
