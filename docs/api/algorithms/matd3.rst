@@ -3,7 +3,7 @@
 Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 ===================================================================
 
-MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MATD3 algorithm to reduce overestimation bias
+MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
 in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This
 enables superior performance when compared to MATD3.
 
@@ -75,31 +75,31 @@ Example
     from tqdm import trange
 
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    from agilerl.wrappers.pettingzoo_wrappers import DefaultPettingZooVectorizationParallelWrapper
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
     env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = DefaultPettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
     env.reset()
 
     # Configure the multi-agent algo input arguments
     try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
         one_hot = True
     except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
         one_hot = False
     try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
+        action_dim = [env.single_action_space(agent).n for agent in env.agents]
         discrete_actions = True
         max_action = None
         min_action = None
     except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
         discrete_actions = False
-        max_action = [env.action_space(agent).high for agent in env.agents]
-        min_action = [env.action_space(agent).low for agent in env.agents]
+        max_action = [env.single_action_space(agent).high for agent in env.agents]
+        min_action = [env.single_action_space(agent).low for agent in env.agents]
 
     channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     n_agents = env.num_agents
@@ -137,12 +137,11 @@ Example
             state = {agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in state.items()}
 
         for _ in range(1000):
-            env_defined_actions = {agent: info[agent]["env_defined_actions"] for agent in env.agents}
             # Get next action from agent
             cont_actions, discrete_action = agent.get_action(
                 states=state,
                 training=True,
-                env_defined_actions=env_defined_actions,
+                infos=info,
             )
             if agent.discrete_actions:
                 action = discrete_action
