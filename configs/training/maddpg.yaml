@@ -5,10 +5,8 @@ INIT_HP:
     ALGO: MADDPG                                          # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
-    NUM_ENVS: 1                # No. parallel environments for training
-    MAX_ACTION: 1              # Maximum action
-    MIN_ACTION: 0             # Minimum action
-    O_U_NOISE: false            # Ornstein-Uhlenbeck action noise
+    NUM_ENVS: 16                # No. parallel environments for training
+    O_U_NOISE: true            # Ornstein-Uhlenbeck action noise
     EXPL_NOISE: 0.1            # Action noise scale
     MEAN_NOISE: 0.             # Mean action noise
     THETA: 0.15                # Rate of mean reversion in OU noise
@@ -24,12 +22,12 @@ INIT_HP:
     TAU: 0.001                  # For soft update of target parameters
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
-    POP_SIZE: 4                # Population size
+    POP_SIZE: 2                # Population size
     EVO_STEPS: 10_000           # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 0      # Steps before learning
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true               # Log with Weights and Biases
     TORCH_COMPILE: default
 
 MUTATION_PARAMS:
@@ -49,7 +47,7 @@ MUTATION_PARAMS:
     MIN_LEARN_STEP: 20
     MAX_LEARN_STEP: 200
     MIN_BATCH_SIZE: 8
-    MAX_BATCH_SIZE: 512
+    MAX_BATCH_SIZE: 2048
 
 NET_CONFIG:
     arch: mlp
@@ -58,5 +56,7 @@ NET_CONFIG:
     max_hidden_layers: 3
     min_mlp_nodes: 64
     max_mlp_nodes: 500
+    mlp_output_activation: Sigmoid
+    mlp_activation: ReLU
 
 DISTRIBUTED_TRAINING: false

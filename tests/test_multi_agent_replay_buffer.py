@@ -220,6 +220,28 @@ def test_add_any_experiences_to_memory():
     assert str(buffer.memory[2].reward) == str(new_reward)
 
 
+# Test that the sampled experiences align with the correct environment
+def test_add_and_sample_vect_experiences_to_memory():
+    memory_size = 100
+    field_names = ["environments", "state"]
+    agent_ids = ["agent1", "agent2"]
+    device = "cpu"
+    buffer = MultiAgentReplayBuffer(memory_size, field_names, agent_ids, device)
+    num_envs = 50
+    environments = {
+        agent: np.array([[env] for env in range(num_envs)]) for agent in agent_ids
+    }
+    states = {
+        agent: np.array([[(env + 1) * (a_idx + 1)] for env in range(num_envs)])
+        for a_idx, agent in enumerate(agent_ids)
+    }
+    buffer.save_to_memory(states, environments, is_vectorised=True)
+    sampled_states, sampled_environments = buffer.sample(batch_size=25)
+    for agent in sampled_environments:
+        for idx, env in enumerate(sampled_environments[agent]):
+            assert states[agent][int(env)] == sampled_states[agent][idx].cpu().numpy()
+
+
 # Can sample experiences from memory using sample method
 def test_sample_experiences_from_memory():
     memory_size = 100

@@ -61,9 +61,9 @@ def minari_to_agile_dataset(dataset_id, remote=False):
     rewards = []
     terminals = []
 
-    minari_dataset = load_minari_dataset(dataset_id, remote)
+    dataset = load_minari_dataset(dataset_id, remote)
 
-    for episode in minari_dataset.iterate_episodes():
+    for episode in dataset.iterate_episodes():
         observations.extend(episode.observations[:-1])
         next_observations.extend(episode.observations[1:])
         actions.extend(episode.actions[:])

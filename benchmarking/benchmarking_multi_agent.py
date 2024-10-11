@@ -10,8 +10,7 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.utils.utils import create_population
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+from agilerl.utils.utils import create_population, make_multi_agent_vect_envs
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -34,9 +33,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator = None
     print(f"DEVICE: {device}")
 
-    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env(
-        max_cycles=25, continuous_actions=True
-    )
+    env = importlib.import_module(f"{INIT_HP['ENV_NAME']}").parallel_env
+    env_kwargs = dict(max_cycles=25, continuous_actions=True)
+    env = make_multi_agent_vect_envs(env, num_envs=INIT_HP["NUM_ENVS"], **env_kwargs)
 
     if INIT_HP["CHANNELS_LAST"]:
         # Environment processing for image based observations
@@ -46,27 +45,28 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
 
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=INIT_HP["NUM_ENVS"])
-
     env.reset()
-
     # Configure the multi-agent algo input arguments
     try:
-        state_dims = [env.observation_space(agent).n for agent in env.agents]
+        state_dims = [env.single_observation_space(agent).n for agent in env.agents]
         one_hot = True
     except Exception:
-        state_dims = [env.observation_space(agent).shape for agent in env.agents]
+        state_dims = [env.single_observation_space(agent).shape for agent in env.agents]
         one_hot = False
     try:
-        action_dims = [env.action_space(agent).n for agent in env.agents]
+        action_dims = [env.single_action_space(agent).n for agent in env.agents]
         INIT_HP["DISCRETE_ACTIONS"] = True
         INIT_HP["MAX_ACTION"] = None
         INIT_HP["MIN_ACTION"] = None
     except Exception:
-        action_dims = [env.action_space(agent).shape[0] for agent in env.agents]
+        action_dims = [env.single_action_space(agent).shape[0] for agent in env.agents]
         INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
-        INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
+        INIT_HP["MAX_ACTION"] = [
+            env.single_action_space(agent).high for agent in env.agents
+        ]
+        INIT_HP["MIN_ACTION"] = [
+            env.single_action_space(agent).low for agent in env.agents
+        ]
 
     if INIT_HP["CHANNELS_LAST"]:
         state_dims = [
@@ -162,6 +162,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
         accelerator=accelerator,
+        torch_compiler=INIT_HP["TORCH_COMPILE"],
     )
 
     train_multi_agent(
@@ -170,6 +171,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         INIT_HP["ALGO"],
         agent_pop,
         memory=memory,
+        sum_scores=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
         net_config=NET_CONFIG,

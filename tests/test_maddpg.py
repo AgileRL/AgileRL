@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium.spaces import Box, Discrete
+from pettingzoo import ParallelEnv
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.maddpg import MADDPG
@@ -20,21 +22,25 @@ from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
-class DummyMultiEnv:
+class DummyMultiEnv(ParallelEnv):
     def __init__(self, state_dims, action_dims):
         self.state_dims = state_dims
         self.action_dims = action_dims
         self.agents = ["agent_0", "agent_1"]
         self.possible_agents = ["agent_0", "agent_1"]
         self.metadata = None
-        self.observation_space = None
-        self.action_space = None
+        self.render_mode = None
+
+    def action_space(self, agent):
+        return Discrete(self.action_dims[0])
+
+    def observation_space(self, agent):
+        return Box(0, 1, self.state_dims)
 
     def reset(self, seed=None, options=None):
         return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
-            "info_string": None,
-            "agent_mask": {"agent_0": False, "agent_1": True},
-            "env_defined_actions": {"agent_0": np.array([0, 1]), "agent_1": None},
+            "agent_0": {"env_defined_actions": np.array([1])},
+            "agent_1": {"env_defined_actions": None},
         }
 
     def step(self, action):
@@ -43,7 +49,7 @@ class DummyMultiEnv:
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: 1 for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
-            {agent: "info_string" for agent in self.agents},
+            self.reset()[1],
         )
 
 
@@ -887,6 +893,76 @@ def test_maddpg_get_action_mlp(
 
 
 @pytest.mark.parametrize(
+    "training, state_dims, action_dims, discrete_actions, one_hot",
+    [
+        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+    ],
+)
+def test_maddpg_get_action_action_masking_exception(
+    training, state_dims, action_dims, discrete_actions, one_hot, device
+):
+    agent_ids = ["agent_0", "agent_1"]
+    state = {
+        agent: {
+            "observation": np.random.randn(*state_dims[idx]),
+            "action_mask": [0, 1, 0, 1],
+        }
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        state_dims,
+        action_dims,
+        one_hot=one_hot,
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        n_agents=2,
+        agent_ids=agent_ids,
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=discrete_actions,
+        device=device,
+    )
+    with pytest.raises(AssertionError):
+        _, discrete_action = maddpg.get_action(state, training)
+
+
+@pytest.mark.parametrize(
+    "training, state_dims, action_dims, discrete_actions, one_hot",
+    [
+        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+    ],
+)
+def test_maddpg_get_action_action_masking(
+    training, state_dims, action_dims, discrete_actions, one_hot, device
+):
+    agent_ids = ["agent_0", "agent_1"]
+    state = {
+        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+    }
+    info = {
+        agent: {
+            "action_mask": [0, 1, 0, 1],
+        }
+        for idx, agent in enumerate(agent_ids)
+    }
+    maddpg = MADDPG(
+        state_dims,
+        action_dims,
+        one_hot=one_hot,
+        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        n_agents=2,
+        agent_ids=agent_ids,
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=discrete_actions,
+        device=device,
+    )
+    _, discrete_action = maddpg.get_action(state, training, info)
+    assert all(i in [1, 3] for i in discrete_action.values())
+
+
+@pytest.mark.parametrize(
     "training, state_dims, action_dims, discrete_actions, compile_mode",
     [
         (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
@@ -1113,11 +1189,16 @@ def test_maddpg_get_action_agent_masking(
 ):
     agent_ids = ["agent_0", "agent_1"]
     state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
-    agent_mask = {"agent_0": False, "agent_1": True}
     if discrete_actions:
-        env_defined_actions = {"agent_0": 1, "agent_1": None}
+        info = {
+            "agent_0": {"env_defined_actions": 1},
+            "agent_1": {"env_defined_actions": None},
+        }
     else:
-        env_defined_actions = {"agent_0": np.array([0, 1]), "agent_1": None}
+        info = {
+            "agent_0": {"env_defined_actions": np.array([0, 1])},
+            "agent_1": {"env_defined_actions": None},
+        }
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -1130,14 +1211,69 @@ def test_maddpg_get_action_agent_masking(
         device=device,
         torch_compiler=compile_mode,
     )
-    cont_actions, discrete_action = maddpg.get_action(
-        state, training, agent_mask=agent_mask, env_defined_actions=env_defined_actions
-    )
+    cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
     if discrete_actions:
-        assert np.array_equal(discrete_action["agent_0"], 1), discrete_action["agent_0"]
-    assert np.array_equal(cont_actions["agent_0"], np.array([0, 1])), cont_actions[
-        "agent_0"
-    ]
+        assert np.array_equal(
+            discrete_action["agent_0"], np.array([[1]])
+        ), discrete_action["agent_0"]
+    else:
+        assert np.array_equal(
+            cont_actions["agent_0"], np.array([[0, 1]])
+        ), cont_actions["agent_0"]
+
+
+@pytest.mark.parametrize(
+    "training, state_dims, action_dims, discrete_actions",
+    [
+        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], False),
+        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], False),
+        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], True),
+        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], True),
+    ],
+)
+def test_maddpg_get_action_vectorized_agent_masking(
+    training, state_dims, action_dims, discrete_actions, device
+):
+    num_envs = 6
+    agent_ids = ["agent_0", "agent_1"]
+    state = {
+        agent: np.array([np.random.randn(*state_dims[0]) for _ in range(num_envs)])
+        for agent in agent_ids
+    }
+    if discrete_actions:
+        env_defined_action = np.array(
+            [np.random.randint(0, state_dims[0][0] + 1) for _ in range(num_envs)]
+        )
+    else:
+        env_defined_action = np.array(
+            [np.random.randn(*state_dims[0]) for _ in range(num_envs)]
+        )
+    nan_array = np.zeros(env_defined_action.shape)
+    nan_array[:] = np.nan
+    info = {
+        "agent_0": {"env_defined_actions": env_defined_action},
+        "agent_1": {"env_defined_actions": nan_array},
+    }
+    maddpg = MADDPG(
+        state_dims,
+        action_dims,
+        one_hot=False,
+        n_agents=2,
+        agent_ids=agent_ids,
+        max_action=[[1], [1]],
+        min_action=[[-1], [-1]],
+        discrete_actions=discrete_actions,
+        device=device,
+    )
+    cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
+    if discrete_actions:
+        assert np.array_equal(
+            discrete_action["agent_0"].squeeze(), info["agent_0"]["env_defined_actions"]
+        ), discrete_action["agent_0"]
+    else:
+        assert np.isclose(
+            cont_actions["agent_0"], info["agent_0"]["env_defined_actions"]
+        ).all(), cont_actions["agent_0"]
 
 
 @pytest.mark.parametrize(
@@ -1574,15 +1710,15 @@ def test_maddpg_soft_update(device, compile_mode):
         )
 
 
+@pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_maddpg_algorithm_test_loop(device, compile_mode):
+def test_maddpg_algorithm_test_loop(device, sum_score, compile_mode):
     state_dims = [(6,), (6,)]
     action_dims = [2, 2]
     accelerator = None
 
     env = DummyMultiEnv(state_dims[0], action_dims)
 
-    # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     maddpg = MADDPG(
         state_dims,
         action_dims,
@@ -1596,12 +1732,17 @@ def test_maddpg_algorithm_test_loop(device, compile_mode):
         device=device,
         torch_compiler=compile_mode,
     )
-    mean_score = maddpg.test(env, max_steps=10)
-    assert isinstance(mean_score, float)
+    mean_score = maddpg.test(env, max_steps=10, sum_scores=sum_score)
+    if sum_score:
+        assert isinstance(mean_score, float)
+    else:
+        assert isinstance(mean_score, np.ndarray)
+        assert len(mean_score) == 2
 
 
+@pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_maddpg_algorithm_test_loop_cnn(device, compile_mode):
+def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compile_mode):
     env_state_dims = [(32, 32, 3), (32, 32, 3)]
     agent_state_dims = [(3, 32, 32), (3, 32, 32)]
     net_config = {
@@ -1624,17 +1765,24 @@ def test_maddpg_algorithm_test_loop_cnn(device, compile_mode):
         max_action=[[1], [1]],
         min_action=[[-1], [-1]],
         net_config=net_config,
-        discrete_actions=False,
+        discrete_actions=True,
         accelerator=accelerator,
         device=device,
         torch_compiler=compile_mode,
     )
-    mean_score = maddpg.test(env, max_steps=10, swap_channels=True)
-    assert isinstance(mean_score, float)
+    mean_score = maddpg.test(
+        env, max_steps=10, swap_channels=True, sum_scores=sum_score
+    )
+    if sum_score:
+        assert isinstance(mean_score, float)
+    else:
+        assert isinstance(mean_score, np.ndarray)
+        assert len(mean_score) == 2
 
 
+@pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
-def test_maddpg_algorithm_test_loop_cnn_vectorized(device, compile_mode):
+def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode):
     env_state_dims = [(32, 32, 3), (32, 32, 3)]
     agent_state_dims = [(3, 32, 32), (3, 32, 32)]
     net_config = {
@@ -1647,7 +1795,9 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, compile_mode):
     }
     action_dims = [2, 2]
     accelerator = None
-    env = make_multi_agent_vect_envs(DummyMultiEnv(env_state_dims[0], action_dims), 2)
+    env = make_multi_agent_vect_envs(
+        DummyMultiEnv, 2, **dict(state_dims=env_state_dims[0], action_dims=action_dims)
+    )
     maddpg = MADDPG(
         agent_state_dims,
         action_dims,
@@ -1657,13 +1807,20 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, compile_mode):
         max_action=[[1], [1]],
         min_action=[[-1], [-1]],
         net_config=net_config,
-        discrete_actions=False,
+        discrete_actions=True,
         accelerator=accelerator,
         device=device,
         torch_compiler=compile_mode,
     )
-    mean_score = maddpg.test(env, max_steps=10, swap_channels=True)
-    assert isinstance(mean_score, float)
+    mean_score = maddpg.test(
+        env, max_steps=10, swap_channels=True, sum_scores=sum_score
+    )
+    if sum_score:
+        assert isinstance(mean_score, float)
+    else:
+        assert isinstance(mean_score, np.ndarray)
+        assert len(mean_score) == 2
+    env.close()
 
 
 @pytest.mark.parametrize(

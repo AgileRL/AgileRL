@@ -13,11 +13,11 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import (
     compile_model,
+    key_in_nested_dict,
     remove_compile_prefix,
     unwrap_optimizer,
 )
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 class MATD3:
@@ -468,9 +468,83 @@ class MATD3:
             self.max_action[idx][0] - self.min_action[idx][0]
         ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
 
-    def get_action(
-        self, states, training=True, agent_mask=None, env_defined_actions=None
-    ):
+    def extract_action_masks(self, infos):
+        """Extract observations and action masks into two separate dictionaries
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
+        action_masks = {
+            agent: info.get("action_mask", None) if isinstance(info, dict) else None
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }  # Get dict of form {"agent_id" : [1, 0, 0, 0]...} etc
+
+        return action_masks
+
+    def extract_agent_masks(self, infos):
+        """Extract env_defined_actions from info dictionary and determine agent masks
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
+        if all(not info for agent, info in infos.items() if agent in self.agent_ids):
+            return None, None
+        env_defined_actions = {
+            agent: (
+                info.get("env_defined_actions", None)
+                if isinstance(info, dict)
+                else None
+            )
+            for agent, info in infos.items()
+            if agent in self.agent_ids
+        }
+        agent_masks = None
+        if env_defined_actions is not None:
+            agent_masks = {}
+            for idx, agent in enumerate(env_defined_actions.keys()):
+                # Handle None if environment isn't vectorized
+                if env_defined_actions[agent] is None:
+                    if not self.discrete_actions:
+                        nan_arr = np.empty(self.action_dims[idx])
+                        nan_arr[:] = np.nan
+                    else:
+                        nan_arr = np.array([[np.nan]])
+                    env_defined_actions[agent] = nan_arr
+
+                # Handle discrete actions + env not vectorized
+                if isinstance(env_defined_actions[agent], (int, float)):
+                    env_defined_actions[agent] = np.array(
+                        [[env_defined_actions[agent]]]
+                    )
+
+                # Ensure additional dimension is added in so shapes align for masking
+                if len(env_defined_actions[agent].shape) == 1:
+                    env_defined_actions[agent] = (
+                        env_defined_actions[agent][:, np.newaxis]
+                        if self.discrete_actions
+                        else env_defined_actions[agent][np.newaxis, :]
+                    )
+                agent_masks[agent] = np.where(
+                    np.isnan(env_defined_actions[agent]), 0, 1
+                ).astype(bool)
+
+        return env_defined_actions, agent_masks
+
+    def process_infos(self, infos):
+        """
+        Process the information, extract env_defined_actions, action_masks and agent_masks
+
+        :param infos: Info dict
+        :type infos: Dict[str, Dict[...]]
+        """
+        if infos is None:
+            infos = {agent: {} for agent in self.agent_ids}
+        env_defined_actions, agent_masks = self.extract_agent_masks(infos)
+        action_masks = self.extract_action_masks(infos)
+        return action_masks, env_defined_actions, agent_masks
+
+    def get_action(self, states, training=True, infos=None):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -479,36 +553,13 @@ class MATD3:
         :type state: Dict[str, numpy.Array]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
-        :param agent_mask: Mask of agents to return actions for: {'agent_0': True, ..., 'agent_n': False}
-        :type agent_mask: Dict[str, bool]
         :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
         :type env_defined_actions: Dict[str, np.array]
         """
-
-        # Get agents, states and actions we want to take actions for at this timestep according to agent_mask
-        if agent_mask is None:
-            agent_ids = self.agent_ids
-            actors = self.actors
-            state_dims = self.state_dims
-        else:
-            agent_ids = [agent for agent in agent_mask.keys() if agent_mask[agent]]
-            state_dims = [
-                state_dim
-                for state_dim, mask_flag in zip(self.state_dims, agent_mask.keys())
-                if mask_flag
-            ]
-            action_dims_dict = {
-                agent: action_dim
-                for agent, action_dim in zip(self.agent_ids, self.action_dims)
-            }
-            states = {
-                agent: states[agent] for agent in agent_mask.keys() if agent_mask[agent]
-            }
-            actors = [
-                actor
-                for agent, actor in zip(agent_mask.keys(), self.actors)
-                if agent_mask[agent]
-            ]
+        assert not key_in_nested_dict(
+            states, "action_mask"
+        ), "AgileRL requires action masks to be defined in the information dictionary."
+        action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         # Convert states to a list of torch tensors
         states = [torch.from_numpy(state).float() for state in states.values()]
@@ -522,7 +573,7 @@ class MATD3:
                 nn.functional.one_hot(state.long(), num_classes=state_dim[0])
                 .float()
                 .squeeze(1)
-                for state, state_dim in zip(states, state_dims)
+                for state, state_dim in zip(states, self.state_dims)
             ]
 
         if self.arch == "mlp":
@@ -541,8 +592,9 @@ class MATD3:
             ]
 
         action_dict = {}
-
-        for idx, (agent_id, state, actor) in enumerate(zip(agent_ids, states, actors)):
+        for idx, (agent_id, state, actor) in enumerate(
+            zip(self.agent_ids, states, self.actors)
+        ):
             actor.eval()
             if self.accelerator is not None:
                 with actor.no_sync(), torch.no_grad():
@@ -561,46 +613,42 @@ class MATD3:
                         self.min_action[idx][0],
                         self.max_action[idx][0],
                     )
-            action_dict[agent_id] = actions
+            action_dict[agent_id] = actions.cpu().numpy()
 
         discrete_action_dict = None
         if self.discrete_actions:
             discrete_action_dict = {}
             for agent, action in action_dict.items():
-                discrete_action_dict[agent] = torch.argmax(action, dim=-1)
-
-        if env_defined_actions is None:
-            ret = (
-                {a: t.cpu().data.numpy() for a, t in action_dict.items()},
-                (
-                    discrete_action_dict
-                    if discrete_action_dict is None
-                    else {
-                        a: t.cpu().data.numpy() for a, t in discrete_action_dict.items()
-                    }
-                ),
-            )
-            return ret
-
-        for agent in agent_mask.keys():
-            if agent_mask[agent]:
-                continue
-            if self.discrete_actions:
-                action = env_defined_actions[agent]
-                action = (
-                    nn.functional.one_hot(
-                        torch.tensor(action).long(),
-                        num_classes=action_dims_dict[agent],
-                    )
-                    .float()
-                    .squeeze()
+                mask = (
+                    1 - np.array(action_masks[agent])
+                    if action_masks[agent] is not None
+                    else None
                 )
-                action_dict.update({agent: action})
-                discrete_action_dict.update({agent: env_defined_actions[agent]})
-            else:
-                action_dict.update({agent: env_defined_actions[agent]})
+                action = np.ma.array(action, mask=mask)
+                if self.one_hot:
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
+                else:
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
+                if len(discrete_action_dict[agent].shape) == 1:
+                    discrete_action_dict[agent] = discrete_action_dict[agent][
+                        :, np.newaxis
+                    ]
+        else:
+            discrete_action_dict = None
 
-        return action_dict, discrete_action_dict
+        # If using env_defined_actions replace actions
+        if env_defined_actions is not None:
+            for agent in self.agent_ids:
+                if self.discrete_actions:
+                    discrete_action_dict[agent][agent_masks[agent]] = (
+                        env_defined_actions[agent][agent_masks[agent]]
+                    )
+                else:
+                    action_dict[agent][agent_masks[agent]] = env_defined_actions[agent][
+                        agent_masks[agent]
+                    ]
+
+        return (action_dict, discrete_action_dict)
 
     def action_noise(self, idx):
         """Create action noise for exploration, either Ornstein Uhlenbeck or
@@ -936,7 +984,7 @@ class MATD3:
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(self, env, swap_channels=False, max_steps=None, loop=3, sum_scores=True):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -947,15 +995,30 @@ class MATD3:
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
+        :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
+        :type sum_scores: book, optional
         """
-        is_vectorised = isinstance(env, PettingZooVectorizationParallelWrapper)
         with torch.no_grad():
             rewards = []
-            num_envs = env.num_envs if hasattr(env, "num_envs") else 1
+            if hasattr(env, "num_envs"):
+                num_envs = env.num_envs
+                is_vectorised = True
+            else:
+                num_envs = 1
+                is_vectorised = False
+
             for i in range(loop):
                 state, info = env.reset()
-                scores = np.zeros(num_envs)
-                completed_episode_scores = np.zeros(num_envs)
+                scores = (
+                    np.zeros((num_envs, 1))
+                    if sum_scores
+                    else np.zeros((num_envs, len(self.agent_ids)))
+                )
+                completed_episode_scores = (
+                    np.zeros((num_envs, 1))
+                    if sum_scores
+                    else np.zeros((num_envs, len(self.agent_ids)))
+                )
                 finished = np.zeros(num_envs)
                 step = 0
                 while not np.all(finished):
@@ -971,19 +1034,10 @@ class MATD3:
                                 agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
                                 for agent_id, s in state.items()
                             }
-                    agent_mask = (
-                        info["agent_mask"] if "agent_mask" in info.keys() else None
-                    )
-                    env_defined_actions = (
-                        info["env_defined_actions"]
-                        if "env_defined_actions" in info.keys()
-                        else None
-                    )
                     cont_actions, discrete_action = self.get_action(
                         state,
                         training=False,
-                        agent_mask=agent_mask,
-                        env_defined_actions=env_defined_actions,
+                        infos=info,
                     )
                     if self.discrete_actions:
                         action = discrete_action
@@ -991,25 +1045,39 @@ class MATD3:
                         action = cont_actions
                     if not is_vectorised:
                         action = {agent: act[0] for agent, act in action.items()}
-                    state, reward, done, trunc, info = env.step(action)
-                    scores += np.sum(
-                        np.array(list(reward.values())).transpose(), axis=-1
+                    state, reward, term, trunc, info = env.step(action)
+                    score_increment = (
+                        (
+                            np.sum(
+                                np.array(list(reward.values())).transpose(), axis=-1
+                            )[:, np.newaxis]
+                            if is_vectorised
+                            else np.sum(
+                                np.array(list(reward.values())).transpose(), axis=-1
+                            )
+                        )
+                        if sum_scores
+                        else np.array(list(reward.values())).transpose()
                     )
-                    done_array = np.array(list(done.values())).transpose()
-                    trunc_array = np.array(list(trunc.values())).transpose()
+                    scores += score_increment
+                    dones = {
+                        agent: term[agent] | trunc[agent] for agent in self.agent_ids
+                    }
                     if not is_vectorised:
-                        done_array = np.expand_dims(done_array, 0)
-                        trunc_array = np.expand_dims(trunc_array, 0)
-                    for idx, (d, t) in enumerate(zip(done_array, trunc_array)):
+                        dones = {
+                            agent: np.array([done]) for agent, done in dones.items()
+                        }
+
+                    for idx, agent_dones in enumerate(zip(*dones.values())):
                         if (
-                            np.any(d)
-                            or np.any(t)
+                            np.all(agent_dones)
                             or (max_steps is not None and step == max_steps)
                         ) and not finished[idx]:
                             completed_episode_scores[idx] = scores[idx]
                             finished[idx] = 1
-                rewards.append(np.mean(completed_episode_scores))
-        mean_fit = np.mean(rewards)
+                rewards.append(np.mean(completed_episode_scores, axis=0))
+        mean_fit = np.mean(rewards, axis=0)
+        mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)
         return mean_fit
 

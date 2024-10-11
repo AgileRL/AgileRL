@@ -78,6 +78,7 @@ Contents
    api/networks/index
    api/train
    api/utils/index
+   api/vector/index
    api/wrappers/index
 
 .. toctree::

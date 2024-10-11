@@ -1,6 +1,7 @@
 import os
 import time
 import warnings
+from copy import deepcopy
 from datetime import datetime
 
 import numpy as np
@@ -10,7 +11,6 @@ from tqdm import trange
 
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
 
 
 def train_multi_agent(
@@ -19,6 +19,7 @@ def train_multi_agent(
     algo,
     pop,
     memory,
+    sum_scores=True,
     INIT_HP=None,
     MUT_P=None,
     net_config=None,
@@ -54,6 +55,8 @@ def train_multi_agent(
     :type pop: list[object]
     :param memory: Experience Replay Buffer
     :type memory: object
+    :param sum_scores: Boolean flag indicating whether to sum sub-agents scores, typically True for co-operative environments, defaults to True
+    :type sum_scores: bool, optional
     :param INIT_HP: Dictionary containing initial hyperparameters.
     :type INIT_HP: dict
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
@@ -172,7 +175,7 @@ def train_multi_agent(
             if not os.path.exists(accel_temp_models_path):
                 os.makedirs(accel_temp_models_path)
 
-    if isinstance(env, PettingZooVectorizationParallelWrapper):
+    if hasattr(env, "num_envs"):
         is_vectorised = True
         num_envs = env.num_envs
     else:
@@ -215,7 +218,7 @@ def train_multi_agent(
     else:
         pbar = trange(max_steps, unit="step", bar_format=bar_format, ascii=True)
 
-    agent_ids = env.agents
+    agent_ids = deepcopy(env.agents)
     pop_actor_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     pop_critic_loss = [{agent_id: [] for agent_id in agent_ids} for _ in pop]
     pop_fitnesses = []
@@ -227,7 +230,6 @@ def train_multi_agent(
     if accelerator is None:
         if mutation is not None:
             pop = mutation.mutation(pop, pre_training_mut=True)
-
     # RL training loop
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
@@ -235,7 +237,11 @@ def train_multi_agent(
         pop_episode_scores = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
-            scores = np.zeros(num_envs)
+            scores = (
+                np.zeros((num_envs, 1))
+                if sum_scores
+                else np.zeros((num_envs, len(agent_ids)))
+            )
             losses = {agent_id: [] for agent_id in agent_ids}
             completed_episode_scores = []
             steps = 0
@@ -253,17 +259,8 @@ def train_multi_agent(
                     }
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
-                agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
-                env_defined_actions = (
-                    info["env_defined_actions"]
-                    if "env_defined_actions" in info.keys()
-                    else None
-                )
                 cont_actions, discrete_action = agent.get_action(
-                    states=state,
-                    training=True,
-                    agent_mask=agent_mask,
-                    env_defined_actions=env_defined_actions,
+                    states=state, training=True, infos=info
                 )
                 if agent.discrete_actions:
                     action = discrete_action
@@ -278,10 +275,23 @@ def train_multi_agent(
 
                 # Act in environment
                 next_state, reward, termination, truncation, info = env.step(action)
-                scores += np.sum(np.array(list(reward.values())).transpose(), axis=-1)
+                score_increment = (
+                    (
+                        np.sum(np.array(list(reward.values())).transpose(), axis=-1)[
+                            :, np.newaxis
+                        ]
+                        if is_vectorised
+                        else np.sum(
+                            np.array(list(reward.values())).transpose(), axis=-1
+                        )
+                    )
+                    if sum_scores
+                    else np.array(list(reward.values())).transpose()
+                )
+
+                scores += score_increment
                 total_steps += num_envs
                 steps += num_envs
-
                 # Save experience to replay buffer
                 if swap_channels:
                     if not is_vectorised:
@@ -340,22 +350,26 @@ def train_multi_agent(
                 state = next_state
 
                 reset_noise_indices = []
-                term_array = np.array(list(termination.values())).transpose()
-                trunc_array = np.array(list(truncation.values())).transpose()
+                # Find which agents are "done" - i.e. terminated or truncated
+                dones = {
+                    agent_id: termination[agent_id] | truncation[agent_id]
+                    for agent_id in agent.agent_ids
+                }
                 if not is_vectorised:
-                    term_array = np.expand_dims(term_array, 0)
-                    trunc_array = np.expand_dims(trunc_array, 0)
-                for idx, (d, t) in enumerate(zip(term_array, trunc_array)):
-                    if np.any(d) or np.any(t):
-                        completed_episode_scores.append(scores[idx])
-                        agent.scores.append(scores[idx])
-                        scores[idx] = 0
-                        reset_noise_indices.append(idx)
+                    dones = {agent: np.array([done]) for agent, done in dones.items()}
 
+                for idx, agent_dones in enumerate(zip(*dones.values())):
+                    if all(agent_dones):
+                        completed_score = (
+                            float(scores[idx]) if sum_scores else list(scores[idx])
+                        )
+                        completed_episode_scores.append(completed_score)
+                        agent.scores.append(completed_score)
+                        scores[idx].fill(0)
+                        reset_noise_indices.append(idx)
                         if not is_vectorised:
                             state, info = env.reset()
                 agent.reset_action_noise(reset_noise_indices)
-
             pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
@@ -377,19 +391,65 @@ def train_multi_agent(
         # Evaluate population
         fitnesses = [
             agent.test(
-                env, swap_channels=swap_channels, max_steps=eval_steps, loop=eval_loop
+                env,
+                swap_channels=swap_channels,
+                max_steps=eval_steps,
+                loop=eval_loop,
+                sum_scores=sum_scores,
             )
             for agent in pop
         ]
         pop_fitnesses.append(fitnesses)
-        mean_scores = [
-            (
-                np.mean(episode_scores)
-                if len(episode_scores) > 0
-                else "0 completed episodes"
-            )
-            for episode_scores in pop_episode_scores
-        ]
+        if sum_scores:
+            mean_scores = [
+                (
+                    np.mean(episode_scores)
+                    if len(episode_scores) > 0
+                    else "0 completed episodes"
+                )
+                for episode_scores in pop_episode_scores
+            ]
+            mean_score_dict = {
+                "train/mean_score": np.mean(
+                    [
+                        mean_score
+                        for mean_score in mean_scores
+                        if not isinstance(mean_score, str)
+                    ]
+                )
+            }
+            fitness_dict = {
+                "eval/mean_fitness": np.mean(fitnesses),
+                "eval/best_fitness": np.max(fitnesses),
+            }
+        else:
+            pop_mean_scores = [
+                np.mean(np.array(score), axis=0)
+                for score in pop_episode_scores
+                if score
+            ]
+            if pop_episode_scores:
+                mean_scores = np.stack(pop_mean_scores, axis=0)
+                mean_score_dict = {
+                    "train/mean_score/" + agent: np.mean(mean_scores[:, idx], axis=-1)
+                    for idx, agent in enumerate(agent_ids)
+                }
+            else:
+                mean_score_dict = {
+                    "train/mean_score/" + agent: np.nan
+                    for idx, agent in enumerate(agent_ids)
+                }
+            mean_fitnesses = np.mean(fitnesses, axis=0)
+            max_fitnesses = np.max(fitnesses, axis=0)
+            fitness_dict = {
+                "eval/mean_fitness/" + agent: mean_fitnesses[idx]
+                for idx, agent in enumerate(agent_ids)
+            }
+            best_fitness_dict = {
+                "eval/best_fitness/" + agent: max_fitnesses[idx]
+                for idx, agent in enumerate(agent_ids)
+            }
+            fitness_dict.update(best_fitness_dict)
 
         if wb:
             wandb_dict = {
@@ -398,16 +458,9 @@ def train_multi_agent(
                     if accelerator is not None and accelerator.is_main_process
                     else total_steps
                 ),
-                "train/mean_score": np.mean(
-                    [
-                        mean_score
-                        for mean_score in mean_scores
-                        if not isinstance(mean_score, str)
-                    ]
-                ),
-                "eval/mean_fitness": np.mean(fitnesses),
-                "eval/best_fitness": np.max(fitnesses),
             }
+            wandb_dict.update(fitness_dict)
+            wandb_dict.update(mean_score_dict)
 
             actor_loss_dict = {}
             critic_loss_dict = {}
@@ -499,9 +552,30 @@ def train_multi_agent(
                 elite.save_checkpoint(f"{elite_save_path}.pt")
 
         if verbose:
-            fitness = ["%.2f" % fitness for fitness in fitnesses]
-            avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
-            avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            if sum_scores:
+                fitness = ["%.2f" % fitness for fitness in fitnesses]
+                avg_fitness = ["%.2f" % np.mean(agent.fitness[-5:]) for agent in pop]
+                avg_score = ["%.2f" % np.mean(agent.scores[-10:]) for agent in pop]
+            else:
+                fitness_arr = np.array([fitness for fitness in fitnesses])
+                avg_fitness_arr = np.array(
+                    [np.mean(agent.fitness[-5:], axis=0) for agent in pop]
+                )
+                avg_score_arr = np.array(
+                    [np.mean(agent.scores[-10:], axis=0) for agent in pop]
+                )
+                fitness = {
+                    agent: fitness_arr[:, idx] for idx, agent in enumerate(agent_ids)
+                }
+                avg_fitness = {
+                    agent: avg_fitness_arr[idx] for idx, agent in enumerate(agent_ids)
+                }
+                avg_score = {
+                    agent: avg_score_arr[idx] for idx, agent in enumerate(agent_ids)
+                }
+                mean_scores = {
+                    agent: mean_scores[:, idx] for idx, agent in enumerate(agent_ids)
+                }
             agents = [agent.index for agent in pop]
             num_steps = [agent.steps[-1] for agent in pop]
             muts = [agent.mut for agent in pop]

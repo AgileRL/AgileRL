@@ -3,9 +3,9 @@
 Multi-Agent Twin-Delayed Deep Deterministic Policy Gradient (MATD3)
 ===================================================================
 
-MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MATD3 algorithm to reduce overestimation bias
+MATD3 (Multi-Agent Twin Delayed Deep Deterministic Policy Gradients) extends the MADDPG algorithm to reduce overestimation bias
 in multi-agent domains through the use of a second set of critic networks and delayed updates of the policy networks. This
-enables superior performance when compared to MATD3.
+enables superior performance when compared to MADDPG.
 
 * MATD3 paper: https://arxiv.org/abs/1910.01465
 
@@ -38,21 +38,27 @@ unnecessary, as the algorithm will select the appropriate function given the env
 Agent Masking
 -------------
 
-If you need to take actions from agents at different timesteps, you can use agent masking to only retrieve new actions for certain agents. This
-can be defined by your environment, and should be returned in 'info' as a dictionary. Info must contain two dictionaries - one named 'agent_mask',
-which contains a boolean value for whether an action should be returned for each agent, and another named 'env_defined_actions', which contains
-the actions for each agent that a new action is not generated for. This is handled automatically by the AgileRL multi-agent training function, but
-can be implemented in a custom loop as follows:
+If you need to take actions from agents at different timesteps, you can use agent masking to only retrieve new actions for certain agents whilst
+providing 'environment defined actions' for other agents, which act as a nominal action for such "masked" agents to take. These nominal actions
+should be returned as part of the ``info`` dictionary. Following the PettingZoo API we recommend the ``info`` dictionary to be keyed by the
+agents, with ``env_defined_actions`` defined as follows:
 
 .. code-block:: python
 
-    info = {'agent_mask': {'speaker_0': True, 'listener_0': False},
-            'env_defined_actions': {'speaker_0': None, 'listener_0': np.array([0,0,0,0,0])}}
+    info = {'speaker_0': {'env_defined_actions':  None},
+            'listener_0': {'env_defined_actions': np.array([0,0,0,0,0])}
+
+For agents that you wish not to be masked, the ``env_defined_actions`` should be set to ``None``. If your environment has discrete action spaces
+then provide 'env_defined_actions' as a numpy array with a single value. For example, an action space of type ``Discrete(5)`` may have an
+``env_defined_action`` of ``np.array([4])``. For an environment with continuous actions spaces (e.g. ``Box(0, 1, (5,))``) then the shape of the
+array should be the size of the action space (``np.array([0.5, 0.5, 0.5, 0.5, 0.5])``). Agent masking is handled automatically by the AgileRL
+multi-agent training function, but can be implemented in a custom loop as follows:
 
 .. code-block:: python
 
+    env_defined_actions = {agent: info[agent]["env_defined_actions"] for agent in env.agents}
     state, info = env.reset()  # or: next_state, reward, done, truncation, info = env.step(action)
-    cont_actions, discrete_action = agent.get_action(state, epsilon, info['agent_mask'], info['env_defined_actions'])
+    cont_actions, discrete_action = agent.get_action(state, env_defined_actions=env_defined_actions)
     if agent.discrete_actions:
         action = discrete_action
     else:
@@ -69,31 +75,31 @@ Example
     from tqdm import trange
 
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
-    from agilerl.wrappers.pettingzoo_wrappers import PettingZooVectorizationParallelWrapper
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = 8
     env = simple_speaker_listener_v4.parallel_env(max_cycles=25, continuous_actions=True)
-    env = PettingZooVectorizationParallelWrapper(env, n_envs=num_envs)
+    env = AsyncPettingZooVecEnv([lambda: env for _ in range(num_envs)])
     env.reset()
 
     # Configure the multi-agent algo input arguments
     try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
         one_hot = True
     except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
         one_hot = False
     try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
+        action_dim = [env.single_action_space(agent).n for agent in env.agents]
         discrete_actions = True
         max_action = None
         min_action = None
     except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
         discrete_actions = False
-        max_action = [env.action_space(agent).high for agent in env.agents]
-        min_action = [env.action_space(agent).low for agent in env.agents]
+        max_action = [env.single_action_space(agent).high for agent in env.agents]
+        min_action = [env.single_action_space(agent).low for agent in env.agents]
 
     channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     n_agents = env.num_agents
@@ -131,19 +137,11 @@ Example
             state = {agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in state.items()}
 
         for _ in range(1000):
-            agent_mask = info["agent_mask"] if "agent_mask" in info.keys() else None
-            env_defined_actions = (
-                info["env_defined_actions"]
-                if "env_defined_actions" in info.keys()
-                else None
-            )
-
             # Get next action from agent
             cont_actions, discrete_action = agent.get_action(
                 states=state,
                 training=True,
-                agent_mask=agent_mask,
-                env_defined_actions=env_defined_actions,
+                infos=info,
             )
             if agent.discrete_actions:
                 action = discrete_action
