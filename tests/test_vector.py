@@ -1004,7 +1004,6 @@ def test_observations_states():
         shared_memory.shared_memory, exp_spec=exp_handler, num_envs=num_envs
     )
     state = observations.__getstate__()
-    assert False
     assert state["obs_view"] is None
     observations.__setstate__(state)
     assert isinstance(observations.obs_view, np.ndarray)

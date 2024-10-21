@@ -804,7 +804,6 @@ class Observations:
         self.obs_view = np.frombuffer(self.shared_memory, dtype=np.float32).reshape(
             (self.num_envs, self.exp_spec.total_observation_width)
         )
-        self.__dict__["obs_view"] = self.obs_view
 
 
 class SharedMemory:
