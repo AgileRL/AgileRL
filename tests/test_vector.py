@@ -995,6 +995,20 @@ def test_observations_image():
     )
 
 
+def test_observations_states():
+    num_envs = 1
+    env_fn = [lambda: pursuit_v4.parallel_env() for _ in range(num_envs)][0]
+    exp_handler = PettingZooExperienceSpec(env_fn(), num_envs)
+    shared_memory = SharedMemory(num_envs, exp_handler, mp)
+    observations = Observations(
+        shared_memory.shared_memory, exp_spec=exp_handler, num_envs=num_envs
+    )
+    state = observations.__getstate__()
+    assert state["obs_view"] is None
+    observations.__setstate__(state)
+    assert isinstance(observations.obs_view, np.ndarray)
+
+
 # Test for pz_vec_env.py
 def test_vec_env_reset():
     vec_env = PettingZooVecEnv(3, ["agent_0"])
