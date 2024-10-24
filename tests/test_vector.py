@@ -288,15 +288,17 @@ def test_env_order_preserved():
     ]
     env = AsyncPettingZooVecEnv(env_fns)
     env.reset()
-    env.observations.obs_view[:] = 0
+    for obs_view in env.observations.obs_view:
+        obs_view[:] = 0
     actions = [0, 1]
     rand_env = np.random.randint(0, 16)
-    # for rand_env in range(16):
     env.parent_pipes[rand_env].send(("step", actions))
     env.parent_pipes[rand_env].recv()
-    assert not np.array_equal(
-        env.observations.obs_view[rand_env, :], np.zeros((14,), dtype=np.float32)
-    )
+    for idx, agent in enumerate(env.agents):
+        assert not np.array_equal(
+            env.observations.obs_view[idx][rand_env, :],
+            np.zeros_like(env.experience_spec.observation_shapes[agent]),
+        )
     env.close()
 
 
@@ -832,7 +834,10 @@ def test_worker_step_autoreset():
     env_fn = [lambda: term_env() for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fn)
     vec_env.reset()
-    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    actions = {
+        agent: np.array([vec_env.single_action_space(agent).sample()])
+        for agent in vec_env.agents
+    }
     vec_env.close()
     actions = actions_to_list_helper(actions)
     exp_handler = PettingZooExperienceSpec(env_fn[0](), num_envs)
@@ -859,6 +864,7 @@ def test_worker_step_autoreset():
     parent_pipe.recv()
     time.sleep(1)
 
+    # print("ACTIONS", actions[0].dtype)
     parent_pipe.send(("step", actions[0]))
     results, success = parent_pipe.recv()
     assert success
