@@ -652,7 +652,7 @@ class PettingZooExperienceSpec:
         """
         if transition_name == "reward":
             return 0
-        if transition_name == "truncation" or transition_name == "termination":
+        if transition_name == "truncated" or transition_name == "terminated":
             return True
         if transition_name == "info":
             return {}
