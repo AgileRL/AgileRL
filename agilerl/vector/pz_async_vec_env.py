@@ -868,9 +868,8 @@ def _async_worker(
                     }
                     transition = env.step(data)
                     observation, reward, terminated, truncated, info = transition
-                    # if any(terminated.values()):
-                    #     raise Exception("True terminal values")
-                    assert False
+                    if any(terminated.values()):
+                        raise Exception("True terminal values")
                     observation, reward, terminated, truncated, info = (
                         experience_spec.process_transition(
                             transition,
