@@ -702,60 +702,54 @@ class Observations:
         self.exp_spec = exp_spec
         self.num_envs = num_envs
         self.shared_memory = shared_memory
-        self.obs_view = np.frombuffer(shared_memory, dtype=np.float32).reshape(
-            (num_envs, exp_spec.total_observation_width)
-        )
+        self.obs_view = []
+
+        for shm, agent in zip(shared_memory, exp_spec.agents):
+            self.obs_view.append(
+                np.frombuffer(
+                    shm, dtype=exp_spec.single_observation_space[agent]
+                ).reshape((num_envs, *exp_spec.observation_shapes[agent]))
+            )
+
+        # self.obs_view = np.frombuffer(shared_memory, dtype=np.float32).reshape(
+        #     (num_envs, exp_spec.total_observation_width)
+        # )
+        for i, arr in enumerate(self.obs_view):
+            print(f"Shape of array {i} --> {arr.shape}")
 
     def __getitem__(self, key):
         """
         Get agent observation given a key (agent_id)
         """
         agent_idx = self.exp_spec.agent_index_map[key]
-        return (
-            self.obs_view[
-                :,
-                self.exp_spec.observation_boundaries[
-                    agent_idx
-                ] : self.exp_spec.observation_boundaries[agent_idx + 1],
-            ]
-            .astype(dtype=self.exp_spec.single_observation_space[key].dtype)
-            .reshape((self.num_envs,) + self.exp_spec.observation_shapes[key])
-        )
+        return self.obs_view[agent_idx]
 
+    # TODO
     def __str__(self):
         """"""
-        my_dic = {
-            agent: self.obs_view[
-                :,
-                self.exp_spec.observation_boundaries[
-                    agent_idx
-                ] : self.exp_spec.observation_boundaries[agent_idx + 1],
-            ]
-            .astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
-            .reshape((self.num_envs,) + (self.exp_spec.observation_shapes[agent]))
-            for agent, agent_idx in self.exp_spec.agent_index_map.items()
-        }
+        my_dic = {agent: obs for agent, obs in zip(self.exp_spec.agents, self.obs_view)}
         return f"{my_dic}"
 
     def set_env_obs(self, index, observation):
-        np.copyto(self.obs_view[index, :], observation)
+        for idx, obs in enumerate(observation.values()):
+            np.copyto(self.obs_view[idx][index, :], obs)
 
-    def get_env_obs(self, index):
-        return self.obs_view[index, :]
+    # def get_env_obs(self, index):
+    #     return self.obs_view[index, :]
 
-    def get_agent_obs(self, agent, flat=True):
-        agent_idx = self.exp_spec.agent_index_map[agent]
-        obs = self.obs_view[
-            :,
-            self.exp_spec.observation_boundaries[
-                agent_idx
-            ] : self.exp_spec.observation_boundaries[agent_idx + 1],
-        ]
-        if flat:
-            return obs.astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
-        return obs.reshape(
-            (self.num_envs,) + (self.exp_spec.observation_shapes[agent])
-        ).astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
+    # def get_agent_obs(self, agent, flat=True):
+    #     agent_idx = self.exp_spec.agent_index_map[agent]
+    #     obs = self.obs_view[
+    #         :,
+    #         self.exp_spec.observation_boundaries[
+    #             agent_idx
+    #         ] : self.exp_spec.observation_boundaries[agent_idx + 1],
+    #     ]
+    #     if flat:
+    #         return obs.astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
+    #     return obs.reshape(
+    #         (self.num_envs,) + (self.exp_spec.observation_shapes[agent])
+    #     ).astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
 
     def __repr__(self):
         return self.__str__()
@@ -819,10 +813,15 @@ class SharedMemory:
     """
 
     def __init__(self, num_envs, exp_spec, context):
-        self.total_bytes = (
-            np.dtype(np.float32).itemsize * exp_spec.total_observation_width * num_envs
-        )
-        self.shared_memory = context.RawArray("c", self.total_bytes)
+        self.shared_memory = []
+        for agent in exp_spec.agents:
+            total_bytes = (
+                np.dtype(exp_spec.single_observation_space[agent].dtype).itemsize
+                * exp_spec.observation_widths[agent]
+                * num_envs
+            )
+            shared_memory = context.RawArray("c", total_bytes)
+            self.shared_memory.append(shared_memory)
 
 
 def _async_worker(
@@ -863,9 +862,7 @@ def _async_worker(
                 observation, info = experience_spec.process_transition(
                     env.reset(**data), observations, ["observation", "info"]
                 )
-                observations.set_env_obs(
-                    index, experience_spec.dict_to_1d_array(observation)
-                )
+                observations.set_env_obs(index, observation)
                 autoreset = False
                 pipe.send(((info), True))
             elif command == "step":
@@ -883,8 +880,6 @@ def _async_worker(
                     }
                     transition = env.step(data)
                     observation, reward, terminated, truncated, info = transition
-                    if any(terminated.values()):
-                        raise Exception("True terminal values")
                     observation, reward, terminated, truncated, info = (
                         experience_spec.process_transition(
                             transition,
@@ -904,9 +899,7 @@ def _async_worker(
                         for term, trunc in zip(terminated.values(), truncated.values())
                     ]
                 )
-                observations.set_env_obs(
-                    index, experience_spec.dict_to_1d_array(observation)
-                )
+                observations.set_env_obs(index, observation)
                 pipe.send(((reward, terminated, truncated, info), True))
 
             elif command == "close":
