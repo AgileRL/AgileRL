@@ -21,8 +21,7 @@ class GumbelSoftmax(nn.Module):
         """
         epsilon = torch.rand_like(logits)  # epsilon = U
         gumbel_noise = -torch.log(-torch.log(epsilon + eps) + eps)
-        y = logits + gumbel_noise
-        y = y.clone()
+        y = (logits + gumbel_noise).clone()
         return F.softmax(y / tau, dim=-1)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
