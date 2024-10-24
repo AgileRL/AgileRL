@@ -671,19 +671,6 @@ class PettingZooExperienceSpec:
             }
         return transition_list
 
-    def dict_to_1d_array(self, input_dict):
-        result = []
-        for value in input_dict.values():
-            if isinstance(value, np.ndarray):
-                result.extend(value.flatten())
-            elif isinstance(value, list):
-                result.extend(value)
-            elif isinstance(value, (int, float)):
-                result.append(value)
-            else:
-                raise TypeError(f"Unsupported type: {type(value)}")
-        return np.array(result, dtype=np.float32)
-
 
 class Observations:
     """
@@ -772,9 +759,13 @@ class Observations:
         """Called when unpickling - tell Python how to deserialize this object"""
         self.__dict__.update(state)
         # Recreate the numpy view from the shared buffer
-        self.obs_view = np.frombuffer(self.shared_memory, dtype=np.float32).reshape(
-            (self.num_envs, self.exp_spec.total_observation_width)
-        )
+        self.obs_view = []
+        for shm, agent in zip(self.shared_memory, self.exp_spec.agents):
+            self.obs_view.append(
+                np.frombuffer(
+                    shm, dtype=self.exp_spec.single_observation_space[agent]
+                ).reshape((self.num_envs, *self.exp_spec.observation_shapes[agent]))
+            )
 
 
 class SharedMemory:

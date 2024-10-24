@@ -67,7 +67,8 @@ class term_env(ParallelEnv):
         env_truncation = self.num_moves >= NUM_ITERS
         truncations = {agent: env_truncation for agent in self.agents}
         observations = {
-            self.agents[i]: actions[self.agents[1 - i]] for i in range(len(self.agents))
+            self.agents[i]: actions[self.agents[1 - i]].astype(int)
+            for i in range(len(self.agents))
         }
         self.state = observations
         infos = {agent: {} for agent in self.agents}
