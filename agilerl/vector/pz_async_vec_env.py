@@ -703,19 +703,12 @@ class Observations:
         self.num_envs = num_envs
         self.shared_memory = shared_memory
         self.obs_view = []
-
         for shm, agent in zip(shared_memory, exp_spec.agents):
             self.obs_view.append(
                 np.frombuffer(
                     shm, dtype=exp_spec.single_observation_space[agent]
                 ).reshape((num_envs, *exp_spec.observation_shapes[agent]))
             )
-
-        # self.obs_view = np.frombuffer(shared_memory, dtype=np.float32).reshape(
-        #     (num_envs, exp_spec.total_observation_width)
-        # )
-        for i, arr in enumerate(self.obs_view):
-            print(f"Shape of array {i} --> {arr.shape}")
 
     def __getitem__(self, key):
         """
@@ -724,7 +717,6 @@ class Observations:
         agent_idx = self.exp_spec.agent_index_map[key]
         return self.obs_view[agent_idx]
 
-    # TODO
     def __str__(self):
         """"""
         my_dic = {agent: obs for agent, obs in zip(self.exp_spec.agents, self.obs_view)}
@@ -733,23 +725,6 @@ class Observations:
     def set_env_obs(self, index, observation):
         for idx, obs in enumerate(observation.values()):
             np.copyto(self.obs_view[idx][index, :], obs)
-
-    # def get_env_obs(self, index):
-    #     return self.obs_view[index, :]
-
-    # def get_agent_obs(self, agent, flat=True):
-    #     agent_idx = self.exp_spec.agent_index_map[agent]
-    #     obs = self.obs_view[
-    #         :,
-    #         self.exp_spec.observation_boundaries[
-    #             agent_idx
-    #         ] : self.exp_spec.observation_boundaries[agent_idx + 1],
-    #     ]
-    #     if flat:
-    #         return obs.astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
-    #     return obs.reshape(
-    #         (self.num_envs,) + (self.exp_spec.observation_shapes[agent])
-    #     ).astype(dtype=self.exp_spec.single_observation_space[agent].dtype)
 
     def __repr__(self):
         return self.__str__()
