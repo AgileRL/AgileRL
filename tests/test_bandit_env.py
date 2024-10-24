@@ -1,16 +1,15 @@
 import random
 
 import numpy as np
-from ucimlrepo import fetch_ucirepo
+import pandas as pd
 
 from agilerl.wrappers.learning import BanditEnv
 
 
 # BanditEnv class creates an environment from a dataset
 def test_create_environment():
-    iris = fetch_ucirepo(id=53)
-    features = iris.data.features
-    targets = iris.data.targets
+    features = pd.DataFrame(np.random.uniform(0, 1, size=(10, 1)), columns=["features"])
+    targets = pd.DataFrame(np.random.randint(0, 2, size=(10, 1)), columns=["targets"])
 
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
@@ -25,9 +24,8 @@ def test_create_environment():
 
 # BanditEnv class returns the reward output
 def test_return_state_reward():
-    iris = fetch_ucirepo(id=53)
-    features = iris.data.features
-    targets = iris.data.targets
+    features = pd.DataFrame(np.random.uniform(0, 1, size=(10, 1)), columns=["features"])
+    targets = pd.DataFrame(np.random.randint(0, 2, size=(10, 1)), columns=["targets"])
 
     env = BanditEnv(features, targets)  # Create environment
     action_dim = env.arms

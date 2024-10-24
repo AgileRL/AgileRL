@@ -47,7 +47,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     def __init__(self, env_fns, experience_spec=None, copy=True):
         # Core class attributes
         self.env_fns = env_fns
-        self.shared_memory = True
         self.num_envs = len(env_fns)
         dummy_env = env_fns[0]()
         self.metadata = (
@@ -702,6 +701,7 @@ class Observations:
     def __init__(self, shared_memory, exp_spec, num_envs):
         self.exp_spec = exp_spec
         self.num_envs = num_envs
+        self.shared_memory = shared_memory
         self.obs_view = np.frombuffer(shared_memory, dtype=np.float32).reshape(
             (num_envs, exp_spec.total_observation_width)
         )
@@ -790,6 +790,21 @@ class Observations:
         except KeyError:
             return None
 
+    def __getstate__(self):
+        """Called when pickling - tell Python how to serialize this object"""
+        state = self.__dict__.copy()
+        # Don't pickle the numpy array view - will be recreated
+        state["obs_view"] = None
+        return state
+
+    def __setstate__(self, state):
+        """Called when unpickling - tell Python how to deserialize this object"""
+        self.__dict__.update(state)
+        # Recreate the numpy view from the shared buffer
+        self.obs_view = np.frombuffer(self.shared_memory, dtype=np.float32).reshape(
+            (self.num_envs, self.exp_spec.total_observation_width)
+        )
+
 
 class SharedMemory:
     """Class to hold the shared memory object that each of the subprocesses will write their observation to.
@@ -816,7 +831,6 @@ def _async_worker(
     pipe,
     parent_pipe,
     observations,
-    # shared_memory,
     error_queue,
     experience_spec,
 ):
@@ -835,6 +849,7 @@ def _async_worker(
     :type error_queue: mp.Queue
     :param experience_spec: Experience handler object to handle and format experiences
     :type experience_spec: PettingZooExperienceSpec,
+
     """
     env = env_fn()
     agents = env.possible_agents[:]
