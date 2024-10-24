@@ -616,7 +616,7 @@ def test_get_placeholder_value(transition_name):
         val = env.experience_spec.get_placeholder_value("agent", transition_name)
         if transition_name == "reward":
             assert val == 0
-        if transition_name == "truncation" or transition_name == "termination":
+        if transition_name == "truncated" or transition_name == "terminated":
             assert val
         if transition_name == "info":
             assert val == {}
