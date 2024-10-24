@@ -867,6 +867,8 @@ def _async_worker(
                         for idx, possible_agent in enumerate(agents)
                     }
                     transition = env.step(data)
+                    observation, reward, terminated, truncated, info = transition
+                    print(terminated)
                     observation, reward, terminated, truncated, info = (
                         experience_spec.process_transition(
                             transition,
