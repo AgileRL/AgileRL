@@ -369,10 +369,18 @@ class MADDPG:
                 self.wrap_models()
         else:
             self.place_models_on_device(self.device)
+            print("AXTOERS")
+            print(
+                [actor.mlp_output_activation for actor in self.actors],
+                any(
+                    isinstance(actor.mlp_output_activation, GumbelSoftmax)
+                    for actor in self.actors
+                ),
+            )
             if self.torch_compiler:
                 if (
                     any(
-                        isinstance(actor.mlp_output_activation, GumbelSoftmax)
+                        actor.mlp_output_activation == "GumbelSoftmax"
                         for actor in self.actors
                     )
                     and self.torch_compiler != "default"
@@ -380,11 +388,13 @@ class MADDPG:
                     warnings.warn(
                         f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
                     )
+                    print("Reassigning compiler")
                     self.torch_compiler = "default"
                 torch.set_float32_matmul_precision("high")
                 self.recompile()
 
         self.criterion = nn.MSELoss()
+        print(self.torch_compiler)
 
     def recompile(self):
         """Recompile all models"""

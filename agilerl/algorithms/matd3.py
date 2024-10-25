@@ -9,7 +9,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from agilerl.networks.custom_components import GumbelSoftmax
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import (
@@ -417,7 +416,7 @@ class MATD3:
             if self.torch_compiler:
                 if (
                     any(
-                        isinstance(actor.mlp_output_activation, GumbelSoftmax)
+                        actor.mlp_output_activation == "GumbelSoftmax"
                         for actor in self.actors
                     )
                     and self.torch_compiler != "default"
@@ -425,6 +424,7 @@ class MATD3:
                     warnings.warn(
                         f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
                     )
+                    print("Reassigning compiler")
                     self.torch_compiler = "default"
                 torch.set_float32_matmul_precision("high")
                 self.recompile()
