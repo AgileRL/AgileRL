@@ -371,6 +371,47 @@ def test_initialize_matd3_with_net_config(
 @pytest.mark.parametrize(
     "state_dims, action_dims, accelerator_flag, compile_mode",
     [
+        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "reduce-overhead"),
+    ],
+)
+def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
+    mlp_actor,
+    mlp_critic,
+    state_dims,
+    action_dims,
+    accelerator_flag,
+    device,
+    compile_mode,
+):
+    net_config = {
+        "arch": "mlp",
+        "hidden_size": [64, 64],
+        "min_hidden_layers": 1,
+        "max_hidden_layers": 3,
+        "min_mlp_nodes": 64,
+        "max_mlp_nodes": 500,
+        "mlp_output_activation": "GumbelSoftmax",
+        "mlp_activation": "ReLU",
+    }
+    matd3 = MATD3(
+        state_dims=state_dims,
+        action_dims=action_dims,
+        one_hot=False,
+        agent_ids=["agent_0", "agent_1"],
+        n_agents=len(state_dims),
+        max_action=[(1,), (1,)],
+        net_config=net_config,
+        min_action=[(-1,), (-1,)],
+        discrete_actions=True,
+        device=device,
+        torch_compiler=compile_mode,
+    )
+    assert matd3.torch_compiler == "default"
+
+
+@pytest.mark.parametrize(
+    "state_dims, action_dims, accelerator_flag, compile_mode",
+    [
         ([(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
         ([(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
         ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
@@ -814,7 +855,7 @@ def test_matd3_init_with_compile_no_error(mode):
         n_agents=2,
         max_action=[(1,), (1,)],
         min_action=[(-1,), (-1,)],
-        discrete_actions=False,
+        discrete_actions=True,
         device="cuda" if torch.cuda.is_available() else "cpu",
         torch_compiler=mode,
     )
@@ -843,7 +884,7 @@ def test_matd3_init_with_compile_no_error(mode):
             isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
             for a in matd3.critic_targets_2
         )
-        assert matd3.torch_compiler == mode
+        assert matd3.torch_compiler == "default"
     else:
         assert isinstance(matd3, MATD3)
 

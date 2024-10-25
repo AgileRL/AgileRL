@@ -19,6 +19,7 @@ class GumbelSoftmax(nn.Module):
         :param eps: Epsilon, defaults to 1e-20
         :type eps: float, optional
         """
+        torch.compiler.cudagraph_mark_step_begin()
         epsilon = torch.rand_like(logits)  # epsilon = U
         gumbel_noise = -torch.log(-torch.log(epsilon + eps) + eps)
         y = logits + gumbel_noise

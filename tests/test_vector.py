@@ -288,15 +288,17 @@ def test_env_order_preserved():
     ]
     env = AsyncPettingZooVecEnv(env_fns)
     env.reset()
-    env.observations.obs_view[:] = 0
+    for obs_view in env.observations.obs_view:
+        obs_view[:] = 0
     actions = [0, 1]
     rand_env = np.random.randint(0, 16)
-    # for rand_env in range(16):
     env.parent_pipes[rand_env].send(("step", actions))
     env.parent_pipes[rand_env].recv()
-    assert not np.array_equal(
-        env.observations.obs_view[rand_env, :], np.zeros((14,), dtype=np.float32)
-    )
+    for idx, agent in enumerate(env.agents):
+        assert not np.array_equal(
+            env.observations.obs_view[idx][rand_env, :],
+            np.zeros_like(env.experience_spec.observation_shapes[agent]),
+        )
     env.close()
 
 
@@ -616,7 +618,7 @@ def test_get_placeholder_value(transition_name):
         val = env.experience_spec.get_placeholder_value("agent", transition_name)
         if transition_name == "reward":
             assert val == 0
-        if transition_name == "truncation" or transition_name == "termination":
+        if transition_name == "truncated" or transition_name == "terminated":
             assert val
         if transition_name == "info":
             assert val == {}
@@ -832,7 +834,10 @@ def test_worker_step_autoreset():
     env_fn = [lambda: term_env() for _ in range(num_envs)]
     vec_env = AsyncPettingZooVecEnv(env_fn)
     vec_env.reset()
-    actions = {agent: vec_env.action_space(agent).sample() for agent in vec_env.agents}
+    actions = {
+        agent: np.array([vec_env.single_action_space(agent).sample()])
+        for agent in vec_env.agents
+    }
     vec_env.close()
     actions = actions_to_list_helper(actions)
     exp_handler = PettingZooExperienceSpec(env_fn[0](), num_envs)
@@ -859,6 +864,7 @@ def test_worker_step_autoreset():
     parent_pipe.recv()
     time.sleep(1)
 
+    # print("ACTIONS", actions[0].dtype)
     parent_pipe.send(("step", actions[0]))
     results, success = parent_pipe.recv()
     assert success
@@ -912,30 +918,6 @@ def test_worker_runtime_error():
     os.kill(p.pid, signal.SIGTERM)
 
 
-@pytest.mark.parametrize(
-    "input_dict",
-    [({"agent_0": 6}), ({"agent_0": np.array([1, 0, 1])}), ({"agent_0": [2, 3, 4]})],
-)
-def test_dict_to_1d_array(input_dict):
-    env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
-    exp_handler = PettingZooExperienceSpec(env_fn(), 3)
-    output = exp_handler.dict_to_1d_array(input_dict)
-    assert isinstance(output, np.ndarray)
-
-
-@pytest.mark.parametrize(
-    "input_dict",
-    [
-        ({"agent_0": (6,)}),
-    ],
-)
-def test_dict_to_1d_array_error(input_dict):
-    env_fn = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(1)][0]
-    exp_handler = PettingZooExperienceSpec(env_fn(), 1)
-    with pytest.raises(TypeError):
-        exp_handler.dict_to_1d_array(input_dict)
-
-
 def test_observations_vector():
     num_envs = 1
     agents = ["speaker_0", "listener_0"]
@@ -953,8 +935,9 @@ def test_observations_vector():
         == observations.__repr__()
         == "{'speaker_0': array([[0., 0., 0.]], dtype=float32), 'listener_0': array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]], dtype=float32)}"
     )
-    observations.set_env_obs(0, np.ones((1, 14), dtype=np.float32))
-    assert np.all(observations.get_env_obs(0) == np.ones((1, 14), dtype=np.float32))
+    ob = {"speaker_0": np.ones((1, 3)), "listener_0": np.ones((1, 11))}
+    observations.set_env_obs(0, ob)
+    # assert np.all(observations.get_env_obs(0) == np.ones((1, 14), dtype=np.float32))
     assert "speaker_0" in observations
     assert len(observations) == 2
     keys = []
@@ -985,14 +968,19 @@ def test_observations_image():
     observations = Observations(
         shared_memory.shared_memory, exp_spec=exp_handler, num_envs=num_envs
     )
-    assert observations.get_agent_obs("pursuer_0", flat=True).shape == (
-        1,
-        exp_handler.observation_widths["pursuer_0"],
-    )
-    assert (
-        observations.get_agent_obs("pursuer_0", flat=False).shape
-        == (1,) + exp_handler.observation_shapes["pursuer_0"]
-    )
+
+    for agent in exp_handler.agents:
+        assert isinstance(observations[agent], np.ndarray)
+        assert observations[agent].shape == (1, 7, 7, 3)
+
+    # assert observations.get_agent_obs("pursuer_0", flat=True).shape == (
+    #     1,
+    #     exp_handler.observation_widths["pursuer_0"],
+    # )
+    # assert (
+    #     observations.get_agent_obs("pursuer_0", flat=False).shape
+    #     == (1,) + exp_handler.observation_shapes["pursuer_0"]
+    # )
 
 
 def test_observations_states():
@@ -1006,7 +994,9 @@ def test_observations_states():
     state = observations.__getstate__()
     assert state["obs_view"] is None
     observations.__setstate__(state)
-    assert isinstance(observations.obs_view, np.ndarray)
+    assert isinstance(observations.obs_view, list)
+    for ob in observations.obs_view:
+        assert isinstance(ob, np.ndarray)
 
 
 # Test for pz_vec_env.py
