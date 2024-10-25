@@ -815,7 +815,7 @@ def test_maddpg_init_torch_compiler_no_error(mode):
         n_agents=2,
         max_action=[(1,), (1,)],
         min_action=[(-1,), (-1,)],
-        discrete_actions=False,
+        discrete_actions=True,
         device="cuda" if torch.cuda.is_available() else "cpu",
         torch_compiler=mode,
     )
@@ -836,7 +836,7 @@ def test_maddpg_init_torch_compiler_no_error(mode):
             isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
             for a in maddpg.critic_targets
         )
-        assert maddpg.torch_compiler == mode
+        assert maddpg.torch_compiler == "default"
     else:
         assert isinstance(maddpg, MADDPG)
 

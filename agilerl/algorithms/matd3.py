@@ -424,7 +424,6 @@ class MATD3:
                     warnings.warn(
                         f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
                     )
-                    print("Reassigning compiler")
                     self.torch_compiler = "default"
                 torch.set_float32_matmul_precision("high")
                 self.recompile()

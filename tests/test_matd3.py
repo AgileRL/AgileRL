@@ -855,7 +855,7 @@ def test_matd3_init_with_compile_no_error(mode):
         n_agents=2,
         max_action=[(1,), (1,)],
         min_action=[(-1,), (-1,)],
-        discrete_actions=False,
+        discrete_actions=True,
         device="cuda" if torch.cuda.is_available() else "cpu",
         torch_compiler=mode,
     )
@@ -884,7 +884,7 @@ def test_matd3_init_with_compile_no_error(mode):
             isinstance(a, torch._dynamo.eval_frame.OptimizedModule)
             for a in matd3.critic_targets_2
         )
-        assert matd3.torch_compiler == mode
+        assert matd3.torch_compiler == "default"
     else:
         assert isinstance(matd3, MATD3)
 
