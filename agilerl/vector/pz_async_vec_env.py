@@ -697,8 +697,6 @@ class Observations:
                 ).reshape((num_envs, *exp_spec.observation_shapes[agent]))
             )
 
-        print([obs.dtype for obs in self.obs_view])
-
     def __getitem__(self, key):
         """
         Get agent observation given a key (agent_id)
@@ -895,9 +893,7 @@ def _async_worker(
 
     except (KeyboardInterrupt, Exception):
         error_type, error_message, _ = sys.exc_info()
-        print("ERROR MESSAGE", error_message)
         trace = traceback.format_exc()
-        print(trace)
         error_queue.put((index, error_type, error_message, trace))
         pipe.send((None, False))
 
