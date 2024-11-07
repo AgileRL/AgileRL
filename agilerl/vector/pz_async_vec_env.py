@@ -42,9 +42,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
+    :param context: Context for multiprocessing
     """
 
-    def __init__(self, env_fns, experience_spec=None, copy=True):
+    def __init__(self, env_fns, experience_spec=None, copy=True, context=None):
+        ctx = mp.get_context(context)
         # Core class attributes
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
@@ -69,7 +71,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         else:
             self.experience_spec = experience_spec
 
-        ctx = mp.get_context()
         dummy_env = env_fns[0]()
         self.experience_spec.detect_space_info(dummy_env)
         del dummy_env
