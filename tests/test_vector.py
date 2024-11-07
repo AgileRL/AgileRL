@@ -1031,3 +1031,18 @@ def test_vec_env_close_extras():
 def test_vec_env_unwrapped():
     vec_env = PettingZooVecEnv(3, ["agent_0"])
     vec_env.unwrapped
+
+
+def test_delete_async_pz_vec_env():
+    env_fns = [
+        lambda: simple_speaker_listener_v4.parallel_env(continuous_actions=False)
+        for _ in range(2)
+    ]
+    env = AsyncPettingZooVecEnv(env_fns)
+    assert len(env.processes) > 0  # Ensure subprocesses were created
+    for process in env.processes:
+        assert process.is_alive()
+    processes = env.processes
+    env.__del__()
+    for p in processes:
+        assert not p.is_alive()
