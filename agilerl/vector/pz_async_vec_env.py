@@ -559,6 +559,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
         return vector_infos
 
+    def __del__(self):
+        """On deleting the object, checks that the vector environment is closed."""
+        if not getattr(self, "closed", True) and hasattr(self, "_state"):
+            self.close(terminate=True)
+
 
 class PettingZooExperienceSpec:
     """Class for formatting experiences when being returned by a vectorized environment
