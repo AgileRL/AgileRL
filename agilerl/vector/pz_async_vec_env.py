@@ -65,7 +65,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.copy = copy
 
         if experience_spec is None:
-            self.experience_spec = PettingZooExperienceSpec(dummy_env, self.num_envs)
+            self.experience_spec = PettingZooExperienceSpec(self.num_envs)
         else:
             self.experience_spec = experience_spec
 
@@ -562,18 +562,19 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """On deleting the object, checks that the vector environment is closed."""
         if not getattr(self, "closed", True) and hasattr(self, "_state"):
             self.close(terminate=True)
+        del self._obs_buffer
+        del self.observations
+        del self.experience_spec
 
 
 class PettingZooExperienceSpec:
     """Class for formatting experiences when being returned by a vectorized environment
 
-    :param env_fn: Function that returns environment instance when called
-    :type env_fn: Callable
     :param num_envs: Number of environments to vectorize
     :type num_envs: int
     """
 
-    def __init__(self, env, num_envs):
+    def __init__(self, num_envs):
         self.num_envs = num_envs
 
     def detect_space_info(self, dummy_env):
