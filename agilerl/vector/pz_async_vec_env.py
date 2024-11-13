@@ -206,7 +206,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("reset", env_kwargs))
         self._state = AsyncState.WAITING_RESET
 
-    def reset_wait(self, timeout=60):
+    def reset_wait(self, timeout=None):
         """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results.
 
         :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to ``reset_wait`` never times out, defaults to 0
@@ -267,7 +267,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("step", action))
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout=60):
+    def step_wait(self, timeout=None):
         """
         Wait for the calls to :obj:`step` in each sub-environment to finish.
 
@@ -364,7 +364,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("_call", (name, args, kwargs)))
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout=60):
+    def call_wait(self, timeout=None):
         """Calls all parent pipes and waits for the results.
 
         :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default), the call to :meth:`call_wait` never times out, defaults to 0
@@ -427,7 +427,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         _, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
         self._raise_if_errors(successes)
 
-    def close_extras(self, timeout=60, terminate=False):
+    def close_extras(self, timeout=None, terminate=False):
         """
         Close the environments & clean up the extra resources (processes and pipes).
 
