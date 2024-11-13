@@ -67,13 +67,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.copy = copy
 
         if experience_spec is None:
-            env = env_fns[0]()
-            self.experience_spec = PettingZooExperienceSpec(env, self.num_envs)
-            del env
+            self.experience_spec = PettingZooExperienceSpec(dummy_env, self.num_envs)
         else:
             self.experience_spec = experience_spec
 
-        dummy_env = env_fns[0]()
         self.experience_spec.detect_space_info(dummy_env)
         del dummy_env
 
