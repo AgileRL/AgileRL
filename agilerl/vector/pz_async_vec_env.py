@@ -47,6 +47,8 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def __init__(self, env_fns, experience_spec=None, copy=True, context=None):
 
+        ctx = mp.get_context(context)
+
         # Core class attributes
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
@@ -80,7 +82,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.single_action_space = self._get_single_action_space
         self.single_observation_space = self._get_single_observation_space
 
-        ctx = mp.get_context(context)
         # Create the shared memory for sharing observations between subprocesses
         self._obs_buffer = SharedMemory(
             num_envs=self.num_envs, exp_spec=self.experience_spec, context=ctx
