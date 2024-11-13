@@ -47,8 +47,6 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def __init__(self, env_fns, experience_spec=None, copy=True, context=None):
 
-        ctx = mp.get_context(context)
-
         # Core class attributes
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
@@ -71,6 +69,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         else:
             self.experience_spec = experience_spec
 
+        ctx = mp.get_context(context)
         self.experience_spec.detect_space_info(dummy_env)
         del dummy_env
 
@@ -576,7 +575,6 @@ class PettingZooExperienceSpec:
 
     def __init__(self, env, num_envs):
         self.num_envs = num_envs
-        self.detect_space_info(env)
 
     def detect_space_info(self, dummy_env):
 
