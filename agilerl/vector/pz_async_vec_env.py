@@ -47,6 +47,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
 
     def __init__(self, env_fns, experience_spec=None, copy=True, context=None):
         ctx = mp.get_context(context)
+        print("CONTEXT", ctx)
         # Core class attributes
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
