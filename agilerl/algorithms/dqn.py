@@ -176,7 +176,7 @@ class DQN:
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=action_dim,
+                    num_outputs=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,

@@ -1,16 +1,17 @@
 import copy
-from collections import OrderedDict
-from typing import List
+from typing import List, Optional, Dict, Tuple, Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import accelerate
 
-from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
+from agilerl.typing import ArrayOrTensor
+from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.utils.evolvable_networks import create_mlp
 
-
-class EvolvableMLP(nn.Module):
+class EvolvableMLP(EvolvableModule):
     """The Evolvable Multi-layer Perceptron class.
 
     :param num_inputs: Input layer dimension
@@ -18,62 +19,61 @@ class EvolvableMLP(nn.Module):
     :param num_outputs: Output layer dimension
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
-    :type hidden_size: list[int]
+    :type hidden_size: List[int]
     :param num_atoms: Number of atoms for Rainbow DQN, defaults to 51
-    :type num_atoms: int, optional
-    :param mlp_activation: Activation layer, defaults to 'relu'
-    :type mlp_activation: str, optional
+    :type num_atoms: Optional[int]
+    :param mlp_activation: Activation layer, defaults to 'ReLU'
+    :type mlp_activation: Optional[str]
     :param mlp_output_activation: Output activation layer, defaults to None
-    :type mlp_output_activation: str, optional
+    :type mlp_output_activation: Optional[str]
     :param min_hidden_layers: Minimum number of hidden layers the network will shrink down to, defaults to 1
-    :type min_hidden_layers: int, optional
+    :type min_hidden_layers: Optional[int]
     :param max_hidden_layers: Maximum number of hidden layers the network will expand to, defaults to 3
-    :type max_hidden_layers: int, optional
+    :type max_hidden_layers: Optional[int]
     :param min_mlp_nodes: Minimum number of nodes a layer can have within the network, defaults to 64
-    :type min_mlp_nodes: int, optional
+    :type min_mlp_nodes: Optional[int]
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
-    :type max_mlp_nodes: int, optional
+    :type max_mlp_nodes: Optional[int]
     :param layer_norm: Normalization between layers, defaults to True
-    :type layer_norm: bool, optional
+    :type layer_norm: Optional[bool]
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
-    :type output_vanish: bool, optional
+    :type output_vanish: Optional[bool]
     :param init_layers: Initialise network layers, defaults to True
-    :type init_layers: bool, optional
+    :type init_layers: Optional[bool]
     :param support: Atoms support tensor, defaults to None
-    :type support: torch.Tensor(), optional
+    :type support: Optional[torch.Tensor]
     :param rainbow: Using Rainbow DQN, defaults to False
-    :type rainbow: bool, optional
+    :type rainbow: Optional[bool]
     :param noise_std: Noise standard deviation, defaults to 0.5
-    :type noise_std: float, optional
+    :type noise_std: Optional[float]
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: str, optional
+    :type device: Optional[str]
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Optional[accelerate.Accelerator]
     """
-
     def __init__(
         self,
         num_inputs: int,
         num_outputs: int,
         hidden_size: List[int],
-        num_atoms=51,
-        mlp_activation="ReLU",
-        mlp_output_activation=None,
-        min_hidden_layers=1,
-        max_hidden_layers=3,
-        min_mlp_nodes=64,
-        max_mlp_nodes=500,
-        layer_norm=True,
-        output_vanish=True,
-        init_layers=True,
-        support=None,
-        rainbow=False,
-        noise_std=0.5,
-        device="cpu",
-        accelerator=None,
-        arch="mlp",
-    ):
-        super().__init__()
+        num_atoms: int = 51,
+        mlp_activation: str = "ReLU",
+        mlp_output_activation: str = None,
+        min_hidden_layers: int = 1,
+        max_hidden_layers: int = 3,
+        min_mlp_nodes: int = 64,
+        max_mlp_nodes: int = 500,
+        layer_norm: bool = True,
+        output_vanish: bool = True,
+        init_layers: bool = True,
+        support: torch.Tensor = None,
+        rainbow: bool = False,
+        noise_std: float = 0.5,
+        device: str = "cpu",
+        accelerator: Optional[accelerate.Accelerator] = None    ,
+        arch: str = "mlp"
+        ):
+        super().__init__(arch)
 
         assert (
             num_inputs > 0
@@ -113,7 +113,6 @@ class EvolvableMLP(nn.Module):
         self.accelerator = accelerator
         self.noise_std = noise_std
         self._net_config = {
-            "arch": self.arch,
             "hidden_size": self.hidden_size,
             "mlp_activation": self.mlp_activation,
             "mlp_output_activation": self.mlp_output_activation,
@@ -123,222 +122,11 @@ class EvolvableMLP(nn.Module):
             "max_mlp_nodes": self.max_mlp_nodes,
         }
 
-        self.feature_net, self.value_net, self.advantage_net = self.create_net()
+        self.feature_net, self.value_net, self.advantage_net = self.build_networks()
 
     @property
-    def net_config(self):
+    def net_config(self) -> Dict[str, Any]:
         return self._net_config
-
-    def get_activation(self, activation_names):
-        """Returns activation function for corresponding activation name.
-
-        :param activation_names: Activation function name
-        :type activation_names: str
-        """
-        activation_functions = {
-            "Tanh": nn.Tanh,
-            "Identity": nn.Identity,
-            "ReLU": nn.ReLU,
-            "ELU": nn.ELU,
-            "Softsign": nn.Softsign,
-            "Sigmoid": nn.Sigmoid,
-            "GumbelSoftmax": GumbelSoftmax,
-            "Softplus": nn.Softplus,
-            "Softmax": nn.Softmax,
-            "LeakyReLU": nn.LeakyReLU,
-            "PReLU": nn.PReLU,
-            "GELU": nn.GELU,
-            None: nn.Identity,
-        }
-
-        return (
-            activation_functions[activation_names](dim=-1)
-            if activation_names == "Softmax"
-            else activation_functions[activation_names]()
-        )
-
-    def layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
-        if hasattr(layer, "weight"):
-            torch.nn.init.orthogonal_(layer.weight, std)
-        elif hasattr(layer, "weight_mu") and hasattr(layer, "weight_sigma"):
-            torch.nn.init.orthogonal_(layer.weight_mu, std)
-            torch.nn.init.orthogonal_(layer.weight_sigma, std)
-
-        if hasattr(layer, "bias"):
-            torch.nn.init.constant_(layer.bias, bias_const)
-        elif hasattr(layer, "bias_mu") and hasattr(layer, "bias_sigma"):
-            torch.nn.init.constant(layer.bias_mu, bias_const)
-            torch.nn.init.constant(layer.bias_sigma, bias_const)
-
-        return layer
-
-    def create_mlp(
-        self,
-        input_size,
-        output_size,
-        hidden_size,
-        output_vanish,
-        output_activation,
-        noisy=False,
-        rainbow_feature_net=False,
-    ):
-        """Creates and returns multi-layer perceptron."""
-        net_dict = OrderedDict()
-        if noisy:
-            net_dict["linear_layer_0"] = NoisyLinear(
-                input_size, hidden_size[0], self.noise_std
-            )
-        else:
-            net_dict["linear_layer_0"] = nn.Linear(input_size, hidden_size[0])
-        if self.init_layers:
-            net_dict["linear_layer_0"] = self.layer_init(net_dict["linear_layer_0"])
-        if self.layer_norm:
-            net_dict["layer_norm_0"] = nn.LayerNorm(hidden_size[0])
-        net_dict["activation_0"] = self.get_activation(
-            self.mlp_output_activation
-            if (len(hidden_size) == 1 and rainbow_feature_net)
-            else self.mlp_activation
-        )
-        if len(hidden_size) > 1:
-            for l_no in range(1, len(hidden_size)):
-                if noisy:
-                    net_dict[f"linear_layer_{str(l_no)}"] = NoisyLinear(
-                        hidden_size[l_no - 1], hidden_size[l_no], self.noise_std
-                    )
-                else:
-                    net_dict[f"linear_layer_{str(l_no)}"] = nn.Linear(
-                        hidden_size[l_no - 1], hidden_size[l_no]
-                    )
-                if self.init_layers:
-                    net_dict[f"linear_layer_{str(l_no)}"] = self.layer_init(
-                        net_dict[f"linear_layer_{str(l_no)}"]
-                    )
-                if self.layer_norm:
-                    net_dict[f"layer_norm_{str(l_no)}"] = nn.LayerNorm(
-                        hidden_size[l_no]
-                    )
-                net_dict[f"activation_{str(l_no)}"] = self.get_activation(
-                    self.mlp_activation
-                    if not rainbow_feature_net
-                    else self.mlp_output_activation
-                )
-        if not rainbow_feature_net:
-            if noisy:
-                output_layer = NoisyLinear(hidden_size[-1], output_size, self.noise_std)
-            else:
-                output_layer = nn.Linear(hidden_size[-1], output_size)
-            if self.init_layers:
-                output_layer = self.layer_init(output_layer)
-            if output_vanish:
-                if self.rainbow:
-                    output_layer.weight_mu.data.mul_(0.1)
-                    output_layer.bias_mu.data.mul_(0.1)
-                    output_layer.weight_sigma.data.mul_(0.1)
-                    output_layer.bias_sigma.data.mul_(0.1)
-                else:
-                    output_layer.weight.data.mul_(0.1)
-                    output_layer.bias.data.mul_(0.1)
-            net_dict["linear_layer_output"] = output_layer
-            if output_activation is not None:
-                net_dict["activation_output"] = self.get_activation(output_activation)
-        net = nn.Sequential(net_dict)
-        return net
-
-    def create_net(self):
-        """Creates and returns neural network."""
-        if not self.rainbow:
-            feature_net = self.create_mlp(
-                input_size=self.num_inputs,
-                output_size=self.num_outputs,
-                hidden_size=self.hidden_size,
-                output_vanish=self.output_vanish,
-                output_activation=self.mlp_output_activation,
-            )
-            if self.accelerator is None:
-                feature_net = feature_net.to(self.device)
-
-        value_net, advantage_net = None, None
-
-        if self.rainbow:
-            feature_net = self.create_mlp(
-                input_size=self.num_inputs,
-                output_size=self.hidden_size[0],
-                hidden_size=[self.hidden_size[0]],
-                output_vanish=False,
-                output_activation=self.mlp_activation,
-                rainbow_feature_net=True,
-            )
-            value_net = self.create_mlp(
-                input_size=self.hidden_size[0],
-                output_size=self.num_atoms,
-                hidden_size=self.hidden_size[1:],
-                output_vanish=self.output_vanish,
-                output_activation=None,
-                noisy=True,
-            )
-            advantage_net = self.create_mlp(
-                input_size=self.hidden_size[0],
-                output_size=self.num_atoms * self.num_outputs,
-                hidden_size=self.hidden_size[1:],
-                output_vanish=self.output_vanish,
-                output_activation=None,
-                noisy=True,
-            )
-            if self.accelerator is None:
-                value_net, advantage_net, feature_net = (
-                    value_net.to(self.device),
-                    advantage_net.to(self.device),
-                    feature_net.to(self.device),
-                )
-
-        return feature_net, value_net, advantage_net
-
-    def reset_noise(self):
-        """Resets noise of value and advantage networks."""
-        if self.rainbow:
-            for layer in self.value_net:
-                if isinstance(layer, NoisyLinear):
-                    layer.reset_noise()
-            for layer in self.advantage_net:
-                if isinstance(layer, NoisyLinear):
-                    layer.reset_noise()
-
-    def forward(self, x, q=True, log=False):
-        """Returns output of neural network.
-
-        :param x: Neural network input
-        :type x: torch.Tensor() or np.array
-        :param q: Return Q value if using rainbow, defaults to True
-        :type q: bool, optional
-        :param log: Return log softmax instead of softmax, defaults to False
-        :type log: bool, optional
-        """
-        if not isinstance(x, torch.Tensor):
-            x = torch.FloatTensor(np.array(x))
-            if self.accelerator is None:
-                x = x.to(self.device)
-
-        if x.dtype != torch.float32:
-            x = x.to(torch.float32)
-        x = self.feature_net(x)
-
-        if self.rainbow:
-            value = self.value_net(x)
-            advantage = self.advantage_net(x)
-            value = value.view(-1, 1, self.num_atoms)
-            advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
-            x = value + advantage - advantage.mean(1, keepdim=True)
-            if log:
-                x = F.log_softmax(x, dim=2)
-                return x
-            else:
-                x = F.softmax(x, dim=2)
-
-            # Output at this point is (batch_size, actions, num_support)
-            if q:
-                x = torch.sum(x * self.support.expand_as(x), dim=2)
-
-        return x
 
     @property
     def init_dict(self):
@@ -364,6 +152,128 @@ class EvolvableMLP(nn.Module):
         }
         return init_dict
 
+    def build_networks(self) -> Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module]]:
+        """Creates and returns the neural networks for feature, value, and advantage.
+        
+        :return: Neural networks for feature and, optionally, value and advantage
+        :rtype: Tuple[nn.Module, Optional[nn.Module], Optional[nn.Module]]"""
+        if not self.rainbow:
+            feature_net = create_mlp(
+                input_size=self.num_inputs,
+                output_size=self.num_outputs,
+                hidden_size=self.hidden_size,
+                output_vanish=self.output_vanish,
+                output_activation=self.mlp_output_activation,
+            )
+            if self.accelerator is None:
+                feature_net = feature_net.to(self.device)
+
+        value_net, advantage_net = None, None
+
+        if self.rainbow:
+            feature_net = create_mlp(
+                input_size=self.num_inputs,
+                output_size=self.hidden_size[0],
+                hidden_size=[self.hidden_size[0]],
+                output_vanish=False,
+                output_activation=self.mlp_activation,
+                rainbow_feature_net=True,
+                init_layers=self.init_layers,
+                layer_norm=self.layer_norm,
+                mlp_activation=self.mlp_activation,
+                mlp_output_activation=self.mlp_output_activation,
+                noise_std=self.noise_std,
+                rainbow=True
+            )
+            value_net = create_mlp(
+                input_size=self.hidden_size[0],
+                output_size=self.num_atoms,
+                hidden_size=self.hidden_size[1:],
+                output_vanish=self.output_vanish,
+                output_activation=None,
+                noisy=True,
+                init_layers=self.init_layers,
+                layer_norm=self.layer_norm,
+                mlp_activation=self.mlp_activation,
+                mlp_output_activation=self.mlp_output_activation,
+                noise_std=self.noise_std,
+                rainbow=True
+            )
+            advantage_net = create_mlp(
+                input_size=self.hidden_size[0],
+                output_size=self.num_atoms * self.num_outputs,
+                hidden_size=self.hidden_size[1:],
+                output_vanish=self.output_vanish,
+                output_activation=None,
+                noisy=True,
+                init_layers=self.init_layers,
+                layer_norm=self.layer_norm,
+                mlp_activation=self.mlp_activation,
+                mlp_output_activation=self.mlp_output_activation,
+                noise_std=self.noise_std,
+                rainbow=True
+            )
+            if self.accelerator is None:
+                value_net, advantage_net, feature_net = (
+                    value_net.to(self.device),
+                    advantage_net.to(self.device),
+                    feature_net.to(self.device),
+                )
+
+        return feature_net, value_net, advantage_net
+
+    def reset_noise(self) -> None:
+        """Resets noise of value and advantage networks."""
+        networks = [self.value_net]
+        if self.rainbow:
+            networks.append(self.advantage_net)
+        
+        EvolvableModule.reset_noise(*networks)
+
+    def forward(self, x: ArrayOrTensor, q: bool = True, log: bool = False) -> torch.Tensor:
+        """Returns output of neural network.
+
+        :param x: Neural network input
+        :type x: torch.Tensor() or np.array
+        :param q: Return Q value if using rainbow, defaults to True
+        :type q: bool, optional
+        :param log: Return log softmax instead of softmax, defaults to False
+        :type log: bool, optional
+    
+        :return: Neural network output
+        :rtype: torch.Tensor
+        """
+        if not isinstance(x, torch.Tensor):
+            x = torch.FloatTensor(np.array(x))
+            if self.accelerator is None:
+                x = x.to(self.device)
+
+        if x.dtype != torch.float32:
+            x = x.to(torch.float32)
+
+        # Forward pass through feature network
+        x = self.feature_net(x)
+
+        # If using rainbow we need to calculate the Q value through (maybe log) softmax
+        if self.rainbow:
+            value: torch.Tensor = self.value_net(x)
+            advantage: torch.Tensor = self.advantage_net(x)
+            value = value.view(-1, 1, self.num_atoms)
+            advantage = advantage.view(-1, self.num_outputs, self.num_atoms)
+            x = value + advantage - advantage.mean(1, keepdim=True)
+            if log:
+                x = F.log_softmax(x, dim=2)
+                return x
+            else:
+                x = F.softmax(x, dim=2)
+
+            # Output at this point has shape -> (batch_size, actions, num_support)
+            if q:
+                x = torch.sum(x * self.support.expand_as(x), dim=2)
+
+        return x
+
+    @register_mutation_fn(MutationType.LAYER)
     def add_mlp_layer(self):
         """Adds a hidden layer to neural network."""
         # add layer to hyper params
@@ -373,6 +283,7 @@ class EvolvableMLP(nn.Module):
         else:
             self.add_mlp_node()
 
+    @register_mutation_fn(MutationType.LAYER)
     def remove_mlp_layer(self):
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
@@ -381,6 +292,7 @@ class EvolvableMLP(nn.Module):
         else:
             self.add_mlp_node()
 
+    @register_mutation_fn(MutationType.NODE)
     def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
         """Adds nodes to hidden layer of neural network.
 
@@ -404,7 +316,8 @@ class EvolvableMLP(nn.Module):
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    def remove_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
+    @register_mutation_fn(MutationType.NODE)
+    def remove_mlp_node(self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None) -> Dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -419,17 +332,20 @@ class EvolvableMLP(nn.Module):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
-        if (
-            self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes
-        ):  # HARD LIMIT
+        # HARD LIMIT
+        if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:
             self.hidden_size[hidden_layer] -= numb_new_nodes
             self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    def recreate_nets(self, shrink_params=False):
-        """Recreates neural networks."""
-        new_feature_net, new_value_net, new_advantage_net = self.create_net()
+    def recreate_nets(self, shrink_params: bool = False) -> None:
+        """Recreates neural networks, shrinking parameters if necessary.
+        
+        :param shrink_params: Shrink parameters of neural networks, defaults to False
+        :type shrink_params: bool, optional
+        """
+        new_feature_net, new_value_net, new_advantage_net = self.build_networks()
         if shrink_params:
             new_feature_net = self.shrink_preserve_parameters(
                 old_net=self.feature_net, new_net=new_feature_net
@@ -452,75 +368,20 @@ class EvolvableMLP(nn.Module):
                 new_advantage_net = self.preserve_parameters(
                     old_net=self.advantage_net, new_net=new_advantage_net
                 )
+        
         self.feature_net, self.value_net, self.advantage_net = (
             new_feature_net,
             new_value_net,
             new_advantage_net,
         )
 
-    def clone(self):
-        """Returns clone of neural net with identical parameters."""
+    def clone(self) -> "EvolvableMLP":
+        """Returns clone of neural net with identical parameters.
+        
+        :return: Clone of neural network
+        :rtype: EvolvableMLP
+        """
         clone = EvolvableMLP(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
 
-    def preserve_parameters(self, old_net, new_net):
-        """Returns new neural network with copied parameters from old network.
-
-        :param old_net: Old neural network
-        :type old_net: nn.Module()
-        :param new_net: New neural network
-        :type new_net: nn.Module()
-        """
-        old_net_dict = dict(old_net.named_parameters())
-
-        for key, param in new_net.named_parameters():
-            if key in old_net_dict.keys():
-                if old_net_dict[key].data.size() == param.data.size():
-                    param.data = old_net_dict[key].data
-                else:
-                    if "norm" not in key:
-                        old_size = old_net_dict[key].data.size()
-                        new_size = param.data.size()
-                        if len(param.data.size()) == 1:
-                            param.data[: min(old_size[0], new_size[0])] = old_net_dict[
-                                key
-                            ].data[: min(old_size[0], new_size[0])]
-                        else:
-                            param.data[
-                                : min(old_size[0], new_size[0]),
-                                : min(old_size[1], new_size[1]),
-                            ] = old_net_dict[key].data[
-                                : min(old_size[0], new_size[0]),
-                                : min(old_size[1], new_size[1]),
-                            ]
-
-        return new_net
-
-    def shrink_preserve_parameters(self, old_net, new_net):
-        """Returns shrunk new neural network with copied parameters from old network.
-
-        :param old_net: Old neural network
-        :type old_net: nn.Module()
-        :param new_net: New neural network
-        :type new_net: nn.Module()
-        """
-        old_net_dict = dict(old_net.named_parameters())
-
-        for key, param in new_net.named_parameters():
-            if key in old_net_dict.keys():
-                if old_net_dict[key].data.size() == param.data.size():
-                    param.data = old_net_dict[key].data
-                else:
-                    if "norm" not in key:
-                        old_size = old_net_dict[key].data.size()
-                        new_size = param.data.size()
-                        min_0 = min(old_size[0], new_size[0])
-                        if len(param.data.size()) == 1:
-                            param.data[:min_0] = old_net_dict[key].data[:min_0]
-                        else:
-                            min_1 = min(old_size[1], new_size[1])
-                            param.data[:min_0, :min_1] = old_net_dict[key].data[
-                                :min_0, :min_1
-                            ]
-        return new_net

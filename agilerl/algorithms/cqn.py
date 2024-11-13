@@ -178,7 +178,7 @@ class CQN:
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=action_dim,
+                    num_outputs=action_dim,
                     channel_size=self.net_config["channel_size"],
                     kernel_size=self.net_config["kernel_size"],
                     stride_size=self.net_config["stride_size"],

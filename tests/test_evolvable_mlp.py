@@ -5,8 +5,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from agilerl.networks.evolvable_mlp import EvolvableMLP, NoisyLinear
-
+from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.networks.custom_components import NoisyLinear
 
 ######### Define fixtures #########
 @pytest.fixture

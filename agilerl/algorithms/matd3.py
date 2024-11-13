@@ -336,7 +336,7 @@ class MATD3:
                     self.actors.append(
                         EvolvableCNN(
                             input_shape=state_dim,
-                            num_actions=action_dim,
+                            num_outputs=action_dim,
                             multi=self.multi,
                             n_agents=self.n_agents,
                             device=self.device,
@@ -351,7 +351,7 @@ class MATD3:
                 self.critics_1 = [
                     EvolvableCNN(
                         input_shape=state_dim,
-                        num_actions=self.total_actions,
+                        num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
                         multi=self.multi,
@@ -364,7 +364,7 @@ class MATD3:
                 self.critics_2 = [
                     EvolvableCNN(
                         input_shape=state_dim,
-                        num_actions=self.total_actions,
+                        num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
                         multi=self.multi,

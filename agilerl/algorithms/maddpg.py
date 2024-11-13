@@ -312,7 +312,7 @@ class MADDPG:
                     self.actors.append(
                         EvolvableCNN(
                             input_shape=state_dim,
-                            num_actions=action_dim,
+                            num_outputs=action_dim,
                             multi=self.multi,
                             n_agents=self.n_agents,
                             device=self.device,
@@ -327,7 +327,7 @@ class MADDPG:
                 self.critics = [
                     EvolvableCNN(
                         input_shape=state_dim,
-                        num_actions=self.total_actions,
+                        num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
                         multi=self.multi,

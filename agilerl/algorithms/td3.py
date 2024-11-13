@@ -313,14 +313,14 @@ class TD3:
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=action_dim,
+                    num_outputs=action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic_1 = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=action_dim,
+                    num_outputs=action_dim,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -328,7 +328,7 @@ class TD3:
                 )
                 self.critic_2 = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=action_dim,
+                    num_outputs=action_dim,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,

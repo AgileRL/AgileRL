@@ -1,15 +1,13 @@
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 class GumbelSoftmax(nn.Module):
     """Applies gumbel softmax function element-wise"""
 
     @staticmethod
-    def gumbel_softmax(logits, tau=1.0, eps=1e-20):
+    def gumbel_softmax(logits: torch.Tensor, tau: float = 1.0, eps: float = 1e-20) -> torch.Tensor:
         """Implementation of the gumbel softmax activation function
 
         :param logits: Tensor containing unnormalized log probabilities for each class.
@@ -28,7 +26,6 @@ class GumbelSoftmax(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self.gumbel_softmax(input)
 
-
 class NoisyLinear(nn.Module):
     """The Noisy Linear Neural Network class.
 
@@ -39,8 +36,10 @@ class NoisyLinear(nn.Module):
     :param std_init: Standard deviation, defaults to 0.5
     :type std_init: float, optional
     """
+    weight_epsilon: torch.Tensor
+    bias_epsilon: torch.Tensor
 
-    def __init__(self, in_features, out_features, std_init=0.5):
+    def __init__(self, in_features: int, out_features: int, std_init: float = 0.5):
         super().__init__()
 
         self.in_features = in_features
@@ -60,11 +59,13 @@ class NoisyLinear(nn.Module):
         self.reset_parameters()
         self.reset_noise()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns output of neural network.
 
         :param x: Neural network input
-        :type x: torch.Tensor()
+        :type x: torch.Tensor
+        :return: Neural network output
+        :rtype: torch.Tensor
         """
         weight_epsilon = self.weight_epsilon.to(x.device)
         bias_epsilon = self.bias_epsilon.to(x.device)
@@ -78,7 +79,7 @@ class NoisyLinear(nn.Module):
 
         return F.linear(x, weight, bias)
 
-    def reset_parameters(self):
+    def reset_parameters(self) -> None:
         """Resets neural network parameters."""
         mu_range = 1 / math.sqrt(self.in_features)
 
@@ -88,7 +89,7 @@ class NoisyLinear(nn.Module):
         self.bias_mu.data.uniform_(-mu_range, mu_range)
         self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
 
-    def reset_noise(self):
+    def reset_noise(self) -> None:
         """Resets neural network noise."""
         epsilon_in = self._scale_noise(self.in_features)
         epsilon_out = self._scale_noise(self.out_features)
@@ -96,7 +97,7 @@ class NoisyLinear(nn.Module):
         self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
         self.bias_epsilon.copy_(epsilon_out)
 
-    def _scale_noise(self, size):
+    def _scale_noise(self, size: int) -> torch.Tensor:
         """Returns noisy tensor.
 
         :param size: Tensor of same size as noisy output

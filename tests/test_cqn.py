@@ -14,13 +14,11 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
 class DummyCQN(CQN):
     def __init__(self, state_dim, action_dim, one_hot, *args, **kwargs):
         super().__init__(state_dim, action_dim, one_hot, *args, **kwargs)
 
         self.tensor_test = torch.randn(1)
-
 
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
@@ -240,7 +238,7 @@ def test_initialize_cqn_with_actor_network_evo_net(state_dim, net_type):
     else:
         actor_network = EvolvableCNN(
             input_shape=state_dim,
-            num_actions=action_dim,
+            num_outputs=action_dim,
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],

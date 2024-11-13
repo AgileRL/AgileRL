@@ -651,7 +651,7 @@ def test_initialize_maddpg_with_evo_networks(
         evo_actors = [
             EvolvableCNN(
                 input_shape=state_dims[0],
-                num_actions=action_dims[0],
+                num_outputs=action_dims[0],
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -666,7 +666,7 @@ def test_initialize_maddpg_with_evo_networks(
         evo_critics = [
             EvolvableCNN(
                 input_shape=state_dims[0],
-                num_actions=sum(action_dims),
+                num_outputs=sum(action_dims),
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -1177,7 +1177,7 @@ def test_maddpg_get_action_distributed_cnn(
     new_actors = [
         DummyEvolvableCNN(
             input_shape=actor.input_shape,
-            num_actions=actor.num_actions,
+            num_outputs=actor.num_outputs,
             channel_size=net_config["channel_size"],
             kernel_size=net_config["kernel_size"],
             stride_size=net_config["stride_size"],

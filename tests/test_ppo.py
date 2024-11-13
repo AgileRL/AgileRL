@@ -346,7 +346,7 @@ def test_initialize_ppo_with_actor_network_evo_net(state_dim, net_type):
     else:
         actor_network = EvolvableCNN(
             input_shape=state_dim,
-            num_actions=action_dim,
+            num_outputs=action_dim,
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
@@ -357,7 +357,7 @@ def test_initialize_ppo_with_actor_network_evo_net(state_dim, net_type):
 
         critic_network = EvolvableCNN(
             input_shape=state_dim,
-            num_actions=action_dim,
+            num_outputs=action_dim,
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],

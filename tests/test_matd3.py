@@ -674,7 +674,7 @@ def test_initialize_matd3_with_evo_networks(
         evo_actors = [
             EvolvableCNN(
                 input_shape=state_dims[0],
-                num_actions=action_dims[0],
+                num_outputs=action_dims[0],
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -690,7 +690,7 @@ def test_initialize_matd3_with_evo_networks(
             [
                 EvolvableCNN(
                     input_shape=state_dims[0],
-                    num_actions=sum(action_dims),
+                    num_outputs=sum(action_dims),
                     channel_size=[8, 8],
                     kernel_size=[2, 2],
                     stride_size=[1, 1],

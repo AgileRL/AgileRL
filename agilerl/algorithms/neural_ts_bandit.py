@@ -175,7 +175,7 @@ class NeuralTS:
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=1,
+                    num_outputs=1,
                     layer_norm=False,
                     device=self.device,
                     accelerator=self.accelerator,

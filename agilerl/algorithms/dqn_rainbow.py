@@ -252,7 +252,7 @@ class RainbowDQN:
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
                     input_shape=state_dim,
-                    num_actions=action_dim,
+                    num_outputs=action_dim,
                     num_atoms=self.num_atoms,
                     support=self.support,
                     rainbow=True,
