@@ -657,7 +657,6 @@ def test_initialize_maddpg_with_evo_networks(
                 stride_size=[1, 1],
                 hidden_size=[64, 64],
                 mlp_activation="ReLU",
-                multi=True,
                 n_agents=2,
                 mlp_output_activation="Tanh",
             )
@@ -673,7 +672,6 @@ def test_initialize_maddpg_with_evo_networks(
                 hidden_size=[64, 64],
                 n_agents=2,
                 critic=True,
-                multi=True,
                 mlp_activation="ReLU",
             )
             for _ in range(2)
@@ -1184,7 +1182,6 @@ def test_maddpg_get_action_distributed_cnn(
             hidden_size=net_config["hidden_size"],
             normalize=net_config["normalize"],
             mlp_output_activation=net_config["mlp_output_activation"],
-            multi=actor.multi,
             n_agents=actor.n_agents,
             accelerator=accelerator,
         )

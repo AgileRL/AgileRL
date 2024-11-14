@@ -9,7 +9,7 @@ from accelerate import Accelerator
 from agilerl.typing import ArrayOrTensor
 from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import (
-    get_activation_from_name,
+    get_activation,
     calc_max_kernel_sizes,
     create_conv_block,
     create_mlp
@@ -106,7 +106,6 @@ class EvolvableCNN(EvolvableModule):
         min_channel_size: int = 32,
         max_channel_size: int = 256,
         n_agents: Optional[int] = None,
-        multi: bool = False,
         layer_norm: bool = False,
         support: Optional[torch.Tensor] = None,
         rainbow: bool = False,
@@ -119,7 +118,7 @@ class EvolvableCNN(EvolvableModule):
         accelerator: Optional[Accelerator] = None,
         arch: str = "cnn"
         ) -> None:
-        super().__init__(arch)
+        super().__init__()
 
         assert len(kernel_size) == len(
             channel_size
@@ -134,12 +133,6 @@ class EvolvableCNN(EvolvableModule):
         assert (
             num_outputs > 0
         ), "'num_outputs' cannot be less than or equal to zero, please enter a valid integer."
-        if multi:
-            # Add multi-agent specific assertions here
-            pass
-        if n_agents is not None:
-            # Add assertions related to n_agents here
-            pass
         assert (
             min_hidden_layers < max_hidden_layers
         ), "'min_hidden_layers' must be less than 'max_hidden_layers."
@@ -152,6 +145,8 @@ class EvolvableCNN(EvolvableModule):
         assert (
             min_channel_size < max_channel_size
         ), "'min_channel_size' must be less than 'max_channel_size'."
+        if n_agents is not None:
+            assert isinstance(n_agents, int) and n_agents > 0, "'n_agents' must be an integer and greater than 0."
 
         self.arch = arch
         self.input_shape = input_shape
@@ -181,12 +176,11 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.device = device
         self.accelerator = accelerator
-        self.multi = multi
         self.n_agents = n_agents
         self.noise_std = noise_std
         self.output_vanish = output_vanish
         self._net_config = {
-            "name": self.name,
+            "arch": self.arch,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
@@ -236,7 +230,6 @@ class EvolvableCNN(EvolvableModule):
             "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
             "min_channel_size": self.min_channel_size,
             "max_channel_size": self.max_channel_size,
-            "multi": self.multi,
             "layer_norm": self.layer_norm,
             "critic": self.critic,
             "rainbow": self.rainbow,
@@ -273,8 +266,6 @@ class EvolvableCNN(EvolvableModule):
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
         """
-        block_type = "Conv3d" if self.multi else "Conv2d"
-
         # Build the main convolutional block
         net_dict = create_conv_block(
             in_channels=in_channels,
@@ -286,8 +277,7 @@ class EvolvableCNN(EvolvableModule):
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
             activation_fn=self.cnn_activation,
-            block_type=block_type,
-            n_agents=self.n_agents if self.multi else None,
+            n_agents=self.n_agents,
         )
 
         # If the CNN is a critic or feature extractor, add a linear layer to flatten the output
@@ -296,7 +286,7 @@ class EvolvableCNN(EvolvableModule):
             features_dim = self.latent_dim if self.latent_dim is not None else self.hidden_size[0]
 
             net_dict[f"{name}_flatten"] = nn.Flatten()
-            if self.multi:
+            if self.n_agents is not None:
                 sample_input = (
                     torch.zeros(1, *self.input_shape)
                     .unsqueeze(2)
@@ -309,7 +299,7 @@ class EvolvableCNN(EvolvableModule):
                 flattened_size = nn.Sequential(net_dict)(sample_input).shape[1]
 
             net_dict[f"{name}_linear_output"] = nn.Linear(flattened_size, features_dim)
-            net_dict[f"{name}_output_activation"] = get_activation_from_name(
+            net_dict[f"{name}_output_activation"] = get_activation(
                 self.cnn_activation
             )
 
@@ -331,7 +321,7 @@ class EvolvableCNN(EvolvableModule):
         )
 
         with torch.no_grad():
-            if self.multi:
+            if self.n_agents is not None:
                 if self.critic:
                     critic_input = (
                         torch.zeros(1, *self.input_shape)
@@ -427,7 +417,13 @@ class EvolvableCNN(EvolvableModule):
         
         EvolvableModule.reset_noise(*networks)
 
-    def forward(self, x: ArrayOrTensor, xc: Optional[ArrayOrTensor] = None, q: bool = True) -> torch.Tensor:
+    def forward(
+            self,
+            x: ArrayOrTensor,
+            xc: Optional[ArrayOrTensor] = None,
+            q: bool = True,
+            log: bool = False
+            ) -> torch.Tensor:
         """Returns output of neural network.
 
         :param x: Neural network input
@@ -436,6 +432,8 @@ class EvolvableCNN(EvolvableModule):
         :type xc: torch.Tensor() or np.array, optional
         :param q: Return Q value if using rainbow, defaults to True
         :type q: bool, optional
+        :param log: Return log softmax if using rainbow, defaults to False
+        :type log: bool, optional
         :return: Output of the neural network
         :rtype: torch.Tensor
         """
@@ -461,14 +459,19 @@ class EvolvableCNN(EvolvableModule):
 
         if self.rainbow:
             advantage: torch.Tensor = self.advantage_net(x)
-            advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
             value = value.view(batch_size, 1, self.num_atoms)
-
+            advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
             x = value + advantage - advantage.mean(1, keepdim=True)
-            x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                -1, self.num_outputs, self.num_atoms
-            )
-            x = x.clamp(min=1e-3)
+            if log:
+                x = F.log_softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                    -1, self.num_outputs, self.num_atoms
+                )
+                return x
+            else:
+                x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
+                    -1, self.num_outputs, self.num_atoms
+                )
+                x = x.clamp(min=1e-3)
 
             if q:
                 x = torch.sum(x * self.support, dim=2)
@@ -699,8 +702,7 @@ class EvolvableCNN(EvolvableModule):
         :return: Clone of neural network
         :rtype: EvolvableCNN
         """
-        clone = EvolvableCNN(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
+        clone = super().clone()
         clone.rainbow = self.rainbow
         clone.critic = self.critic
         return clone

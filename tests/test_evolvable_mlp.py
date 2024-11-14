@@ -91,29 +91,6 @@ def test_reset_noise(device):
     assert isinstance(evolvable_mlp.value_net[0], NoisyLinear)
     assert isinstance(evolvable_mlp.advantage_net[0], NoisyLinear)
 
-
-@pytest.mark.parametrize("output_vanish, noisy", [(True, True), (False, True)])
-def test_create_mlp(output_vanish, noisy, device):
-    evolvable_mlp = EvolvableMLP(
-        num_inputs=10,
-        num_outputs=4,
-        hidden_size=[32, 32],
-        rainbow=True,
-        output_vanish=True,
-        support=torch.linspace(0.0, 200.0, 50).to(device),
-        device=device,
-    )
-    net = evolvable_mlp.create_mlp(
-        10,
-        4,
-        [32, 32],
-        output_vanish=output_vanish,
-        output_activation=None,
-        noisy=noisy,
-    )
-    assert isinstance(net, nn.Module)
-
-
 def test_rainbow_instantiation(device):
     evolvable_mlp = EvolvableMLP(
         num_inputs=10,
@@ -124,36 +101,11 @@ def test_rainbow_instantiation(device):
         output_vanish=True,
         device=device,
     )
-    feature_net, value_net, advantage_net = evolvable_mlp.create_net()
+    feature_net, value_net, advantage_net = evolvable_mlp.build_networks()
     assert isinstance(evolvable_mlp, EvolvableMLP)
     assert isinstance(feature_net, nn.Module)
     assert isinstance(advantage_net, nn.Module)
     assert isinstance(value_net, nn.Module)
-
-
-######### Test get_activation #########
-def test_returns_correct_activation_function_for_all_supported_names(device):
-    activation_names = [
-        "Tanh",
-        "Identity",
-        "ReLU",
-        "ELU",
-        "Softsign",
-        "Sigmoid",
-        "GumbelSoftmax",
-        "Softplus",
-        "Softmax",
-        "LeakyReLU",
-        "PReLU",
-        "GELU",
-    ]
-    for name in activation_names:
-        activation = EvolvableMLP(2, 1, [4], device=device).get_activation(name)
-        assert isinstance(activation, nn.Module)
-
-
-######### Test layer_init #########
-
 
 ######### Test forward #########
 @pytest.mark.parametrize(

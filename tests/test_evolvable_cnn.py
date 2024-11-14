@@ -110,7 +110,6 @@ def test_instantiation_for_multi_agents(
         hidden_size=hidden_size,
         num_outputs=num_outputs,
         n_agents=n_agents,
-        multi=True,
         critic=True,
         device=device,
     )
@@ -118,7 +117,7 @@ def test_instantiation_for_multi_agents(
 
 
 @pytest.mark.parametrize(
-    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_outputs, multi, n_agents",
+    "input_shape, channel_size, kernel_size, stride_size, hidden_size, num_outputs, n_agents",
     [
         (
             [1, 16, 16],
@@ -127,10 +126,9 @@ def test_instantiation_for_multi_agents(
             [2, 2],
             [32, 32],
             10,
-            True,
-            None,
+            2.5,
         ),
-        ([1, 16, 16], [3, 32], [3, 3], [2, 2], [32, 32], 10, False, 2),
+        ([1, 16, 16], [3, 32], [3, 3], [2, 2], [32, 32], 10, 0),
     ],
 )
 def test_incorrect_instantiation_for_multi_agents(
@@ -140,7 +138,6 @@ def test_incorrect_instantiation_for_multi_agents(
     stride_size,
     hidden_size,
     num_outputs,
-    multi,
     n_agents,
     device,
 ):
@@ -153,7 +150,6 @@ def test_incorrect_instantiation_for_multi_agents(
             hidden_size=hidden_size,
             num_outputs=num_outputs,
             n_agents=n_agents,
-            multi=multi,
             critic=True,
             device=device,
         )
@@ -254,7 +250,6 @@ def test_forward_multi(
         hidden_size=hidden_size,
         num_outputs=num_outputs,
         n_agents=n_agents,
-        multi=True,
         critic=False,
         device=device,
     )
@@ -301,7 +296,6 @@ def test_forward_multi_critic(
         hidden_size=hidden_size,
         num_outputs=num_outputs,
         n_agents=n_agents,
-        multi=True,
         critic=True,
         device=device,
     )
@@ -334,34 +328,6 @@ def test_forward_rainbow(device):
     with torch.no_grad():
         output = evolvable_cnn.forward(input_tensor)
     assert output.shape == (1, 10)
-
-
-######### Test create_mlp and create_cnn########
-@pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
-def test_create_mlp_create_cnn(noisy, output_vanish, device):
-    evolvable_cnn = EvolvableCNN(
-        input_shape=[1, 16, 16],
-        channel_size=[32, 32],
-        kernel_size=[3, 3],
-        stride_size=[1, 1],
-        hidden_size=[64, 64],
-        num_outputs=10,
-        rainbow=True if noisy else False,
-        layer_norm=True,
-        device=device,
-    )
-    value_net = evolvable_cnn.create_mlp(
-        10,
-        4,
-        [64, 64],
-        output_activation=None,
-        noisy=noisy,
-        name="value",
-        output_vanish=output_vanish,
-    )
-    feature_net = evolvable_cnn.create_cnn(1, [32, 32], [3, 3], [1, 1], "feature")
-    assert isinstance(value_net, nn.Module)
-    assert isinstance(feature_net, nn.Module)
 
 ######### Test add_mlp_layer #########
 @pytest.mark.parametrize(
@@ -934,7 +900,6 @@ def test_change_cnn_kernel_multi(critic, device):
         kernel_size=[3, 3],
         stride_size=[1, 1],
         hidden_size=[32, 32],
-        multi=True,
         n_agents=2,
         num_outputs=4,
         critic=critic,
@@ -961,7 +926,6 @@ def test_change_cnn_kernel_multi_else_statement(device):
         kernel_size=[3],
         stride_size=[1],
         hidden_size=[32, 32],
-        multi=True,
         n_agents=2,
         num_outputs=4,
         device=device,

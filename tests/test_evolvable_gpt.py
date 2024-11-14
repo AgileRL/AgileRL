@@ -2,14 +2,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from agilerl.utils.evolvable_networks import new_gelu
 from agilerl.networks.evolvable_gpt import (
     MLP,
     CausalSelfAttention,
     EvolvableGPT,
     PositionalEncoding,
-    TokenEmbedding,
-    new_gelu,
-)
+    TokenEmbedding
+    )
 
 #### TESTING EvolvableGPT CLASS ####
 

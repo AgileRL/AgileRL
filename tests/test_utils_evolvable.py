@@ -3,7 +3,7 @@ import pytest
 import torch.nn as nn
 
 from agilerl.utils.evolvable_networks import (
-    get_activation_from_name,
+    get_activation,
     calc_max_kernel_sizes,
     create_conv_block,
     create_mlp
@@ -26,7 +26,7 @@ def test_returns_correct_activation_function_for_all_supported_names():
         "GELU",
     ]
     for name in activation_names:
-        activation = get_activation_from_name(name)
+        activation = get_activation(name)
         assert isinstance(activation, nn.Module)
 
 @pytest.mark.parametrize(
@@ -63,20 +63,51 @@ def test_max_kernel_size_negative(
         channel_size, kernel_size, stride_size, input_shape
     )
     assert max_kernel_sizes == [1, 1]
+    
 
+@pytest.mark.parametrize("output_vanish, noisy", [(True, True), (False, True)])
+def test_create_mlp(output_vanish, noisy):
+    net = create_mlp(
+        10,
+        4,
+        [32, 32],
+        output_vanish=output_vanish,
+        output_activation=None,
+        noisy=noisy,
+        rainbow_feature_net=True
+        )
+    assert isinstance(net, nn.Module)
 
+######### Test create_mlp and create_cnn########
 @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
-def test_create_mlp_create_cnn_multi(noisy, output_vanish):
-    value_net = create_mlp(
+def test_create_cnn(noisy, output_vanish):
+    feature_net = create_conv_block(
+        1,
+        [32, 32], 
+        [3, 3],
+        [1, 1],
+        "feature",
+        layer_norm=True,
+        )
+
+    head = create_mlp(
         10,
         4,
         [64, 64],
         output_activation=None,
-        rainbow_feature_net=True if noisy else False,
         noisy=noisy,
         name="value",
         output_vanish=output_vanish,
     )
+
+    feature_net = nn.ModuleDict(feature_net)
+
+    assert isinstance(head, nn.Module)
+    assert isinstance(feature_net, nn.Module)
+
+
+@pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
+def test_create_cnn_multi(noisy, output_vanish):
     feature_net = create_conv_block(
         1,
         [32, 32],
@@ -86,5 +117,18 @@ def test_create_mlp_create_cnn_multi(noisy, output_vanish):
         layer_norm=True,
         n_agents=2
         )
-    assert isinstance(value_net, nn.Module)
+    head = create_mlp(
+        10,
+        4,
+        [64, 64],
+        output_activation=None,
+        rainbow_feature_net=True if noisy else False,
+        noisy=noisy,
+        name="value",
+        output_vanish=output_vanish,
+    )
+    
+    feature_net = nn.ModuleDict(feature_net)
+
+    assert isinstance(head, nn.Module)
     assert isinstance(feature_net, nn.Module)

@@ -313,7 +313,6 @@ class MADDPG:
                         EvolvableCNN(
                             input_shape=state_dim,
                             num_outputs=action_dim,
-                            multi=self.multi,
                             n_agents=self.n_agents,
                             device=self.device,
                             accelerator=self.accelerator,
@@ -330,7 +329,6 @@ class MADDPG:
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        multi=self.multi,
                         device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,

@@ -194,31 +194,6 @@ def test_instantiation_with_rainbow():
 )"""
     )
 
-
-######### Test get_activation #########
-def test_returns_correct_activation_function_for_all_supported_names(
-    simple_mlp, device
-):
-    activation_names = [
-        "Tanh",
-        "ReLU",
-        "ELU",
-        "Softsign",
-        "Sigmoid",
-        "GumbelSoftmax",
-        "Softplus",
-        "Softmax",
-        "LeakyReLU",
-        "PReLU",
-        "GELU",
-    ]
-    for name in activation_names:
-        activation = MakeEvolvable(
-            simple_mlp, torch.randn(1, 10), device=device
-        ).get_activation(name)
-        assert isinstance(activation, nn.Module)
-
-
 ######### Test forward #########
 @pytest.mark.parametrize(
     "network, input_tensor, secondary_input_tensor, expected_result",

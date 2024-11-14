@@ -1,4 +1,4 @@
-import copy
+from typing import Tuple, Optional, Dict, Any
 import inspect
 import math
 from collections import OrderedDict
@@ -8,10 +8,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 
-
-class EvolvableGPT(nn.Module):
+class EvolvableGPT(EvolvableModule):
     """The Evolvable GPT class.
 
     :param n_layer: Number of transformer block layers, defaults to 12
@@ -43,7 +43,6 @@ class EvolvableGPT(nn.Module):
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     """
-
     def __init__(
         self,
         n_layer: int = 12,
@@ -59,6 +58,7 @@ class EvolvableGPT(nn.Module):
         max_layers: int = 16,
         bias: bool = True,
         device="cpu",
+        arch: str = "gpt",
         accelerator=None,
     ):
         assert isinstance(n_layer, int), "Number of layers must be an integer."
@@ -100,7 +100,7 @@ class EvolvableGPT(nn.Module):
         ), "Maximum number of layers must be greater than or equal to minimum number of layers."
         assert isinstance(bias, bool), "Bias flag must be boolean value True or False."
 
-        super().__init__()
+        super().__init__(gpt=True)
 
         self.arch = "gpt"
         self.n_layer = n_layer
@@ -118,7 +118,7 @@ class EvolvableGPT(nn.Module):
         self.device = device
         self.accelerator = accelerator
 
-        self.transformer = self.create_net()
+        self.transformer = self.build_networks()
         self.transformer = self.transformer.to(self.device)
         self.transformer_keys = list(self.transformer.keys())
 
@@ -138,18 +138,25 @@ class EvolvableGPT(nn.Module):
         # report number of parameters
         # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self, non_embedding: bool = True) -> int:
         """Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
+
+        :param non_embedding: If True, subtracts the position embeddings from the count, defaults to True
+        :type non_embedding: bool, optional
+        :return: Number of parameters in the model
+        :rtype: int
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize the weights of the model.
+
+        :param module: The module to initialize
+        :type module: nn.Module
+        """
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -157,30 +164,12 @@ class EvolvableGPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def get_activation(self, activation_names):
-        """Returns activation function for corresponding activation name.
+    def build_networks(self) -> nn.ModuleDict:
+        """Creates and returns transformer neural network.
 
-        :param activation_names: Activation function name
-        :type activation_names: str
+        :return: Transformer neural network as a ModuleDict
+        :rtype: nn.ModuleDict
         """
-        activation_functions = {
-            "Tanh": nn.Tanh,
-            "Identity": nn.Identity,
-            "ReLU": nn.ReLU,
-            "ELU": nn.ELU,
-            "Softsign": nn.Softsign,
-            "Sigmoid": nn.Sigmoid,
-            "Softplus": nn.Softplus,
-            "Softmax": nn.Softmax,
-            "LeakyReLU": nn.LeakyReLU,
-            "PReLU": nn.PReLU,
-            "GELU": new_gelu,
-        }
-
-        return activation_functions[activation_names]()
-
-    def create_net(self):
-        """Creates and returns transformer neural network."""
         net_dict = OrderedDict()
         net_dict["wte"] = nn.Embedding(self.vocab_size, self.n_embd)
         net_dict["wpe"] = nn.Embedding(self.block_size, self.n_embd)
@@ -205,20 +194,32 @@ class EvolvableGPT(nn.Module):
 
     def forward(
         self,
-        idx=None,
-        tok_emb=None,
-        targets=None,
-        attn_mask=None,
-        past_key_values=None,
-        pos=None,
-        is_causal=True,
-    ):
+        idx: Optional[torch.Tensor] = None,
+        tok_emb: Optional[torch.Tensor] = None,
+        targets: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Tuple[torch.Tensor]] = None,
+        pos: Optional[torch.Tensor] = None,
+        is_causal: bool = True,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor], Optional[torch.Tensor]]:
         """Forward pass through evolvable GPT model.
 
-        :param idxs: Input ids
-        :type idxs: torch.Tensor
+        :param idx: Input ids
+        :type idx: torch.Tensor, optional
+        :param tok_emb: Token embeddings
+        :type tok_emb: torch.Tensor, optional
         :param targets: Target ids
-        :type targets: torch.Tensor
+        :type targets: torch.Tensor, optional
+        :param attn_mask: Attention mask
+        :type attn_mask: torch.Tensor, optional
+        :param past_key_values: Past key values for caching
+        :type past_key_values: Tuple[torch.Tensor], optional
+        :param pos: Position ids
+        :type pos: torch.Tensor, optional
+        :param is_causal: Whether to apply causal mask
+        :type is_causal: bool, optional
+        :return: Tuple containing logits, all hidden states, presents, and loss
+        :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor], Optional[torch.Tensor]]
         """
         if idx is not None:
             device = idx.device
@@ -285,10 +286,18 @@ class EvolvableGPT(nn.Module):
 
         return logits, all_hidden_states, presents, loss
 
-    def crop_block_size(self, block_size):
-        # model surgery to decrease the block size if necessary
-        # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
-        # but want to use a smaller block size for some smaller, simpler model
+    def crop_block_size(self, block_size: int) -> None:
+        """
+        Adjust the block size of the model.
+
+        This method performs model surgery to decrease the block size if necessary.
+        For example, we may load the GPT2 pretrained model checkpoint (block size 1024)
+        but want to use a smaller block size for some smaller, simpler model.
+
+        :param block_size: The new block size to set. Must be less than or equal to the current block size.
+        :type block_size: int
+        :raises AssertionError: If the new block size is greater than the current block size.
+        """
         assert block_size <= self.block_size
         self.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(
@@ -301,7 +310,24 @@ class EvolvableGPT(nn.Module):
                 ]
 
     @classmethod
-    def from_pretrained(cls, model_type, override_args=None, custom_sd=None):
+    def from_pretrained(
+        cls,
+        model_type: str,
+        override_args: Optional[dict] = None,
+        custom_sd: Optional[str] = None
+        ) -> 'EvolvableGPT':
+        """
+        Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
+
+        :param model_type: The type of GPT model to load. Must be one of {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}.
+        :type model_type: str
+        :param override_args: A dictionary of arguments to override the default configuration. Defaults to None.
+        :type override_args: Optional[dict]
+        :param custom_sd: Path to a custom state dictionary to load. If None, the default pretrained weights are used. Defaults to None.
+        :type custom_sd: Optional[str]
+        :return: An instance of the EvolvableGPT model with the specified configuration and weights.
+        :rtype: EvolvableGPT
+        """
         assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
         override_args = override_args or {}  # default to empty dict
         from transformers import GPT2Config, GPT2LMHeadModel
@@ -376,14 +402,25 @@ class EvolvableGPT(nn.Module):
                     sd[k].copy_(sd_hf[khf])
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: tuple, device_type: str) -> torch.optim.Optimizer:
         """
-        This long function is unfortunately doing something very simple and is being very defensive:
-        We are separating out all parameters of the model into two buckets: those that will experience
-        weight decay for regularization and those that won't (biases, and layernorm/embedding weights).
-        We are then returning the PyTorch optimizer object.
-        """
+        Configures the optimizer for the model by separating parameters into those that will and won't experience weight decay.
 
+        This function separates all parameters of the model into two buckets: those that will experience weight decay for 
+        regularization and those that won't (biases, and layernorm/embedding weights). It then returns the PyTorch optimizer object.
+
+        :param weight_decay: The weight decay factor for regularization.
+        :type weight_decay: float
+        :param learning_rate: The learning rate for the optimizer.
+        :type learning_rate: float
+        :param betas: Coefficients used for computing running averages of gradient and its square.
+        :type betas: tuple
+        :param device_type: The type of device being used ('cuda' or 'cpu').
+        :type device_type: str
+        :return: Configured PyTorch optimizer.
+        :rtype: torch.optim.Optimizer
+        :raises AssertionError: If any parameter is in both decay and no_decay sets or if any parameter is not considered.
+        """
         # separate out all parameters to those that will and won't experience
         # regularizing weight decay
         decay = set()
@@ -453,8 +490,17 @@ class EvolvableGPT(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
+    def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float:
+        """
+        Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+
+        :param fwdbwd_per_iter: Number of forward-backward passes per iteration.
+        :type fwdbwd_per_iter: int
+        :param dt: Time taken per iteration in seconds.
+        :type dt: float
+        :return: Model flops utilization as a ratio of A100 bfloat16 peak FLOPS.
+        :rtype: float
+        """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
@@ -474,11 +520,31 @@ class EvolvableGPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+    ) -> torch.Tensor:
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        Generate a sequence of tokens.
+
+        This method takes a conditioning sequence of indices `idx` (LongTensor of shape (b, t))
+        and completes the sequence `max_new_tokens` times, feeding the predictions back into the
+        model each time. Most likely you'll want to make sure to be in `model.eval()` mode of operation
+        for this.
+
+        :param idx: Conditioning sequence of indices.
+        :type idx: torch.Tensor
+        :param max_new_tokens: Number of new tokens to generate.
+        :type max_new_tokens: int
+        :param temperature: Sampling temperature. Higher values mean more random samples, defaults to 1.0.
+        :type temperature: float, optional
+        :param top_k: If specified, only consider the top k tokens for sampling, defaults to None.
+        :type top_k: Optional[int], optional
+        :return: Generated sequence of indices.
+        :rtype: torch.Tensor
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
@@ -503,7 +569,7 @@ class EvolvableGPT(nn.Module):
         return idx
 
     @property
-    def init_dict(self):
+    def init_dict(self) -> Dict[str, Any]:
         """Returns model information in dictionary."""
         init_dict = {
             "n_layer": self.n_layer,
@@ -522,6 +588,7 @@ class EvolvableGPT(nn.Module):
         }
         return init_dict
 
+    @register_mutation_fn(MutationType.LAYER)
     def add_layer(self):
         """Adds a block layer to transformer."""
         if self.n_layer < self.max_layers:
@@ -530,6 +597,7 @@ class EvolvableGPT(nn.Module):
         # else:
         #     self.add_node()
 
+    @register_mutation_fn(MutationType.LAYER)
     def remove_layer(self):
         """Removes a block layer from transformer."""
         if self.n_layer > self.min_layers:
@@ -538,6 +606,7 @@ class EvolvableGPT(nn.Module):
         # else:
         #     self.add_node()
 
+    @register_mutation_fn(MutationType.NODE)
     def add_node(self, numb_new_nodes=None):
         """Adds nodes to hidden layers of transformer.
 
@@ -550,6 +619,7 @@ class EvolvableGPT(nn.Module):
         self.recreate_nets()
         return {"numb_new_nodes": numb_new_nodes}
 
+    @register_mutation_fn(MutationType.NODE)
     def remove_node(self, numb_new_nodes=None):
         """Removes nodes from hidden layers of transformer.
 
@@ -564,103 +634,67 @@ class EvolvableGPT(nn.Module):
 
     def recreate_nets(self):
         """Recreates neural network."""
-        new_transformer = self.create_net()
+        new_transformer = self.build_networks()
         self.transformer = self.preserve_parameters(
             old_net=self.transformer, new_net=new_transformer
         )
 
     def recreate_shrunk_nets(self):
         """Recreates shrunk neural network."""
-        new_transformer = self.create_net()
+        new_transformer = self.build_networks()
         self.transformer = self.shrink_preserve_parameters(
             old_net=self.transformer, new_net=new_transformer
         )
 
-    def clone(self):
-        """Returns clone of neural net with identical parameters."""
-        clone = EvolvableGPT(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
-        return clone
-
-    def preserve_parameters(self, old_net, new_net):
-        """Returns new neural network with copied parameters from old network.
-
-        :param old_net: Old neural network
-        :type old_net: nn.Module()
-        :param new_net: New neural network
-        :type new_net: nn.Module()
-        """
-        old_net_dict = dict(old_net.named_parameters())
-
-        for key, param in new_net.named_parameters():
-            if key in old_net_dict.keys():
-                if old_net_dict[key].data.size() == param.data.size():
-                    param.data = old_net_dict[key].data
-                else:
-                    if "norm" not in key:
-                        old_size = old_net_dict[key].data.size()
-                        new_size = param.data.size()
-                        if len(param.data.size()) == 1:
-                            param.data[: min(old_size[0], new_size[0])] = old_net_dict[
-                                key
-                            ].data[: min(old_size[0], new_size[0])]
-                        else:
-                            param.data[
-                                : min(old_size[0], new_size[0]),
-                                : min(old_size[1], new_size[1]),
-                            ] = old_net_dict[key].data[
-                                : min(old_size[0], new_size[0]),
-                                : min(old_size[1], new_size[1]),
-                            ]
-
-        return new_net
-
-    def shrink_preserve_parameters(self, old_net, new_net):
-        """Returns shrunk new neural network with copied parameters from old network.
-
-        :param old_net: Old neural network
-        :type old_net: nn.Module()
-        :param new_net: New neural network
-        :type new_net: nn.Module()
-        """
-        old_net_dict = dict(old_net.named_parameters())
-
-        for key, param in new_net.named_parameters():
-            if key in old_net_dict.keys():
-                if old_net_dict[key].data.size() == param.data.size():
-                    param.data = old_net_dict[key].data
-                else:
-                    if "norm" not in key:
-                        old_size = old_net_dict[key].data.size()
-                        new_size = param.data.size()
-                        min_0 = min(old_size[0], new_size[0])
-                        if len(param.data.size()) == 1:
-                            param.data[:min_0] = old_net_dict[key].data[:min_0]
-                        else:
-                            min_1 = min(old_size[1], new_size[1])
-                            param.data[:min_0, :min_1] = old_net_dict[key].data[
-                                :min_0, :min_1
-                            ]
-        return new_net
-
-
 class LayerNorm(nn.Module):
-    """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
+    """
+    LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False.
 
-    def __init__(self, ndim, bias, layer_norm_eps=1e-5):
+    :param int ndim: The number of dimensions in the input tensor.
+    :param bool bias: If True, adds a learnable bias to the normalization.
+    :param float layer_norm_eps: A value added to the denominator for numerical stability (default: 1e-5).
+
+    :ivar torch.nn.Parameter weight: The learnable weights for normalization.
+    :ivar torch.nn.Parameter bias: The learnable bias for normalization, if bias is True.
+    :ivar float layer_norm_eps: The epsilon value for numerical stability.
+
+    :method forward: Applies layer normalization to the input tensor.
+    :param torch.Tensor input: The input tensor to normalize.
+    :return: The normalized tensor.
+    :rtype: torch.Tensor
+    """
+    def __init__(self, ndim: int, bias: bool, layer_norm_eps: float = 1e-5):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim))
         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
         self.layer_norm_eps = layer_norm_eps
 
-    def forward(self, input):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.layer_norm(
             input, self.weight.shape, self.weight, self.bias, self.layer_norm_eps
         )
 
-
 class CausalSelfAttention(nn.Module):
-    def __init__(self, n_embd, n_head, bias, dropout, block_size):
+    """
+    Causal Self-Attention module for transformer models.
+
+    This module implements a causal self-attention mechanism, ensuring that each position in the sequence
+    can only attend to previous positions.
+
+    :param n_embd: The embedding dimensionality.
+    :type n_embd: int
+    :param n_head: The number of attention heads.
+    :type n_head: int
+    :param bias: Whether to use bias in the linear projections.
+    :type bias: bool
+    :param dropout: Dropout probability for attention and residual connections.
+    :type dropout: float
+    :param block_size: The maximum block size for the causal mask.
+    :type block_size: int
+    """
+    attention_bias: torch.Tensor
+
+    def __init__(self, n_embd: int, n_head: int, bias: bool, dropout: float, block_size: int):
         super().__init__()
         assert n_embd % n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -689,12 +723,28 @@ class CausalSelfAttention(nn.Module):
                 ),
             )
 
-    def forward(self, x, attn_mask=None, layer_past=None, is_causal=True):
-        (
-            B,
-            T,
-            C,
-        ) = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+    def forward(
+            self,
+            x: torch.Tensor,
+            attn_mask: Optional[torch.Tensor] = None,
+            layer_past: Optional[Tuple[torch.Tensor]] = None,
+            is_causal: bool = True
+            ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
+        """
+        Forward pass through the CausalSelfAttention module.
+
+        :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
+        :type x: torch.Tensor
+        :param attn_mask: Optional attention mask tensor.
+        :type attn_mask: Optional[torch.Tensor]
+        :param layer_past: Optional tuple of past key and value tensors for caching.
+        :type layer_past: Optional[Tuple[torch.Tensor]]
+        :param is_causal: Whether to apply causal mask.
+        :type is_causal: bool
+        :return: Tuple containing the output tensor and the present key and value tensors.
+        :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor]]
+        """
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head
         # forward to be the batch dim
@@ -730,7 +780,7 @@ class CausalSelfAttention(nn.Module):
             )
         else:
             # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.attention_bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -743,18 +793,37 @@ class CausalSelfAttention(nn.Module):
 
         return y, present
 
-
 class Block(nn.Module):
+    """
+    Transformer block consisting of layer normalization, causal self-attention, and MLP.
+
+    :param n_embd: The embedding dimensionality.
+    :type n_embd: int
+    :param n_head: The number of attention heads.
+    :type n_head: int
+    :param bias: Whether to use bias in the linear projections.
+    :type bias: bool
+    :param dropout: Dropout probability for attention and residual connections.
+    :type dropout: float
+    :param block_size: The maximum block size for the causal mask.
+    :type block_size: int
+    :param hidden_size: The size of the hidden layer in the MLP.
+    :type hidden_size: int
+    :param activation: The activation function to use in the MLP, defaults to "GELU".
+    :type activation: str, optional
+    :param layer_norm_eps: A value added to the denominator for numerical stability in layer normalization, defaults to 1e-5.
+    :type layer_norm_eps: float, optional
+    """
     def __init__(
         self,
-        n_embd,
-        n_head,
-        bias,
-        dropout,
-        block_size,
-        hidden_size,
-        activation="GELU",
-        layer_norm_eps=1e-5,
+        n_embd: int,
+        n_head: int,
+        bias: bool,
+        dropout: float,
+        block_size: int,
+        hidden_size: int,
+        activation: str = "GELU",
+        layer_norm_eps: float = 1e-5,
     ):
         super().__init__()
         self.ln_1 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
@@ -762,7 +831,27 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
         self.mlp = MLP(n_embd, dropout, hidden_size, activation)
 
-    def forward(self, x, attn_mask=None, layer_past=None, is_causal=True):
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        is_causal: bool = True
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
+        """
+        Forward pass through the transformer block.
+
+        :param x: Input tensor of shape (batch_size, sequence_length, embedding_dim).
+        :type x: torch.Tensor
+        :param attn_mask: Optional attention mask tensor.
+        :type attn_mask: Optional[torch.Tensor]
+        :param layer_past: Optional tuple of past key and value tensors for caching.
+        :type layer_past: Optional[Tuple[torch.Tensor]]
+        :param is_causal: Whether to apply causal mask.
+        :type is_causal: bool
+        :return: Tuple containing the output tensor and the present key and value tensors.
+        :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor]]
+        """
         attn_output, present = self.attn(
             self.ln_1(x),
             attn_mask=attn_mask,
@@ -773,7 +862,6 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x, present
 
-
 class MLP(EvolvableMLP):
     def __init__(self, n_embd, dropout, hidden_size, activation="GELU", **kwargs):
         super().__init__(
@@ -782,6 +870,7 @@ class MLP(EvolvableMLP):
             hidden_size=[hidden_size],
             layer_norm=False,
             mlp_output_activation=activation,
+            gpt_activations=True,
             **kwargs,
         )
         self.dropout = nn.Dropout(dropout)
@@ -800,48 +889,6 @@ class MLP(EvolvableMLP):
             x = value(x)
         x = self.dropout(x)
         return x
-
-    def get_activation(self, activation_names):
-        """Returns activation function for corresponding activation name.
-
-        :param activation_names: Activation function name
-        :type activation_names: str
-        """
-        activation_functions = {
-            "Tanh": nn.Tanh,
-            "Identity": nn.Identity,
-            "ReLU": nn.ReLU,
-            "ELU": nn.ELU,
-            "Softsign": nn.Softsign,
-            "Sigmoid": nn.Sigmoid,
-            "Softplus": nn.Softplus,
-            "Softmax": nn.Softmax,
-            "LeakyReLU": nn.LeakyReLU,
-            "PReLU": nn.PReLU,
-            "GELU": new_gelu,
-        }
-
-        return activation_functions[activation_names]()
-
-
-class new_gelu(nn.Module):
-    """
-    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
-    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
-    """
-
-    def forward(self, x):
-        return (
-            0.5
-            * x
-            * (
-                1.0
-                + torch.tanh(
-                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))
-                )
-            )
-        )
-
 
 class PositionalEncoding(nn.Module):
     """The positional embedding class.

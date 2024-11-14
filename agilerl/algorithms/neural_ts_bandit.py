@@ -416,7 +416,7 @@ class NeuralTS:
 
         if clone.actor.arch == "mlp":
             if isinstance(clone.actor, EvolvableMLP):
-                clone.exp_layer = clone.actor.feature_net.linear_layer_output
+                clone.exp_layer = clone.actor.feature_net.mlp_linear_layer_output
             else:
                 clone.exp_layer = clone.actor.feature_net.feature_linear_layer_output
         else:
@@ -532,7 +532,7 @@ class NeuralTS:
 
         if self.actor.arch == "mlp":
             if isinstance(self.actor, EvolvableMLP):
-                self.exp_layer = self.actor.feature_net.linear_layer_output
+                self.exp_layer = self.actor.feature_net.mlp_linear_layer_output
             else:
                 self.exp_layer = self.actor.feature_net.feature_linear_layer_output
         else:
@@ -604,7 +604,7 @@ class NeuralTS:
 
         if agent.actor.arch == "mlp":
             if isinstance(agent.actor, EvolvableMLP):
-                agent.exp_layer = agent.actor.feature_net.linear_layer_output
+                agent.exp_layer = agent.actor.feature_net.mlp_linear_layer_output
             else:
                 agent.exp_layer = agent.actor.feature_net.feature_linear_layer_output
         else:

@@ -1,11 +1,13 @@
 from typing import Any, Dict, List, Protocol, Callable, Optional, runtime_checkable
-from functools import wraps
+import copy
+from functools import wraps, partial
 from abc import ABC, abstractmethod
 from enum import Enum
 
 import torch
 import torch.nn as nn
 
+from agilerl.utils.evolvable_networks import get_activation
 from agilerl.networks.custom_components import NoisyLinear
 
 class MutationType(Enum):
@@ -39,10 +41,10 @@ class EvolvableModule(nn.Module, ABC):
     value_net: Optional[nn.Module]
     advantage_net: Optional[nn.Module]
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, gpt: bool = False) -> None:
         nn.Module.__init__(self)  # Properly initialize nn.Module
 
-        self.name = name
+        self._fetch_activation_fn = partial(get_activation, gpt=gpt)
 
         # Initialize dictionaries to store mutation methods by type
         self._layer_mutation_methods = {}
@@ -63,21 +65,12 @@ class EvolvableModule(nn.Module, ABC):
 
     @property
     @abstractmethod
-    def net_config(self) -> Dict[str, Any]:
-        raise NotImplementedError("net_config property must be implemented in order to keep track of the dynamic network architecture.")
-    
-    @property
-    @abstractmethod
     def init_dict(self) -> Dict[str, Any]:
         raise NotImplementedError("init_dict property must be implemented in order to store the configuration of the neural network.")
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("forward method must be implemented in order to use the neural network.")
-    
-    @abstractmethod
-    def clone(self) -> "EvolvableModule":
-        raise NotImplementedError("Clone method must be implemented in order to duplicate the neural network for mutations.")
     
     @abstractmethod
     def build_networks(self) -> None:
@@ -156,6 +149,15 @@ class EvolvableModule(nn.Module, ABC):
             for layer in net.modules():
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
+    
+    def get_activation(self, name: str):
+        """Get the activation function by name.
+
+        param name: The name of the activation function.
+        type name: str
+        return: The activation function.
+        """
+        return self._fetch_activation_fn(name)
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods.
@@ -184,3 +186,9 @@ class EvolvableModule(nn.Module, ABC):
             probs.append(prob)
         
         return probs
+
+    def clone(self):
+        """Returns clone of neural net with identical parameters."""
+        clone = self.__class__(**copy.deepcopy(self.init_dict))
+        clone.load_state_dict(self.state_dict())
+        return clone

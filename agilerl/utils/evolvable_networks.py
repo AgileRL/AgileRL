@@ -1,13 +1,12 @@
 # This file contains utility functions for tuning
-from typing import Tuple, Union, List, Dict, Literal, Optional, Iterable
-
+from typing import Tuple, Union, List, Dict, Optional, Iterable
+import math
 import numpy as np
 import torch
 from torch.optim import Optimizer
 import torch.nn as nn
 from collections import OrderedDict
 from accelerate.optimizer import AcceleratedOptimizer
-
 from gymnasium import spaces
 
 from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
@@ -101,7 +100,7 @@ def get_conv_layer(
             in_channels, out_channels, kernel_size, stride, padding
         )
 
-def get_normalization_from_name(normalization_name: str, layer_size: int) -> nn.Module:
+def get_normalization(normalization_name: str, layer_size: int) -> nn.Module:
     """Returns normalization layer for corresponding normalization name.
 
     :param normalization_names: Normalization layer name
@@ -122,7 +121,25 @@ def get_normalization_from_name(normalization_name: str, layer_size: int) -> nn.
 
     return normalization_functions[normalization_name](layer_size)
 
-def get_activation_from_name(activation_name: Optional[str]) -> nn.Module:
+class new_gelu(nn.Module):
+    """
+    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
+    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
+    """
+
+    def forward(self, x):
+        return (
+            0.5
+            * x
+            * (
+                1.0
+                + torch.tanh(
+                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))
+                )
+            )
+        )
+
+def get_activation(activation_name: Optional[str], gpt: bool = False) -> nn.Module:
     """Returns activation function for corresponding activation name.
 
     :param activation_names: Activation function name
@@ -139,14 +156,14 @@ def get_activation_from_name(activation_name: Optional[str]) -> nn.Module:
         "Softmax": nn.Softmax,
         "LeakyReLU": nn.LeakyReLU,
         "PReLU": nn.PReLU,
-        "GELU": nn.GELU,
+        "GELU": nn.GELU if not gpt else new_gelu,
         "Identity": nn.Identity,
     }
 
     activation_name = activation_name if activation_name is not None else "Identity"
     return (
         activation_functions[activation_name](dim=-1)
-        if activation_name == "Softmax"
+        if activation_name == "Softmax" and not gpt
         else activation_functions[activation_name]()
     )
 
@@ -206,8 +223,8 @@ def layer_init(layer: LayerType, std: float = np.sqrt(2), bias_const: float = 0.
         torch.nn.init.constant_(layer.bias, bias_const)
 
     elif hasattr(layer, "bias_mu") and hasattr(layer, "bias_sigma"):
-        torch.nn.init.constant(layer.bias_mu, bias_const)
-        torch.nn.init.constant(layer.bias_sigma, bias_const)
+        torch.nn.init.constant_(layer.bias_mu, bias_const)
+        torch.nn.init.constant_(layer.bias_sigma, bias_const)
 
     return layer
 
@@ -289,7 +306,7 @@ def create_conv_block(
         layer_norm: bool = False,
         activation_fn: str = "ReLU",
         n_agents: Optional[int] = None,
-        ) -> nn.ModuleDict:
+        ) -> Dict[str, nn.Module]:
     """
     Build a convolutional block.
 
@@ -353,7 +370,7 @@ def create_conv_block(
         )
     if layer_norm:
         net_dict[f"{name}_layer_norm_0"] = block_batch_norm_map[block_type](channel_size[0])
-    net_dict[f"{name}_activation_0"] = get_activation_from_name(activation_fn)
+    net_dict[f"{name}_activation_0"] = get_activation(activation_fn)
 
     if len(channel_size) > 1:
         for l_no in range(1, len(channel_size)):
@@ -372,11 +389,11 @@ def create_conv_block(
                 net_dict[f"{name}_layer_norm_{str(l_no)}"] = block_batch_norm_map[block_type](
                     channel_size[l_no]
                 )
-            net_dict[f"{name}_activation_{str(l_no)}"] = get_activation_from_name(
+            net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
                 activation_fn
             )
     
-    return nn.ModuleDict(net_dict)
+    return net_dict
 
 def create_mlp(
     input_size: int,
@@ -388,6 +405,7 @@ def create_mlp(
     rainbow_feature_net: bool = False,
     init_layers: bool = True,
     layer_norm: bool = False,
+    gpt_activations: bool = False,
     mlp_activation: str = "ReLU",
     mlp_output_activation: Optional[str] = None,
     noise_std: float = 0.1,
@@ -414,6 +432,8 @@ def create_mlp(
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization.
     :type layer_norm: bool, optional
+    :param gpt_activations: Whether to use GPT activations.
+    :type gpt_activations: bool, optional
     :param mlp_activation: Activation function for hidden layers.
     :type mlp_activation: str, optional
     :param mlp_output_activation: Activation function for output layer.
@@ -439,8 +459,9 @@ def create_mlp(
 
     if layer_norm:
         net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0])
-    net_dict[f"{name}_activation_0"] = get_activation_from_name(
-        mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else mlp_activation
+    net_dict[f"{name}_activation_0"] = get_activation(
+        activation_name=mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else mlp_activation,
+        gpt=gpt_activations,
     )
 
     if len(hidden_size) > 1:
@@ -457,8 +478,9 @@ def create_mlp(
                 net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(net_dict[f"{name}_linear_layer_{str(l_no)}"])
             if layer_norm:
                 net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(hidden_size[l_no])
-            net_dict[f"{name}_activation_{str(l_no)}"] = get_activation_from_name(
-                mlp_activation if not rainbow_feature_net else mlp_output_activation
+            net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
+                mlp_activation if not rainbow_feature_net else mlp_output_activation,
+                gpt=gpt_activations,
             )
 
     if not rainbow_feature_net:
@@ -482,8 +504,9 @@ def create_mlp(
 
         net_dict[f"{name}_linear_layer_output"] = output_layer
         if output_activation is not None:
-            net_dict[f"{name}_activation_output"] = get_activation_from_name(
-                output_activation
+            net_dict[f"{name}_activation_output"] = get_activation(
+                activation_name=output_activation,
+                gpt=gpt_activations,
             )
 
     net = nn.Sequential(net_dict)
