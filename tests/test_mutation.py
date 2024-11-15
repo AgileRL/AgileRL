@@ -5,7 +5,7 @@ import pytest
 import torch
 from accelerate import Accelerator
 
-from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.mutation_v2 import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
 from agilerl.utils.utils import create_population
 

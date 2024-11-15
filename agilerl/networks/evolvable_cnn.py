@@ -535,7 +535,7 @@ class EvolvableCNN(EvolvableModule):
             self,
             hidden_layer: Optional[int] = None,
             numb_new_nodes: Optional[int] = None
-            ) -> Dict[str, Union[int, None]]:
+            ) -> Dict[str, int]:
         """Adds nodes to the hidden layer of the Multi-layer Perceptron.
 
         :param hidden_layer: Depth of the hidden layer to add nodes to, defaults to None
@@ -564,7 +564,7 @@ class EvolvableCNN(EvolvableModule):
             self,
             hidden_layer: Optional[int] = None,
             numb_new_nodes: Optional[int] = None
-            ) -> Dict[str, Union[int, None]]:
+            ) -> Dict[str, int]:
         """Removes nodes from hidden layer of fully connected layer.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -606,7 +606,7 @@ class EvolvableCNN(EvolvableModule):
             self,
             hidden_layer: Optional[int] = None,
             numb_new_channels: Optional[int] = None
-            ) -> Dict[str, Union[int, None]]:
+            ) -> Dict[str, int]:
         """Adds channel to hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -614,7 +614,7 @@ class EvolvableCNN(EvolvableModule):
         :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
         :type numb_new_channels: int, optional
         :return: Dictionary containing the hidden layer and number of new channels added
-        :rtype: dict[str, Union[int, None]]
+        :rtype: dict[str, int]
         """
         if hidden_layer is None:
             hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
@@ -623,9 +623,8 @@ class EvolvableCNN(EvolvableModule):
         if numb_new_channels is None:
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 
-        if (
-            self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size
-        ):  # HARD LIMIT
+        # HARD LIMIT
+        if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:
             self.channel_size[hidden_layer] += numb_new_channels
 
             self.recreate_nets()
@@ -637,7 +636,7 @@ class EvolvableCNN(EvolvableModule):
             self,
             hidden_layer: Optional[int] = None,
             numb_new_channels: Optional[int] = None
-            ) -> Dict[str, Union[int, None]]:
+            ) -> Dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -651,6 +650,7 @@ class EvolvableCNN(EvolvableModule):
             hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
         else:
             hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
+
         if numb_new_channels is None:
             numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
 

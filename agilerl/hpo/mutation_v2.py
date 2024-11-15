@@ -28,7 +28,11 @@ def get_return_type(method: Callable) -> Any:
         return_type = signature.return_annotation
         if return_type is inspect.Signature.empty:
             return None  # No return type specified
-        return return_type
+        
+        if hasattr(return_type, "__origin__"):
+            return return_type.__origin__  # Return type is a type hint
+        
+        return return_type  # Return type is a class or type
     except ValueError as e:
         print(f"Error inspecting {method}: {e}")
         return None
@@ -787,14 +791,14 @@ class Mutations:
         if self.multi_agent:
             # Extract actors and critics from individual
             actors: List[EvolvableModule] = getattr(individual, self.algo["actor"]["eval"])
-            nested_critics: List[List[EvolvableModule]] = [critics for critics in self.algo["critics"]]
+            nested_critics: List[List[EvolvableModule]] = [getattr(individual, critics["eval"]) for critics in self.algo["critics"]]
             offspring_actors = [actor.clone()for actor in actors]
             offspring_critics_list = [[critic.clone() for critic in critics]for critics in nested_critics]
 
             # Actors and critics must use same EvolvableModule, so use first actor 
             # to determine available mutations
-            mutation_methods = offspring_actors[0].get_mutation_methods()
-            mutation_probs = offspring_actors[0].get_mutation_probs(self.new_layer_prob)
+            mutation_methods = list(offspring_actors[0].get_mutation_methods().keys())
+            mutation_probs = offspring_actors[0].get_mutation_probs(self.new_layer_prob) 
             mutation_method = self.rng.choice(mutation_methods, size=1, p=mutation_probs)[0]
             mut_return_type = get_return_type(getattr(offspring_actors[0], mutation_method))
 
@@ -806,42 +810,9 @@ class Mutations:
                     for offspring_critic in offspring_critics:
                         critic_mutation = getattr(offspring_critic, mutation_method)
                         critic_mutation()
-
-            elif self.arch == "bert":
-                # Functionality to account for MATD3
-                if mutation_method in ["add_node", "remove_node"]:
-                    if len(offspring_critics_list) == 1:
-                        for offspring_actor, offspring_critic in zip(
-                            offspring_actors, offspring_critics_list[0]
-                        ):
-                            actor_mutation = getattr(offspring_actor, mutation_method)
-                            node_dict = actor_mutation()
-                            critic_mutation = getattr(offspring_critic, mutation_method)
-                            critic_mutation(**node_dict)
-                    else:
-                        for (
-                            offspring_actor,
-                            offspring_critic_1,
-                            offspring_critic_2,
-                        ) in zip(offspring_actors, *offspring_critics_list):
-                            actor_mutation = getattr(offspring_actor, mutation_method)
-                            node_dict = actor_mutation()
-                            critic_mutation_1 = getattr(offspring_critic_1, mutation_method)
-                            critic_mutation_2 = getattr(offspring_critic_2, mutation_method)
-                            critic_mutation_1(**node_dict)
-                            critic_mutation_2(**node_dict)
-                else:
-                    for offspring_actor in offspring_actors:
-                        actor_mutation = getattr(offspring_actor, mutation_method)
-                        actor_mutation()
-                    for offspring_critics in offspring_critics_list:
-                        for offspring_critic in offspring_critics:
-                            critic_mutation = getattr(offspring_critic, mutation_method)
-                            critic_mutation()
-
-            else:  # mlp or gpt
-                if mutation_method in ["add_mlp_node", "remove_mlp_node"]: # Functionality to account for MATD3
-                    if len(offspring_critics_list) == 1:
+            else:  # mlp, gpt, or bert
+                if mut_return_type == dict:
+                    if len(offspring_critics_list) == 1: # Functionality to account for MATD3
                         for offspring_actor, offspring_critic in zip(
                             offspring_actors, offspring_critics_list[0]
                         ):
@@ -875,6 +846,7 @@ class Mutations:
                     offspring_actor.to(self.device)
                     for offspring_actor in offspring_actors
                 ]
+
             setattr(individual, self.algo["actor"]["eval"], offspring_actors)
 
             for offspring_critics, critics in zip(
@@ -907,9 +879,10 @@ class Mutations:
                 for critic in self.algo["critics"]
             ]
 
-            mutation_methods = offspring_actor.get_mutation_methods()
+            mutation_methods = list(offspring_actor.get_mutation_methods().keys())
             mutation_probs = offspring_actor.get_mutation_probs(self.new_layer_prob)
             mutation_method = self.rng.choice(mutation_methods, size=1, p=mutation_probs)[0]
+            mut_return_type = get_return_type(getattr(offspring_actor, mutation_method))
 
             if self.arch == "cnn":
                 actor_mutation = getattr(offspring_actor, mutation_method)
@@ -917,23 +890,8 @@ class Mutations:
                 for offspring_critic in offspring_critics:
                     critic_mutation = getattr(offspring_critic, mutation_method)
                     critic_mutation()
-
-            elif self.arch == "bert":
-                if mutation_method in ["add_node", "remove_node"]:
-                    actor_mutation = getattr(offspring_actor, mutation_method)
-                    node_dict = actor_mutation()
-                    for offspring_critic in offspring_critics:
-                        critic_mutation = getattr(offspring_critic, mutation_method)
-                        critic_mutation(**node_dict)
-                else:
-                    actor_mutation = getattr(offspring_actor, mutation_method)
-                    actor_mutation()
-                    for offspring_critic in offspring_critics:
-                        critic_mutation = getattr(offspring_critic, mutation_method)
-                        critic_mutation()
-
-            else:  # mlp or gpt
-                if mutation_method in ["add_mlp_node", "remove_mlp_node"]:
+            else:  # mlp, gpt, bert
+                if mut_return_type == dict:
                     actor_mutation = getattr(offspring_actor, mutation_method)
                     node_dict = actor_mutation()
                     for offspring_critic in offspring_critics:
