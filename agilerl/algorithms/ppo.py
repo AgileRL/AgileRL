@@ -1,6 +1,6 @@
+from typing import Optional, Dict, Any, Tuple, Union
 import copy
 import inspect
-
 import dill
 import numpy as np
 import torch
@@ -8,20 +8,18 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
 from torch.nn.utils import clip_grad_norm_
+from gymnasium import spaces
 
+from agilerl.networks.evolvable_composed import EvolvableComposed
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.algorithms.base import EvolvableAlgorithm
 
-
-class PPO:
+class PPO(EvolvableAlgorithm):
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
 
-    :param state_dim: State observation dimension
-    :type state_dim: list[int]
-    :param action_dim: Action dimension
-    :type action_dim: int
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
     :param discrete_actions: Boolean flag to indicate a discrete action space
@@ -71,42 +69,46 @@ class PPO:
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
-
     def __init__(
         self,
-        state_dim,
-        action_dim,
-        one_hot,
-        discrete_actions,
-        max_action=1,
-        min_action=-1,
-        index=0,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        batch_size=64,
-        lr=1e-4,
-        learn_step=2048,
-        gamma=0.99,
-        gae_lambda=0.95,
-        mut=None,
-        action_std_init=0.6,
-        clip_coef=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        target_kl=None,
-        update_epochs=4,
-        actor_network=None,
-        critic_network=None,
-        device="cpu",
-        accelerator=None,
-        wrap=True,
-    ):
-        assert isinstance(
-            state_dim, (list, tuple)
-        ), "State dimension must be a list or tuple."
-        assert isinstance(
-            action_dim, (int, np.integer)
-        ), "Action dimension must be an integer."
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        one_hot: bool,
+        discrete_actions: bool,
+        max_action: float = 1,
+        min_action: float = -1,
+        index: int = 0,
+        net_config: Dict[str, Any] = {"arch": "mlp", "hidden_size": [64, 64]},
+        batch_size: int = 64,
+        lr: float = 1e-4,
+        learn_step: int = 2048,
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        mut: Optional[str] = None,
+        action_std_init: float = 0.6,
+        clip_coef: float = 0.2,
+        ent_coef: float = 0.01,
+        vf_coef: float = 0.5,
+        max_grad_norm: float = 0.5,
+        target_kl: Optional[float] = None,
+        update_epochs: int = 4,
+        actor_network: Optional[nn.Module] = None,
+        critic_network: Optional[nn.Module] = None,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        wrap: bool = True,
+    ) -> None:
+        super().__init__(
+            observation_space,
+            action_space,
+            index=index,
+            learn_step=learn_step,
+            net_config=net_config,
+            device=device,
+            accelerator=accelerator,
+            name="PPO"
+            )
+
         assert isinstance(
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
@@ -123,12 +125,12 @@ class PPO:
         ), "Min action must be a float or integer."
         if isinstance(min_action, list):
             assert (
-                len(min_action) == action_dim
+                len(min_action) == self.action_dim
             ), "Length of min_action must be equal to action_dim."
             min_action = np.array(min_action)
         if isinstance(max_action, list):
             assert (
-                len(max_action) == action_dim
+                len(max_action) == self.action_dim
             ), "Length of max_action must be equal to action_dim."
             max_action = np.array(max_action)
         if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
@@ -194,20 +196,14 @@ class PPO:
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.algo = "PPO"
-        self.state_dim = state_dim
-        self.action_dim = action_dim
         self.one_hot = one_hot
         self.discrete_actions = discrete_actions
         self.max_action = max_action
         self.min_action = min_action
-        self.net_config = net_config
         self.batch_size = batch_size
         self.lr = lr
-        self.learn_step = learn_step
         self.gamma = gamma
         self.gae_lambda = gae_lambda
-        self.mut = mut
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef
         self.ent_coef = ent_coef
@@ -217,17 +213,10 @@ class PPO:
         self.update_epochs = update_epochs
         self.actor_network = actor_network
         self.critic_network = critic_network
-        self.device = device
-        self.accelerator = accelerator
-
-        self.index = index
-        self.scores = []
-        self.fitness = []
-        self.steps = [0]
 
         # For continuous action spaces
         if not self.discrete_actions:
-            self.action_var = torch.full((action_dim,), action_std_init**2)
+            self.action_var = torch.full((self.action_dim,), action_std_init**2)
             if self.accelerator is None:
                 self.action_var = self.action_var.to(self.device)
             else:
@@ -288,14 +277,14 @@ class PPO:
                     len(self.net_config["hidden_size"]) > 0
                 ), "Net config hidden_size must contain at least one element."
                 self.actor = EvolvableMLP(
-                    num_inputs=state_dim[0],
-                    num_outputs=action_dim,
+                    num_inputs=self.state_dim[0],
+                    num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic = EvolvableMLP(
-                    num_inputs=state_dim[0],
+                    num_inputs=self.state_dim[0],
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -324,14 +313,55 @@ class PPO:
                     self.net_config["normalize"], bool
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
-                    input_shape=state_dim,
-                    num_outputs=action_dim,
+                    input_shape=self.state_dim,
+                    num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic = EvolvableCNN(
-                    input_shape=state_dim,
+                    input_shape=self.state_dim,
+                    num_outputs=1,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **critic_net_config,
+                )
+            elif self.net_config["arch"] == "composed": # Dict observations
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+
+                assert (
+                    "normalize" in self.net_config.keys()
+                ), "Net config must contain normalize: True or False."
+                assert isinstance(
+                    self.net_config["normalize"], bool
+                ), "Net config normalize must be boolean value True or False."
+                assert (
+                    "latent_dim" in self.net_config.keys()
+                ), "Net config must contain latent_dim: int."
+
+                self.actor = EvolvableComposed(
+                    observation_space=self.observation_space,
+                    num_outputs=self.action_dim,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **self.net_config,
+                )
+                self.critic = EvolvableComposed(
+                    observation_space=self.observation_space,
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -362,13 +392,7 @@ class PPO:
         :param state: Observation of environment
         :type state: np.Array() or list
         """
-        if not isinstance(state, torch.Tensor):
-            state = torch.from_numpy(state).float()
-
-        if self.accelerator is None:
-            state = state.to(self.device)
-        else:
-            state = state.to(self.accelerator.device)
+        state = self.obs_to_tensor(state)
 
         if self.one_hot:
             state = (
@@ -428,7 +452,13 @@ class PPO:
             pre_scaled_max - pre_scaled_min
         )
 
-    def get_action(self, state, action=None, grad=False, action_mask=None):
+    def get_action(
+        self,
+        state: np.ndarray,
+        action: Optional[torch.Tensor] = None,
+        grad: bool = False,
+        action_mask: Optional[np.ndarray] = None
+    ) -> Tuple[Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch

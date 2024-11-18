@@ -10,7 +10,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
-from agilerl.typing import TensorDict
+from agilerl.typing import TensorDict, NumpyObsType, TorchObsType
 
 def unwrap_optimizer(
         optimizer: Union[Optimizer, AcceleratedOptimizer],
@@ -267,21 +267,6 @@ def calc_max_kernel_sizes(
         width_in = width_out
 
     return max_kernel_list
-
-def obs_as_tensor(obs: Union[np.ndarray, Dict[str, np.ndarray]], device: torch.device) -> Union[torch.Tensor, TensorDict]:
-    """
-    Moves the observation to the given device.
-
-    :param obs:
-    :param device: PyTorch device
-    :return: PyTorch tensor of the observation on a desired device.
-    """
-    if isinstance(obs, np.ndarray):
-        return torch.as_tensor(obs, device=device)
-    elif isinstance(obs, dict):
-        return {key: torch.as_tensor(_obs, device=device) for (key, _obs) in obs.items()}
-    else:
-        raise Exception(f"Unrecognized type of observation {type(obs)}")
     
 def is_image_space(space: spaces.Space) -> bool:
     """Check if the space is an image space. We ignore dtype and number of channels 

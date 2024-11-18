@@ -1,14 +1,13 @@
 from collections import OrderedDict
-from typing import Union, List, Tuple, Dict, Any
-
+from typing import Union, Dict, Any
 import torch
+import numpy as np
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from torch.optim import Optimizer
 from torch.nn import Module
 
-OptimizerType = Union[Optimizer, AcceleratedOptimizer]
-NetworkType = Union[Module, List[Module], Tuple[Module, ...]]
+from agilerl.typing import NumpyObsType, TorchObsType, NetworkType, OptimizerType
 
 def unwrap_optimizer(
         optimizer: OptimizerType,
@@ -96,3 +95,21 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
             for k, v in state_dict.items()
         ]
     )
+
+def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchObsType:
+    """
+    Moves the observation to the given device.
+
+    :param obs:
+    :type obs: NumpyObsType
+    :param device: PyTorch device
+    :type device: Union[str, torch.device]
+    :return: PyTorch tensor of the observation on a desired device.
+    :rtype: TorchObsType
+    """
+    if isinstance(obs, np.ndarray):
+        return torch.as_tensor(obs, device=device)
+    elif isinstance(obs, dict):
+        return {key: torch.as_tensor(_obs, device=device) for (key, _obs) in obs.items()}
+    else:
+        raise Exception(f"Unrecognized type of observation {type(obs)}")

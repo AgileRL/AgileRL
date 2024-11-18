@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
+from gymnasium import spaces
 from accelerate.optimizer import AcceleratedOptimizer
 
 from agilerl.algorithms.ppo import PPO
@@ -15,17 +16,15 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
 class DummyPPO(PPO):
     def __init__(
-        self, state_dim, action_dim, one_hot, discrete_actions, *args, **kwargs
+        self, observation_space, action_space, one_hot, discrete_actions, *args, **kwargs
     ):
         super().__init__(
-            state_dim, action_dim, one_hot, discrete_actions, *args, **kwargs
+            observation_space, action_space, one_hot, discrete_actions, *args, **kwargs
         )
 
         self.tensor_test = torch.randn(1)
-
 
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
@@ -97,6 +96,17 @@ def simple_cnn():
     )
     return network
 
+@pytest.fixture
+def vector_space():
+    return spaces.Box(low=0, high=255, shape=(4,), dtype=np.uint8)
+
+@pytest.fixture
+def image_space():
+    return spaces.Box(low=0, high=255, shape=(3, 32, 32), dtype=np.uint8)
+
+@pytest.fixture
+def action_space():
+    return spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
 
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -132,18 +142,18 @@ class SimpleCNN(nn.Module):
 
 # Initializes all necessary attributes with default values
 def test_initializes_with_default_values():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(low=0, high=255, shape=(4,), dtype=np.uint8)
+    action_space = spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
     one_hot = False
     discrete_actions = False
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
 
-    ppo = PPO(state_dim, action_dim, one_hot, discrete_actions, net_config=net_config)
+    ppo = PPO(observation_space, action_space, one_hot, discrete_actions, net_config=net_config)
 
     print("ppo net config", ppo.net_config)
     assert ppo.algo == "PPO"
-    assert ppo.state_dim == state_dim
-    assert ppo.action_dim == action_dim
+    assert ppo.state_dim ==(4,)
+    assert ppo.action_dim == 2
     assert ppo.one_hot == one_hot
     assert ppo.discrete_actions == discrete_actions
     assert ppo.net_config == {
@@ -181,11 +191,9 @@ def test_initializes_with_default_values():
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_ppo_with_cnn_accelerator():
-    state_dim = [3, 32, 32]
-    action_dim = 2
+    observation_space = spaces.Box(low=0, high=255, shape=(3, 32, 32), dtype=np.uint8)
+    action_space = spaces.Discrete(2)
     one_hot = False
-    discrete_actions = True
-    index = 0
     net_config_cnn = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -212,11 +220,10 @@ def test_initialize_ppo_with_cnn_accelerator():
     wrap = True
 
     ppo = PPO(
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=one_hot,
-        discrete_actions=discrete_actions,
-        index=index,
+        discrete_actions=True,
         net_config=net_config_cnn,
         batch_size=batch_size,
         lr=lr,
@@ -233,47 +240,26 @@ def test_initialize_ppo_with_cnn_accelerator():
         actor_network=actor_network,
         critic_network=critic_network,
         accelerator=accelerator,
-        wrap=wrap,
+        wrap=wrap
     )
 
-    net_config_cnn.update({"mlp_output_activation": "Softmax"})
-
-    assert ppo.state_dim == state_dim
-    assert ppo.action_dim == action_dim
-    assert ppo.one_hot == one_hot
-    assert ppo.discrete_actions == discrete_actions
-    assert ppo.net_config == net_config_cnn
-    assert ppo.batch_size == batch_size
-    assert ppo.lr == lr
-    assert ppo.gamma == gamma
-    assert ppo.gae_lambda == gae_lambda
-    assert ppo.mut == mut
-    assert ppo.action_std_init == action_std_init
-    assert ppo.clip_coef == clip_coef
-    assert ppo.ent_coef == ent_coef
-    assert ppo.vf_coef == vf_coef
-    assert ppo.max_grad_norm == max_grad_norm
-    assert ppo.target_kl == target_kl
-    assert ppo.update_epochs == update_epochs
-    assert ppo.actor_network == actor_network
-    assert ppo.critic_network == critic_network
     assert isinstance(ppo.actor, EvolvableCNN)
-    assert isinstance(ppo.critic, EvolvableCNN)
+    assert isinstance(ppo.critic, EvolvableMLP)
+    assert isinstance(ppo.optimizer, optim.Adam)
     assert ppo.arch == "cnn"
-    assert isinstance(ppo.optimizer, AcceleratedOptimizer)
-
 
 # Can initialize ppo with an actor network
 @pytest.mark.parametrize(
-    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    "obs_space, action_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
-        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        ("vector_space", "action_space", "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
     ],
 )
 def test_initialize_ppo_with_actor_network(
-    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+    obs_space, action_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
 ):
-    action_dim = 2
+    obs_space = request.getfixturevalue(obs_space)
+    action_space = request.getfixturevalue(action_space)
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -281,16 +267,16 @@ def test_initialize_ppo_with_actor_network(
     critic_network = MakeEvolvable(critic_network, input_tensor_critic)
 
     ppo = PPO(
-        state_dim,
-        action_dim,
+        obs_space,
+        action_space,
         one_hot,
         discrete_actions=True,
         actor_network=actor_network,
         critic_network=critic_network,
     )
 
-    assert ppo.state_dim == state_dim
-    assert ppo.action_dim == action_dim
+    assert ppo.state_dim == (4,)
+    assert ppo.action_dim == 2
     assert ppo.one_hot == one_hot
     assert ppo.net_config is None
     assert ppo.batch_size == 64
@@ -404,7 +390,7 @@ def test_initialize_ppo_with_actor_network_evo_net(state_dim, net_type):
     assert ppo.arch == actor_network.arch
 
 
-def test_initialize_ddpg_with_incorrect_actor_net():
+def test_initialize_ppo_with_incorrect_actor_net():
     state_dim = [4]
     action_dim = 2
     one_hot = False

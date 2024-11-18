@@ -22,8 +22,15 @@ class MutationMethod(Protocol):
         ...
 
 def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], MutationMethod]:
-    """Decorator to register a method as a mutation function of a specific type."""
-    def decorator(func: Callable) -> MutationMethod:
+    """Decorator to register a method as a mutation function of a specific type.
+    
+    :param mutation_type: The type of mutation function.
+    :type mutation_type: MutationType
+    :return: The decorator function.
+    :rtype: Callable[[Callable], MutationMethod]
+    """
+    def decorator(func: Callable[[Any], Optional[Dict[str, Any]]]) -> MutationMethod:
+        f"""{func.__doc__}"""
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             return func(self, *args, **kwargs)

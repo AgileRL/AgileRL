@@ -72,7 +72,8 @@ class EvolvableMLP(EvolvableModule):
         device: str = "cpu",
         gpt_activations: bool = False,
         accelerator: Optional[accelerate.Accelerator] = None,
-        arch: str = "mlp"
+        arch: str = "mlp",
+        name: Optional[str] = None
         ):
         super().__init__(gpt=gpt_activations)
 
@@ -95,6 +96,7 @@ class EvolvableMLP(EvolvableModule):
         ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
 
         self.arch = arch
+
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation

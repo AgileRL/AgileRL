@@ -130,7 +130,6 @@ class EvolvableComposed(EvolvableModule):
             min_channel_size: int = 32,
             max_channel_size: int = 256,
             n_agents: Optional[int] = None,
-            multi: bool = False,
             layer_norm: bool = False,
             support: Optional[torch.Tensor] = None,
             rainbow: bool = False,
@@ -141,10 +140,11 @@ class EvolvableComposed(EvolvableModule):
             output_vanish: bool = False,
             device: str = "cpu",
             accelerator: Optional[Accelerator] = None,
-            name: str = "composed"
+            arch: str = "composed"
         ):
-        super().__init__(name)
+        super().__init__()
 
+        self.arch = arch
         self.observation_space = observation_space
         self.vector_space_mlp = vector_space_mlp
         self.channel_size = channel_size
@@ -173,14 +173,13 @@ class EvolvableComposed(EvolvableModule):
         self.init_layers = init_layers
         self.device = device if accelerator is None else accelerator.device
         self.accelerator = accelerator
-        self.multi = multi
         self.n_agents = n_agents
         self.noise_std = noise_std
         self.output_vanish = output_vanish
         self.init_dicts = init_dicts
         self.vector_spaces = [key for key, space in observation_space.spaces.items() if not is_image_space(space)]
         self._net_config = {
-            "name": self.name,
+            "arch": self.arch,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
@@ -240,7 +239,6 @@ class EvolvableComposed(EvolvableModule):
             "min_channel_size": self.min_channel_size,
             "max_channel_size": self.max_channel_size,
             "n_agents": self.n_agents,
-            "multi": self.multi,
             "layer_norm": self.layer_norm,
             "support": self.support,
             "rainbow": self.rainbow,
@@ -250,7 +248,7 @@ class EvolvableComposed(EvolvableModule):
             "output_vanish": self.output_vanish,
             "device": self.device,
             "accelerator": self.accelerator,
-            "name": self.name
+            "arch": self.arch
         }
     
     @property
@@ -279,7 +277,6 @@ class EvolvableComposed(EvolvableModule):
             "min_channel_size": self.min_channel_size,
             "max_channel_size": self.max_channel_size,
             "n_agents": self.n_agents,
-            "multi": self.multi,
             "layer_norm": self.layer_norm,
             "support": self.support,
             "noise_std": self.noise_std,
@@ -414,13 +411,13 @@ class EvolvableComposed(EvolvableModule):
             value_net = EvolvableMLP(
                 num_inputs=features_dim,
                 num_outputs=self.num_atoms,
-                name="value_net",
+                # name="value_net", # TODO: Ideally we are able to give it a name without changing `self.arch`
                 **copy.deepcopy(self.get_init_dict("head", default='mlp'))
             )
             advantage_net = EvolvableMLP(
                 num_inputs=features_dim,
                 num_outputs=self.num_outputs * self.num_atoms,
-                name="advantage_net",
+                # name="advantage_net", # TODO: Ideally we are able to give it a name without changing `self.arch`
                 **copy.deepcopy(self.get_init_dict("advantage", default='mlp'))
             )
 
@@ -439,14 +436,14 @@ class EvolvableComposed(EvolvableModule):
                 value_net = EvolvableMLP(
                     num_inputs=features_dim,
                     num_outputs=1,
-                    name="value_net",
+                    # name="value_net",
                     **copy.deepcopy(self.get_init_dict("head", default='mlp'))
                 )
             else:
                 value_net = EvolvableMLP(
                     num_inputs=features_dim,
                     num_outputs=self.num_outputs,
-                    name="action_net",
+                    # name="action_net",
                     **copy.deepcopy(self.get_init_dict("head", default='mlp'))
                 )
             

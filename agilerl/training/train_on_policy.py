@@ -1,37 +1,45 @@
+from typing import List, Tuple, Optional, Any, Dict
 import os
 import warnings
 from datetime import datetime
+from accelerate import Accelerator
+import gymnasium as gym
 
 import numpy as np
 import wandb
 from tqdm import trange
 
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
+from agilerl.typing import PopulationType
+
+InitDictType = Optional[Dict[str, Any]]
 
 def train_on_policy(
-    env,
-    env_name,
-    algo,
-    pop,
-    INIT_HP=None,
-    MUT_P=None,
-    swap_channels=False,
-    max_steps=1000000,
-    evo_steps=10000,
-    eval_steps=None,
-    eval_loop=1,
-    target=None,
-    tournament=None,
-    mutation=None,
-    checkpoint=None,
-    checkpoint_path=None,
-    overwrite_checkpoints=False,
-    save_elite=False,
-    elite_path=None,
-    wb=False,
-    verbose=True,
-    accelerator=None,
-    wandb_api_key=None,
-):
+    env: gym.Env,
+    env_name: str,
+    algo: str,
+    pop: PopulationType,
+    INIT_HP: InitDictType = None,
+    MUT_P: InitDictType = None,
+    swap_channels: bool = False,
+    max_steps: int = 1000000,
+    evo_steps: int = 10000,
+    eval_steps: Optional[int] = None,
+    eval_loop: int = 1,
+    target: Optional[float] = None,
+    tournament: Optional[TournamentSelection] = None,
+    mutation: Optional[Mutations] = None,
+    checkpoint: Optional[int] = None,
+    checkpoint_path: Optional[str] = None,
+    overwrite_checkpoints: bool = False,
+    save_elite: bool = False,
+    elite_path: Optional[str] = None,
+    wb: bool = False,
+    verbose: bool = True,
+    accelerator: Optional[Accelerator] = None,
+    wandb_api_key: Optional[str] = None,
+) -> Tuple[PopulationType, List[List[float]]]:
     """The general on-policy RL training function. Returns trained population of agents
     and their fitnesses.
 
@@ -42,7 +50,7 @@ def train_on_policy(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: list[object]
+    :type pop: list[EvolvableAlgorithm]
     :param INIT_HP: Dictionary containing initial hyperparameters, defaults to None
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
@@ -84,6 +92,9 @@ def train_on_policy(
     :type accelerator: accelerate.Accelerator(), optional
     :param wandb_api_key: API key for Weights & Biases, defaults to None
     :type wandb_api_key: str, optional
+
+    :return: Trained population of agents and their fitnesses
+    :rtype: list[EvolvableAlgorithm], list[list[float]]
     """
     assert isinstance(
         algo, str

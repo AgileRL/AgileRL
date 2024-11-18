@@ -1,7 +1,10 @@
+from typing import List, Dict, Any, Optional
 import gymnasium as gym
+from gymnasium import spaces
 import matplotlib.pyplot as plt
 import numpy as np
 
+from agilerl.algorithms.base import EvolvableAlgorithm
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -13,9 +16,10 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
+from agilerl.networks.base import EvolvableModule
+from agilerl.typing import PopulationType
 
-
-def make_vect_envs(env_name, num_envs=1):
+def make_vect_envs(env_name: str, num_envs: int = 1) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -27,8 +31,7 @@ def make_vect_envs(env_name, num_envs=1):
         [lambda: gym.make(env_name) for i in range(num_envs)]
     )
 
-
-def make_multi_agent_vect_envs(env, num_envs=1, **env_kwargs):
+def make_multi_agent_vect_envs(env: Any, num_envs: int = 1, **env_kwargs: Any) -> AsyncPettingZooVecEnv:
     """Returns async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
@@ -39,8 +42,7 @@ def make_multi_agent_vect_envs(env, num_envs=1, **env_kwargs):
     env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
     return AsyncPettingZooVecEnv(env_fns=env_fns)
 
-
-def make_skill_vect_envs(env_name, skill, num_envs=1):
+def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -54,30 +56,29 @@ def make_skill_vect_envs(env_name, skill, num_envs=1):
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
-
 def create_population(
-    algo,
-    state_dim,
-    action_dim,
-    one_hot,
-    net_config,
-    INIT_HP,
-    actor_network=None,
-    critic_network=None,
-    population_size=1,
-    num_envs=1,
-    device="cpu",
-    accelerator=None,
-    torch_compiler=None,
-):
+    algo: str,
+    observation_space: spaces.Space,
+    action_space: spaces.Space,
+    one_hot: bool,
+    net_config: Optional[Dict[str, Any]],
+    INIT_HP: Dict[str, Any],
+    actor_network: Optional[EvolvableModule] = None,
+    critic_network: Optional[EvolvableModule] = None,
+    population_size: int = 1,
+    num_envs: int = 1,
+    device: str = "cpu",
+    accelerator: Optional[Any] = None,
+    torch_compiler: Optional[Any] = None,
+) -> PopulationType:
     """Returns population of identical agents.
 
     :param algo: RL algorithm
     :type algo: str
-    :param state_dim: State observation dimension
-    :type state_dim: int
-    :param action_dim: Action dimension
-    :type action_dim: int
+    :param observation_space: Observation space
+    :type observation_space: spaces.Space
+    :param action_space: Action space
+    :type action_space: spaces.Space
     :param one_hot: One-hot encoding
     :type one_hot: bool
     :param net_config: Network configuration
@@ -96,16 +97,17 @@ def create_population(
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
-    :param torch_compiler:
-    :type torch_compiler:
+    :param torch_compiler: Torch compiler, defaults to None
+    :type torch_compiler: Any, optional
+    :return: Population of agents
+    :rtype: list[EvolvableAlgorithm]
     """
     population = []
-
     if algo == "DQN":
         for idx in range(population_size):
             agent = DQN(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 one_hot=one_hot,
                 index=idx,
                 net_config=net_config,
@@ -124,8 +126,8 @@ def create_population(
     elif algo == "Rainbow DQN":
         for idx in range(population_size):
             agent = RainbowDQN(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 one_hot=one_hot,
                 index=idx,
                 net_config=net_config,
@@ -149,8 +151,8 @@ def create_population(
     elif algo == "DDPG":
         for idx in range(population_size):
             agent = DDPG(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 one_hot=one_hot,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
@@ -179,8 +181,8 @@ def create_population(
     elif algo == "PPO":
         for idx in range(population_size):
             agent = PPO(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 one_hot=one_hot,
                 discrete_actions=INIT_HP["DISCRETE_ACTIONS"],
                 index=idx,
@@ -207,8 +209,8 @@ def create_population(
     elif algo == "CQN":
         for idx in range(population_size):
             agent = CQN(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 one_hot=one_hot,
                 index=idx,
                 net_config=net_config,
@@ -227,8 +229,8 @@ def create_population(
     elif algo == "TD3":
         for idx in range(population_size):
             agent = TD3(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 one_hot=one_hot,
                 max_action=INIT_HP["MAX_ACTION"],
                 min_action=INIT_HP["MIN_ACTION"],
@@ -257,8 +259,8 @@ def create_population(
     elif algo == "MADDPG":
         for idx in range(population_size):
             agent = MADDPG(
-                state_dims=state_dim,
-                action_dims=action_dim,
+                observation_spaces=observation_space,
+                action_spaces=action_space,
                 one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
@@ -290,8 +292,8 @@ def create_population(
     elif algo == "MATD3":
         for idx in range(population_size):
             agent = MATD3(
-                state_dims=state_dim,
-                action_dims=action_dim,
+                observation_spaces=observation_space,
+                action_spaces=action_space,
                 one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
@@ -324,8 +326,8 @@ def create_population(
     elif algo == "NeuralUCB":
         for idx in range(population_size):
             agent = NeuralUCB(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 index=idx,
                 net_config=net_config,
                 gamma=INIT_HP["GAMMA"],
@@ -343,8 +345,8 @@ def create_population(
     elif algo == "NeuralTS":
         for idx in range(population_size):
             agent = NeuralTS(
-                state_dim=state_dim,
-                action_dim=action_dim,
+                observation_space=observation_space,
+                action_space=action_space,
                 index=idx,
                 net_config=net_config,
                 gamma=INIT_HP["GAMMA"],
