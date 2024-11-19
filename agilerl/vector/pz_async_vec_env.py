@@ -562,9 +562,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """On deleting the object, checks that the vector environment is closed."""
         if not getattr(self, "closed", True) and hasattr(self, "_state"):
             self.close(terminate=True)
-        del self._obs_buffer
-        del self.observations
-        del self.experience_spec
+        if hasattr(self, "_obs_buffer"):
+            del self._obs_buffer
+        if hasattr(self, "observations"):
+            del self.observations
+        if hasattr(self, "experience_spec"):
+            del self.experience_spec
 
 
 class PettingZooExperienceSpec:
@@ -653,14 +656,17 @@ class PettingZooExperienceSpec:
         :param observations: Observations numpy array backed by RawArray, defaults to None
         :type observations: agilerl.vector.pz_async_vec_env.Observations, optional
         """
-        if transition_name == "reward":
-            return 0
-        if transition_name == "truncated" or transition_name == "terminated":
-            return True
-        if transition_name == "info":
-            return {}
-        if transition_name == "observation":
-            return observations[agent]
+        match transition_name:
+            case "reward":
+                return 0
+            case "truncated":
+                return False
+            case "terminated":
+                return True
+            case "info":
+                return {}
+            case "observtion":
+                return -np.ones_like(observations[agent])
 
     def process_transition(self, transitions, observations, transition_names):
         transition_list = list(transitions)

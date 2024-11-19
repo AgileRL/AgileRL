@@ -449,6 +449,12 @@ class MADDPG:
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
         """
+
+        # Deal with case of no env_defined_actions defined in the info dict
+        if not key_in_nested_dict(infos, "env_defined_actions"):
+            return None, None
+
+        # Deal with empty info dicts for each sub agent
         if all(not info for agent, info in infos.items() if agent in self.agent_ids):
             return None, None
         env_defined_actions = {
