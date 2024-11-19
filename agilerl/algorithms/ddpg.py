@@ -1,3 +1,4 @@
+from typing import Optional, Dict, Any
 import copy
 import inspect
 import warnings
@@ -7,20 +8,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from gymnasium import spaces
 
+from agilerl.algorithms.base import RLAlgorithm
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
-class DDPG:
+class DDPG(RLAlgorithm):
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 
-    :param state_dim: State observation dimension
-    :type state_dim: list[int]
-    :param action_dim: Action dimension
-    :type action_dim: int
+    :param observation_space: Environment observation space
+    :type observation_space: gym.spaces.Space
+    :param action_space: Environment action space
+    :type action_space: gym.spaces.Space
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
     :param max_action: Upper bound of the action space, defaults to 1
@@ -73,39 +75,44 @@ class DDPG:
 
     def __init__(
         self,
-        state_dim,
-        action_dim,
-        one_hot,
-        max_action=1,
-        min_action=-1,
-        O_U_noise=True,
-        expl_noise=0.1,
-        vect_noise_dim=1,
-        mean_noise=0.0,
-        theta=0.15,
-        dt=1e-2,
-        index=0,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        batch_size=64,
-        lr_actor=1e-4,
-        lr_critic=1e-3,
-        learn_step=5,
-        gamma=0.99,
-        tau=1e-3,
-        mut=None,
-        policy_freq=2,
-        actor_network=None,
-        critic_network=None,
-        device="cpu",
-        accelerator=None,
-        wrap=True,
-    ):
-        assert isinstance(
-            state_dim, (list, tuple)
-        ), "State dimension must be a list or tuple."
-        assert isinstance(
-            action_dim, (int, np.integer)
-        ), "Action dimension must be an integer."
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        one_hot: bool,
+        max_action: float = 1,
+        min_action: float = -1,
+        O_U_noise: bool = True,
+        expl_noise: float = 0.1,
+        vect_noise_dim: int = 1,
+        mean_noise: float = 0.0,
+        theta: float = 0.15,
+        dt: float = 1e-2,
+        index: int = 0,
+        net_config: Optional[Dict[str, Any]] = {"arch": "mlp", "hidden_size": [64, 64]},
+        batch_size: int = 64,
+        lr_actor: float = 1e-4,
+        lr_critic: float = 1e-3,
+        learn_step: int = 5,
+        gamma: float = 0.99,
+        tau: float = 1e-3,
+        mut: Optional[str] = None,
+        policy_freq: int = 2,
+        actor_network: Optional[nn.Module] = None,
+        critic_network: Optional[nn.Module] = None,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        wrap: bool = True,
+    ) -> None:
+        super().__init__(
+            observation_space,
+            action_space,
+            index=index,
+            net_config=net_config,
+            learn_step=learn_step,
+            device=device,
+            accelerator=accelerator,
+            name="DDPG"
+        )
+
         assert isinstance(
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
@@ -119,12 +126,12 @@ class DDPG:
         ), "Min action must be a float or integer."
         if isinstance(min_action, list):
             assert (
-                len(min_action) == action_dim
+                len(min_action) == self.action_dim
             ), "Length of min_action must be equal to action_dim."
             min_action = np.array(min_action)
         if isinstance(max_action, list):
             assert (
-                len(max_action) == action_dim
+                len(max_action) == self.action_dim
             ), "Length of max_action must be equal to action_dim."
             max_action = np.array(max_action)
         if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
@@ -137,21 +144,18 @@ class DDPG:
             ), "Max action must be greater than min action."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
-            and expl_noise.shape == (vect_noise_dim, action_dim)
+            and expl_noise.shape == (vect_noise_dim, self.action_dim)
         ), "Exploration action noise rate must be a float, or an array of size action_dim"
         if isinstance(expl_noise, (float, int)):
             assert (
                 expl_noise >= 0
             ), "Exploration noise must be greater than or equal to zero."
-        assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
         assert lr_actor > 0, "Actor learning rate must be greater than zero."
         assert isinstance(lr_critic, float), "Critic learning rate must be a float."
         assert lr_critic > 0, "Critic learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, (float, int)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -168,13 +172,9 @@ class DDPG:
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.algo = "DDPG"
-        self.state_dim = state_dim
-        self.action_dim = action_dim
         self.one_hot = one_hot
         self.max_action = max_action
         self.min_action = min_action
-        self.net_config = net_config
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -188,23 +188,16 @@ class DDPG:
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, np.ndarray)
-            else expl_noise * np.ones((vect_noise_dim, action_dim))
+            else expl_noise * np.ones((vect_noise_dim, self.action_dim))
         )
         self.mean_noise = (
             mean_noise
             if isinstance(mean_noise, np.ndarray)
-            else mean_noise * np.ones((vect_noise_dim, action_dim))
+            else mean_noise * np.ones((vect_noise_dim, self.action_dim))
         )
-        self.current_noise = np.zeros((vect_noise_dim, action_dim))
+        self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
         self.theta = theta
         self.dt = dt
-        self.device = device
-        self.accelerator = accelerator
-
-        self.index = index
-        self.scores = []
-        self.fitness = []
-        self.steps = [0]
         self.learn_counter = 0
         self.actor_network = None
         self.critic_network = None
@@ -262,14 +255,14 @@ class DDPG:
                     len(self.net_config["hidden_size"]) > 0
                 ), "Net config hidden_size must contain at least one element."
                 self.actor = EvolvableMLP(
-                    num_inputs=state_dim[0],
-                    num_outputs=action_dim,
+                    num_inputs=self.state_dim[0],
+                    num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic = EvolvableMLP(
-                    num_inputs=state_dim[0] + action_dim,
+                    num_inputs=self.state_dim[0] + self.action_dim,
                     num_outputs=1,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -298,15 +291,15 @@ class DDPG:
                     self.net_config["normalize"], bool
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
-                    input_shape=state_dim,
-                    num_outputs=action_dim,
+                    input_shape=self.state_dim,
+                    num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic = EvolvableCNN(
-                    input_shape=state_dim,
-                    num_outputs=action_dim,
+                    input_shape=self.state_dim,
+                    num_outputs=self.action_dim,
                     critic=True,
                     device=self.device,
                     accelerator=self.accelerator,
@@ -709,54 +702,6 @@ class DDPG:
 
         return clone
 
-    def inspect_attributes(self, input_args_only=False):
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = [
-            "actor",
-            "critic",
-            "actor_target",
-            "critic_target",
-            "actor_optimizer",
-            "critic_optimizer",
-        ]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]
-
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in guarded_attributes and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-
-        return attributes
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            (
-                self.actor,
-                self.actor_target,
-                self.critic,
-                self.critic_target,
-                self.actor_optimizer,
-                self.critic_optimizer,
-            ) = self.accelerator.prepare(
-                self.actor,
-                self.actor_target,
-                self.critic,
-                self.critic_target,
-                self.actor_optimizer,
-                self.critic_optimizer,
-            )
-
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
@@ -769,35 +714,6 @@ class DDPG:
             self.critic_optimizer = unwrap_optimizer(
                 self.critic_optimizer, self.critic, self.lr_critic
             )
-
-    def save_checkpoint(self, path):
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-        attribute_dict = self.inspect_attributes()
-
-        network_info = {
-            "actor_init_dict": self.actor.init_dict,
-            "actor_state_dict": self.actor.state_dict(),
-            "actor_target_init_dict": self.actor_target.init_dict,
-            "actor_target_state_dict": self.actor_target.state_dict(),
-            "critic_init_dict": self.critic.init_dict,
-            "critic_state_dict": self.critic.state_dict(),
-            "critic_target_init_dict": self.critic_target.init_dict,
-            "critic_target_state_dict": self.critic_target.state_dict(),
-            "actor_optimizer_state_dict": self.actor_optimizer.state_dict(),
-            "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
-        }
-
-        attribute_dict.update(network_info)
-
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
 
     def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.

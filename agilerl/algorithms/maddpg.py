@@ -1,3 +1,4 @@
+from typing import Optional, Dict, Any, List
 import copy
 import inspect
 import warnings
@@ -7,25 +8,26 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from gymnasium import spaces
 
+from agilerl.algorithms.base import MultiAgentAlgorithm
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.networks.base import EvolvableModule
 from agilerl.utils.algo_utils import (
     compile_model,
     key_in_nested_dict,
-    remove_compile_prefix,
     unwrap_optimizer,
 )
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
-class MADDPG:
+class MADDPG(MultiAgentAlgorithm):
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
 
-    :param state_dims: State observation dimensions for each agent
-    :type state_dims: list[tuple]
-    :param action_dims: Action dimensions for each agent
-    :type action_dims: list[int]
+    :param observation_spaces: Observation space for each agent
+    :type observation_spaces: list[spaces.Space]
+    :param action_spaces: Action space for each agent
+    :type action_spaces: list[spaces.Space]
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
     :param n_agents: Number of agents
@@ -81,41 +83,54 @@ class MADDPG:
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+    actors: List[EvolvableModule]
+    actor_targets: List[EvolvableModule]
+    critics: List[EvolvableModule]
+    critic_targets: List[EvolvableModule]
 
     def __init__(
         self,
-        state_dims,
-        action_dims,
-        one_hot,
-        n_agents,
-        agent_ids,
-        max_action,
-        min_action,
-        discrete_actions,
-        O_U_noise=True,
-        expl_noise=0.1,
-        vect_noise_dim=1,
-        mean_noise=0.0,
-        theta=0.15,
-        dt=1e-2,
-        index=0,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        batch_size=64,
-        lr_actor=0.001,
-        lr_critic=0.01,
-        learn_step=5,
-        gamma=0.95,
-        tau=0.01,
-        mut=None,
-        actor_networks=None,
-        critic_networks=None,
-        device="cpu",
-        accelerator=None,
-        torch_compiler=None,
-        wrap=True,
+        observation_spaces: List[spaces.Space],
+        action_spaces: List[spaces.Space],
+        one_hot: bool,
+        n_agents: int,
+        agent_ids: List[str],
+        max_action: Optional[List[float]],
+        min_action: Optional[List[float]],
+        discrete_actions: bool,
+        O_U_noise: bool = True,
+        expl_noise: float = 0.1,
+        vect_noise_dim: int = 1,
+        mean_noise: float = 0.0,
+        theta: float = 0.15,
+        dt: float = 1e-2,
+        index: int = 0,
+        net_config: Dict[str, Any] = {"arch": "mlp", "hidden_size": [64, 64]},
+        batch_size: int = 64,
+        lr_actor: float = 0.001,
+        lr_critic: float = 0.01,
+        learn_step: int = 5,
+        gamma: float = 0.95,
+        tau: float = 0.01,
+        mut: Optional[str] = None,
+        actor_networks: Optional[List[nn.Module]] = None,
+        critic_networks: Optional[List[nn.Module]] = None,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        torch_compiler: Optional[str] = None,
+        wrap: bool = True,
     ):
-        assert isinstance(state_dims, list), "State dimensions must be a list."
-        assert isinstance(action_dims, list), "Action dimensions must be a list."
+        super().__init__(
+            observation_spaces,
+            action_spaces,
+            index=index,
+            net_config=net_config,
+            learn_step=learn_step,
+            device=device,
+            accelerator=accelerator,
+            name="MADDPG",
+        )
+
         assert isinstance(
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
@@ -141,15 +156,12 @@ class MADDPG:
                 assert x > n, "Max action must be greater than min action."
                 assert x > 0, "Max action must be greater than zero."
                 assert n <= 0, "Min action must be less than or equal to zero."
-        assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
         assert lr_actor > 0, "Actor learning rate must be greater than zero."
         assert isinstance(lr_critic, float), "Critic learning rate must be a float."
         assert lr_critic > 0, "Critic learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, float), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -169,39 +181,26 @@ class MADDPG:
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
-        self.algo = "MADDPG"
-        self.state_dims = state_dims
-        self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
-        self.action_dims = action_dims
+
         self.one_hot = one_hot
         self.n_agents = n_agents
         self.multi = True
         self.agent_ids = agent_ids
-        self.net_config = net_config
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
-        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
-        self.mut = mut
-        self.device = device
-        self.accelerator = accelerator
         self.torch_compiler = torch_compiler
         self.learn_counter = 0
-        self.index = index
-        self.scores = []
-        self.fitness = []
-        self.steps = [0]
         self.max_action = max_action
         self.min_action = min_action
         self.discrete_actions = discrete_actions
-        self.total_actions = sum(self.action_dims)
 
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.sample_gaussian = [
-            torch.zeros(*(vect_noise_dim, action_dims[idx])).to(device)
+            torch.zeros(*(vect_noise_dim, self.action_dims[idx])).to(device)
             for idx in range(self.n_agents)
         ]
         self.expl_noise = (
@@ -1072,35 +1071,6 @@ class MADDPG:
 
         return clone
 
-    def inspect_attributes(self, input_args_only=False):
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = [
-            "actors",
-            "critics",
-            "actor_targets",
-            "critic_targets",
-            "actor_optimizers",
-            "critic_optimizers",
-        ]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]
-
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in guarded_attributes and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-        return attributes
-
     def place_models_on_device(self, device):
         self.actors = [actor.to(device) for actor in self.actors]
         self.actor_targets = [
@@ -1110,27 +1080,6 @@ class MADDPG:
         self.critic_targets = [
             critic_target.to(device) for critic_target in self.critic_targets
         ]
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actors = [self.accelerator.prepare(actor) for actor in self.actors]
-            self.actor_targets = [
-                self.accelerator.prepare(actor_target)
-                for actor_target in self.actor_targets
-            ]
-            self.critics = [self.accelerator.prepare(critic) for critic in self.critics]
-            self.critic_targets = [
-                self.accelerator.prepare(critic_target)
-                for critic_target in self.critic_targets
-            ]
-            self.actor_optimizers = [
-                self.accelerator.prepare(actor_optimizer)
-                for actor_optimizer in self.actor_optimizers
-            ]
-            self.critic_optimizers = [
-                self.accelerator.prepare(critic_optimizer)
-                for critic_optimizer in self.critic_optimizers
-            ]
 
     def unwrap_models(self):
         if self.accelerator is not None:
@@ -1159,55 +1108,13 @@ class MADDPG:
                 )
             ]
 
-    def save_checkpoint(self, path):
+    def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
 
         :param path: Location to save checkpoint at
         :type path: string
         """
-        attribute_dict = self.inspect_attributes()
-
-        network_info = {
-            "actors_init_dict": [actor.init_dict for actor in self.actors],
-            "actors_state_dict": [
-                remove_compile_prefix(actor.state_dict()) for actor in self.actors
-            ],
-            "actor_targets_init_dict": [
-                actor_target.init_dict for actor_target in self.actor_targets
-            ],
-            "actor_targets_state_dict": [
-                remove_compile_prefix(actor_target.state_dict())
-                for actor_target in self.actor_targets
-            ],
-            "critics_init_dict": [critic.init_dict for critic in self.critics],
-            "critics_state_dict": [
-                remove_compile_prefix(critic.state_dict()) for critic in self.critics
-            ],
-            "critic_targets_init_dict": [
-                critic_target.init_dict for critic_target in self.critic_targets
-            ],
-            "critic_targets_state_dict": [
-                remove_compile_prefix(critic_target.state_dict())
-                for critic_target in self.critic_targets
-            ],
-            "actor_optimizers_state_dict": [
-                actor_optimizer.state_dict()
-                for actor_optimizer in self.actor_optimizers
-            ],
-            "critic_optimizers_state_dict": [
-                critic_optimizer.state_dict()
-                for critic_optimizer in self.critic_optimizers
-            ],
-        }
-
-        attribute_dict.update(network_info)
-        attribute_dict.pop("accelerator", None)
-
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
+        super().save_checkpoint(path, exclude_accelerator=True)
 
     def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.

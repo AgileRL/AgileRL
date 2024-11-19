@@ -6,7 +6,9 @@ from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from torch.optim import Optimizer
 from torch.nn import Module
+from torch._dynamo import OptimizedModule
 
+from agilerl.networks.base import EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType, NetworkType, OptimizerType
 
 def unwrap_optimizer(
@@ -35,6 +37,22 @@ def unwrap_optimizer(
         return unwrapped_optimizer
     else:
         return optimizer
+    
+def recursive_check_module_attrs(obj: Any) -> bool:
+    """Recursively check if the object has any attributes that are EvolvableModule's or Optimizer's.
+
+    :param obj: The object to check for EvolvableModule's or Optimizer's.
+    :type obj: Any
+    :return: True if the object has any attributes that are EvolvableModule's or Optimizer's, False otherwise.
+    :rtype: bool
+    """
+    if isinstance(obj, (OptimizedModule, EvolvableModule, Optimizer)):
+        return True
+    if isinstance(obj, dict):
+        return any(recursive_check_module_attrs(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(recursive_check_module_attrs(v) for v in obj)
+    return False
 
 def chkpt_attribute_to_device(chkpt_dict: Dict[str, torch.Tensor], device: str) -> Dict[str, Any]:
     """Place checkpoint attributes on device. Used when loading saved agents.

@@ -15,11 +15,15 @@ from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.algorithms.base import EvolvableAlgorithm
+from agilerl.algorithms.base import RLAlgorithm
 
-class PPO(EvolvableAlgorithm):
+class PPO(RLAlgorithm):
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
 
+    :param observation_space: Observation space of the environment
+    :type observation_space: gym.spaces.Space
+    :param action_space: Action space of the environment
+    :type action_space: gym.spaces.Space
     :param one_hot: One-hot encoding, used with discrete observation spaces
     :type one_hot: bool
     :param discrete_actions: Boolean flag to indicate a discrete action space
@@ -102,8 +106,8 @@ class PPO(EvolvableAlgorithm):
             observation_space,
             action_space,
             index=index,
-            learn_step=learn_step,
             net_config=net_config,
+            learn_step=learn_step,
             device=device,
             accelerator=accelerator,
             name="PPO"
@@ -783,35 +787,6 @@ class PPO(EvolvableAlgorithm):
 
         return clone
 
-    def inspect_attributes(self, input_args_only=False):
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "critic", "optimizer"]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]
-
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in guarded_attributes and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-
-        return attributes
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actor, self.critic, self.optimizer = self.accelerator.prepare(
-                self.actor, self.critic, self.optimizer
-            )
-
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
@@ -819,31 +794,6 @@ class PPO(EvolvableAlgorithm):
             self.optimizer = unwrap_optimizer(
                 self.optimizer, [self.actor, self.critic], self.lr
             )
-
-    def save_checkpoint(self, path):
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-
-        attribute_dict = self.inspect_attributes()
-
-        network_info = {
-            "actor_init_dict": self.actor.init_dict,
-            "actor_state_dict": self.actor.state_dict(),
-            "critic_init_dict": self.critic.init_dict,
-            "critic_state_dict": self.critic.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-        }
-
-        attribute_dict.update(network_info)
-
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
 
     def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.

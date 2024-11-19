@@ -9,11 +9,12 @@ import numpy as np
 import wandb
 from tqdm import trange
 
+from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-from agilerl.typing import PopulationType
 
 InitDictType = Optional[Dict[str, Any]]
+PopulationType = List[RLAlgorithm]   
 
 def train_on_policy(
     env: gym.Env,
@@ -50,7 +51,7 @@ def train_on_policy(
     :param algo: RL algorithm name
     :type algo: str
     :param pop: Population of agents
-    :type pop: list[EvolvableAlgorithm]
+    :type pop: list[RLAlgorithm]
     :param INIT_HP: Dictionary containing initial hyperparameters, defaults to None
     :type INIT_HP: dict, optional
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
@@ -94,7 +95,7 @@ def train_on_policy(
     :type wandb_api_key: str, optional
 
     :return: Trained population of agents and their fitnesses
-    :rtype: list[EvolvableAlgorithm], list[list[float]]
+    :rtype: list[RLAlgorithm], list[list[float]]
     """
     assert isinstance(
         algo, str

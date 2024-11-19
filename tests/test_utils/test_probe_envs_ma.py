@@ -579,8 +579,8 @@ def test_policy_q_learning_with_probe_env():
     env = ConstantRewardEnv()
     learn_steps = 10
     algo_args = {
-        "state_dims": [(env.observation_space[agent].n,) for agent in env.agents],
-        "action_dims": [env.action_space[agent].n for agent in env.agents],
+        "observation_spaces": [(env.observation_space[agent].n,) for agent in env.agents],
+        "action_spaces": [env.action_space[agent].n for agent in env.agents],
         "one_hot": True,
         "n_agents": env.num_agents,
         "agent_ids": env.possible_agents,
@@ -608,8 +608,8 @@ def test_policy_q_learning_with_probe_env_mlp():
     env = FixedObsPolicyContActionsEnv()
     learn_steps = 10
     algo_args = {
-        "state_dims": [(env.observation_space[agent].n,) for agent in env.agents],
-        "action_dims": [env.action_space[agent].shape[0] for agent in env.agents],
+        "observation_spaces": [(env.observation_space[agent].n,) for agent in env.agents],
+        "action_spaces": [env.action_space[agent].shape[0] for agent in env.agents],
         "one_hot": True,
         "n_agents": env.num_agents,
         "agent_ids": env.possible_agents,
@@ -637,8 +637,8 @@ def test_policy_q_learning_with_probe_env_cnn():
     env = FixedObsPolicyContActionsImageEnv()
     learn_steps = 10
     algo_args = {
-        "state_dims": [(env.observation_space[agent].shape) for agent in env.agents],
-        "action_dims": [env.action_space[agent].shape[0] for agent in env.agents],
+        "observation_spaces": [(env.observation_space[agent].shape) for agent in env.agents],
+        "action_spaces": [env.action_space[agent].shape[0] for agent in env.agents],
         "one_hot": False,
         "n_agents": env.num_agents,
         "agent_ids": env.possible_agents,

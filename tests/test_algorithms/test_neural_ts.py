@@ -10,24 +10,24 @@ import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
+from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 
-class DummyNeuralUCB(NeuralUCB):
+class DummyNeuralTS(NeuralTS):
     def __init__(
         self,
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         net_config={"arch": "mlp", "hidden_size": [128]},
         *args,
         **kwargs,
     ):
         super().__init__(
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             net_config=net_config,
             *args,
             **kwargs,
@@ -82,18 +82,18 @@ def simple_cnn():
     return network
 
 
-# initialize NeuralUCB with valid parameters
+# initialize NeuralTS with valid parameters
 def test_initialize_bandit_with_minimum_parameters():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
 
-    bandit = NeuralUCB(state_dim, action_dim)
+    bandit = NeuralTS(observation_space, action_space)
 
-    assert bandit.state_dim == state_dim
-    assert bandit.action_dim == action_dim
+    assert bandit.observation_space == observation_space
+    assert bandit.action_space == action_space
     assert bandit.net_config == {"arch": "mlp", "hidden_size": [128]}
     assert bandit.batch_size == 64
-    assert bandit.lr == 0.001
+    assert bandit.lr == 0.003
     assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
@@ -114,8 +114,8 @@ def test_initialize_bandit_with_minimum_parameters():
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_bandit_with_cnn_accelerator():
-    state_dim = [3, 32, 32]
-    action_dim = 2
+    observation_space = [3, 32, 32]
+    action_space = 2
     index = 0
     net_config_cnn = {
         "arch": "cnn",
@@ -136,9 +136,9 @@ def test_initialize_bandit_with_cnn_accelerator():
     accelerator = Accelerator()
     wrap = True
 
-    bandit = NeuralUCB(
-        state_dim=state_dim,
-        action_dim=action_dim,
+    bandit = NeuralTS(
+        observation_space=observation_space,
+        action_space=action_space,
         index=index,
         net_config=net_config_cnn,
         batch_size=batch_size,
@@ -153,8 +153,8 @@ def test_initialize_bandit_with_cnn_accelerator():
         wrap=wrap,
     )
 
-    assert bandit.state_dim == state_dim
-    assert bandit.action_dim == action_dim
+    assert bandit.observation_space == observation_space
+    assert bandit.action_space == action_space
     assert bandit.net_config == net_config_cnn
     assert bandit.batch_size == batch_size
     assert bandit.lr == lr
@@ -175,28 +175,28 @@ def test_initialize_bandit_with_cnn_accelerator():
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
-# Can initialize NeuralUCB with an actor network
+# Can initialize NeuralTS with an actor network
 @pytest.mark.parametrize(
-    "state_dim, actor_network, input_tensor",
+    "observation_space, actor_network, input_tensor",
     [
         ([4], "simple_mlp", torch.randn(1, 4)),
         ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_initialize_bandit_with_actor_network(
-    state_dim, actor_network, input_tensor, request
+    observation_space, actor_network, input_tensor, request
 ):
-    action_dim = 2
+    action_space = 2
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    bandit = NeuralUCB(state_dim, action_dim, actor_network=actor_network)
+    bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
 
-    assert bandit.state_dim == state_dim
-    assert bandit.action_dim == action_dim
+    assert bandit.observation_space == observation_space
+    assert bandit.action_space == action_space
     assert bandit.net_config is None
     assert bandit.batch_size == 64
-    assert bandit.lr == 0.001
+    assert bandit.lr == 0.003
     assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
@@ -215,34 +215,19 @@ def test_initialize_bandit_with_actor_network(
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
-def test_initialize_bandit_with_incorrect_actor_network():
-    state_dim = [4]
-    action_dim = 2
-    actor_network = nn.Sequential(nn.Linear(state_dim[0], action_dim))
-
-    with pytest.raises(AssertionError) as e:
-        bandit = NeuralUCB(state_dim, action_dim, actor_network=actor_network)
-
-        assert bandit
-        assert (
-            e
-            == "'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-        )
-
-
 def test_initialize_bandit_with_evo_nets():  #
-    state_dim = (4,)
-    action_dim = 2
+    observation_space = (4,)
+    action_space = 2
     actor_network = EvolvableMLP(
-        num_inputs=state_dim[0], num_outputs=1, hidden_size=[64, 64], layer_norm=False
+        num_inputs=observation_space[0], num_outputs=1, hidden_size=[64, 64], layer_norm=False
     )
 
-    bandit = NeuralUCB(state_dim, action_dim, actor_network=actor_network)
-    assert bandit.state_dim == state_dim
-    assert bandit.action_dim == action_dim
+    bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
+    assert bandit.observation_space == observation_space
+    assert bandit.action_space == action_space
     assert bandit.net_config is not None
     assert bandit.batch_size == 64
-    assert bandit.lr == 0.001
+    assert bandit.lr == 0.003
     assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
     assert bandit.lamb == 1.0
@@ -261,13 +246,13 @@ def test_initialize_bandit_with_evo_nets():  #
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
-def test_initialize_neuralucb_with_incorrect_actor_net_type():
-    state_dim = (4,)
-    action_dim = 2
+def test_initialize_neuralts_with_incorrect_actor_net_type():
+    observation_space = (4,)
+    action_space = 2
     actor_network = "dummy"
 
     with pytest.raises(AssertionError) as a:
-        bandit = NeuralUCB(state_dim, action_dim, actor_network=actor_network)
+        bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
         assert bandit
         assert (
             str(a.value)
@@ -277,10 +262,10 @@ def test_initialize_neuralucb_with_incorrect_actor_net_type():
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
 
-    bandit = NeuralUCB(state_dim, action_dim)
+    bandit = NeuralTS(observation_space, action_space)
     state = np.array([1, 2, 3, 4])
 
     action_mask = None
@@ -288,16 +273,16 @@ def test_returns_expected_action():
     action = bandit.get_action(state, action_mask)
 
     assert action.is_integer()
-    assert action >= 0 and action < action_dim
+    assert action >= 0 and action < action_space
 
 
 # Returns the expected action when given a state observation and action mask.
 def test_returns_expected_action_mask():
     accelerator = Accelerator()
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
 
-    bandit = NeuralUCB(state_dim, action_dim, accelerator=accelerator)
+    bandit = NeuralTS(observation_space, action_space, accelerator=accelerator)
     state = np.array([1, 2, 3, 4])
 
     action_mask = np.array([0, 1])
@@ -310,15 +295,15 @@ def test_returns_expected_action_mask():
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     batch_size = 64
 
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(state_dim, action_dim, batch_size=batch_size)
+    # Create an instance of the NeuralTS class
+    bandit = NeuralTS(observation_space, action_space, batch_size=batch_size)
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *state_dim)
+    states = torch.randn(batch_size, *observation_space)
     rewards = torch.randn((batch_size, 1))
 
     experiences = [states, rewards]
@@ -338,17 +323,17 @@ def test_learns_from_experiences():
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_if_cuda():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     batch_size = 64
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(state_dim, action_dim, batch_size=batch_size, device=device)
+    # Create an instance of the NeuralTS class
+    bandit = NeuralTS(observation_space, action_space, batch_size=batch_size, device=device)
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *state_dim).to(device)
+    states = torch.randn(batch_size, *observation_space).to(device)
     rewards = torch.randn((batch_size, 1)).to(device)
 
     experiences = [states, rewards]
@@ -368,20 +353,20 @@ def test_learns_from_experiences_if_cuda():
 
 def test_learning_accelerator():
     accelerator = Accelerator()
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     batch_size = 64
 
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(
-        state_dim,
-        action_dim,
+    # Create an instance of the NeuralTS class
+    bandit = NeuralTS(
+        observation_space,
+        action_space,
         batch_size=batch_size,
         accelerator=accelerator,
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *state_dim)
+    states = torch.randn(batch_size, *observation_space)
     rewards = torch.randn((batch_size, 1))
 
     experiences = [states, rewards]
@@ -400,8 +385,8 @@ def test_learning_accelerator():
 
 
 def test_learning_cnn():
-    state_dim = (3, 32, 32)
-    action_dim = 2
+    observation_space = (3, 32, 32)
+    action_space = 2
     batch_size = 64
     net_config = {
         "arch": "cnn",
@@ -412,16 +397,16 @@ def test_learning_cnn():
         "normalize": False,
     }
 
-    # Create an instance of the NeuralUCB class
-    bandit = NeuralUCB(
-        state_dim,
-        action_dim,
+    # Create an instance of the NeuralTS class
+    bandit = NeuralTS(
+        observation_space,
+        action_space,
         net_config=net_config,
         batch_size=batch_size,
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *state_dim)
+    states = torch.randn(batch_size, *observation_space)
     rewards = torch.randn((batch_size, 1))
 
     experiences = [states, rewards]
@@ -441,22 +426,22 @@ def test_learning_cnn():
 
 # Runs algorithm test loop
 def test_algorithm_test_loop():
-    state_dim = (4,)
-    action_dim = 2
+    observation_space = (4,)
+    action_space = 2
 
-    env = DummyBanditEnv(state_size=state_dim, arms=action_dim)
+    env = DummyBanditEnv(state_size=observation_space, arms=action_space)
 
-    agent = NeuralUCB(state_dim=state_dim, action_dim=action_dim)
+    agent = NeuralTS(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    state_dim = (32, 32, 3)
-    action_dim = 2
+    observation_space = (32, 32, 3)
+    action_space = 2
 
-    env = DummyBanditEnv(state_size=state_dim, arms=action_dim)
+    env = DummyBanditEnv(state_size=observation_space, arms=action_space)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -467,9 +452,9 @@ def test_algorithm_test_loop_images():
         "normalize": False,
     }
 
-    agent = NeuralUCB(
-        state_dim=(3, 32, 32),
-        action_dim=action_dim,
+    agent = NeuralTS(
+        observation_space=(3, 32, 32),
+        action_space=action_space,
         net_config=net_config_cnn,
     )
     mean_score = agent.test(env, max_steps=10, swap_channels=True)
@@ -478,7 +463,7 @@ def test_algorithm_test_loop_images():
 
 # Clones the agent and returns an identical agent.
 @pytest.mark.parametrize(
-    "state_dim, net_config",
+    "observation_space, net_config",
     [
         (
             (3, 32, 32),
@@ -494,17 +479,16 @@ def test_algorithm_test_loop_images():
         ((4,), {"arch": "mlp", "hidden_size": [128]}),
     ],
 )
-def test_clone_returns_identical_agent(state_dim, net_config):
-    action_dim = 2
+def test_clone_returns_identical_agent(observation_space, net_config):
+    action_space = 2
 
-    bandit = DummyNeuralUCB(state_dim, action_dim, net_config)
-    print(bandit.actor)
+    bandit = DummyNeuralTS(observation_space, action_space, net_config)
     bandit.tensor_attribute = torch.randn(1)
     bandit.numpy_attribute = np.random.rand(1)
     clone_agent = bandit.clone()
 
-    assert clone_agent.state_dim == bandit.state_dim
-    assert clone_agent.action_dim == bandit.action_dim
+    assert clone_agent.observation_space == bandit.observation_space
+    assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
     assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
@@ -525,11 +509,11 @@ def test_clone_returns_identical_agent(state_dim, net_config):
     assert clone_agent.numpy_test == bandit.numpy_test
 
     accelerator = Accelerator()
-    bandit = NeuralUCB(state_dim, action_dim, accelerator=accelerator)
+    bandit = NeuralTS(observation_space, action_space, accelerator=accelerator)
     clone_agent = bandit.clone()
 
-    assert clone_agent.state_dim == bandit.state_dim
-    assert clone_agent.action_dim == bandit.action_dim
+    assert clone_agent.observation_space == bandit.observation_space
+    assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
     assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
@@ -546,11 +530,11 @@ def test_clone_returns_identical_agent(state_dim, net_config):
     assert clone_agent.scores == bandit.scores
 
     accelerator = Accelerator()
-    bandit = NeuralUCB(state_dim, action_dim, accelerator=accelerator, wrap=False)
+    bandit = NeuralTS(observation_space, action_space, accelerator=accelerator, wrap=False)
     clone_agent = bandit.clone(wrap=False)
 
-    assert clone_agent.state_dim == bandit.state_dim
-    assert clone_agent.action_dim == bandit.action_dim
+    assert clone_agent.observation_space == bandit.observation_space
+    assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
     assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
@@ -568,62 +552,29 @@ def test_clone_returns_identical_agent(state_dim, net_config):
 
 
 def test_clone_new_index():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     one_hot = False
 
-    bandit = NeuralUCB(state_dim, action_dim, one_hot)
+    bandit = NeuralTS(observation_space, action_space, one_hot)
     clone_agent = bandit.clone(index=100)
 
     assert clone_agent.index == 100
 
 
 def test_clone_after_learning():
-    action_dim = 2
-    state_dim = (4,)
+    action_space = 2
+    observation_space = (4,)
     batch_size = 4
-    states = torch.randn(batch_size, state_dim[0])
+    states = torch.randn(batch_size, observation_space[0])
     rewards = torch.rand(batch_size, 1)
     experiences = states, rewards
-    bandit = NeuralUCB(state_dim, action_dim, batch_size=batch_size)
+    bandit = NeuralTS(observation_space, action_space, batch_size=batch_size)
     bandit.learn(experiences)
     clone_agent = bandit.clone()
 
-    assert clone_agent.state_dim == bandit.state_dim
-    assert clone_agent.action_dim == bandit.action_dim
-    assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
-    assert clone_agent.batch_size == bandit.batch_size
-    assert clone_agent.lr == bandit.lr
-    assert clone_agent.learn_step == bandit.learn_step
-    assert clone_agent.gamma == bandit.gamma
-    assert clone_agent.mut == bandit.mut
-    assert clone_agent.device == bandit.device
-    assert clone_agent.accelerator == bandit.accelerator
-    assert str(clone_agent.actor.state_dict()) == str(bandit.actor.state_dict())
-    assert str(clone_agent.optimizer.state_dict()) == str(bandit.optimizer.state_dict())
-    assert clone_agent.fitness == bandit.fitness
-    assert clone_agent.steps == bandit.steps
-    assert clone_agent.scores == bandit.scores
-
-
-@pytest.mark.parametrize(
-    "state_dim, actor_network, input_tensor",
-    [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
-    ],
-)
-def test_clone_with_make_evo(state_dim, actor_network, input_tensor, request):
-    action_dim = 2
-    actor_network = request.getfixturevalue(actor_network)
-    actor_network = MakeEvolvable(actor_network, input_tensor)
-
-    bandit = NeuralUCB(state_dim, action_dim, actor_network=actor_network)
-    clone_agent = bandit.clone()
-
-    assert clone_agent.state_dim == bandit.state_dim
-    assert clone_agent.action_dim == bandit.action_dim
+    assert clone_agent.observation_space == bandit.observation_space
+    assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
     assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
@@ -642,15 +593,15 @@ def test_clone_with_make_evo(state_dim, actor_network, input_tensor, request):
 
 # The method successfully unwraps the actor model when an accelerator is present.
 def test_unwrap_models():
-    bandit = NeuralUCB(state_dim=[4], action_dim=2, accelerator=Accelerator())
+    bandit = NeuralTS(observation_space=[4], action_space=2, accelerator=Accelerator())
     bandit.unwrap_models()
     assert isinstance(bandit.actor, nn.Module)
 
 
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(state_dim=[4], action_dim=2)
+    # Initialize the NeuralTS agent
+    bandit = NeuralTS(observation_space=[4], action_space=2)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -674,14 +625,14 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralUCB(state_dim=[4], action_dim=2)
+    bandit = NeuralTS(observation_space=[4], action_space=2)
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert bandit.net_config == {"arch": "mlp", "hidden_size": [128]}
     assert isinstance(bandit.actor, EvolvableMLP)
-    assert bandit.lr == 1e-3
+    assert bandit.lr == 3e-3
     assert bandit.batch_size == 64
     assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
@@ -714,8 +665,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "normalize": False,
     }
 
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(state_dim=[3, 32, 32], action_dim=2, net_config=net_config_cnn)
+    # Initialize the NeuralTS agent
+    bandit = NeuralTS(observation_space=[3, 32, 32], action_space=2, net_config=net_config_cnn)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -739,14 +690,14 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralUCB(state_dim=[4], action_dim=2)
+    bandit = NeuralTS(observation_space=[4], action_space=2)
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert bandit.net_config == net_config_cnn
     assert isinstance(bandit.actor, EvolvableCNN)
-    assert bandit.lr == 1e-3
+    assert bandit.lr == 3e-3
     assert bandit.batch_size == 64
     assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
@@ -771,20 +722,19 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
 # The saved checkpoint file contains the correct data and format.
 @pytest.mark.parametrize(
-    "state_dim, actor_network, input_tensor",
+    "actor_network, input_tensor",
     [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        ("simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_save_load_checkpoint_correct_data_and_format_cnn_network(
-    state_dim, actor_network, input_tensor, request, tmpdir
+    actor_network, input_tensor, request, tmpdir
 ):
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(state_dim=state_dim, action_dim=2, actor_network=actor_network)
+    # Initialize the NeuralTS agent
+    bandit = NeuralTS(observation_space=[3, 64, 64], action_space=2, actor_network=actor_network)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -808,14 +758,14 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralUCB(state_dim=state_dim, action_dim=2)
+    bandit = NeuralTS(observation_space=[4], action_space=2)
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
     assert bandit.net_config is None
     assert isinstance(bandit.actor, nn.Module)
-    assert bandit.lr == 1e-3
+    assert bandit.lr == 3e-3
     assert bandit.batch_size == 64
     assert bandit.learn_step == 2
     assert bandit.gamma == 1.0
@@ -847,19 +797,19 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(state_dim=[4], action_dim=2)
+    # Initialize the NeuralTS agent
+    bandit = NeuralTS(observation_space=[4], action_space=2)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
     bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_bandit = NeuralUCB.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_bandit = NeuralTS.load(checkpoint_path, device=device, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
-    assert new_bandit.state_dim == bandit.state_dim
-    assert new_bandit.action_dim == bandit.action_dim
+    assert new_bandit.observation_space == bandit.observation_space
+    assert new_bandit.action_space == bandit.action_space
     assert new_bandit.net_config == bandit.net_config
     assert isinstance(new_bandit.actor, EvolvableMLP)
     assert new_bandit.lr == bandit.lr
@@ -897,10 +847,10 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(
-        state_dim=[3, 32, 32],
-        action_dim=2,
+    # Initialize the NeuralTS agent
+    bandit = NeuralTS(
+        observation_space=[3, 32, 32],
+        action_space=2,
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
@@ -916,11 +866,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_bandit = NeuralUCB.load(checkpoint_path, device=device, accelerator=accelerator)
+    new_bandit = NeuralTS.load(checkpoint_path, device=device, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
-    assert new_bandit.state_dim == bandit.state_dim
-    assert new_bandit.action_dim == bandit.action_dim
+    assert new_bandit.observation_space == bandit.observation_space
+    assert new_bandit.action_space == bandit.action_space
     assert new_bandit.net_config == bandit.net_config
     assert isinstance(new_bandit.actor, EvolvableCNN)
     assert new_bandit.lr == bandit.lr
@@ -950,7 +900,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
 
 @pytest.mark.parametrize(
-    "state_dim, actor_network, input_tensor",
+    "observation_space, actor_network, input_tensor",
     [
         ([4], "simple_mlp", torch.randn(1, 4)),
         ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
@@ -958,16 +908,16 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
-    state_dim, actor_network, input_tensor, request, tmpdir
+    observation_space, actor_network, input_tensor, request, tmpdir
 ):
-    action_dim = 2
+    action_space = 2
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    # Initialize the NeuralUCB agent
-    bandit = NeuralUCB(
-        state_dim=state_dim,
-        action_dim=action_dim,
+    # Initialize the NeuralTS agent
+    bandit = NeuralTS(
+        observation_space=observation_space,
+        action_space=action_space,
         actor_network=actor_network,
     )
 
@@ -976,11 +926,11 @@ def test_load_from_pretrained_networks(
     bandit.save_checkpoint(checkpoint_path)
 
     # Create new agent object
-    new_bandit = NeuralUCB.load(checkpoint_path)
+    new_bandit = NeuralTS.load(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert new_bandit.state_dim == bandit.state_dim
-    assert new_bandit.action_dim == bandit.action_dim
+    assert new_bandit.observation_space == bandit.observation_space
+    assert new_bandit.action_space == bandit.action_space
     assert new_bandit.net_config == bandit.net_config
     assert isinstance(new_bandit.actor, nn.Module)
     assert new_bandit.lr == bandit.lr

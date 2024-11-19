@@ -100,8 +100,8 @@ def test_returns_asyncvectorenv_object_skill():
 
 # Can create a population of agent for each single agent algorithm
 def test_create_initial_population_single_agent():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
@@ -120,8 +120,8 @@ def test_create_initial_population_single_agent():
     for algo in algo_classes.keys():
         population = create_population(
             algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP,
@@ -132,8 +132,8 @@ def test_create_initial_population_single_agent():
         assert len(population) == population_size
         for agent in population:
             assert isinstance(agent, algo_classes[algo])
-            assert agent.state_dim == state_dim
-            assert agent.action_dim == action_dim
+            assert agent.observation_space == observation_space
+            assert agent.action_space == action_space
             assert agent.one_hot == one_hot
             assert agent.net_config == net_config
             assert agent.device == "cpu"
@@ -142,8 +142,8 @@ def test_create_initial_population_single_agent():
 
 # Can create a population of agent for each multi agent algorithm
 def test_create_initial_population_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
+    observation_space = [[4], [4]]
+    action_space = [2, 2]
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 4
@@ -158,8 +158,8 @@ def test_create_initial_population_multi_agent():
     for algo in algo_classes.keys():
         population = create_population(
             algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP_MA,
@@ -170,8 +170,8 @@ def test_create_initial_population_multi_agent():
         assert len(population) == population_size
         for agent in population:
             assert isinstance(agent, algo_classes[algo])
-            assert agent.state_dims == state_dim
-            assert agent.action_dims == action_dim
+            assert agent.observation_spaces == observation_space
+            assert agent.action_spaces == action_space
             assert agent.one_hot == one_hot
             assert agent.net_config == net_config
             assert agent.device == "cpu"
@@ -246,8 +246,8 @@ def test_returns_list_of_episode_rewards_with_no_terminations():
 # The function prints the hyperparameters and fitnesses of all agents in the population.
 def test_prints_hyperparams():
     # Arrange
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 1
@@ -257,8 +257,8 @@ def test_prints_hyperparams():
 
     pop = create_population(
         algo=algo,
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=one_hot,
         net_config=net_config,
         INIT_HP=SHARED_INIT_HP,

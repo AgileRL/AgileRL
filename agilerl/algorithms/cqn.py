@@ -13,12 +13,12 @@ from gymnasium import spaces
 from agilerl.networks.evolvable_composed import EvolvableComposed
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.algorithms.base import EvolvableAlgorithm
+from agilerl.algorithms.base import RLAlgorithm
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.typing import NumpyObsType, TorchObsType
 
-class CQN(EvolvableAlgorithm):
+class CQN(RLAlgorithm):
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
 
     :param observation_space: The observation space of the environment.
@@ -68,8 +68,10 @@ class CQN(EvolvableAlgorithm):
         gamma: float = 0.99,
         tau: float = 1e-3,
         double: bool = False,
+        mut: Optional[str] = None,
         actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
+
         accelerator: Optional[Any] = None,
         wrap: bool = True
     ) -> None:
@@ -77,23 +79,20 @@ class CQN(EvolvableAlgorithm):
             observation_space,
             action_space,
             index=index,
+            net_config=net_config,
+            learn_step=learn_step,
             device=device,
             accelerator=accelerator,
-            learn_step=learn_step,
-            net_config=net_config,
             name="CQN"
             )
 
         assert isinstance(
             one_hot, bool
         ), "One-hot encoding flag must be boolean value True or False."
-        assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(gamma, (float, int)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
@@ -107,11 +106,11 @@ class CQN(EvolvableAlgorithm):
         self.one_hot = one_hot
         self.batch_size = batch_size
         self.lr = lr
-        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.double = double
         self.actor_network = actor_network
+        self.mut = mut
 
         if self.actor_network is not None:
             self.actor = actor_network
@@ -459,64 +458,11 @@ class CQN(EvolvableAlgorithm):
 
         return clone
 
-    def inspect_attributes(self, input_args_only=False):
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "actor_target", "optimizer"]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]
-
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in guarded_attributes and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-
-        return attributes
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(
-                self.actor, self.actor_target, self.optimizer
-            )
-
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.actor_target = self.accelerator.unwrap_model(self.actor_target)
             self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
-
-    def save_checkpoint(self, path):
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-        attribute_dict = self.inspect_attributes()
-
-        network_info = {
-            "actor_init_dict": self.actor.init_dict,
-            "actor_state_dict": self.actor.state_dict(),
-            "actor_target_init_dict": self.actor_target.init_dict,
-            "actor_target_state_dict": self.actor_target.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-        }
-
-        attribute_dict.update(network_info)
-
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
 
     def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.

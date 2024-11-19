@@ -13,12 +13,12 @@ def test_create_environment():
 
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
-    action_dim = env.arms
+    action_space = env.arms
 
     assert isinstance(env, BanditEnv)
-    assert isinstance(action_dim, int)
+    assert isinstance(action_space, int)
     assert isinstance(context_dim, tuple)
-    assert action_dim == int(targets.nunique()[0])
+    assert action_space == int(targets.nunique()[0])
     assert context_dim == (len(np.array(features.loc[0])) * int(targets.nunique()),)
 
 
@@ -28,10 +28,10 @@ def test_return_state_reward():
     targets = pd.DataFrame(np.random.randint(0, 2, size=(10, 1)), columns=["targets"])
 
     env = BanditEnv(features, targets)  # Create environment
-    action_dim = env.arms
+    action_space = env.arms
 
     state = env.reset()
-    action = random.randint(0, action_dim - 1)
+    action = random.randint(0, action_space - 1)
     prev_reward = env.prev_reward
     new_state, reward = env.step(action)
 

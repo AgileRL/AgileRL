@@ -3,7 +3,6 @@ import copy
 from functools import wraps, partial
 from abc import ABC, abstractmethod
 from enum import Enum
-
 import torch
 import torch.nn as nn
 
@@ -16,6 +15,12 @@ class MutationType(Enum):
 
 @runtime_checkable
 class MutationMethod(Protocol):
+    """Protocol for module mutation methods. Architecture mutations can be abstracted 
+    into two types: layer mutations and node mutations.
+    
+    :attribute _mutation_type: The type of mutation function.
+    :type _mutation_type: MutationType
+    """
     _mutation_type: MutationType
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -79,6 +84,7 @@ class EvolvableModule(nn.Module, ABC):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("forward method must be implemented in order to use the neural network.")
     
+    # TODO: Will remove the need for this in the future by creating a `networks` module
     @abstractmethod
     def build_networks(self) -> None:
         """Build the neural network architecture."""

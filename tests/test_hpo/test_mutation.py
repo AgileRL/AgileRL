@@ -97,8 +97,8 @@ SHARED_INIT_HP_MA = {
 @pytest.fixture
 def init_pop(
     algo,
-    state_dim,
-    action_dim,
+    observation_space,
+    action_space,
     one_hot,
     net_config,
     INIT_HP,
@@ -108,8 +108,8 @@ def init_pop(
 ):
     yield create_population(
         algo=algo,
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=one_hot,
         net_config=net_config,
         INIT_HP=INIT_HP,
@@ -319,7 +319,7 @@ def test_returns_regularize_weight():
 
 # Checks no mutations if all probabilities set to zero
 @pytest.mark.parametrize(
-    "algo, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -336,8 +336,8 @@ def test_returns_regularize_weight():
 )
 def test_mutation_no_options(
     algo,
-    state_dim,
-    action_dim,
+    observation_space,
+    action_space,
     one_hot,
     net_config,
     INIT_HP,
@@ -365,7 +365,7 @@ def test_mutation_no_options(
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -606,7 +606,7 @@ def test_mutation_applies_random_mutations(
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -860,7 +860,7 @@ def test_mutation_applies_no_mutations(
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -1121,7 +1121,7 @@ def test_mutation_applies_no_mutations_pre_training_mut(
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -1399,7 +1399,7 @@ def test_mutation_applies_rl_hp_mutations(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -1655,7 +1655,7 @@ def test_mutation_applies_activation_mutations(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DDPG",
@@ -1721,7 +1721,7 @@ def test_mutation_applies_activation_mutations_no_skip(
 
 # The mutation method applies CNN activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -2103,7 +2103,7 @@ def test_mutation_applies_cnn_activation_mutations(
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -2357,7 +2357,7 @@ def test_mutation_applies_parameter_mutations(
 
 # The mutation method applies CNN parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -2738,7 +2738,7 @@ def test_mutation_applies_cnn_parameter_mutations(
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -3002,7 +3002,7 @@ def test_mutation_applies_architecture_mutations(
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
@@ -3383,7 +3383,7 @@ def test_mutation_applies_cnn_architecture_mutations(
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator, mut_method",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator, mut_method",
     [
         (
             "DDPG",
@@ -3510,7 +3510,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -3606,7 +3606,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -3694,7 +3694,7 @@ def test_mutation_applies_no_mutations_multi_agent(
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -3804,7 +3804,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -3897,7 +3897,7 @@ def test_mutation_applies_activation_mutations_multi_agent(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -3992,7 +3992,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 
 # The mutation method applies CNN activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -4113,7 +4113,7 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -4200,7 +4200,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 
 # The mutation method applies CNN parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -4316,7 +4316,7 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -4413,7 +4413,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
@@ -4529,7 +4529,7 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator, mut_method",
+    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator, mut_method",
     [
         (
             "MADDPG",
@@ -4767,7 +4767,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
 
 @pytest.mark.parametrize(
-    "algo, state_dim, action_dim, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",

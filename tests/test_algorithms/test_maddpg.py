@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 from gymnasium.spaces import Box, Discrete
 from pettingzoo import ParallelEnv
 from torch._dynamo import OptimizedModule
@@ -21,31 +22,30 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
 class DummyMultiEnv(ParallelEnv):
-    def __init__(self, state_dims, action_dims):
-        self.state_dims = state_dims
-        self.action_dims = action_dims
+    def __init__(self, observation_spaces, action_spaces):
+        self.observation_spaces = observation_spaces
+        self.action_spaces = action_spaces
         self.agents = ["agent_0", "agent_1"]
         self.possible_agents = ["agent_0", "agent_1"]
         self.metadata = None
         self.render_mode = None
 
     def action_space(self, agent):
-        return Discrete(self.action_dims[0])
+        return Discrete(self.action_spaces[0].n)
 
     def observation_space(self, agent):
-        return Box(0, 1, self.state_dims)
+        return Box(0, 1, self.observation_spaces.shape)
 
     def reset(self, seed=None, options=None):
-        return {agent: np.random.rand(*self.state_dims) for agent in self.agents}, {
+        return {agent: np.random.rand(*self.observation_spaces.shape) for agent in self.agents}, {
             "agent_0": {"env_defined_actions": np.array([1])},
             "agent_1": {"env_defined_actions": None},
         }
 
     def step(self, action):
         return (
-            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
+            {agent: np.random.rand(*self.observation_spaces.shape) for agent in self.agents},
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: 1 for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
@@ -140,20 +140,20 @@ class DummyEvolvableCNN(EvolvableCNN):
 
 
 @pytest.fixture
-def mlp_actor(state_dims, action_dims):
+def mlp_actor(observation_spaces, action_spaces):
     net = nn.Sequential(
-        nn.Linear(state_dims[0][0], 64),
+        nn.Linear(observation_spaces[0].shape[0], 64),
         nn.ReLU(),
-        nn.Linear(64, action_dims[0]),
+        nn.Linear(64, action_spaces[0].n),
         GumbelSoftmax(),
     )
     return net
 
 
 @pytest.fixture
-def mlp_critic(action_dims, state_dims):
+def mlp_critic(action_spaces, observation_spaces):
     net = nn.Sequential(
-        nn.Linear(state_dims[0][0] + action_dims[0], 64), nn.ReLU(), nn.Linear(64, 1)
+        nn.Linear(observation_spaces[0].shape[0] + action_spaces[0].n, 64), nn.ReLU(), nn.Linear(64, 1)
     )
     return net
 
@@ -181,9 +181,9 @@ def mocked_accelerator():
 
 
 @pytest.fixture
-def accelerated_experiences(batch_size, state_dims, action_dims, agent_ids, one_hot):
-    state_size = state_dims[0]
-    action_size = action_dims[0]
+def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_hot):
+    state_size = observation_spaces[0].shape
+    action_size = action_spaces[0].n
     if one_hot:
         states = {
             agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
@@ -209,9 +209,9 @@ def accelerated_experiences(batch_size, state_dims, action_dims, agent_ids, one_
 
 
 @pytest.fixture
-def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device):
-    state_size = state_dims[0]
-    action_size = action_dims[0]
+def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_hot, device):
+    state_size = observation_spaces[0].shape
+    action_size = action_spaces[0].n
     if one_hot:
         states = {
             agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
@@ -245,9 +245,9 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
 
 
 @pytest.mark.parametrize(
-    "net_config, accelerator_flag, state_dims, compile_mode",
+    "net_config, accelerator_flag, observation_spaces, compile_mode",
     [
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)], None),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))], None),
         (
             {
                 "arch": "cnn",
@@ -258,7 +258,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "normalize": False,
             },
             False,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             None,
         ),
         (
@@ -271,10 +271,10 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "normalize": False,
             },
             True,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             None,
         ),
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)], "default"),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))], "default"),
         (
             {
                 "arch": "cnn",
@@ -285,7 +285,7 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "normalize": False,
             },
             False,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             "default",
         ),
         (
@@ -298,15 +298,15 @@ def experiences(batch_size, state_dims, action_dims, agent_ids, one_hot, device)
                 "normalize": False,
             },
             True,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             "default",
         ),
     ],
 )
 def test_initialize_maddpg_with_net_config(
-    net_config, accelerator_flag, state_dims, device, compile_mode
+    net_config, accelerator_flag, observation_spaces, device, compile_mode
 ):
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -320,9 +320,9 @@ def test_initialize_maddpg_with_net_config(
     else:
         accelerator = None
     maddpg = MADDPG(
-        state_dims=state_dims,
+        observation_spaces=observation_spaces,
         net_config=net_config,
-        action_dims=action_dims,
+        action_spaces=action_spaces,
         one_hot=one_hot,
         n_agents=n_agents,
         agent_ids=agent_ids,
@@ -334,8 +334,8 @@ def test_initialize_maddpg_with_net_config(
         torch_compiler=compile_mode,
     )
     net_config.update({"mlp_output_activation": "Softmax"})
-    assert maddpg.state_dims == state_dims
-    assert maddpg.action_dims == action_dims
+    assert maddpg.observation_spaces == observation_spaces
+    assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot == one_hot
     assert maddpg.n_agents == n_agents
     assert maddpg.agent_ids == agent_ids
@@ -347,8 +347,8 @@ def test_initialize_maddpg_with_net_config(
     assert maddpg.net_config == net_config, maddpg.net_config
     assert maddpg.batch_size == batch_size
     assert maddpg.multi
-    assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
-    assert maddpg.total_actions == sum(action_dims)
+    assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -388,19 +388,19 @@ def test_initialize_maddpg_with_net_config(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, accelerator_flag, compile_mode",
+    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_initialize_maddpg_with_mlp_networks(
     mlp_actor,
     mlp_critic,
-    state_dims,
-    action_dims,
+    observation_spaces,
+    action_spaces,
     accelerator_flag,
     device,
     compile_mode,
@@ -418,11 +418,11 @@ def test_initialize_maddpg_with_mlp_networks(
         for _ in range(2)
     ]
     maddpg = MADDPG(
-        state_dims=state_dims,
-        action_dims=action_dims,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(state_dims),
+        n_agents=len(observation_spaces),
         max_action=[(1,), (1,)],
         min_action=[(-1,), (-1,)],
         discrete_actions=True,
@@ -440,8 +440,8 @@ def test_initialize_maddpg_with_mlp_networks(
         assert all(isinstance(critic, MakeEvolvable) for critic in maddpg.critics)
     assert maddpg.net_config is None
     assert maddpg.arch == "mlp"
-    assert maddpg.state_dims == state_dims
-    assert maddpg.action_dims == action_dims
+    assert maddpg.observation_spaces == observation_spaces
+    assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
@@ -449,8 +449,8 @@ def test_initialize_maddpg_with_mlp_networks(
     assert maddpg.min_action == [(-1,), (-1,)]
     assert maddpg.discrete_actions is True
     assert maddpg.multi
-    assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
-    assert maddpg.total_actions == sum(action_dims)
+    assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -476,16 +476,16 @@ def test_initialize_maddpg_with_mlp_networks(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, accelerator_flag, compile_mode",
+    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "reduce-overhead"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "reduce-overhead"),
     ],
 )
 def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
     mlp_actor,
     mlp_critic,
-    state_dims,
-    action_dims,
+    observation_spaces,
+    action_spaces,
     accelerator_flag,
     device,
     compile_mode,
@@ -501,11 +501,11 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         "mlp_activation": "ReLU",
     }
     maddpg = MADDPG(
-        state_dims=state_dims,
-        action_dims=action_dims,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(state_dims),
+        n_agents=len(observation_spaces),
         max_action=[(1,), (1,)],
         net_config=net_config,
         min_action=[(-1,), (-1,)],
@@ -517,19 +517,19 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, accelerator_flag, compile_mode",
+    "observation_spaces, action_spaces, accelerator_flag, compile_mode",
     [
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False, None),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True, None),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_initialize_maddpg_with_cnn_networks(
     cnn_actor,
     cnn_critic,
-    state_dims,
-    action_dims,
+    observation_spaces,
+    action_spaces,
     accelerator_flag,
     device,
     compile_mode,
@@ -556,11 +556,11 @@ def test_initialize_maddpg_with_cnn_networks(
         for _ in range(2)
     ]
     maddpg = MADDPG(
-        state_dims=state_dims,
-        action_dims=action_dims,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(state_dims),
+        n_agents=len(observation_spaces),
         max_action=[(1,), (1,)],
         min_action=[(-1,), (-1,)],
         discrete_actions=True,
@@ -578,8 +578,8 @@ def test_initialize_maddpg_with_cnn_networks(
         assert all(isinstance(critic, MakeEvolvable) for critic in maddpg.critics)
     assert maddpg.net_config is None
     assert maddpg.arch == "cnn"
-    assert maddpg.state_dims == state_dims
-    assert maddpg.action_dims == action_dims
+    assert maddpg.observation_spaces == observation_spaces
+    assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
@@ -587,8 +587,8 @@ def test_initialize_maddpg_with_cnn_networks(
     assert maddpg.min_action == [(-1,), (-1,)]
     assert maddpg.discrete_actions is True
     assert maddpg.multi
-    assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
-    assert maddpg.total_actions == sum(action_dims)
+    assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -615,22 +615,22 @@ def test_initialize_maddpg_with_cnn_networks(
 
 @pytest.mark.parametrize("accelerator", [None, Accelerator()])
 @pytest.mark.parametrize(
-    "state_dims, action_dims, net, compile_mode",
+    "observation_spaces, action_spaces, net, compile_mode",
     [
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp", None),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn", None),
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp", "default"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn", "default"),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "mlp", None),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "cnn", None),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "mlp", "default"),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "cnn", "default"),
     ],
 )
 def test_initialize_maddpg_with_evo_networks(
-    state_dims, action_dims, net, device, compile_mode, accelerator
+    observation_spaces, action_spaces, net, device, compile_mode, accelerator
 ):
     if net == "mlp":
         evo_actors = [
             EvolvableMLP(
-                num_inputs=state_dims[x][0],
-                num_outputs=action_dims[x],
+                num_inputs=observation_spaces[x].shape[0],
+                num_outputs=action_spaces[x].n,
                 hidden_size=[64, 64],
                 mlp_activation="ReLU",
                 mlp_output_activation="Tanh",
@@ -639,8 +639,8 @@ def test_initialize_maddpg_with_evo_networks(
         ]
         evo_critics = [
             EvolvableMLP(
-                num_inputs=sum(state_dim[0] for state_dim in state_dims)
-                + sum(action_dims),
+                num_inputs=sum(observation_space.shape[0] for observation_space in observation_spaces)
+                + sum(space.n for space in action_spaces),
                 num_outputs=1,
                 hidden_size=[64, 64],
                 mlp_activation="ReLU",
@@ -650,8 +650,8 @@ def test_initialize_maddpg_with_evo_networks(
     else:
         evo_actors = [
             EvolvableCNN(
-                input_shape=state_dims[0],
-                num_outputs=action_dims[0],
+                input_shape=observation_spaces[0].shape,
+                num_outputs=action_spaces[0].n,
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -664,8 +664,8 @@ def test_initialize_maddpg_with_evo_networks(
         ]
         evo_critics = [
             EvolvableCNN(
-                input_shape=state_dims[0],
-                num_outputs=sum(action_dims),
+                input_shape=observation_spaces[0].shape,
+                num_outputs=sum(space.n for space in action_spaces),
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -677,11 +677,11 @@ def test_initialize_maddpg_with_evo_networks(
             for _ in range(2)
         ]
     maddpg = MADDPG(
-        state_dims=state_dims,
-        action_dims=action_dims,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(state_dims),
+        n_agents=len(observation_spaces),
         max_action=[(1,), (1,)],
         min_action=[(-1,), (-1,)],
         discrete_actions=True,
@@ -706,8 +706,8 @@ def test_initialize_maddpg_with_evo_networks(
         assert maddpg.arch == "mlp"
     else:
         assert maddpg.arch == "cnn"
-    assert maddpg.state_dims == state_dims
-    assert maddpg.action_dims == action_dims
+    assert maddpg.observation_spaces == observation_spaces
+    assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
@@ -715,8 +715,8 @@ def test_initialize_maddpg_with_evo_networks(
     assert maddpg.min_action == [(-1,), (-1,)]
     assert maddpg.discrete_actions is True
     assert maddpg.multi
-    assert maddpg.total_state_dims == sum(state[0] for state in state_dims)
-    assert maddpg.total_actions == sum(action_dims)
+    assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
@@ -743,25 +743,25 @@ def test_initialize_maddpg_with_evo_networks(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, compile_mode",
+    "observation_spaces, action_spaces, compile_mode",
     [
-        ([[4] for _ in range(2)], [2 for _ in range(2)], None),
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "default"),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], None),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "default"),
     ],
 )
 def test_initialize_maddpg_with_incorrect_evo_networks(
-    state_dims, action_dims, compile_mode
+    observation_spaces, action_spaces, compile_mode
 ):
     evo_actors = []
     evo_critics = []
 
     with pytest.raises(AssertionError):
         maddpg = MADDPG(
-            state_dims=state_dims,
-            action_dims=action_dims,
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
             one_hot=False,
             agent_ids=["agent_0", "agent_1"],
-            n_agents=len(state_dims),
+            n_agents=len(observation_spaces),
             max_action=[(1,), (1,)],
             min_action=[(-1,), (-1,)],
             discrete_actions=True,
@@ -773,13 +773,13 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
 
 
 @pytest.mark.parametrize(
-    "state_dims, action_dims, compile_mode",
+    "observation_spaces, action_spaces, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], None),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "default"),
     ],
 )
-def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device, compile_mode):
+def test_maddpg_init_warning(mlp_actor, observation_spaces, action_spaces, device, compile_mode):
     warning_string = "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
     evo_actors = [
         MakeEvolvable(network=mlp_actor, input_tensor=torch.randn(1, 6), device=device)
@@ -787,11 +787,11 @@ def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device, compile
     ]
     with pytest.warns(UserWarning, match=warning_string):
         MADDPG(
-            state_dims=state_dims,
-            action_dims=action_dims,
+            observation_spaces=observation_spaces,
+            action_spaces=action_spaces,
             one_hot=False,
             agent_ids=["agent_0", "agent_1"],
-            n_agents=len(state_dims),
+            n_agents=len(observation_spaces),
             max_action=[(1,), (1,)],
             min_action=[(-1,), (-1,)],
             discrete_actions=True,
@@ -806,8 +806,8 @@ def test_maddpg_init_warning(mlp_actor, state_dims, action_dims, device, compile
 )
 def test_maddpg_init_torch_compiler_no_error(mode):
     maddpg = MADDPG(
-        state_dims=[(1,), (1,)],
-        action_dims=[1, 1],
+        observation_spaces=[spaces.Box(0, 1, shape=(1,)), spaces.Box(0, 1, shape=(1,))],
+        action_spaces=[spaces.Discrete(1), spaces.Discrete(1)],
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
         n_agents=2,
@@ -847,8 +847,8 @@ def test_maddpg_init_torch_compiler_error(mode):
     )
     with pytest.raises(AssertionError, match=err_string):
         MADDPG(
-            state_dims=[(1,), (1,)],
-            action_dims=[1, 1],
+            observation_spaces=[spaces.Box(0, 1, shape=(1,)), spaces.Box(0, 1, shape=(1,))],
+            action_spaces=[spaces.Discrete(1), spaces.Discrete(1)],
             one_hot=False,
             agent_ids=["agent_0", "agent_1"],
             n_agents=2,
@@ -861,44 +861,44 @@ def test_maddpg_init_torch_compiler_error(mode):
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, one_hot, compile_mode",
+    "training, observation_spaces, action_spaces, discrete_actions, one_hot, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, "default"),
     ],
 )
 def test_maddpg_get_action_mlp(
-    training, state_dims, action_dims, discrete_actions, one_hot, device, compile_mode
+    training, observation_spaces, action_spaces, discrete_actions, one_hot, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1"]
     if one_hot:
         state = {
-            agent: np.random.randint(0, state_dims[idx], 1)
+            agent: np.random.randint(0, observation_spaces[idx].shape[0], 1)
             for idx, agent in enumerate(agent_ids)
         }
     else:
         state = {
-            agent: np.random.randn(*state_dims[idx])
+            agent: np.random.randn(*observation_spaces[idx].shape)
             for idx, agent in enumerate(agent_ids)
         }
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         n_agents=2,
@@ -912,7 +912,7 @@ def test_maddpg_get_action_mlp(
     cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_dims[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 torch.testing.assert_close(
                     sum(action),
@@ -927,31 +927,31 @@ def test_maddpg_get_action_mlp(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_dims[idx] - 1
+                assert action <= action_spaces[idx].n - 1
     maddpg = None
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, one_hot",
+    "training, observation_spaces, action_spaces, discrete_actions, one_hot",
     [
-        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
     ],
 )
 def test_maddpg_get_action_action_masking_exception(
-    training, state_dims, action_dims, discrete_actions, one_hot, device
+    training, observation_spaces, action_spaces, discrete_actions, one_hot, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     state = {
         agent: {
-            "observation": np.random.randn(*state_dims[idx]),
+            "observation": np.random.randn(*observation_spaces[idx].shape),
             "action_mask": [0, 1, 0, 1],
         }
         for idx, agent in enumerate(agent_ids)
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         n_agents=2,
@@ -966,18 +966,18 @@ def test_maddpg_get_action_action_masking_exception(
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, one_hot",
+    "training, observation_spaces, action_spaces, discrete_actions, one_hot",
     [
-        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
     ],
 )
 def test_maddpg_get_action_action_masking(
-    training, state_dims, action_dims, discrete_actions, one_hot, device
+    training, observation_spaces, action_spaces, discrete_actions, one_hot, device
 ):
     agent_ids = ["agent_0", "agent_1"]
     state = {
-        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     info = {
         agent: {
@@ -986,8 +986,8 @@ def test_maddpg_get_action_action_masking(
         for idx, agent in enumerate(agent_ids)
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
         n_agents=2,
@@ -1002,20 +1002,20 @@ def test_maddpg_get_action_action_masking(
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile_mode",
+    "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_maddpg_get_action_cnn(
-    training, state_dims, action_dims, discrete_actions, device, compile_mode
+    training, observation_spaces, action_spaces, discrete_actions, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
@@ -1027,11 +1027,11 @@ def test_maddpg_get_action_cnn(
         "normalize": False,
     }
     state = {
-        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1045,7 +1045,7 @@ def test_maddpg_get_action_cnn(
     cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_dims[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 torch.testing.assert_close(
                     sum(action),
@@ -1060,35 +1060,35 @@ def test_maddpg_get_action_cnn(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_dims[idx] - 1
+                assert action <= action_spaces[idx].n - 1
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile_mode",
+    "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
     ],
 )
 def test_get_action_distributed(
-    training, state_dims, action_dims, discrete_actions, compile_mode
+    training, observation_spaces, action_spaces, discrete_actions, compile_mode
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
     state = {
-        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     from agilerl.algorithms.maddpg import MADDPG
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1112,7 +1112,7 @@ def test_get_action_distributed(
     cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_dims[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 torch.testing.assert_close(
                     sum(action),
@@ -1127,24 +1127,24 @@ def test_get_action_distributed(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_dims[idx] - 1
+                assert action <= action_spaces[idx].n - 1
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile_mode",
+    "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
     ],
 )
 def test_maddpg_get_action_distributed_cnn(
-    training, state_dims, action_dims, discrete_actions, compile_mode
+    training, observation_spaces, action_spaces, discrete_actions, compile_mode
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
@@ -1157,11 +1157,11 @@ def test_maddpg_get_action_distributed_cnn(
         "normalize": False,
     }
     state = {
-        agent: np.random.randn(*state_dims[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1191,7 +1191,7 @@ def test_maddpg_get_action_distributed_cnn(
     cont_actions, discrete_action = maddpg.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_dims[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 torch.testing.assert_close(
                     sum(action),
@@ -1206,27 +1206,27 @@ def test_maddpg_get_action_distributed_cnn(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_dims[idx] - 1
+                assert action <= action_spaces[idx].n - 1
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions, compile_mode",
+    "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_maddpg_get_action_agent_masking(
-    training, state_dims, action_dims, discrete_actions, device, compile_mode
+    training, observation_spaces, action_spaces, discrete_actions, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1"]
-    state = {agent: np.random.randn(*state_dims[0]) for agent in agent_ids}
+    state = {agent: np.random.randn(*observation_spaces[0].shape) for agent in agent_ids}
     if discrete_actions:
         info = {
             "agent_0": {"env_defined_actions": 1},
@@ -1238,8 +1238,8 @@ def test_maddpg_get_action_agent_masking(
             "agent_1": {"env_defined_actions": None},
         }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1261,30 +1261,30 @@ def test_maddpg_get_action_agent_masking(
 
 
 @pytest.mark.parametrize(
-    "training, state_dims, action_dims, discrete_actions",
+    "training, observation_spaces, action_spaces, discrete_actions",
     [
-        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], False),
-        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], False),
-        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], True),
-        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], True),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], False),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], False),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], True),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], True),
     ],
 )
 def test_maddpg_get_action_vectorized_agent_masking(
-    training, state_dims, action_dims, discrete_actions, device
+    training, observation_spaces, action_spaces, discrete_actions, device
 ):
     num_envs = 6
     agent_ids = ["agent_0", "agent_1"]
     state = {
-        agent: np.array([np.random.randn(*state_dims[0]) for _ in range(num_envs)])
+        agent: np.array([np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)])
         for agent in agent_ids
     }
     if discrete_actions:
         env_defined_action = np.array(
-            [np.random.randint(0, state_dims[0][0] + 1) for _ in range(num_envs)]
+            [np.random.randint(0, observation_spaces[0].shape[0] + 1) for _ in range(num_envs)]
         )
     else:
         env_defined_action = np.array(
-            [np.random.randn(*state_dims[0]) for _ in range(num_envs)]
+            [np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)]
         )
     nan_array = np.zeros(env_defined_action.shape)
     nan_array[:] = np.nan
@@ -1293,8 +1293,8 @@ def test_maddpg_get_action_vectorized_agent_masking(
         "agent_1": {"env_defined_actions": nan_array},
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1315,34 +1315,34 @@ def test_maddpg_get_action_vectorized_agent_masking(
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
+    "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, "default"),
     ],
 )
 def test_maddpg_learns_from_experiences_mlp(
-    state_dims,
+    observation_spaces,
     experiences,
     discrete_actions,
     batch_size,
-    action_dims,
+    action_spaces,
     agent_ids,
     one_hot,
     device,
     compile_mode,
 ):
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1400,34 +1400,34 @@ def no_sync(self):
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
+    "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], False, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))], True, 64, [spaces.Discrete(2), spaces.Discrete(2)], ["agent_0", "agent_1"], True, "default"),
     ],
 )
 def test_maddpg_learns_from_experiences_mlp_distributed(
-    state_dims,
+    observation_spaces,
     accelerated_experiences,
     discrete_actions,
     batch_size,
-    action_dims,
+    action_spaces,
     agent_ids,
     one_hot,
     compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         n_agents=2,
         agent_ids=agent_ids,
@@ -1485,22 +1485,22 @@ def test_maddpg_learns_from_experiences_mlp_distributed(
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
+    "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             False,
             64,
-            [2, 2],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             ["agent_0", "agent_1"],
             False,
             None,
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             True,
             64,
-            [2, 2],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             ["agent_0", "agent_1"],
             False,
             "default",
@@ -1508,17 +1508,17 @@ def test_maddpg_learns_from_experiences_mlp_distributed(
     ],
 )
 def test_maddpg_learns_from_experiences_cnn(
-    state_dims,
+    observation_spaces,
     experiences,
     discrete_actions,
     batch_size,
-    action_dims,
+    action_spaces,
     agent_ids,
     one_hot,
     device,
     compile_mode,
 ):
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
         "arch": "cnn",
@@ -1529,8 +1529,8 @@ def test_maddpg_learns_from_experiences_cnn(
         "normalize": False,
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         n_agents=2,
         net_config=net_config,
@@ -1579,40 +1579,40 @@ def test_maddpg_learns_from_experiences_cnn(
 
 
 @pytest.mark.parametrize(
-    "state_dims, discrete_actions, batch_size, action_dims, agent_ids, one_hot, compile_mode",
+    "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             False,
             64,
-            [2, 2],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             ["agent_0", "agent_1"],
             False,
             None,
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             True,
             64,
-            [2, 2],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             ["agent_0", "agent_1"],
             False,
             None,
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             False,
             64,
-            [2, 2],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             ["agent_0", "agent_1"],
             False,
             "default",
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
             True,
             64,
-            [2, 2],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             ["agent_0", "agent_1"],
             False,
             "default",
@@ -1620,18 +1620,18 @@ def test_maddpg_learns_from_experiences_cnn(
     ],
 )
 def test_maddpg_learns_from_experiences_cnn_distributed(
-    state_dims,
+    observation_spaces,
     accelerated_experiences,
     discrete_actions,
     batch_size,
-    action_dims,
+    action_spaces,
     agent_ids,
     one_hot,
     device,
     compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
         "arch": "cnn",
@@ -1642,8 +1642,8 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
         "normalize": False,
     }
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=one_hot,
         n_agents=2,
         net_config=net_config,
@@ -1701,13 +1701,13 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_soft_update(device, compile_mode):
-    state_dims = [(6,), (6,)]
-    action_dims = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -1751,15 +1751,15 @@ def test_maddpg_soft_update(device, compile_mode):
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_algorithm_test_loop(device, sum_score, compile_mode):
-    state_dims = [(6,), (6,)]
-    action_dims = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
 
-    env = DummyMultiEnv(state_dims[0], action_dims)
+    env = DummyMultiEnv(observation_spaces[0], action_spaces)
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -1777,12 +1777,11 @@ def test_maddpg_algorithm_test_loop(device, sum_score, compile_mode):
         assert isinstance(mean_score, np.ndarray)
         assert len(mean_score) == 2
 
-
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compile_mode):
-    env_state_dims = [(32, 32, 3), (32, 32, 3)]
-    agent_state_dims = [(3, 32, 32), (3, 32, 32)]
+    env_observation_spaces = [spaces.Box(0, 1, shape=(32, 32, 3)), spaces.Box(0, 1, shape=(32, 32, 3))]
+    agent_observation_spaces = [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))]
     net_config = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -1791,12 +1790,12 @@ def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compil
         "stride_size": [1],
         "normalize": False,
     }
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
-    env = DummyMultiEnv(env_state_dims[0], action_dims)
+    env = DummyMultiEnv(env_observation_spaces[0], action_spaces)
     maddpg = MADDPG(
-        agent_state_dims,
-        action_dims,
+        agent_observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -1821,8 +1820,8 @@ def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compil
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode):
-    env_state_dims = [(32, 32, 3), (32, 32, 3)]
-    agent_state_dims = [(3, 32, 32), (3, 32, 32)]
+    env_observation_spaces = [spaces.Box(0, 1, shape=(32, 32, 3)), spaces.Box(0, 1, shape=(32, 32, 3))]
+    agent_observation_spaces = [spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))]
     net_config = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -1831,14 +1830,14 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mo
         "stride_size": [1],
         "normalize": False,
     }
-    action_dims = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
     env = make_multi_agent_vect_envs(
-        DummyMultiEnv, 2, **dict(state_dims=env_state_dims[0], action_dims=action_dims)
+        DummyMultiEnv, 2, **dict(observation_spaces=env_observation_spaces[0], action_spaces=action_spaces)
     )
     maddpg = MADDPG(
-        agent_state_dims,
-        action_dims,
+        agent_observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -1874,8 +1873,8 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mo
 )
 def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode):
     # Clones the agent and returns an identical copy.
-    state_dims = [(4,), (4,)]
-    action_dims = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -1901,8 +1900,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
         accelerator = None
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot,
         n_agents,
         agent_ids,
@@ -1930,8 +1929,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
     clone_agent = maddpg.clone(wrap=wrap)
 
     assert isinstance(clone_agent, MADDPG)
-    assert clone_agent.state_dims == maddpg.state_dims
-    assert clone_agent.action_dims == maddpg.action_dims
+    assert clone_agent.observation_spaces == maddpg.observation_spaces
+    assert clone_agent.action_spaces == maddpg.action_spaces
     assert clone_agent.one_hot == maddpg.one_hot
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
@@ -1967,8 +1966,8 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_clone_new_index(compile_mode):
-    state_dims = [(4,), (4,)]
-    action_dims = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -1977,8 +1976,8 @@ def test_clone_new_index(compile_mode):
     discrete_actions = False
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot,
         n_agents,
         agent_ids,
@@ -1994,8 +1993,8 @@ def test_clone_new_index(compile_mode):
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_clone_after_learning(compile_mode):
-    state_dims = [(4,), (4,)]
-    action_dims = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -2005,8 +2004,8 @@ def test_clone_after_learning(compile_mode):
     batch_size = 8
 
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot,
         n_agents,
         agent_ids,
@@ -2018,16 +2017,16 @@ def test_clone_after_learning(compile_mode):
     )
 
     states = {
-        agent_id: torch.randn(batch_size, state_dims[idx][0])
+        agent_id: torch.randn(batch_size, observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
     actions = {
-        agent_id: torch.randn(batch_size, action_dims[idx])
+        agent_id: torch.randn(batch_size, action_spaces[idx].n)
         for idx, agent_id in enumerate(agent_ids)
     }
     rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
     next_states = {
-        agent_id: torch.randn(batch_size, state_dims[idx][0])
+        agent_id: torch.randn(batch_size, observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
     dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
@@ -2036,8 +2035,8 @@ def test_clone_after_learning(compile_mode):
     maddpg.learn(experiences)
     clone_agent = maddpg.clone()
     assert isinstance(clone_agent, MADDPG)
-    assert clone_agent.state_dims == maddpg.state_dims
-    assert clone_agent.action_dims == maddpg.action_dims
+    assert clone_agent.observation_spaces == maddpg.observation_spaces
+    assert clone_agent.action_spaces == maddpg.action_spaces
     assert clone_agent.one_hot == maddpg.one_hot
     assert clone_agent.n_agents == maddpg.n_agents
     assert clone_agent.agent_ids == maddpg.agent_ids
@@ -2097,12 +2096,8 @@ def test_save_load_checkpoint_correct_data_and_format(
     net_config = {"arch": "mlp", "hidden_size": [32, 32]}
     # Initialize the maddpg agent
     maddpg = MADDPG(
-        state_dims=[
-            [
-                6,
-            ]
-        ],
-        action_dims=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(6,))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2148,12 +2143,8 @@ def test_save_load_checkpoint_correct_data_and_format(
 
     # Load checkpoint
     loaded_maddpg = MADDPG(
-        state_dims=[
-            [
-                6,
-            ]
-        ],
-        action_dims=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(6,))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2240,8 +2231,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
 
     # Initialize the maddpg agent
     maddpg = MADDPG(
-        state_dims=[[3, 32, 32]],
-        action_dims=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2287,8 +2278,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
 
     # Load checkpoint
     loaded_maddpg = MADDPG(
-        state_dims=[[3, 32, 32]],
-        action_dims=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2362,18 +2353,18 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     ],
 )
 @pytest.mark.parametrize(
-    "state_dims, action_dims",
+    "observation_spaces, action_spaces",
     [
         (
-            [[6]],
-            [2],
+            [spaces.Box(0, 1, shape=(6,))],
+            [spaces.Discrete(2)],
         )
     ],
 )
 def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     tmpdir,
-    state_dims,
-    action_dims,
+    observation_spaces,
+    action_spaces,
     mlp_actor,
     mlp_critic,
     device,
@@ -2389,8 +2380,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
         for _ in range(1)
     ]
     maddpg = MADDPG(
-        state_dims=state_dims,
-        action_dims=action_dims,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2436,8 +2427,8 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
 
     # Load checkpoint
     loaded_maddpg = MADDPG(
-        state_dims=[[3, 32, 32]],
-        action_dims=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2501,12 +2492,12 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_unwrap_models(compile_mode):
-    state_dims = [(6,), (6,)]
-    action_dims = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(6,)), spaces.Box(0, 1, shape=(6,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = Accelerator()
     maddpg = MADDPG(
-        state_dims,
-        action_dims,
+        observation_spaces,
+        action_spaces,
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -2534,8 +2525,8 @@ def test_action_scaling(compile_mode):
     min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
 
     maddpg = MADDPG(
-        state_dims=[[4], [4], [4], [4], [4]],
-        action_dims=[1, 1, 1, 1, 1],
+        observation_spaces=[spaces.Box(0, 1, shape=(4,)) for _ in range(5)],
+        action_spaces=[spaces.Discrete(1) for _ in range(5)],
         n_agents=5,
         agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
         discrete_actions=False,
@@ -2585,8 +2576,8 @@ def test_action_scaling(compile_mode):
 def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     # Initialize the maddpg agent
     maddpg = MADDPG(
-        state_dims=[[4], [4]],
-        action_dims=[2, 2],
+        observation_spaces=[spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))],
+        action_spaces=[spaces.Discrete(2), spaces.Discrete(2)],
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -2606,8 +2597,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     new_maddpg = MADDPG.load(checkpoint_path, device=device, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
-    assert new_maddpg.state_dims == maddpg.state_dims
-    assert new_maddpg.action_dims == maddpg.action_dims
+    assert new_maddpg.observation_spaces == maddpg.observation_spaces
+    assert new_maddpg.action_spaces == maddpg.action_spaces
     assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids
@@ -2684,8 +2675,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
     # Initialize the maddpg agent
     maddpg = MADDPG(
-        state_dims=[[3, 32, 32], [3, 32, 32]],
-        action_dims=[2, 2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32)), spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2), spaces.Discrete(2)],
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_a", "agent_b"],
@@ -2713,8 +2704,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
     new_maddpg = MADDPG.load(checkpoint_path, device=device, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
-    assert new_maddpg.state_dims == maddpg.state_dims
-    assert new_maddpg.action_dims == maddpg.action_dims
+    assert new_maddpg.observation_spaces == maddpg.observation_spaces
+    assert new_maddpg.action_spaces == maddpg.action_spaces
     assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids
@@ -2778,12 +2769,12 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
     "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
 )
 @pytest.mark.parametrize(
-    "state_dims, action_dims, arch, input_tensor, critic_input_tensor, secondary_input_tensor, compile_mode",
+    "observation_spaces, action_spaces, arch, input_tensor, critic_input_tensor, secondary_input_tensor, compile_mode",
     [
-        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2), spaces.Discrete(2)], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
         (
-            [[4, 210, 160], [4, 210, 160]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             "cnn",
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
@@ -2791,8 +2782,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
             None,
         ),
         (
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             "mlp",
             torch.randn(1, 4),
             torch.randn(1, 6),
@@ -2800,8 +2791,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
             "default",
         ),
         (
-            [[4, 210, 160], [4, 210, 160]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)],
+            [spaces.Discrete(2), spaces.Discrete(2)],
             "cnn",
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
@@ -2816,8 +2807,8 @@ def test_load_from_pretrained_networks(
     mlp_critic,
     cnn_actor,
     cnn_critic,
-    state_dims,
-    action_dims,
+    observation_spaces,
+    action_spaces,
     arch,
     input_tensor,
     critic_input_tensor,
@@ -2843,8 +2834,8 @@ def test_load_from_pretrained_networks(
 
     # Initialize the maddpg agent
     maddpg = MADDPG(
-        state_dims=state_dims,
-        action_dims=action_dims,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         one_hot=one_hot,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -2864,8 +2855,8 @@ def test_load_from_pretrained_networks(
     new_maddpg = MADDPG.load(checkpoint_path, device=device)
 
     # Check if properties and weights are loaded correctly
-    assert new_maddpg.state_dims == maddpg.state_dims
-    assert new_maddpg.action_dims == maddpg.action_dims
+    assert new_maddpg.observation_spaces == maddpg.observation_spaces
+    assert new_maddpg.action_spaces == maddpg.action_spaces
     assert new_maddpg.one_hot == maddpg.one_hot
     assert new_maddpg.n_agents == maddpg.n_agents
     assert new_maddpg.agent_ids == maddpg.agent_ids

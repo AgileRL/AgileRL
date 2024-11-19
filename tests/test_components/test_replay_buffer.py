@@ -185,7 +185,7 @@ def test_add_any_experiences_to_memory():
 
 # Can sample experiences from memory of desired batch size with sample method
 def test_sample_experiences_from_memory():
-    action_dim = 1
+    action_space = 1
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
@@ -207,14 +207,14 @@ def test_sample_experiences_from_memory():
     assert isinstance(experiences[0], torch.Tensor)
     assert experiences[0].shape == (batch_size, 2)
     assert isinstance(experiences[1], torch.Tensor)
-    assert experiences[1].shape == (batch_size, action_dim)
+    assert experiences[1].shape == (batch_size, action_space)
     assert isinstance(experiences[2], torch.Tensor)
     assert experiences[2].shape == (batch_size, 1)
 
 
 # Can sample experiences from memory of desired batch size with sample method
 def test_sample_experiences_from_memory_images():
-    action_dim = 1
+    action_space = 1
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
@@ -236,13 +236,13 @@ def test_sample_experiences_from_memory_images():
     assert isinstance(experiences[0], torch.Tensor)
     assert experiences[0].shape == (batch_size, 3, 128, 128)
     assert isinstance(experiences[1], torch.Tensor)
-    assert experiences[1].shape == (batch_size, action_dim)
+    assert experiences[1].shape == (batch_size, action_space)
     assert isinstance(experiences[2], torch.Tensor)
     assert experiences[2].shape == (batch_size, 1)
 
 
 def test_sample_experiences_from_memory_return_idx():
-    action_dim = 1
+    action_space = 1
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
@@ -267,7 +267,7 @@ def test_sample_experiences_from_memory_return_idx():
     assert isinstance(experiences[0], torch.Tensor)
     assert experiences[0].shape == (batch_size, 2)
     assert isinstance(experiences[1], torch.Tensor)
-    assert experiences[1].shape == (batch_size, action_dim)
+    assert experiences[1].shape == (batch_size, action_space)
     assert isinstance(experiences[2], torch.Tensor)
     assert experiences[2].shape == (batch_size, 1)
     assert any(experiences[3] < len(buffer))
@@ -275,7 +275,7 @@ def test_sample_experiences_from_memory_return_idx():
 
 # Can process transition from experiences with _process_transition method
 def test_process_transition_from_experiences():
-    action_dim = 1
+    action_space = 1
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
@@ -293,14 +293,14 @@ def test_process_transition_from_experiences():
     assert isinstance(transition["state"], torch.Tensor)
     assert transition["state"].shape == (len(experiences), 1)
     assert isinstance(transition["action"], torch.Tensor)
-    assert transition["action"].shape == (len(experiences), action_dim)
+    assert transition["action"].shape == (len(experiences), action_space)
     assert isinstance(transition["reward"], torch.Tensor)
     assert transition["reward"].shape == (len(experiences), 1)
 
 
 # Can process single transition from experiences with _process_transition method
 def test_process_single_transition_from_experiences():
-    action_dim = 1
+    action_space = 1
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
@@ -317,14 +317,14 @@ def test_process_single_transition_from_experiences():
     assert isinstance(transition["state"], torch.Tensor)
     assert transition["state"].shape == (len(experiences), 2)
     assert isinstance(transition["action"], torch.Tensor)
-    assert transition["action"].shape == (len(experiences), action_dim)
+    assert transition["action"].shape == (len(experiences), action_space)
     assert isinstance(transition["reward"], torch.Tensor)
     assert transition["reward"].shape == (len(experiences), 1)
 
 
 # Can process transition from experiences with _process_transition method
 def test_process_transition_from_experiences_images():
-    action_dim = 1
+    action_space = 1
     memory_size = 100
     field_names = ["state", "action", "reward"]
     device = "cpu"
@@ -342,7 +342,7 @@ def test_process_transition_from_experiences_images():
     assert isinstance(transition["state"], torch.Tensor)
     assert transition["state"].shape == (len(experiences), 3, 128, 128)
     assert isinstance(transition["action"], torch.Tensor)
-    assert transition["action"].shape == (len(experiences), action_dim)
+    assert transition["action"].shape == (len(experiences), action_space)
     assert isinstance(transition["reward"], torch.Tensor)
     assert transition["reward"].shape == (len(experiences), 1)
 

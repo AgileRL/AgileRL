@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
@@ -17,7 +17,8 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.networks.base import EvolvableModule
-from agilerl.typing import PopulationType
+
+PopulationType = list[EvolvableAlgorithm]
 
 def make_vect_envs(env_name: str, num_envs: int = 1) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
@@ -56,10 +57,12 @@ def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.ve
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
+GymSpaceType = Union[spaces.Space, List[spaces.Space]]
+
 def create_population(
     algo: str,
-    observation_space: spaces.Space,
-    action_space: spaces.Space,
+    observation_space: GymSpaceType,
+    action_space: GymSpaceType,
     one_hot: bool,
     net_config: Optional[Dict[str, Any]],
     INIT_HP: Dict[str, Any],
@@ -365,8 +368,25 @@ def create_population(
 
 
 def calculate_vectorized_scores(
-    rewards, terminations, include_unterminated=False, only_first_episode=True
-):
+    rewards: np.ndarray,
+    terminations: np.ndarray,
+    include_unterminated: bool = False,
+    only_first_episode: bool = True,
+) -> List[float]:
+    """
+    Calculate the vectorized scores for episodes based on rewards and terminations.
+
+    :param rewards: Array of rewards for each environment.
+    :type rewards: np.ndarray
+    :param terminations: Array indicating termination points for each environment.
+    :type terminations: np.ndarray
+    :param include_unterminated: Whether to include rewards from unterminated episodes, defaults to False.
+    :type include_unterminated: bool, optional
+    :param only_first_episode: Whether to consider only the first episode, defaults to True.
+    :type only_first_episode: bool, optional
+    :return: List of episode rewards.
+    :rtype: list[float]
+    """
     episode_rewards = []
     num_envs, _ = rewards.shape
 
@@ -410,8 +430,7 @@ def calculate_vectorized_scores(
 
     return episode_rewards
 
-
-def print_hyperparams(pop):
+def print_hyperparams(pop: PopulationType) -> None:
     """Prints current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
@@ -425,8 +444,7 @@ def print_hyperparams(pop):
             )
         )
 
-
-def plot_population_score(pop):
+def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents
@@ -450,4 +468,5 @@ def get_env_defined_actions(info, agents):
 
     if all(eda is None for eda in env_defined_actions.values()):
         return
+
     return env_defined_actions

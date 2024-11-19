@@ -9,19 +9,18 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
 class DummyDDPG(DDPG):
-    def __init__(self, state_dim, action_dim, one_hot, *args, **kwargs):
-        super().__init__(state_dim, action_dim, one_hot, *args, **kwargs)
+    def __init__(self, observation_space, action_space, one_hot, *args, **kwargs):
+        super().__init__(observation_space, action_space, one_hot, *args, **kwargs)
 
         self.tensor_test = torch.randn(1)
-
 
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
@@ -128,14 +127,14 @@ class SimpleCNN(nn.Module):
 
 # initialize ddpg with valid parameters
 def test_initialize_ddpg_with_minimum_parameters():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
 
-    ddpg = DDPG(state_dim, action_dim, one_hot)
+    ddpg = DDPG(observation_space, action_space, one_hot)
 
-    assert ddpg.state_dim == state_dim
-    assert ddpg.action_dim == action_dim
+    assert ddpg.observation_space == observation_space
+    assert ddpg.action_space == action_space
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config == {
         "arch": "mlp",
@@ -168,8 +167,8 @@ def test_initialize_ddpg_with_minimum_parameters():
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_ddpg_with_cnn_accelerator():
-    state_dim = [3, 32, 32]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     index = 0
     net_config_cnn = {
@@ -192,8 +191,8 @@ def test_initialize_ddpg_with_cnn_accelerator():
     wrap = True
 
     ddpg = DDPG(
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=one_hot,
         index=index,
         min_action=0,
@@ -210,8 +209,8 @@ def test_initialize_ddpg_with_cnn_accelerator():
         wrap=wrap,
     )
 
-    assert ddpg.state_dim == state_dim
-    assert ddpg.action_dim == action_dim
+    assert ddpg.observation_space == observation_space
+    assert ddpg.action_space == action_space
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config == net_config_cnn
     assert ddpg.batch_size == batch_size
@@ -238,15 +237,15 @@ def test_initialize_ddpg_with_cnn_accelerator():
 
 # Can initialize ddpg with an actor network
 @pytest.mark.parametrize(
-    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
-        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
     ],
 )
 def test_initialize_ddpg_with_actor_network(
-    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+    observation_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
 ):
-    action_dim = 2
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -254,15 +253,15 @@ def test_initialize_ddpg_with_actor_network(
     critic_network = MakeEvolvable(critic_network, input_tensor_critic)
 
     ddpg = DDPG(
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         one_hot,
         actor_network=actor_network,
         critic_network=critic_network,
     )
 
-    assert ddpg.state_dim == state_dim
-    assert ddpg.action_dim == action_dim
+    assert ddpg.observation_space == observation_space
+    assert ddpg.action_space == action_space
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config is None
     assert ddpg.batch_size == 64
@@ -289,33 +288,33 @@ def test_initialize_ddpg_with_actor_network(
 
 
 @pytest.mark.parametrize(
-    "state_dim, net_type",
+    "observation_space, net_type",
     [
-        ([4], "mlp"),
-        ([3, 64, 64], "cnn"),
+        (spaces.Box(0, 1, shape=(4,)), "mlp"),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "cnn"),
     ],
 )
-def test_initialize_ddpg_with_actor_network_evo_net(state_dim, net_type):
-    action_dim = 2
+def test_initialize_ddpg_with_actor_network_evo_net(observation_space, net_type):
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     if net_type == "mlp":
         actor_network = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
+            num_inputs=observation_space.shape[0],
+            num_outputs=action_space.shape[0],
             hidden_size=[64, 64],
             mlp_activation="ReLU",
             mlp_output_activation="Tanh",
         )
         critic_network = EvolvableMLP(
-            num_inputs=state_dim[0] + action_dim,
+            num_inputs=observation_space.shape[0] + action_space.shape[0],
             num_outputs=1,
             hidden_size=[64, 64],
             mlp_activation="ReLU",
         )
     else:
         actor_network = EvolvableCNN(
-            input_shape=state_dim,
-            num_outputs=action_dim,
+            input_shape=observation_space.shape,
+            num_outputs=action_space.shape[0],
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
@@ -325,8 +324,8 @@ def test_initialize_ddpg_with_actor_network_evo_net(state_dim, net_type):
         )
 
         critic_network = EvolvableCNN(
-            input_shape=state_dim,
-            num_outputs=action_dim,
+            input_shape=observation_space.shape,
+            num_outputs=action_space.shape[0],
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
@@ -336,15 +335,15 @@ def test_initialize_ddpg_with_actor_network_evo_net(state_dim, net_type):
         )
 
     ddpg = DDPG(
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         one_hot,
         actor_network=actor_network,
         critic_network=critic_network,
     )
 
-    assert ddpg.state_dim == state_dim
-    assert ddpg.action_dim == action_dim
+    assert ddpg.observation_space == observation_space
+    assert ddpg.action_space == action_space
     assert ddpg.one_hot == one_hot
     assert ddpg.batch_size == 64
     assert ddpg.lr_actor == 0.0001
@@ -368,17 +367,17 @@ def test_initialize_ddpg_with_actor_network_evo_net(state_dim, net_type):
 
 
 def test_initialize_ddpg_with_incorrect_actor_net():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     actor_network = "dummy"
     critic_network = "dummy"
     with pytest.raises(AssertionError):
         ddpg = DDPG(
-            state_dim,
-            action_dim,
+            observation_space,
+            action_space,
             one_hot,
-            expl_noise=np.zeros(action_dim),
+            expl_noise=np.zeros(action_space.shape[0]),
             actor_network=actor_network,
             critic_network=critic_network,
         )
@@ -387,29 +386,29 @@ def test_initialize_ddpg_with_incorrect_actor_net():
 
 # Can initialize ddpg with an actor network but no critic - should trigger warning
 @pytest.mark.parametrize(
-    "state_dim, actor_network, critic_network, input_tensor, input_tensor_critic",
+    "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
-        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
     ],
 )
 def test_initialize_ddpg_with_actor_network_no_critic(
-    state_dim, actor_network, critic_network, input_tensor, input_tensor_critic, request
+    observation_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
 ):
-    action_dim = 2
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
     ddpg = DDPG(
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         one_hot,
         actor_network=actor_network,
         critic_network=None,
     )
 
-    assert ddpg.state_dim == state_dim
-    assert ddpg.action_dim == action_dim
+    assert ddpg.observation_space == observation_space
+    assert ddpg.action_space == action_space
     assert ddpg.one_hot == one_hot
     assert ddpg.net_config is not None
     assert ddpg.batch_size == 64
@@ -435,38 +434,38 @@ def test_initialize_ddpg_with_actor_network_no_critic(
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action_training():
     accelerator = Accelerator()
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
 
-    ddpg = DDPG(state_dim, action_dim, one_hot=False)
+    ddpg = DDPG(observation_space, action_space, one_hot=False)
     state = np.array([1, 2, 3, 4])
 
     training = False
     action = ddpg.get_action(state, training)[0]
 
-    assert len(action) == action_dim
+    assert len(action) == action_space.shape[0]
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
 
-    ddpg = DDPG(state_dim, action_dim, one_hot=True, accelerator=accelerator)
+    ddpg = DDPG(observation_space, action_space, one_hot=True, accelerator=accelerator)
     state = np.array([1])
     training = True
     action = ddpg.get_action(state, training)[0]
 
-    assert len(action) == action_dim
+    assert len(action) == action_space.shape[0]
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
 
     ddpg = DDPG(
-        state_dim, action_dim, one_hot=True, O_U_noise=False, accelerator=accelerator
+        observation_space, action_space, one_hot=True, O_U_noise=False, accelerator=accelerator
     )
     state = np.array([1])
     training = True
     action = ddpg.get_action(state, training)[0]
 
-    assert len(action) == action_dim
+    assert len(action) == action_space.shape[0]
     for act in action:
         assert isinstance(act, np.float32)
         assert -1 <= act <= 1
@@ -477,8 +476,8 @@ def test_returns_expected_action_training():
     "min_action, max_action", [(-1, 1), ([-1, 0], 1), (-1, [0, 1]), ([-1, -2], [1, 0])]
 )
 def test_learns_from_experiences(min_action, max_action):
-    state_dim = (3, 32, 32)
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     batch_size = 4
     policy_freq = 4
@@ -493,8 +492,8 @@ def test_learns_from_experiences(min_action, max_action):
 
     # Create an instance of the ddpg class
     ddpg = DDPG(
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         one_hot,
         min_action=min_action,
         max_action=max_action,
@@ -513,10 +512,10 @@ def test_learns_from_experiences(min_action, max_action):
 
     for i in range(policy_freq * 2):
         # Create a batch of experiences
-        states = torch.rand(batch_size, *state_dim)
-        actions = torch.randint(0, 2, (batch_size, action_dim)).float()
+        states = torch.rand(batch_size, *observation_space.shape)
+        actions = torch.randint(0, 2, (batch_size, action_space.shape[0])).float()
         rewards = torch.randn((batch_size, 1))
-        next_states = torch.rand(batch_size, *state_dim)
+        next_states = torch.rand(batch_size, *observation_space.shape)
         dones = torch.randint(0, 2, (batch_size, 1))
 
         experiences = [states, actions, rewards, next_states, dones]
@@ -540,15 +539,15 @@ def test_learns_from_experiences(min_action, max_action):
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_with_accelerator():
     accelerator = Accelerator()
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = True
     batch_size = 64
 
     # Create an instance of the ddpg class
     ddpg = DDPG(
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         one_hot,
         batch_size=batch_size,
         policy_freq=2,
@@ -556,10 +555,10 @@ def test_learns_from_experiences_with_accelerator():
     )
 
     # Create a batch of experiences
-    states = torch.randint(0, state_dim[0], (batch_size, 1)).float()
-    actions = torch.randint(0, 2, (batch_size, action_dim)).float()
+    states = torch.randint(0, observation_space.shape[0], (batch_size, 1)).float()
+    actions = torch.randint(0, 2, (batch_size, action_space.shape[0])).float()
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, state_dim[0], (batch_size, 1)).float()
+    next_states = torch.randint(0, observation_space.shape[0], (batch_size, 1)).float()
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
@@ -597,8 +596,8 @@ def test_learns_from_experiences_with_accelerator():
 
 # Updates target network parameters with soft update
 def test_soft_update():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
@@ -614,8 +613,8 @@ def test_soft_update():
     wrap = True
 
     ddpg = DDPG(
-        state_dim,
-        action_dim,
+        observation_space,
+        action_space,
         one_hot,
         net_config=net_config,
         batch_size=batch_size,
@@ -662,36 +661,36 @@ def test_soft_update():
 
 # Runs algorithm test loop
 def test_algorithm_test_loop():
-    state_dim = (4,)
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     num_envs = 3
 
-    env = DummyEnv(state_size=state_dim, vect=True, num_envs=num_envs)
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=False)
+    agent = DDPG(observation_space=observation_space, action_space=action_space, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
 
 # Runs algorithm test loop with unvectorised env
 def test_algorithm_test_loop_unvectorized():
-    state_dim = (4,)
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
 
-    env = DummyEnv(state_size=state_dim, vect=False)
+    env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=False)
+    agent = DDPG(observation_space=observation_space, action_space=action_space, one_hot=False)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    state_dim = (3, 32, 32)
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Box(0, 1, shape=(2,))
 
-    env = DummyEnv(state_size=state_dim, vect=True)
+    env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -703,8 +702,8 @@ def test_algorithm_test_loop_images():
     }
 
     agent = DDPG(
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=False,
         net_config=net_config_cnn,
     )
@@ -714,10 +713,10 @@ def test_algorithm_test_loop_images():
 
 # Runs algorithm test loop with unvectorized images
 def test_algorithm_test_loop_images_unvectorized():
-    state_dim = (32, 32, 3)
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
+    action_space = spaces.Box(0, 1, shape=(2,))
 
-    env = DummyEnv(state_size=state_dim, vect=False)
+    env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -729,8 +728,8 @@ def test_algorithm_test_loop_images_unvectorized():
     }
 
     agent = DDPG(
-        state_dim=(3, 32, 32),
-        action_dim=action_dim,
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=action_space,
         one_hot=False,
         net_config=net_config_cnn,
     )
@@ -740,19 +739,19 @@ def test_algorithm_test_loop_images_unvectorized():
 
 # Clones the agent and returns an identical agent.
 def test_clone_returns_identical_agent():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
 
-    ddpg = DDPG(state_dim, action_dim, one_hot)
+    ddpg = DDPG(observation_space, action_space, one_hot)
     ddpg.fitness = [200, 200, 200]
     ddpg.scores = [94, 94, 94]
     ddpg.steps = [2500]
     ddpg.tensor_attribute = torch.randn(1)
     clone_agent = ddpg.clone()
 
-    assert clone_agent.state_dim == ddpg.state_dim
-    assert clone_agent.action_dim == ddpg.action_dim
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
     assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
@@ -786,11 +785,11 @@ def test_clone_returns_identical_agent():
     assert clone_agent.tensor_attribute == ddpg.tensor_attribute
 
     accelerator = Accelerator()
-    ddpg = DDPG(state_dim, action_dim, one_hot, accelerator=accelerator)
+    ddpg = DDPG(observation_space, action_space, one_hot, accelerator=accelerator)
     clone_agent = ddpg.clone()
 
-    assert clone_agent.state_dim == ddpg.state_dim
-    assert clone_agent.action_dim == ddpg.action_dim
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
     assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
@@ -823,11 +822,11 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == ddpg.scores
 
     accelerator = Accelerator()
-    ddpg = DDPG(state_dim, action_dim, one_hot, accelerator=accelerator, wrap=False)
+    ddpg = DDPG(observation_space, action_space, one_hot, accelerator=accelerator, wrap=False)
     clone_agent = ddpg.clone(wrap=False)
 
-    assert clone_agent.state_dim == ddpg.state_dim
-    assert clone_agent.action_dim == ddpg.action_dim
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
     assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
@@ -861,35 +860,35 @@ def test_clone_returns_identical_agent():
 
 
 def test_clone_new_index():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
 
-    ddpg = DDPG(state_dim, action_dim, one_hot)
+    ddpg = DDPG(observation_space, action_space, one_hot)
     clone_agent = ddpg.clone(index=100)
 
     assert clone_agent.index == 100
 
 
 def test_clone_after_learning():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     batch_size = 8
-    ddpg = DDPG(state_dim, action_dim, one_hot)
+    ddpg = DDPG(observation_space, action_space, one_hot)
 
-    states = torch.randn(batch_size, state_dim[0])
-    actions = torch.randn(batch_size, action_dim)
+    states = torch.randn(batch_size, observation_space.shape[0])
+    actions = torch.randn(batch_size, action_space.shape[0])
     rewards = torch.rand(batch_size, 1)
-    next_states = torch.randn(batch_size, state_dim[0])
+    next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.zeros(batch_size, 1)
 
     experiences = states, actions, rewards, next_states, dones
     ddpg.learn(experiences)
     clone_agent = ddpg.clone()
 
-    assert clone_agent.state_dim == ddpg.state_dim
-    assert clone_agent.action_dim == ddpg.action_dim
+    assert clone_agent.observation_space == ddpg.observation_space
+    assert clone_agent.action_space == ddpg.action_space
     assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
@@ -924,7 +923,7 @@ def test_clone_after_learning():
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
-    ddpg = DDPG(state_dim=[4], action_dim=2, one_hot=False, accelerator=Accelerator())
+    ddpg = DDPG(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Box(0, 1, shape=(2,)), one_hot=False, accelerator=Accelerator())
     ddpg.unwrap_models()
     assert isinstance(ddpg.actor, nn.Module)
     assert isinstance(ddpg.actor_target, nn.Module)
@@ -935,7 +934,7 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the ddpg agent
-    ddpg = DDPG(state_dim=[4], action_dim=2, one_hot=False)
+    ddpg = DDPG(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Box(0, 1, shape=(2,)), one_hot=False)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -969,8 +968,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "steps" in checkpoint
 
     ddpg = DDPG(
-        state_dim=[3, 32, 32],
-        action_dim=2,
+        observation_space = spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Box(0, 1, shape=(2,)),
         one_hot=False,
     )
     # Load checkpoint
@@ -1013,7 +1012,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the ddpg agent
     ddpg = DDPG(
-        state_dim=[3, 32, 32], action_dim=2, one_hot=False, net_config=net_config_cnn
+        observation_space = spaces.Box(0, 1, shape=(3, 32, 32)), action_space=spaces.Box(0, 1, shape=(2,)), one_hot=False, net_config=net_config_cnn
     )
 
     # Save the checkpoint to a file
@@ -1051,8 +1050,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Load checkpoint
     ddpg = DDPG(
-        state_dim=[3, 32, 32],
-        action_dim=2,
+        observation_space = spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Box(0, 1, shape=(2,)),
         one_hot=False,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
     )
@@ -1089,8 +1088,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network, input_tensor, request, tmpdir
 ):
-    state_dim = input_tensor.shape
-    action_dim = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 64, 64))
+    action_space = spaces.Box(0, 1, shape=(2,))
 
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -1098,13 +1097,13 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     critic_network = MakeEvolvable(
         critic_network,
         input_tensor,
-        torch.randn(1, action_dim),
+        torch.randn(1, action_space.shape[0]),
     )
 
     # Initialize the ddpg agent
     ddpg = DDPG(
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=False,
         actor_network=actor_network,
         critic_network=critic_network,
@@ -1142,8 +1141,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "steps" in checkpoint
 
     ddpg = DDPG(
-        state_dim=[3, 32, 32],
-        action_dim=2,
+        observation_space = spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Box(0, 1, shape=(2,)),
         one_hot=False,
     )
     # Load checkpoint
@@ -1200,8 +1199,8 @@ def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
         min_activation_val, max_activation_val = 0, 1
     action = np.array(action_array_vals)
     ddpg = DDPG(
-        state_dim=[4],
-        action_dim=4,
+        observation_space=spaces.Box(0, 1, shape=(4,)),
+        action_space=spaces.Box(0, 1, shape=(4,)),
         one_hot=False,
         max_action=max_action,
         min_action=min_action,
@@ -1246,7 +1245,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
         min = np.array(min)
     if isinstance(max, list):
         max = np.array(max)
-    ddpg = DDPG(state_dim=[4], action_dim=1, one_hot=False, device=device)
+    ddpg = DDPG(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Box(0, 1, shape=(1,)), one_hot=False, device=device)
     input = torch.tensor(action, dtype=torch.float32).to(device)
     clamped_actions = ddpg.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
@@ -1263,7 +1262,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the ddpg agent
-    ddpg = DDPG(state_dim=[4], action_dim=2, one_hot=False)
+    ddpg = DDPG(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Box(0, 1, shape=(2,)), one_hot=False)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1273,8 +1272,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
-    assert new_ddpg.state_dim == ddpg.state_dim
-    assert new_ddpg.action_dim == ddpg.action_dim
+    assert new_ddpg.observation_space == ddpg.observation_space
+    assert new_ddpg.action_space == ddpg.action_space
     assert new_ddpg.one_hot == ddpg.one_hot
     assert new_ddpg.min_action == ddpg.min_action
     assert new_ddpg.max_action == ddpg.max_action
@@ -1316,8 +1315,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the ddpg agent
     ddpg = DDPG(
-        state_dim=[3, 32, 32],
-        action_dim=2,
+        observation_space = spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Box(0, 1, shape=(2,)),
         one_hot=False,
         net_config={
             "arch": "cnn",
@@ -1337,8 +1336,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     new_ddpg = DDPG.load(checkpoint_path, device=device, accelerator=accelerator)
 
     # Check if properties and weights are loaded correctly
-    assert new_ddpg.state_dim == ddpg.state_dim
-    assert new_ddpg.action_dim == ddpg.action_dim
+    assert new_ddpg.observation_space == ddpg.observation_space
+    assert new_ddpg.action_space == ddpg.action_space
     assert new_ddpg.one_hot == ddpg.one_hot
     assert new_ddpg.min_action == ddpg.min_action
     assert new_ddpg.max_action == ddpg.max_action
@@ -1370,25 +1369,25 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 
 
 @pytest.mark.parametrize(
-    "state_dim, actor_network, input_tensor",
+    "observation_space, actor_network, input_tensor",
     [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
-    state_dim, actor_network, input_tensor, request, tmpdir
+    observation_space, actor_network, input_tensor, request, tmpdir
 ):
-    action_dim = 2
+    action_space = spaces.Box(0, 1, shape=(2,))
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
     # Initialize the ddpg agent
     ddpg = DDPG(
-        state_dim=state_dim,
-        action_dim=action_dim,
+        observation_space=observation_space,
+        action_space=action_space,
         one_hot=one_hot,
         actor_network=actor_network,
         critic_network=copy.deepcopy(actor_network),
@@ -1402,8 +1401,8 @@ def test_load_from_pretrained_networks(
     new_ddpg = DDPG.load(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert new_ddpg.state_dim == ddpg.state_dim
-    assert new_ddpg.action_dim == ddpg.action_dim
+    assert new_ddpg.observation_space == ddpg.observation_space
+    assert new_ddpg.action_space == ddpg.action_space
     assert new_ddpg.one_hot == ddpg.one_hot
     assert new_ddpg.min_action == ddpg.min_action
     assert new_ddpg.max_action == ddpg.max_action

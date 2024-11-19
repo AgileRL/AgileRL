@@ -1,3 +1,4 @@
+from typing import Optional, Dict, Any
 import copy
 import inspect
 
@@ -7,20 +8,21 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import torch.optim as optim
+from gymnasium import spaces
 
+from agilerl.algorithms.base import RLAlgorithm
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-
-class NeuralUCB:
+class NeuralUCB(RLAlgorithm):
     """The NeuralUCB algorithm class. NeuralUCB paper: https://arxiv.org/abs/1911.04462
 
-    :param state_dim: State observation (context) dimension
-    :type state_dim: list[int]
-    :param action_dim: Action dimension (number of arms)
-    :type action_dim: int
+    :param observation_space: Observation space of the environment
+    :type observation_space: gym.spaces.Space
+    :param action_space: Action space of the environment
+    :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -51,29 +53,33 @@ class NeuralUCB:
 
     def __init__(
         self,
-        state_dim,
-        action_dim,
-        index=0,
-        net_config={"arch": "mlp", "hidden_size": [128]},
-        gamma=1.0,
-        lamb=1.0,
-        reg=0.000625,
-        batch_size=64,
-        lr=1e-3,
-        learn_step=2,
-        mut=None,
-        actor_network=None,
-        device="cpu",
-        accelerator=None,
-        wrap=True,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        index: int = 0,
+        net_config: Optional[Dict[str, Any]] = {"arch": "mlp", "hidden_size": [128]},
+        gamma: float = 1.0,
+        lamb: float = 1.0,
+        reg: float = 0.000625,
+        batch_size: int = 64,
+        lr: float = 1e-3,
+        learn_step: int = 2,
+        mut: Optional[str] = None,
+        actor_network: Optional[nn.Module] = None,
+        device: str = "cpu",
+        accelerator: Optional[Any] = None,
+        wrap: bool = True,
     ):
-        assert isinstance(
-            state_dim, (list, tuple)
-        ), "State dimension must be a list or tuple."
-        assert isinstance(
-            action_dim, (int, np.integer)
-        ), "Action dimension must be an integer."
-        assert isinstance(index, int), "Agent index must be an integer."
+        super().__init__(
+            observation_space,
+            action_space,
+            index=index,
+            net_config=net_config,
+            learn_step=learn_step,
+            device=device,
+            accelerator=accelerator,
+            name="NeuralUCB",
+            )
+
         assert isinstance(
             gamma, (float, int)
         ), "Scaling factor must be a float or integer."
@@ -88,8 +94,6 @@ class NeuralUCB:
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert (
             isinstance(actor_network, nn.Module) or actor_network is None
         ), "Actor network must be an nn.Module or None."
@@ -97,24 +101,13 @@ class NeuralUCB:
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.algo = "NeuralUCB"
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.net_config = net_config
         self.gamma = gamma
         self.lamb = lamb
         self.reg = reg
         self.batch_size = batch_size
         self.lr = lr
-        self.learn_step = learn_step
         self.mut = mut
-        self.device = device
-        self.accelerator = accelerator
-        self.index = index
-        self.scores = []
         self.regret = [0]
-        self.fitness = []
-        self.steps = [0]
         self.actor_network = actor_network
 
         if self.actor_network is not None:
@@ -146,7 +139,7 @@ class NeuralUCB:
                     len(self.net_config["hidden_size"]) > 0
                 ), "Net config hidden_size must contain at least one element."
                 self.actor = EvolvableMLP(
-                    num_inputs=state_dim[0],
+                    num_inputs=self.state_dim[0],
                     num_outputs=1,
                     layer_norm=False,
                     device=self.device,
@@ -176,7 +169,7 @@ class NeuralUCB:
                     self.net_config["normalize"], bool
                 ), "Net config normalize must be boolean value True or False."
                 self.actor = EvolvableCNN(
-                    input_shape=state_dim,
+                    input_shape=self.state_dim,
                     num_outputs=1,
                     layer_norm=False,
                     device=self.device,
@@ -435,62 +428,10 @@ class NeuralUCB:
 
         return clone
 
-    def inspect_attributes(self, input_args_only=False):
-        # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
-        guarded_attributes = ["actor", "optimizer"]
-
-        # Exclude private and built-in attributes
-        attributes = [
-            a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))
-        ]
-
-        if input_args_only:
-            constructor_params = inspect.signature(self.__init__).parameters.keys()
-            attributes = {
-                k: v
-                for k, v in attributes
-                if k not in guarded_attributes and k in constructor_params
-            }
-        else:
-            # Remove the algo specific guarded variables
-            attributes = {k: v for k, v in attributes if k not in guarded_attributes}
-
-        return attributes
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actor, self.optimizer = self.accelerator.prepare(
-                self.actor, self.optimizer
-            )
-
     def unwrap_models(self):
         if self.accelerator is not None:
             self.actor = self.accelerator.unwrap_model(self.actor)
             self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
-
-    def save_checkpoint(self, path):
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-
-        attribute_dict = self.inspect_attributes()
-
-        network_info = {
-            "actor_init_dict": self.actor.init_dict,
-            "actor_state_dict": self.actor.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-        }
-
-        attribute_dict.update(network_info)
-
-        torch.save(
-            attribute_dict,
-            path,
-            pickle_module=dill,
-        )
 
     def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.

@@ -75,8 +75,8 @@ def test_initialization_with_given_parameters():
 ### Single-agent algorithms ###
 # Returns best agent and new population of agents following tournament selection.
 def test_returns_best_agent_and_new_population():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
@@ -98,8 +98,8 @@ def test_returns_best_agent_and_new_population():
     for algo in algo_classes.keys():
         population = create_population(
             algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP,
@@ -128,8 +128,8 @@ def test_returns_best_agent_and_new_population():
 
 # Returns best agent and new population of agents following tournament selection without elitism.
 def test_returns_best_agent_and_new_population_without_elitism():
-    state_dim = [4]
-    action_dim = 2
+    observation_space = [4]
+    action_space = 2
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
@@ -151,8 +151,8 @@ def test_returns_best_agent_and_new_population_without_elitism():
     for algo in algo_classes.keys():
         population = create_population(
             algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP,
@@ -180,8 +180,8 @@ def test_returns_best_agent_and_new_population_without_elitism():
 ### Multi-agent algorithms ###
 # Returns best agent and new population of agents following tournament selection.
 def test_returns_best_agent_and_new_population_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
+    observation_space = [[4], [4]]
+    action_space = [2, 2]
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
@@ -196,8 +196,8 @@ def test_returns_best_agent_and_new_population_multi_agent():
     for algo in algo_classes.keys():
         population = create_population(
             algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP_MA,
@@ -226,8 +226,8 @@ def test_returns_best_agent_and_new_population_multi_agent():
 
 # Returns best agent and new population of agents following tournament selection without elitism.
 def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
-    state_dim = [[4], [4]]
-    action_dim = [2, 2]
+    observation_space = [[4], [4]]
+    action_space = [2, 2]
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
@@ -242,8 +242,8 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
     for algo in algo_classes.keys():
         population = create_population(
             algo=algo,
-            state_dim=state_dim,
-            action_dim=action_dim,
+            observation_space=observation_space,
+            action_space=action_space,
             one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP_MA,
