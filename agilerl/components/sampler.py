@@ -1,28 +1,45 @@
 import warnings
-
+from typing import Optional, Union, Tuple, Any
 from torch.utils.data import DataLoader
 
+from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
-from agilerl.components.replay_data import ReplayDataset
 
+BufferType = Union[ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
 
 class Sampler:
-    """Sampler class to handle both standard and distributed training."""
+    """Sampler class to handle both standard and distributed training.
+
+    :param distributed: Whether to use distributed sampling, defaults to False
+    :type distributed: bool, optional
+    :param per: Whether to use Prioritized Experience Replay (PER), defaults to False
+    :type per: bool, optional
+    :param n_step: Whether to use n-step returns, defaults to False
+    :type n_step: bool, optional
+    :param memory: Replay buffer memory, defaults to None
+    :type memory: Optional[Union[ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]], optional
+    :param dataset: Dataset for distributed sampling, defaults to None
+    :type dataset: Optional[ReplayDataset], optional
+    :param dataloader: DataLoader for distributed sampling, defaults to None
+    :type dataloader: Optional[DataLoader], optional
+    :raises AssertionError: If neither memory nor (dataset and dataloader) are provided
+    """
 
     def __init__(
         self,
-        distributed=False,
-        per=False,
-        n_step=False,
-        memory=None,
-        dataset=None,
-        dataloader=None,
-    ):
+        distributed: bool = False,
+        per: bool = False,
+        n_step: bool = False,
+        memory: Optional[BufferType] = None,
+        dataset: Optional[ReplayDataset] = None,
+        dataloader: Optional[DataLoader] = None,
+    ) -> None:
+
         assert (memory is not None) or (
             (dataset is not None) and (dataloader is not None)
         ), "Sampler needs to be initialized with either 'memory' or ('dataset' AND 'dataloader')."
@@ -58,15 +75,49 @@ class Sampler:
                 )
             self.sample = self.sample_standard
 
-    def sample_standard(self, batch_size, return_idx=False):
+    def sample_standard(self, batch_size: int, return_idx: bool = False) -> Any:
+        """Sample a batch of experiences from the standard replay buffer.
+
+        :param batch_size: Size of the batch to sample
+        :type batch_size: int
+        :param return_idx: Whether to return indices, defaults to False
+        :type return_idx: bool, optional
+        :return: Sampled batch of experiences
+        :rtype: Any
+        """
         return self.memory.sample(batch_size, return_idx)
 
-    def sample_distributed(self, batch_size, return_idx=None):
+    def sample_distributed(self, batch_size: int, return_idx: Optional[bool] = None) -> Any:
+        """Sample a batch of experiences from the distributed dataset.
+
+        :param batch_size: Size of the batch to sample
+        :type batch_size: int
+        :param return_idx: Not used in distributed sampling, defaults to None
+        :type return_idx: Optional[bool], optional
+        :return: Sampled batch of experiences
+        :rtype: Any
+        """
         self.dataset.batch_size = batch_size
         return next(iter(self.dataloader))
 
-    def sample_per(self, batch_size, beta):
+    def sample_per(self, batch_size: int, beta: float) -> Tuple[Any, Any, Any]:
+        """Sample a batch of experiences from the Prioritized Experience Replay buffer.
+
+        :param batch_size: Size of the batch to sample
+        :type batch_size: int
+        :param beta: Importance-sampling weight
+        :type beta: float
+        :return: Sampled batch of experiences, indices, and importance-sampling weights
+        :rtype: Tuple[Any, Any, Any]
+        """
         return self.memory.sample(batch_size, beta)
 
-    def sample_n_step(self, idxs):
+    def sample_n_step(self, idxs: Any) -> Any:
+        """Sample a batch of experiences from the n-step replay buffer.
+
+        :param idxs: Indices to sample from
+        :type idxs: Any
+        :return: Sampled batch of experiences
+        :rtype: Any
+        """
         return self.memory.sample_from_indices(idxs)

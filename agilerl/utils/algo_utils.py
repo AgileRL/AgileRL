@@ -125,6 +125,8 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
     :return: PyTorch tensor of the observation on a desired device.
     :rtype: TorchObsType
     """
+    if isinstance(obs, torch.Tensor):
+        return obs.to(device)
     if isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device)
     elif isinstance(obs, dict):

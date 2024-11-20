@@ -285,8 +285,8 @@ def test_q_learning_with_probe_env():
     env = ConstantRewardEnv()
     learn_steps = 1000
     algo_args = {
-        "observation_space": (env.observation_space.n,),
-        "action_space": env.action_space.n,
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
         "one_hot": True if env.observation_space.n > 1 else False,
         "lr": 1e-2,
     }
@@ -304,8 +304,8 @@ def test_policy_q_learning_with_probe_env():
     env = ConstantRewardContActionsEnv()
     learn_steps = 1000
     algo_args = {
-        "observation_space": (env.observation_space.n,),
-        "action_space": env.action_space.shape[0],
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
         "one_hot": True if env.observation_space.n > 1 else False,
         "max_action": 1.0,
         "min_action": 0.0,
@@ -328,8 +328,8 @@ def test_policy_q_learning_with_probe_env_cnn():
     env = FixedObsPolicyContActionsImageEnv()
     learn_steps = 1000
     algo_args = {
-        "observation_space": (env.observation_space.shape),
-        "action_space": env.action_space.shape[0],
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
         "one_hot": False,
         "net_config": {
             "arch": "cnn",  # Network architecture
@@ -361,8 +361,8 @@ def test_policy_on_policy_with_probe_env():
     env = ConstantRewardContActionsEnv()
     learn_steps = 100
     algo_args = {
-        "observation_space": (env.observation_space.n,),
-        "action_space": env.action_space.shape[0],
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
         "one_hot": True if env.observation_space.n > 1 else False,
         "lr": 0.01,
         "discrete_actions": False,
@@ -375,8 +375,8 @@ def test_policy_on_policy_with_probe_env_cnn():
     env = FixedObsPolicyContActionsImageEnv()
     learn_steps = 100
     algo_args = {
-        "observation_space": (env.observation_space.shape),
-        "action_space": env.action_space.shape[0],
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
         "one_hot": False,
         "net_config": {
             "arch": "cnn",  # Network architecture

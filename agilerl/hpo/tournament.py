@@ -1,5 +1,9 @@
+from typing import List, Tuple
 import numpy as np
 
+from agilerl.algorithms.base import EvolvableAlgorithm
+
+PopulationType = List[EvolvableAlgorithm]
 
 class TournamentSelection:
     """The tournament selection class.
@@ -14,7 +18,7 @@ class TournamentSelection:
     :type eval_loop: int
     """
 
-    def __init__(self, tournament_size, elitism, population_size, eval_loop):
+    def __init__(self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
         assert population_size > 0, "Population size must be greater than zero."
@@ -25,28 +29,46 @@ class TournamentSelection:
         self.population_size = population_size
         self.eval_loop = eval_loop
 
-    def _tournament(self, fitness_values):
+    def _tournament(self, fitness_values: List[float]) -> int:
+        """
+        Perform a tournament selection.
+
+        :param fitness_values: List of fitness values
+        :type fitness_values: list[float]
+        :return: Index of the selected winner
+        :rtype: int
+        """
         selection = np.random.randint(0, len(fitness_values), size=self.tournament_size)
         selection_values = [fitness_values[i] for i in selection]
         winner = selection[np.argmax(selection_values)]
         return winner
 
-    def _elitism(self, population):
-        """Returns elite member of population and its id."""
-        last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
+    def _elitism(self, population: PopulationType) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
+        """
+        Perform elitism selection.
+
+        :param population: Population of agents
+        :type population: PopulationType
+        :return: Elite member of population, rank array, and max id
+        :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
+        """
+        last_fitness = [np.mean(indi.fitness[-self.eval_loop:]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
 
         max_id = max([ind.index for ind in population])
 
-        model = population[np.argsort(rank)[-1]]
+        model = population[int(np.argsort(rank)[-1])]
         elite = model.clone()
         return elite, rank, max_id
 
-    def select(self, population):
-        """Returns best agent and new population of agents following tournament selection.
+    def select(self, population: PopulationType) -> Tuple[EvolvableAlgorithm, PopulationType]:
+        """
+        Returns best agent and new population of agents following tournament selection.
 
         :param population: Population of agents
-        :type population: list[object]
+        :type population: PopulationType
+        :return: Elite agent and new population
+        :rtype: tuple[EvolvableAlgorithm, PopulationType]
         """
         elite, rank, max_id = self._elitism(population)
 

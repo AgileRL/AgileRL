@@ -1,47 +1,60 @@
+from typing import List, Tuple, Optional, Any, Dict
 import os
 import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-
+from accelerate import Accelerator
 import numpy as np
 import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
+import gymnasium as gym
 
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
+from agilerl.algorithms.base import MultiAgentAlgorithm
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
+from agilerl.utils.utils import (
+    tournament_selection_and_mutation,
+    save_population_checkpoint,
+    init_wandb
+)
 
+InitDictType = Optional[Dict[str, Any]]
+PopulationType = List[MultiAgentAlgorithm]   
 
 def train_multi_agent(
-    env,
-    env_name,
-    algo,
-    pop,
-    memory,
-    sum_scores=True,
-    INIT_HP=None,
-    MUT_P=None,
-    net_config=None,
-    swap_channels=False,
-    max_steps=50000,
-    evo_steps=25,
-    eval_steps=None,
-    eval_loop=1,
-    learning_delay=0,
-    target=None,
-    tournament=None,
-    mutation=None,
-    checkpoint=None,
-    checkpoint_path=None,
-    overwrite_checkpoints=False,
-    save_elite=False,
-    elite_path=None,
-    wb=False,
-    verbose=True,
-    accelerator=None,
-    wandb_api_key=None,
-):
+    env: gym.Env,
+    env_name: str,
+    algo: str,
+    pop: PopulationType,
+    memory: ReplayBuffer,
+    sum_scores: bool = True,
+    INIT_HP: InitDictType = None,
+    MUT_P: InitDictType = None,
+    net_config: InitDictType = None,
+    swap_channels: bool = False,
+    max_steps: int = 50000,
+    evo_steps: int = 25,
+    eval_steps: Optional[int] = None,
+    eval_loop: int = 1,
+    learning_delay: int = 0,
+    target: Optional[float] = None,
+    tournament: Optional[TournamentSelection] = None,
+    mutation: Optional[Mutations] = None,
+    checkpoint: Optional[int] = None,
+    checkpoint_path: Optional[str] = None,
+    overwrite_checkpoints: bool = False,
+    save_elite: bool = False,
+    elite_path: Optional[str] = None,
+    wb: bool = False,
+    verbose: bool = True,
+    accelerator: Optional[Accelerator] = None,
+    wandb_api_key: Optional[str] = None,
+) -> Tuple[PopulationType, List[List[float]]]:
     """The general online multi-agent RL training function. Returns trained population of agents
     and their fitnesses.
 
@@ -132,48 +145,14 @@ def train_multi_agent(
     start_time = time.time()
 
     if wb:
-        if not hasattr(wandb, "api"):
-            if wandb_api_key is not None:
-                wandb.login(key=wandb_api_key)
-            else:
-                warnings.warn("Must login to wandb with API key.")
-
-        config_dict = {}
-        if INIT_HP is not None:
-            config_dict.update(INIT_HP)
-        if MUT_P is not None:
-            config_dict.update(MUT_P)
-        if net_config is not None:
-            config_dict.update(net_config)
-
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.init(
-                    # set the wandb project where this run will be logged
-                    project="AgileRLMultiAgent",
-                    name="{}-MAEvoHPO-{}-{}".format(
-                        env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                    ),
-                    # track hyperparameters and run metadata
-                    config=config_dict,
-                )
-            accelerator.wait_for_everyone()
-        else:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project="AgileRLMultiAgent",
-                name="{}-MAEvoHPO-{}-{}".format(
-                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                ),
-                # track hyperparameters and run metadata
-                config=config_dict,
-            )
-    if accelerator is not None:
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            if not os.path.exists(accel_temp_models_path):
-                os.makedirs(accel_temp_models_path)
+        init_wandb(
+            algo=algo,
+            env_name=env_name,
+            init_hyperparams=INIT_HP,
+            mutation_hyperparams=MUT_P,
+            wandb_api_key=wandb_api_key,
+            accelerator=accelerator
+        )
 
     if hasattr(env, "num_envs"):
         is_vectorised = True
@@ -518,39 +497,17 @@ def train_multi_agent(
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                for model in pop:
-                    model.unwrap_models()
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    elite, pop = tournament.select(pop)
-                    pop = mutation.mutation(pop)
-                    for pop_i, model in enumerate(pop):
-                        model.save_checkpoint(
-                            f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                        )
-                accelerator.wait_for_everyone()
-                if not accelerator.is_main_process:
-                    for pop_i, model in enumerate(pop):
-                        model.load_checkpoint(
-                            f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                        )
-                accelerator.wait_for_everyone()
-                for model in pop:
-                    model.wrap_models()
-            else:
-                elite, pop = tournament.select(pop)
-                pop = mutation.mutation(pop)
-
-            if save_elite:
-                elite_save_path = (
-                    elite_path.split(".pt")[0]
-                    if elite_path is not None
-                    else f"{env_name}-elite_{algo}"
-                )
-                elite.save_checkpoint(f"{elite_save_path}.pt")
-
+            pop = tournament_selection_and_mutation(
+                population=pop,
+                tournament=tournament,
+                mutation=mutation,
+                env_name=env_name,
+                algo=algo,
+                elite_path=elite_path,
+                save_elite=save_elite,
+                accelerator=accelerator
+            )
+    
         if verbose:
             if sum_scores:
                 fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -617,33 +574,12 @@ def train_multi_agent(
         # Save model checkpoint
         if checkpoint is not None:
             if pop[0].steps[-1] // checkpoint > checkpoint_count:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.unwrap_models()
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        for i, agent in enumerate(pop):
-                            current_checkpoint_path = (
-                                f"{save_path}_{i}.pt"
-                                if overwrite_checkpoints
-                                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                            )
-                            agent.save_checkpoint(current_checkpoint_path)
-                        print("Saved checkpoint.")
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.wrap_models()
-                    accelerator.wait_for_everyone()
-                else:
-                    for i, agent in enumerate(pop):
-                        current_checkpoint_path = (
-                            f"{save_path}_{i}.pt"
-                            if overwrite_checkpoints
-                            else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                        )
-                        agent.save_checkpoint(current_checkpoint_path)
-                    print("Saved checkpoint.")
+                save_population_checkpoint(
+                    population=pop,
+                    save_path=save_path,
+                    overwrite_checkpoints=overwrite_checkpoints,
+                    accelerator=accelerator
+                )
                 checkpoint_count += 1
 
     if wb:

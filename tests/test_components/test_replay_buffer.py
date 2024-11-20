@@ -742,7 +742,7 @@ def test_proportions_calculated_based_on_sum_tree():
         num_envs=1,
     )
     batch_size = 32
-    indices = buffer._sample_proprtional(batch_size)
+    indices = buffer._sample_proportional(batch_size)
     p_total = buffer.sum_tree.sum(0, len(buffer) - 1)
     segment = p_total / batch_size
     for i, idx in enumerate(indices):

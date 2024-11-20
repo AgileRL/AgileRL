@@ -11,6 +11,7 @@ import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from torch._dynamo import OptimizedModule
+from gymnasium import spaces
 
 from agilerl.algorithms.matd3 import MATD3
 from agilerl.networks.custom_components import GumbelSoftmax
@@ -110,9 +111,9 @@ class DummyEvolvableCNN(EvolvableCNN):
 @pytest.fixture
 def mlp_actor(observation_spaces, action_spaces):
     net = nn.Sequential(
-        nn.Linear(observation_spaces[0][0], 64),
+        nn.Linear(observation_spaces[0].shape[0], 64),
         nn.ReLU(),
-        nn.Linear(64, action_spaces[0]),
+        nn.Linear(64, action_spaces[0].n),
         GumbelSoftmax(),
     )
     return net
@@ -121,7 +122,7 @@ def mlp_actor(observation_spaces, action_spaces):
 @pytest.fixture
 def mlp_critic(action_spaces, observation_spaces):
     net = nn.Sequential(
-        nn.Linear(observation_spaces[0][0] + action_spaces[0], 64), nn.ReLU(), nn.Linear(64, 1)
+        nn.Linear(observation_spaces[0].shape[0] + action_spaces[0].n, 64), nn.ReLU(), nn.Linear(64, 1)
     )
     return net
 
@@ -150,8 +151,8 @@ def mocked_accelerator():
 
 @pytest.fixture
 def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_hot):
-    state_size = observation_spaces[0]
-    action_size = action_spaces[0]
+    state_size = observation_spaces[0].shape
+    action_size = action_spaces[0].n
     if one_hot:
         states = {
             agent: torch.randint(0, state_size[0], (batch_size, 1)).float()
@@ -178,8 +179,8 @@ def accelerated_experiences(batch_size, observation_spaces, action_spaces, agent
 
 @pytest.fixture
 def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_hot, device):
-    state_size = observation_spaces[0]
-    action_size = action_spaces[0]
+    state_size = observation_spaces[0].shape
+    action_size = action_spaces[0].n
     if one_hot:
         states = {
             agent: torch.randint(0, state_size[0], (batch_size, 1)).float().to(device)
@@ -211,11 +212,10 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_ho
 
     return states, actions, rewards, next_states, dones
 
-
 @pytest.mark.parametrize(
     "net_config, accelerator_flag, observation_spaces, compile_mode",
     [
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)], None),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [spaces.Box(0, 1, shape=(4,)) for _ in range(2)], None),
         (
             {
                 "arch": "cnn",
@@ -226,7 +226,7 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_ho
                 "normalize": False,
             },
             False,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             None,
         ),
         (
@@ -239,10 +239,10 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_ho
                 "normalize": False,
             },
             True,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             None,
         ),
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [(4,), (4,)], "default"),
+        ({"arch": "mlp", "hidden_size": [64, 64]}, False, [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))], "default"),
         (
             {
                 "arch": "cnn",
@@ -253,7 +253,7 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_ho
                 "normalize": False,
             },
             False,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             "default",
         ),
         (
@@ -266,7 +266,7 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_ho
                 "normalize": False,
             },
             True,
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             "default",
         ),
     ],
@@ -274,7 +274,7 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, one_ho
 def test_initialize_matd3_with_net_config(
     net_config, accelerator_flag, observation_spaces, device, compile_mode
 ):
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -318,8 +318,8 @@ def test_initialize_matd3_with_net_config(
     assert matd3.net_config == net_config, matd3.net_config
     assert matd3.batch_size == batch_size
     assert matd3.multi
-    assert matd3.total_observation_spaces == sum(state[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(action_spaces)
+    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -371,7 +371,7 @@ def test_initialize_matd3_with_net_config(
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, accelerator_flag, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "reduce-overhead"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "reduce-overhead"),
     ],
 )
 def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
@@ -412,10 +412,10 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, accelerator_flag, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_initialize_matd3_with_mlp_networks(
@@ -480,8 +480,8 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.min_action == [(-1,), (-1,)]
     assert matd3.discrete_actions is True
     assert matd3.multi
-    assert matd3.total_observation_spaces == sum(state[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(action_spaces)
+    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -517,10 +517,10 @@ def test_initialize_matd3_with_mlp_networks(
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, accelerator_flag, compile_mode",
     [
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False, None),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True, None),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_initialize_matd3_with_cnn_networks(
@@ -599,8 +599,8 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.min_action == [(-1,), (-1,)]
     assert matd3.discrete_actions is True
     assert matd3.multi
-    assert matd3.total_observation_spaces == sum(state[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(action_spaces)
+    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -637,10 +637,10 @@ def test_initialize_matd3_with_cnn_networks(
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, net, compile_mode",
     [
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp", None),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn", None),
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "mlp", "default"),
-        ([(4, 210, 160) for _ in range(2)], [2 for _ in range(2)], "cnn", "default"),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "mlp", None),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "cnn", None),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "mlp", "default"),
+        ([spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "cnn", "default"),
     ],
 )
 def test_initialize_matd3_with_evo_networks(
@@ -649,8 +649,8 @@ def test_initialize_matd3_with_evo_networks(
     if net == "mlp":
         evo_actors = [
             EvolvableMLP(
-                num_inputs=observation_spaces[x][0],
-                num_outputs=action_spaces[x],
+                num_inputs=observation_spaces[x].shape[0],
+                num_outputs=action_spaces[x].n,
                 hidden_size=[64, 64],
                 mlp_activation="ReLU",
                 mlp_output_activation="Tanh",
@@ -660,8 +660,8 @@ def test_initialize_matd3_with_evo_networks(
         evo_critics = [
             [
                 EvolvableMLP(
-                    num_inputs=sum(observation_space[0] for observation_space in observation_spaces)
-                    + sum(action_spaces),
+                    num_inputs=sum(observation_space.shape[0] for observation_space in observation_spaces)
+                    + sum(space.n for space in action_spaces),
                     num_outputs=1,
                     hidden_size=[64, 64],
                     mlp_activation="ReLU",
@@ -673,8 +673,8 @@ def test_initialize_matd3_with_evo_networks(
     else:
         evo_actors = [
             EvolvableCNN(
-                input_shape=observation_spaces[0],
-                num_outputs=action_spaces[0],
+                input_shape=observation_spaces[0].shape,
+                num_outputs=action_spaces[0].n,
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -688,8 +688,8 @@ def test_initialize_matd3_with_evo_networks(
         evo_critics = [
             [
                 EvolvableCNN(
-                    input_shape=observation_spaces[0],
-                    num_outputs=sum(action_spaces),
+                    input_shape=observation_spaces[0].shape,
+                    num_outputs=sum(space.n for space in action_spaces),
                     channel_size=[8, 8],
                     kernel_size=[2, 2],
                     stride_size=[1, 1],
@@ -747,8 +747,8 @@ def test_initialize_matd3_with_evo_networks(
     assert matd3.min_action == [(-1,), (-1,)]
     assert matd3.discrete_actions is True
     assert matd3.multi
-    assert matd3.total_observation_spaces == sum(state[0] for state in observation_spaces)
-    assert matd3.total_actions == sum(action_spaces)
+    assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
+    assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
@@ -785,8 +785,8 @@ def test_initialize_matd3_with_evo_networks(
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, compile_mode",
     [
-        ([[4] for _ in range(2)], [2 for _ in range(2)], None),
-        ([[4] for _ in range(2)], [2 for _ in range(2)], "default"),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], None),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "default"),
     ],
 )
 def test_initialize_matd3_with_incorrect_evo_networks(
@@ -815,8 +815,8 @@ def test_initialize_matd3_with_incorrect_evo_networks(
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, compile_mode",
     [
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], None),
-        ([(6,) for _ in range(2)], [2 for _ in range(2)], "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "default"),
     ],
 )
 def test_matd3_init_warning(mlp_actor, observation_spaces, action_spaces, device, compile_mode):
@@ -846,8 +846,8 @@ def test_matd3_init_warning(mlp_actor, observation_spaces, action_spaces, device
 )
 def test_matd3_init_with_compile_no_error(mode):
     matd3 = MATD3(
-        observation_spaces=[(1,), (1,)],
-        action_spaces=[1, 1],
+        observation_spaces=[spaces.Box(0, 1, shape=(1,)) for _ in range(2)],
+        action_spaces=[spaces.Discrete(1) for _ in range(2)],
         one_hot=False,
         agent_ids=["agent_0", "agent_1"],
         n_agents=2,
@@ -895,8 +895,8 @@ def test_matd3_init_with_compile_error(mode):
     )
     with pytest.raises(AssertionError, match=err_string):
         MATD3(
-            observation_spaces=[(1,), (1,)],
-            action_spaces=[1, 1],
+            observation_spaces=[spaces.Box(0, 1, shape=(1,)) for _ in range(2)],
+            action_spaces=[spaces.Discrete(1) for _ in range(2)],
             one_hot=False,
             agent_ids=["agent_0", "agent_1"],
             n_agents=2,
@@ -911,22 +911,22 @@ def test_matd3_init_with_compile_error(mode):
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, one_hot, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, False, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, False, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, True, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, True, "default"),
     ],
 )
 def test_matd3_get_action_mlp(
@@ -935,12 +935,12 @@ def test_matd3_get_action_mlp(
     agent_ids = ["agent_0", "agent_1"]
     if one_hot:
         state = {
-            agent: np.random.randint(0, observation_spaces[idx], 1)
+            agent: np.random.randint(0, observation_spaces[idx].shape, 1)
             for idx, agent in enumerate(agent_ids)
         }
     else:
         state = {
-            agent: np.random.randn(*observation_spaces[idx])
+            agent: np.random.randn(*observation_spaces[idx].shape)
             for idx, agent in enumerate(agent_ids)
         }
 
@@ -960,7 +960,7 @@ def test_matd3_get_action_mlp(
     cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_spaces[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 assert (
                     np.isclose(
@@ -983,21 +983,21 @@ def test_matd3_get_action_mlp(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_spaces[idx] - 1
+                assert action <= action_spaces[idx].n - 1
     matd3 = None
 
 
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (1, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(3, 32, 32) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_matd3_get_action_cnn(
@@ -1013,7 +1013,7 @@ def test_matd3_get_action_cnn(
         "normalize": False,
     }
     state = {
-        agent: np.random.randn(*observation_spaces[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     matd3 = MATD3(
         observation_spaces,
@@ -1031,7 +1031,7 @@ def test_matd3_get_action_cnn(
     cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_spaces[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 assert (
                     np.isclose(
@@ -1054,20 +1054,20 @@ def test_matd3_get_action_cnn(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_spaces[idx] - 1
+                assert action <= action_spaces[idx].n - 1
 
 
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
     ],
 )
 def test_matd3_get_action_distributed(
@@ -1076,7 +1076,7 @@ def test_matd3_get_action_distributed(
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
     state = {
-        agent: np.random.randn(*observation_spaces[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     matd3 = MATD3(
         observation_spaces,
@@ -1104,7 +1104,7 @@ def test_matd3_get_action_distributed(
     cont_actions, discrete_action = matd3.get_action(state, training)
     for idx, env_actions in enumerate(list(cont_actions.values())):
         for action in env_actions:
-            assert len(action) == action_spaces[idx]
+            assert len(action) == action_spaces[idx].n
             if discrete_actions:
                 assert (
                     np.isclose(
@@ -1127,27 +1127,27 @@ def test_matd3_get_action_distributed(
     if discrete_actions:
         for idx, env_action in enumerate(list(discrete_action.values())):
             for action in env_action:
-                assert action <= action_spaces[idx] - 1
+                assert action <= action_spaces[idx].n - 1
 
 
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, None),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], False, "default"),
-        (1, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
-        (0, [(6,) for _ in range(2)], [2 for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], True, "default"),
     ],
 )
 def test_matd3_get_action_agent_masking(
     training, observation_spaces, action_spaces, discrete_actions, compile_mode, device
 ):
     agent_ids = ["agent_0", "agent_1"]
-    state = {agent: np.random.randn(*observation_spaces[0]) for agent in agent_ids}
+    state = {agent: np.random.randn(*observation_spaces[0].shape) for agent in agent_ids}
     if discrete_actions:
         info = {
             "agent_0": {"env_defined_actions": 1},
@@ -1184,14 +1184,14 @@ def test_matd3_get_action_agent_masking(
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, compile_mode",
     [
-        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], False, None),
-        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], False, None),
-        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], True, None),
-        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], True, None),
-        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], False, "default"),
-        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], False, "default"),
-        (1, [(6,) for _ in range(2)], [6 for _ in range(2)], True, "default"),
-        (0, [(6,) for _ in range(2)], [6 for _ in range(2)], True, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], False, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], False, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], True, None),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], True, None),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], False, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], False, "default"),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], True, "default"),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(6) for _ in range(2)], True, "default"),
     ],
 )
 def test_matd3_get_action_vectorized_agent_masking(
@@ -1200,16 +1200,16 @@ def test_matd3_get_action_vectorized_agent_masking(
     num_envs = 6
     agent_ids = ["agent_0", "agent_1"]
     state = {
-        agent: np.array([np.random.randn(*observation_spaces[0]) for _ in range(num_envs)])
+        agent: np.array([np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)])
         for agent in agent_ids
     }
     if discrete_actions:
         env_defined_action = np.array(
-            [np.random.randint(0, observation_spaces[0][0] + 1) for _ in range(num_envs)]
+            [np.random.randint(0, observation_spaces[0].shape[0] + 1) for _ in range(num_envs)]
         )
     else:
         env_defined_action = np.array(
-            [np.random.randn(*observation_spaces[0]) for _ in range(num_envs)]
+            [np.random.randn(*observation_spaces[0].shape) for _ in range(num_envs)]
         )
     nan_array = np.zeros(env_defined_action.shape)
     nan_array[:] = np.nan
@@ -1243,8 +1243,8 @@ def test_matd3_get_action_vectorized_agent_masking(
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, one_hot",
     [
-        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
     ],
 )
 def test_matd3_get_action_action_masking_exception(
@@ -1253,7 +1253,7 @@ def test_matd3_get_action_action_masking_exception(
     agent_ids = ["agent_0", "agent_1"]
     state = {
         agent: {
-            "observation": np.random.randn(*observation_spaces[idx]),
+            "observation": np.random.randn(*observation_spaces[idx].shape),
             "action_mask": [0, 1, 0, 1],
         }
         for idx, agent in enumerate(agent_ids)
@@ -1277,8 +1277,8 @@ def test_matd3_get_action_action_masking_exception(
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, discrete_actions, one_hot",
     [
-        (1, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
-        (0, [(6,) for _ in range(2)], [4 for _ in range(2)], True, False),
+        (1, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
+        (0, [spaces.Box(0, 1, shape=(6,)) for _ in range(2)], [spaces.Discrete(4) for _ in range(2)], True, False),
     ],
 )
 def test_matd3_get_action_action_masking(
@@ -1286,7 +1286,7 @@ def test_matd3_get_action_action_masking(
 ):
     agent_ids = ["agent_0", "agent_1"]
     state = {
-        agent: np.random.randn(*observation_spaces[idx]) for idx, agent in enumerate(agent_ids)
+        agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
     info = {
         agent: {
@@ -1313,14 +1313,14 @@ def test_matd3_get_action_action_masking(
 @pytest.mark.parametrize(
     "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, "default"),
     ],
 )
 def test_matd3_learns_from_experiences_mlp(
@@ -1334,7 +1334,7 @@ def test_matd3_learns_from_experiences_mlp(
     device,
     compile_mode,
 ):
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     policy_freq = 2
     matd3 = MATD3(
@@ -1415,14 +1415,14 @@ def no_sync(self):
 @pytest.mark.parametrize(
     "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, None),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, None),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], False, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], False, "default"),
-        ([(6,), (6,)], True, 64, [2, 2], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, None),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], False, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], False, "default"),
+        ([spaces.Box(0, 1, shape=(6,)) for _ in range(2)], True, 64, [spaces.Discrete(2) for _ in range(2)], ["agent_0", "agent_1"], True, "default"),
     ],
 )
 def test_matd3_learns_from_experiences_mlp_distributed(
@@ -1436,7 +1436,7 @@ def test_matd3_learns_from_experiences_mlp_distributed(
     compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     policy_freq = 2
     matd3 = MATD3(
@@ -1530,19 +1530,19 @@ def test_matd3_learns_from_experiences_mlp_distributed(
     "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             False,
             64,
-            [2, 2],
+            [spaces.Discrete(2) for _ in range(2)],
             ["agent_0", "agent_1"],
             False,
             None,
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             True,
             64,
-            [2, 2],
+            [spaces.Discrete(2) for _ in range(2)],
             ["agent_0", "agent_1"],
             False,
             "default",
@@ -1560,7 +1560,7 @@ def test_matd3_learns_from_experiences_cnn(
     device,
     compile_mode,
 ):
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     policy_freq = 2
     net_config = {
@@ -1640,37 +1640,37 @@ def test_matd3_learns_from_experiences_cnn(
     "observation_spaces, discrete_actions, batch_size, action_spaces, agent_ids, one_hot, compile_mode",
     [
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             False,
             64,
-            [2, 2],
+            [spaces.Discrete(2) for _ in range(2)],
             ["agent_0", "agent_1"],
             False,
             None,
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             True,
             64,
-            [2, 2],
+            [spaces.Discrete(2) for _ in range(2)],
             ["agent_0", "agent_1"],
             False,
             None,
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             False,
             64,
-            [2, 2],
+            [spaces.Discrete(2) for _ in range(2)],
             ["agent_0", "agent_1"],
             False,
             "default",
         ),
         (
-            [(3, 32, 32), (3, 32, 32)],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
             True,
             64,
-            [2, 2],
+            [spaces.Discrete(2) for _ in range(2)],
             ["agent_0", "agent_1"],
             False,
             "default",
@@ -1689,7 +1689,7 @@ def test_matd3_learns_from_experiences_cnn_distributed(
     compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
         "arch": "cnn",
@@ -1792,8 +1792,8 @@ def test_matd3_learns_from_experiences_cnn_distributed(
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_soft_update(device, compile_mode):
-    observation_spaces = [(6,), (6,)]
-    action_spaces = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(6,)) for _ in range(2)]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
 
     matd3 = MATD3(
@@ -1866,8 +1866,8 @@ def test_matd3_soft_update(device, compile_mode):
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize("sum_score", [True, False])
 def test_matd3_algorithm_test_loop(device, compile_mode, sum_score):
-    observation_spaces = [(6,), (6,)]
-    action_spaces = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(6,)) for _ in range(2)]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
 
     env = DummyMultiEnv(observation_spaces[0], action_spaces)
@@ -1896,8 +1896,8 @@ def test_matd3_algorithm_test_loop(device, compile_mode, sum_score):
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
-    env_observation_spaces = [(32, 32, 3), (32, 32, 3)]
-    agent_observation_spaces = [(3, 32, 32), (3, 32, 32)]
+    env_observation_spaces = [spaces.Box(0, 1, shape=(32, 32, 3)) for _ in range(2)]
+    agent_observation_spaces = [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)]
     net_config = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -1906,7 +1906,7 @@ def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
         "stride_size": [1],
         "normalize": False,
     }
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
     env = DummyMultiEnv(env_observation_spaces[0], action_spaces)
     matd3 = MATD3(
@@ -1935,8 +1935,8 @@ def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
 @pytest.mark.parametrize("sum_score", [True, False])
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode):
-    env_observation_spaces = [(32, 32, 3), (32, 32, 3)]
-    agent_observation_spaces = [(3, 32, 32), (3, 32, 32)]
+    env_observation_spaces = [spaces.Box(0, 1, shape=(32, 32, 3)) for _ in range(2)]
+    agent_observation_spaces = [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)]
     net_config = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -1945,7 +1945,7 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mod
         "stride_size": [1],
         "normalize": False,
     }
-    action_spaces = [2, 2]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = None
     env = make_multi_agent_vect_envs(
         DummyMultiEnv, 2, **dict(observation_spaces=env_observation_spaces[0], action_spaces=action_spaces)
@@ -1986,8 +1986,8 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mod
 )
 def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode):
     # Clones the agent and returns an identical copy.
-    observation_spaces = [(4,), (4,)]
-    action_spaces = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -2097,8 +2097,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_clone_new_index(compile_mode):
-    observation_spaces = [(4,), (4,)]
-    action_spaces = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -2121,11 +2121,10 @@ def test_clone_new_index(compile_mode):
 
     assert clone_agent.index == 100
 
-
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_clone_after_learning(compile_mode):
-    observation_spaces = [(4,), (4,)]
-    action_spaces = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(4,)), spaces.Box(0, 1, shape=(4,))]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     one_hot = False
     n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
@@ -2148,16 +2147,16 @@ def test_clone_after_learning(compile_mode):
     )
 
     states = {
-        agent_id: torch.randn(batch_size, observation_spaces[idx][0])
+        agent_id: torch.randn(batch_size, observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
     actions = {
-        agent_id: torch.randn(batch_size, action_spaces[idx])
+        agent_id: torch.randn(batch_size, action_spaces[idx].n)
         for idx, agent_id in enumerate(agent_ids)
     }
     rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
     next_states = {
-        agent_id: torch.randn(batch_size, observation_spaces[idx][0])
+        agent_id: torch.randn(batch_size, observation_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
     dones = {agent_id: torch.zeros(batch_size, 1) for agent_id in agent_ids}
@@ -2249,12 +2248,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     net_config = {"arch": "mlp", "hidden_size": [32, 32]}
     # Initialize the ddpg agent
     matd3 = MATD3(
-        observation_spaces=[
-            [
-                6,
-            ]
-        ],
-        action_spaces=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(6,))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2306,12 +2301,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
 
     # Load checkpoint
     loaded_matd3 = MATD3(
-        observation_spaces=[
-            [
-                6,
-            ]
-        ],
-        action_spaces=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(6,))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2419,8 +2410,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     policy_freq = 2
     # Initialize the ddpg agent
     matd3 = MATD3(
-        observation_spaces=[[3, 32, 32]],
-        action_spaces=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2473,8 +2464,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
 
     # Load checkpoint
     loaded_matd3 = MATD3(
-        observation_spaces=[[3, 32, 32]],
-        action_spaces=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2573,8 +2564,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     "observation_spaces, action_spaces",
     [
         (
-            [[6]],
-            [2],
+            [spaces.Box(0, 1, shape=(6,))],
+            [spaces.Discrete(2)],
         )
     ],
 )
@@ -2655,8 +2646,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
 
     # Load checkpoint
     loaded_matd3 = MATD3(
-        observation_spaces=[[3, 32, 32]],
-        action_spaces=[2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32))],
+        action_spaces=[spaces.Discrete(2)],
         one_hot=False,
         n_agents=1,
         agent_ids=["agent_0"],
@@ -2740,8 +2731,8 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_matd3_unwrap_models(compile_mode):
-    observation_spaces = [(6,), (6,)]
-    action_spaces = [2, 2]
+    observation_spaces = [spaces.Box(0, 1, shape=(6,)) for _ in range(2)]
+    action_spaces = [spaces.Discrete(2), spaces.Discrete(2)]
     accelerator = Accelerator()
     matd3 = MATD3(
         observation_spaces,
@@ -2787,8 +2778,8 @@ def test_action_scaling(compile_mode):
     min_actions = [(-1,), (-2,), (0,), (0,), (-1,)]
 
     matd3 = MATD3(
-        observation_spaces=[[4], [4], [4], [4], [4]],
-        action_spaces=[1, 1, 1, 1, 1],
+        observation_spaces=[spaces.Box(0, 1, shape=(4,)) for _ in range(5)],
+        action_spaces=[spaces.Discrete(1) for _ in range(5)],
         n_agents=5,
         agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
         discrete_actions=False,
@@ -2852,8 +2843,8 @@ def test_action_scaling(compile_mode):
 def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     # Initialize the matd3 agent
     matd3 = MATD3(
-        observation_spaces=[[4], [4]],
-        action_spaces=[2, 2],
+        observation_spaces=[spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+        action_spaces=[spaces.Discrete(2) for _ in range(2)],
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
@@ -2966,8 +2957,8 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     # Initialize the matd3 agent
     matd3 = MATD3(
-        observation_spaces=[[3, 32, 32], [3, 32, 32]],
-        action_spaces=[2, 2],
+        observation_spaces=[spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+        action_spaces=[spaces.Discrete(2) for _ in range(2)],
         one_hot=False,
         n_agents=2,
         agent_ids=["agent_a", "agent_b"],
@@ -3078,10 +3069,10 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces, arch, input_tensor, critic_input_tensor, secondary_input_tensor, compile_mode",
     [
-        ([[4], [4]], [2, 2], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
+        ([spaces.Box(0, 1, shape=(4,)) for _ in range(2)], [spaces.Discrete(2) for _ in range(2)], "mlp", torch.randn(1, 4), torch.randn(1, 6), None, None),
         (
-            [[4, 210, 160], [4, 210, 160]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             "cnn",
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),
@@ -3089,8 +3080,8 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             None,
         ),
         (
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             "mlp",
             torch.randn(1, 4),
             torch.randn(1, 6),
@@ -3098,8 +3089,8 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             "default",
         ),
         (
-            [[4, 210, 160], [4, 210, 160]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4, 210, 160)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             "cnn",
             torch.randn(1, 4, 2, 210, 160),
             torch.randn(1, 4, 2, 210, 160),

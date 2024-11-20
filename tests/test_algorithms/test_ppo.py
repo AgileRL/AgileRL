@@ -10,6 +10,7 @@ import torch.optim as optim
 from accelerate import Accelerator
 from gymnasium import spaces
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 
 from agilerl.algorithms.ppo import PPO
 from agilerl.networks.evolvable_cnn import EvolvableCNN
@@ -152,8 +153,8 @@ def test_initializes_with_default_values():
 
     print("ppo net config", ppo.net_config)
     assert ppo.algo == "PPO"
-    assert ppo.observation_space ==(4,)
-    assert ppo.action_space == 2
+    assert ppo.observation_space ==spaces.Box(low=0, high=255, shape=(4,), dtype=np.uint8)
+    assert ppo.action_space == spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
     assert ppo.one_hot == one_hot
     assert ppo.discrete_actions == discrete_actions
     assert ppo.net_config == {
@@ -207,6 +208,7 @@ def test_initialize_ppo_with_cnn_accelerator():
     gamma = 0.99
     gae_lambda = 0.95
     mut = None
+    discrete_actions = True
     action_std_init = 0.6
     clip_coef = 0.2
     ent_coef = 0.01
@@ -243,10 +245,31 @@ def test_initialize_ppo_with_cnn_accelerator():
         wrap=wrap
     )
 
+    net_config_cnn.update({"mlp_output_activation": "Softmax"})
+
+    assert ppo.observation_space == observation_space
+    assert ppo.action_space == action_space
+    assert ppo.one_hot == one_hot
+    assert ppo.discrete_actions == discrete_actions
+    assert ppo.net_config == net_config_cnn
+    assert ppo.batch_size == batch_size
+    assert ppo.lr == lr
+    assert ppo.gamma == gamma
+    assert ppo.gae_lambda == gae_lambda
+    assert ppo.mut == mut
+    assert ppo.action_std_init == action_std_init
+    assert ppo.clip_coef == clip_coef
+    assert ppo.ent_coef == ent_coef
+    assert ppo.vf_coef == vf_coef
+    assert ppo.max_grad_norm == max_grad_norm
+    assert ppo.target_kl == target_kl
+    assert ppo.update_epochs == update_epochs
+    assert ppo.actor_network == actor_network
+    assert ppo.critic_network == critic_network
     assert isinstance(ppo.actor, EvolvableCNN)
-    assert isinstance(ppo.critic, EvolvableMLP)
-    assert isinstance(ppo.optimizer, optim.Adam)
+    assert isinstance(ppo.critic, EvolvableCNN)
     assert ppo.arch == "cnn"
+    assert isinstance(ppo.optimizer, AcceleratedOptimizer)
 
 # Can initialize ppo with an actor network
 @pytest.mark.parametrize(
@@ -259,7 +282,7 @@ def test_initialize_ppo_with_actor_network(
     obs_space, action_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
 ):
     obs_space = request.getfixturevalue(obs_space)
-    action_space = request.getfixturevalue(action_space)
+    action_space = spaces.Box(low=0, high=1, shape=(2,), dtype=np.float32)
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -275,8 +298,8 @@ def test_initialize_ppo_with_actor_network(
         critic_network=critic_network,
     )
 
-    assert ppo.observation_space == (4,)
-    assert ppo.action_space == 2
+    assert ppo.observation_space == obs_space
+    assert ppo.action_space == action_space
     assert ppo.one_hot == one_hot
     assert ppo.net_config is None
     assert ppo.batch_size == 64
@@ -308,31 +331,31 @@ def test_initialize_ppo_with_actor_network(
 @pytest.mark.parametrize(
     "observation_space, net_type",
     [
-        ([4], "mlp"),
-        ([3, 64, 64], "cnn"),
+        (spaces.Box(0, 1, shape=(4,)), "mlp"),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "cnn"),
     ],
 )
 def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     if net_type == "mlp":
         actor_network = EvolvableMLP(
-            num_inputs=observation_space[0],
-            num_outputs=action_space,
+            num_inputs=observation_space.shape[0],
+            num_outputs=action_space.n,
             hidden_size=[64, 64],
             mlp_activation="Tanh",
             mlp_output_activation="Tanh",
         )
         critic_network = EvolvableMLP(
-            num_inputs=observation_space[0] + action_space,
+            num_inputs=observation_space.shape[0] + action_space.n,
             num_outputs=1,
             hidden_size=[64, 64],
             mlp_activation="Tanh",
         )
     else:
         actor_network = EvolvableCNN(
-            input_shape=observation_space,
-            num_outputs=action_space,
+            input_shape=observation_space.shape,
+            num_outputs=action_space.n,
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
@@ -342,8 +365,8 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
         )
 
         critic_network = EvolvableCNN(
-            input_shape=observation_space,
-            num_outputs=action_space,
+            input_shape=observation_space.shape,
+            num_outputs=action_space.n,
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
@@ -391,8 +414,8 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
 
 
 def test_initialize_ppo_with_incorrect_actor_net():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     actor_network = "dummy"
     critic_network = "dummy"
@@ -412,13 +435,13 @@ def test_initialize_ppo_with_incorrect_actor_net():
 @pytest.mark.parametrize(
     "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
-        ([4], "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
     ],
 )
 def test_initialize_ppo_with_actor_network_no_critic(
     observation_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -437,22 +460,22 @@ def test_initialize_ppo_with_actor_network_no_critic(
 # Converts numpy array to torch tensor of type float
 def test_convert_numpy_array_to_tensor():
     state = np.array([1, 2, 3, 4])
-    ppo = PPO(observation_space=[5], action_space=2, one_hot=True, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(5,)), action_space=spaces.Discrete(2), one_hot=True, discrete_actions=True)
     prepared_state = ppo.prepare_state(state)
     assert isinstance(prepared_state, torch.Tensor)
 
 
 def test_unsqueeze_prepare():
     state = np.array([1, 2, 3, 4])
-    ppo = PPO(observation_space=[4], action_space=2, one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
     prepared_state = ppo.prepare_state(state)
     assert isinstance(prepared_state, torch.Tensor)
 
 
 def test_prepare_state_cnn_accelerator():
     accelerator = Accelerator()
-    observation_space = (3, 32, 32)
-    state = torch.rand(*observation_space)
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    state = torch.rand(*observation_space.shape)
     net_config_cnn = {
         "arch": "cnn",
         "hidden_size": [8],
@@ -463,7 +486,7 @@ def test_prepare_state_cnn_accelerator():
     }
     ppo = PPO(
         observation_space=observation_space,
-        action_space=2,
+        action_space=spaces.Discrete(2),
         one_hot=False,
         discrete_actions=True,
         net_config=net_config_cnn,
@@ -484,8 +507,8 @@ def build_ppo(observation_space, action_space, one_hot, discrete_actions, accele
 @pytest.mark.parametrize(
     "observation_space, action_space, one_hot, discrete_actions, accelerator",
     [
-        ([4], 2, False, False, None),
-        ([4], 2, True, True, Accelerator()),
+        (spaces.Box(0, 1, shape=(4,)), spaces.Discrete(2), False, False, None),
+        (spaces.Box(0, 1, shape=(4,)), spaces.Discrete(2), True, True, Accelerator()),
     ],
 )
 # Returns the expected action when given a state observation.
@@ -511,10 +534,10 @@ def test_returns_expected_action(
     if discrete_actions:
         for act in action:
             assert act.is_integer()
-            assert act >= 0 and act < action_space
+            assert act >= 0 and act < action_space.n
     else:
         action = action[0]
-        assert len(action) == action_space
+        assert len(action) == action_space.n
         for act in action:
             assert isinstance(act, np.float32)
 
@@ -533,11 +556,11 @@ def test_returns_expected_action(
     if discrete_actions:
         action = torch.argmax(action, dim=-1)
         assert act.is_integer()
-        assert act >= 0 and act < action_space
+        assert act >= 0 and act < action_space.n
     else:
         action = action.cpu().data.numpy()
         action = action[0]
-        assert len(action) == action_space
+        assert len(action) == action_space.n
         for act in action:
             assert isinstance(act, np.float32)
 
@@ -545,7 +568,7 @@ def test_returns_expected_action(
 @pytest.mark.parametrize(
     "observation_space, action_space, one_hot, discrete_actions, accelerator",
     [
-        ([4], 2, False, True, None),
+        (spaces.Box(0, 1, shape=(4,)), spaces.Discrete(2), False, True, None),
     ],
 )
 def test_returns_expected_action_mask_vectorized(build_ppo):
@@ -561,8 +584,8 @@ def test_returns_expected_action_mask_vectorized(build_ppo):
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
-    observation_space = (3, 32, 32)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
     one_hot = False
     discrete_actions = True
     batch_size = 45
@@ -592,8 +615,8 @@ def test_learns_from_experiences():
     num_steps = batch_size + 1
 
     # Create a batch of experiences
-    states = torch.rand(num_steps, *observation_space)
-    actions = torch.randint(0, action_space, (num_steps,)).float()
+    states = torch.rand(num_steps, *observation_space.shape)
+    actions = torch.randint(0, action_space.n, (num_steps,)).float()
     log_probs = torch.randn(
         num_steps,
     )
@@ -604,7 +627,7 @@ def test_learns_from_experiences():
     values = torch.randn(
         num_steps,
     )
-    next_states = torch.rand(1, *observation_space)
+    next_states = torch.rand(1, *observation_space.shape)
 
     experiences = [states, actions, log_probs, rewards, dones, values, next_states]
     # Call the learn method
@@ -619,8 +642,8 @@ def test_learns_from_experiences():
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_continuous_accel():
     accelerator = Accelerator()
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     discrete_actions = False
     batch_size = 10
@@ -648,8 +671,8 @@ def test_learns_from_experiences_continuous_accel():
     num_steps = 11
 
     # Create a batch of experiences
-    states = torch.rand(num_steps, *observation_space)
-    actions = torch.rand(num_steps, action_space)
+    states = torch.rand(num_steps, *observation_space.shape)
+    actions = torch.rand(num_steps, action_space.n)
     log_probs = torch.randn(
         num_steps,
     )
@@ -660,7 +683,7 @@ def test_learns_from_experiences_continuous_accel():
     values = torch.randn(
         num_steps,
     )
-    next_state = torch.rand(1, *observation_space)
+    next_state = torch.rand(1, *observation_space.shape)
 
     experiences = [states, actions, log_probs, rewards, dones, values, next_state]
     # Call the learn method
@@ -674,11 +697,11 @@ def test_learns_from_experiences_continuous_accel():
 
 # Runs algorithm test loop
 def test_algorithm_test_loop():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     num_envs = 3
 
-    env = DummyEnv(state_size=observation_space, vect=True, num_envs=num_envs)
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = PPO(
@@ -690,10 +713,10 @@ def test_algorithm_test_loop():
 
 # Runs algorithm test loop with unvectorised env
 def test_algorithm_test_loop_unvectorized():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space, vect=False)
+    env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     agent = PPO(
         observation_space=observation_space, action_space=action_space, one_hot=False, discrete_actions=True
@@ -704,10 +727,10 @@ def test_algorithm_test_loop_unvectorized():
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    observation_space = (3, 32, 32)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space, vect=True)
+    env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -731,10 +754,10 @@ def test_algorithm_test_loop_images():
 
 # Runs algorithm test loop with unvectorized images
 def test_algorithm_test_loop_images_unvectorized():
-    observation_space = (32, 32, 3)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
+    action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space, vect=False)
+    env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -746,7 +769,7 @@ def test_algorithm_test_loop_images_unvectorized():
     }
 
     agent = PPO(
-        observation_space=(3, 32, 32),
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=action_space,
         one_hot=False,
         discrete_actions=True,
@@ -758,8 +781,8 @@ def test_algorithm_test_loop_images_unvectorized():
 
 # Clones the agent and returns an identical agent.
 def test_clone_returns_identical_agent():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     discrete_actions = True
 
@@ -870,8 +893,8 @@ def test_clone_returns_identical_agent():
 
 
 def test_clone_new_index():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
 
     ppo = PPO(observation_space, action_space, one_hot, discrete_actions=True)
@@ -881,23 +904,23 @@ def test_clone_new_index():
 
 
 def test_clone_after_learning():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_env_steps = 20
     num_vec_envs = 2
     ppo = PPO(observation_space, action_space, one_hot, discrete_actions=False)
     states = (
-        np.random.randn(max_env_steps, num_vec_envs, observation_space[0])
+        np.random.randn(max_env_steps, num_vec_envs, observation_space.shape[0])
         if not one_hot
-        else torch.randint(0, observation_space[0], (max_env_steps, num_vec_envs))
+        else torch.randint(0, observation_space.shape[0], (max_env_steps, num_vec_envs))
     )
     next_states = (
-        np.random.randn(num_vec_envs, observation_space[0])
+        np.random.randn(num_vec_envs, observation_space.shape[0])
         if not one_hot
-        else torch.randint(0, observation_space[0], (num_vec_envs,))
+        else torch.randint(0, observation_space.shape[0], (num_vec_envs,))
     )
-    actions = np.random.rand(max_env_steps, num_vec_envs, action_space)
+    actions = np.random.rand(max_env_steps, num_vec_envs, action_space.n)
     log_probs = -np.random.rand(max_env_steps, num_vec_envs)
     rewards = np.random.randint(0, 100, (max_env_steps, num_vec_envs))
     dones = np.zeros((max_env_steps, num_vec_envs))
@@ -936,7 +959,7 @@ def test_clone_after_learning():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the ppo agent
-    ppo = PPO(observation_space=[4], action_space=2, one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -972,7 +995,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    ppo = PPO(observation_space=[4], action_space=2, one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
@@ -1014,8 +1037,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the ppo agent
     ppo = PPO(
-        observation_space=[3, 32, 32],
-        action_space=2,
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
         one_hot=False,
         discrete_actions=True,
         net_config=net_config_cnn,
@@ -1053,7 +1076,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    ppo = PPO(observation_space=[4], action_space=2, one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
@@ -1088,8 +1111,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network, input_tensor, request, tmpdir
 ):
-    observation_space = input_tensor.shape
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=input_tensor.shape[1:])
+    action_space = spaces.Discrete(2)
 
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -1097,7 +1120,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     critic_network = MakeEvolvable(
         critic_network,
         input_tensor,
-        torch.randn(1, action_space),
+        torch.randn(1, action_space.n),
     )
 
     # Initialize the ppo agent
@@ -1142,7 +1165,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    ppo = PPO(observation_space=[4], action_space=2, one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
@@ -1177,7 +1200,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the ppo agent
-    ppo = PPO(observation_space=[4], action_space=2, one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1217,8 +1240,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the ppo agent
     ppo = PPO(
-        observation_space=[3, 32, 32],
-        action_space=2,
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
         one_hot=False,
         net_config={
             "arch": "cnn",
@@ -1261,15 +1284,15 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)

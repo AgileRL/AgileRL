@@ -4,6 +4,7 @@ from unittest.mock import patch
 import gymnasium as gym
 import numpy as np
 from pettingzoo.mpe import simple_speaker_listener_v4
+from gymnasium import spaces
 
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
@@ -100,8 +101,8 @@ def test_returns_asyncvectorenv_object_skill():
 
 # Can create a population of agent for each single agent algorithm
 def test_create_initial_population_single_agent():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
@@ -142,8 +143,8 @@ def test_create_initial_population_single_agent():
 
 # Can create a population of agent for each multi agent algorithm
 def test_create_initial_population_multi_agent():
-    observation_space = [[4], [4]]
-    action_space = [2, 2]
+    observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
+    action_space = [spaces.Discrete(2) for _ in range(2)]
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 4
@@ -246,8 +247,8 @@ def test_returns_list_of_episode_rewards_with_no_terminations():
 # The function prints the hyperparameters and fitnesses of all agents in the population.
 def test_prints_hyperparams():
     # Arrange
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 1

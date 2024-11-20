@@ -1,8 +1,13 @@
 from typing import Dict, Any, Optional, List, Union
+import os
+import warnings
+from datetime import datetime
 import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
+from accelerate import Accelerator
 import numpy as np
+import wandb
 
 from agilerl.algorithms.base import EvolvableAlgorithm
 from agilerl.algorithms.cqn import CQN
@@ -17,6 +22,8 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.networks.base import EvolvableModule
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.hpo.mutation import Mutations
 
 PopulationType = list[EvolvableAlgorithm]
 
@@ -366,6 +373,198 @@ def create_population(
 
     return population
 
+def save_population_checkpoint(
+        population: PopulationType,
+        save_path: str,
+        overwrite_checkpoints: bool,
+        accelerator: Optional[Accelerator] = None
+        ) -> None:
+    """Saves checkpoint of population of agents.
+
+    :param population: Population of agents
+    :type population: list[PopulationType]
+    :param save_path: Path to save checkpoint
+    :type save_path: str
+    :param overwrite_checkpoints: Flag to overwrite checkpoints
+    :type overwrite_checkpoints: bool
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+    """
+    if accelerator is not None:
+        # Need to unwrap models from acccelerator before saving
+        accelerator.wait_for_everyone()
+        for model in population:
+            model.unwrap_models()
+        accelerator.wait_for_everyone()
+
+        # Save checkpoint on main process
+        if accelerator.is_main_process:
+            for i, agent in enumerate(population):
+                current_checkpoint_path = (
+                    f"{save_path}_{i}.pt"
+                    if overwrite_checkpoints
+                    else f"{save_path}_{i}_{agent.steps[-1]}.pt"
+                )
+                agent.save_checkpoint(current_checkpoint_path)
+            print("Saved checkpoint.")
+        accelerator.wait_for_everyone()
+
+        # Load models back to accelerator processes
+        for model in population:
+            model.wrap_models()
+        accelerator.wait_for_everyone()
+    else:
+        # Save checkpoint
+        for i, agent in enumerate(population):
+            current_checkpoint_path = (
+                f"{save_path}_{i}.pt"
+                if overwrite_checkpoints
+                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
+            )
+            agent.save_checkpoint(current_checkpoint_path)
+        print("Saved checkpoint.")
+
+def tournament_selection_and_mutation(
+    population: PopulationType,
+    tournament: TournamentSelection,
+    mutation: Mutations,
+    env_name: str,
+    algo: Optional[str] = None,
+    elite_path: Optional[str] = None,
+    save_elite: bool = False,
+    accelerator: Optional[Accelerator] = None,
+    ) -> PopulationType:
+    """Performs tournament selection and mutation on a population of agents.
+
+    :param population: Population of agents
+    :type population: list[PopulationType]
+    :param tournament: Tournament selection object
+    :type tournament: TournamentSelection
+    :param mutation: Mutation object
+    :type mutation: Mutations
+    :param env_name: Environment name
+    :type env_name: str
+    :param elite_path: Path to save elite agent, defaults to None
+    :type elite_path: str, optional
+    :param save_elite: Flag to save elite agent, defaults to False
+    :type save_elite: bool, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    :type accelerator: accelerate.Accelerator(), optional
+
+    :return: Population of agents after tournament selection and mutation
+    :rtype: list[PopulationType]
+    """
+    if algo is None:
+        algo = population[0].__class__.__name__
+
+    # Save temporary models for accelerator processes
+    if accelerator is not None:
+        accel_temp_models_path = f"models/{env_name}"
+        if accelerator.is_main_process:
+            if not os.path.exists(accel_temp_models_path):
+                os.makedirs(accel_temp_models_path)
+
+    if accelerator is not None:
+        # Need to unwrap models from acccelerator before selecting and mutating
+        accelerator.wait_for_everyone()
+        for model in population:
+            model.unwrap_models()
+
+        accelerator.wait_for_everyone()
+
+        # Perform tournament selection and mutation on main process
+        if accelerator.is_main_process:
+            elite, population = tournament.select(population)
+            population = mutation.mutation(population)
+            for pop_i, model in enumerate(population):
+                model.save_checkpoint(
+                    f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
+                )
+        accelerator.wait_for_everyone()
+
+        # Load models back to accelerator processes
+        if not accelerator.is_main_process:
+            for pop_i, model in enumerate(population):
+                model.load_checkpoint(
+                    f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
+                )
+        accelerator.wait_for_everyone()
+
+        # Wrap models back to accelerator
+        for model in population:
+            model.wrap_models()
+    else:
+        # Perform tournament selection and mutation
+        elite, population = tournament.select(population)
+        population = mutation.mutation(population)
+
+    if save_elite:
+        elite_save_path = (
+            elite_path.split(".pt")[0]
+            if elite_path is not None
+            else f"{env_name}-elite_{algo}"
+        )
+        elite.save_checkpoint(f"{elite_save_path}.pt")
+    
+    return population
+
+def init_wandb(
+        algo: str,
+        env_name: str,
+        init_hyperparams: Optional[Dict[str, Any]] = None,
+        mutation_hyperparams: Optional[Dict[str, Any]] = None,
+        wandb_api_key: Optional[str] = None,
+        accelerator: Optional[Accelerator] = None
+    ) -> None:
+    """Initializes wandb for logging hyperparameters and run metadata.
+
+    :param algo: RL algorithm
+    :type algo: str
+    :param env_name: Environment name
+    :type env_name: str
+    :param init_hyperparams: Initial hyperparameters, defaults to None
+    :type init_hyperparams: dict, optional
+    :param mutation_hyperparams: Mutation hyperparameters, defaults to None
+    :type mutation_hyperparams: dict, optional
+    :param wandb_api_key: Wandb API key, defaults to None
+    :type wandb_api_key: str, optional
+    :param accelerator: Accelerator for distributed computing, defaults to None
+    """
+    if not hasattr(wandb, "api"):
+        if wandb_api_key is not None:
+            wandb.login(key=wandb_api_key)
+        else:
+            warnings.warn("Must login to wandb with API key.")
+
+    config_dict = {}
+    if init_hyperparams is not None:
+        config_dict.update(init_hyperparams)
+    if mutation_hyperparams is not None:
+        config_dict.update(mutation_hyperparams)
+
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            wandb.init(
+                # set the wandb project where this run will be logged
+                project="AgileRL",
+                name="{}-EvoHPO-{}-{}".format(
+                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+                ),
+                # track hyperparameters and run metadata
+                config=config_dict,
+            )
+        accelerator.wait_for_everyone()
+    else:
+        wandb.init(
+            # set the wandb project where this run will be logged
+            project="AgileRL",
+            name="{}-EvoHPO-{}-{}".format(
+                env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
+            ),
+            # track hyperparameters and run metadata
+            config=config_dict,
+        )
 
 def calculate_vectorized_scores(
     rewards: np.ndarray,

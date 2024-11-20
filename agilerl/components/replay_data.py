@@ -1,4 +1,5 @@
 import warnings
+from typing import Iterator
 
 from torch.utils.data import IterableDataset
 
@@ -16,12 +17,12 @@ class ReplayDataset(IterableDataset):
     :type batch_size: int, optional
     """
 
-    def __init__(self, buffer, batch_size=256):
+    def __init__(self, buffer: ReplayBuffer, batch_size: int = 256) -> None:
         if not isinstance(buffer, ReplayBuffer):
             warnings.warn("Buffer is not an agilerl ReplayBuffer.")
         assert batch_size > 0, "Batch size must be greater than zero."
         self.buffer = buffer
         self.batch_size = batch_size
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator:
         yield self.buffer.sample(self.batch_size)

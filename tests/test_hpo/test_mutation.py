@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 from accelerate import Accelerator
+from gymnasium import spaces
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
@@ -323,8 +324,8 @@ def test_returns_regularize_weight():
     [
         (
             "DQN",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -370,8 +371,8 @@ def test_mutation_no_options(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -382,8 +383,8 @@ def test_mutation_no_options(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -394,8 +395,8 @@ def test_mutation_no_options(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -406,8 +407,8 @@ def test_mutation_no_options(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -418,8 +419,8 @@ def test_mutation_no_options(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -430,8 +431,8 @@ def test_mutation_no_options(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -442,8 +443,8 @@ def test_mutation_no_options(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -454,8 +455,8 @@ def test_mutation_no_options(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -466,8 +467,8 @@ def test_mutation_no_options(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -478,8 +479,8 @@ def test_mutation_no_options(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -490,8 +491,8 @@ def test_mutation_no_options(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -502,8 +503,8 @@ def test_mutation_no_options(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -514,8 +515,8 @@ def test_mutation_no_options(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -526,8 +527,8 @@ def test_mutation_no_options(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -538,8 +539,8 @@ def test_mutation_no_options(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -550,8 +551,8 @@ def test_mutation_no_options(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -611,8 +612,8 @@ def test_mutation_applies_random_mutations(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -623,8 +624,8 @@ def test_mutation_applies_random_mutations(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -635,8 +636,8 @@ def test_mutation_applies_random_mutations(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -647,8 +648,8 @@ def test_mutation_applies_random_mutations(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -659,8 +660,8 @@ def test_mutation_applies_random_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -671,8 +672,8 @@ def test_mutation_applies_random_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -683,8 +684,8 @@ def test_mutation_applies_random_mutations(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -695,8 +696,8 @@ def test_mutation_applies_random_mutations(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -707,8 +708,8 @@ def test_mutation_applies_random_mutations(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -719,8 +720,8 @@ def test_mutation_applies_random_mutations(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -731,8 +732,8 @@ def test_mutation_applies_random_mutations(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -743,8 +744,8 @@ def test_mutation_applies_random_mutations(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -755,8 +756,8 @@ def test_mutation_applies_random_mutations(
         (
             "ILQL",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -767,8 +768,8 @@ def test_mutation_applies_random_mutations(
         (
             "ILQL",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -779,8 +780,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -791,8 +792,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -803,8 +804,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -815,8 +816,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -865,8 +866,8 @@ def test_mutation_applies_no_mutations(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -877,8 +878,8 @@ def test_mutation_applies_no_mutations(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -889,8 +890,8 @@ def test_mutation_applies_no_mutations(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -901,8 +902,8 @@ def test_mutation_applies_no_mutations(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -913,8 +914,8 @@ def test_mutation_applies_no_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -925,8 +926,8 @@ def test_mutation_applies_no_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -937,8 +938,8 @@ def test_mutation_applies_no_mutations(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -949,8 +950,8 @@ def test_mutation_applies_no_mutations(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -961,8 +962,8 @@ def test_mutation_applies_no_mutations(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -973,8 +974,8 @@ def test_mutation_applies_no_mutations(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -985,8 +986,8 @@ def test_mutation_applies_no_mutations(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -997,8 +998,8 @@ def test_mutation_applies_no_mutations(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1009,8 +1010,8 @@ def test_mutation_applies_no_mutations(
         (
             "ILQL",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1021,8 +1022,8 @@ def test_mutation_applies_no_mutations(
         (
             "ILQL",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1033,8 +1034,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1045,8 +1046,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1057,8 +1058,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1069,8 +1070,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1126,8 +1127,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1138,8 +1139,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1150,8 +1151,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -1162,8 +1163,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -1174,8 +1175,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1186,8 +1187,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1198,8 +1199,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1210,8 +1211,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1222,8 +1223,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1234,8 +1235,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1246,8 +1247,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1258,8 +1259,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1270,8 +1271,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "ILQL",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1282,8 +1283,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "ILQL",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1294,8 +1295,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1306,8 +1307,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1318,8 +1319,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1330,8 +1331,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1404,8 +1405,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1416,8 +1417,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1428,8 +1429,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -1440,8 +1441,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -1452,8 +1453,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1464,8 +1465,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1476,8 +1477,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1488,8 +1489,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1500,8 +1501,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1512,8 +1513,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1524,8 +1525,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1536,8 +1537,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1548,8 +1549,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "ILQL",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1560,8 +1561,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "ILQL",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1572,8 +1573,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1584,8 +1585,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1596,8 +1597,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1608,8 +1609,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1660,8 +1661,8 @@ def test_mutation_applies_activation_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1672,8 +1673,8 @@ def test_mutation_applies_activation_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -1726,8 +1727,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1745,8 +1746,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1764,8 +1765,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "Rainbow DQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1783,8 +1784,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "Rainbow DQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1802,8 +1803,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DDPG",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1821,8 +1822,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DDPG",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1840,8 +1841,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "TD3",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1859,8 +1860,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "TD3",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1878,8 +1879,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "PPO",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1897,8 +1898,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "PPO",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1916,8 +1917,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "CQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1935,8 +1936,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "CQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1954,8 +1955,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "ILQL",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1973,8 +1974,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "ILQL",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -1992,8 +1993,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralUCB",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2011,8 +2012,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralUCB",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2030,8 +2031,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralTS",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2049,8 +2050,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralTS",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2108,8 +2109,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2120,8 +2121,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2132,8 +2133,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -2144,8 +2145,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -2156,8 +2157,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2168,8 +2169,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2180,8 +2181,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2192,8 +2193,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2204,8 +2205,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2216,8 +2217,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2228,8 +2229,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2240,8 +2241,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2252,8 +2253,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "ILQL",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2264,8 +2265,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "ILQL",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2276,8 +2277,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2288,8 +2289,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2300,8 +2301,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2312,8 +2313,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2362,8 +2363,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2381,8 +2382,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2400,8 +2401,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "Rainbow DQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2419,8 +2420,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "Rainbow DQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2438,8 +2439,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DDPG",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2457,8 +2458,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DDPG",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2476,8 +2477,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "TD3",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2495,8 +2496,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "TD3",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2514,8 +2515,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "PPO",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2533,8 +2534,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "PPO",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2552,8 +2553,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "CQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2571,8 +2572,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "CQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2590,8 +2591,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "ILQL",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2609,8 +2610,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "ILQL",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2628,8 +2629,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralUCB",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2647,8 +2648,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralUCB",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2666,8 +2667,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralTS",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2685,8 +2686,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralTS",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -2743,8 +2744,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2755,8 +2756,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2767,8 +2768,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "Rainbow DQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -2779,8 +2780,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "Rainbow DQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -2791,8 +2792,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2803,8 +2804,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2815,8 +2816,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "TD3",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2827,8 +2828,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "TD3",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2839,8 +2840,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "PPO",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2851,8 +2852,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "PPO",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2863,8 +2864,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "CQN",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2875,8 +2876,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "CQN",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2887,8 +2888,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "ILQL",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2899,8 +2900,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "ILQL",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2911,8 +2912,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralUCB",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2923,8 +2924,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralUCB",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2935,8 +2936,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralTS",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -2947,8 +2948,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralTS",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -3007,8 +3008,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3026,8 +3027,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3045,8 +3046,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "Rainbow DQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3064,8 +3065,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "Rainbow DQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3083,8 +3084,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DDPG",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3102,8 +3103,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DDPG",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3121,8 +3122,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "TD3",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3140,8 +3141,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "TD3",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3159,8 +3160,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "PPO",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3178,8 +3179,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "PPO",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3197,8 +3198,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "CQN",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3216,8 +3217,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "CQN",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3235,8 +3236,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "ILQL",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3254,8 +3255,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "ILQL",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3273,8 +3274,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralUCB",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3292,8 +3293,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralUCB",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3311,8 +3312,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralTS",
             False,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3330,8 +3331,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralTS",
             True,
-            [3, 32, 32],
-            2,
+            spaces.Box(0, 1, shape=(3, 32, 32)),
+            spaces.Discrete(2),
             False,
             {
                 "arch": "cnn",
@@ -3388,8 +3389,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -3406,8 +3407,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -3424,8 +3425,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             False,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -3437,8 +3438,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             True,
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -3515,8 +3516,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3527,8 +3528,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3539,8 +3540,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3551,8 +3552,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3611,8 +3612,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3623,8 +3624,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3635,8 +3636,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3647,8 +3648,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3699,8 +3700,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3711,8 +3712,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3723,8 +3724,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3735,8 +3736,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3809,8 +3810,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3821,8 +3822,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3833,8 +3834,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3845,8 +3846,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3902,8 +3903,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3914,8 +3915,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3926,8 +3927,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3938,8 +3939,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -3997,8 +3998,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MADDPG",
             False,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4016,8 +4017,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MADDPG",
             True,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4035,8 +4036,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MATD3",
             False,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4054,8 +4055,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MATD3",
             True,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4118,8 +4119,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4130,8 +4131,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4142,8 +4143,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4154,8 +4155,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4205,8 +4206,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4224,8 +4225,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4243,8 +4244,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4262,8 +4263,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4321,8 +4322,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4333,8 +4334,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4345,8 +4346,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4357,8 +4358,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4418,8 +4419,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4437,8 +4438,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4456,8 +4457,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4475,8 +4476,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[3, 32, 32], [3, 32, 32]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {
                 "arch": "cnn",
@@ -4534,8 +4535,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4552,8 +4553,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4570,8 +4571,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4588,8 +4589,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4601,8 +4602,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4614,8 +4615,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4627,8 +4628,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4640,8 +4641,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [[4], [4]],
-            [2, 2],
+            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
+            [spaces.Discrete(2) for _ in range(2)],
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
@@ -4771,8 +4772,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     [
         (
             "DQN",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -4782,8 +4783,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "Rainbow DQN",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
@@ -4793,8 +4794,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "DDPG",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -4804,8 +4805,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "TD3",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -4815,8 +4816,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "PPO",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -4826,8 +4827,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "CQN",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -4837,8 +4838,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "NeuralUCB",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
@@ -4848,8 +4849,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "NeuralTS",
-            [4],
-            2,
+            spaces.Box(0, 1, shape=(4,)),
+            spaces.Discrete(2),
             False,
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,

@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 
 from agilerl.algorithms.td3 import TD3
 from agilerl.networks.evolvable_cnn import EvolvableCNN
@@ -128,8 +129,8 @@ class SimpleCNN(nn.Module):
 
 # initialize td3 with valid parameters
 def test_initialize_td3_with_minimum_parameters():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
 
@@ -173,8 +174,8 @@ def test_initialize_td3_with_minimum_parameters():
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_td3_with_cnn_accelerator():
-    observation_space = [3, 32, 32]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     index = 0
@@ -253,7 +254,7 @@ def test_initialize_td3_with_cnn_accelerator():
     "observation_space, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
     [
         (
-            [4],
+            spaces.Box(0, 1, shape=(4,)),
             "simple_mlp",
             "simple_mlp_critic",
             "simple_mlp_critic",
@@ -271,7 +272,7 @@ def test_initialize_td3_with_actor_network(
     input_tensor_critic,
     request,
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     actor_network = request.getfixturevalue(actor_network)
@@ -286,7 +287,7 @@ def test_initialize_td3_with_actor_network(
         action_space,
         one_hot,
         max_action,
-        expl_noise=np.zeros((1, action_space)),
+        expl_noise=np.zeros((1, action_space.n)),
         actor_network=actor_network,
         critic_networks=[critic_1_network, critic_2_network],
     )
@@ -324,7 +325,7 @@ def test_initialize_td3_with_actor_network(
     "observation_space, actor_network, critic_1_network, critic_2_network, input_tensor, input_tensor_critic",
     [
         (
-            [4],
+            spaces.Box(0, 1, shape=(4,)),
             "simple_mlp",
             "simple_mlp_critic",
             "simple_mlp_critic",
@@ -344,7 +345,7 @@ def test_initialize_td3_with_actor_network_no_critics(
     input_tensor_critic,
     request,
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     actor_network = request.getfixturevalue(actor_network)
@@ -389,13 +390,13 @@ def test_initialize_td3_with_actor_network_no_critics(
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_initialize_td3_with_actor_network_cnn(
     observation_space, actor_network, input_tensor, request
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     actor_network = request.getfixturevalue(actor_network)
@@ -404,13 +405,13 @@ def test_initialize_td3_with_actor_network_cnn(
     critic_1_network = MakeEvolvable(
         critic_1_network,
         input_tensor,
-        torch.randn(1, action_space),
+        torch.randn(1, action_space.n),
     )
     critic_2_network = SimpleCNN()
     critic_2_network = MakeEvolvable(
         critic_2_network,
         input_tensor,
-        torch.randn(1, action_space),
+        torch.randn(1, action_space.n),
     )
 
     td3 = TD3(
@@ -453,8 +454,8 @@ def test_initialize_td3_with_actor_network_cnn(
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action_training():
     accelerator = Accelerator()
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     max_action = 1
 
     td3 = TD3(observation_space, action_space, one_hot=False, max_action=max_action)
@@ -462,7 +463,7 @@ def test_returns_expected_action_training():
     training = False
     action = td3.get_action(state, training)[0]
 
-    assert len(action) == action_space
+    assert len(action) == action_space.n
     for act in action:
         assert isinstance(act, np.float32)
         assert -max_action <= act <= max_action
@@ -478,7 +479,7 @@ def test_returns_expected_action_training():
     training = True
     action = td3.get_action(state, training)[0]
 
-    assert len(action) == action_space
+    assert len(action) == action_space.n
     for act in action:
         assert isinstance(act, np.float32)
         assert -max_action <= act <= max_action
@@ -495,7 +496,7 @@ def test_returns_expected_action_training():
     training = True
     action = td3.get_action(state, training)[0]
 
-    assert len(action) == action_space
+    assert len(action) == action_space.n
     for act in action:
         assert isinstance(act, np.float32)
         assert -max_action <= act <= max_action
@@ -506,8 +507,8 @@ def test_returns_expected_action_training():
     "min_action, max_action", [(-1, 1), ([-1, 0], 1), (-1, [0, 1]), ([-1, -2], [1, 0])]
 )
 def test_learns_from_experiences(min_action, max_action):
-    observation_space = (3, 32, 32)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     batch_size = 64
@@ -533,10 +534,10 @@ def test_learns_from_experiences(min_action, max_action):
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space)
-    actions = torch.randint(0, 2, (batch_size, action_space)).float()
+    states = torch.randn(batch_size, *observation_space.shape)
+    actions = torch.randint(0, 2, (batch_size, action_space.n)).float()
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randn(batch_size, *observation_space)
+    next_states = torch.randn(batch_size, *observation_space.shape)
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
@@ -580,8 +581,8 @@ def test_learns_from_experiences(min_action, max_action):
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_with_accelerator():
     accelerator = Accelerator()
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = True
     max_action = 1
     batch_size = 64
@@ -598,10 +599,10 @@ def test_learns_from_experiences_with_accelerator():
     )
 
     # Create a batch of experiences
-    states = torch.randint(0, observation_space[0], (batch_size, 1)).float()
-    actions = torch.randint(0, 2, (batch_size, action_space)).float()
+    states = torch.randint(0, observation_space.shape[0], (batch_size, 1)).float()
+    actions = torch.randint(0, 2, (batch_size, action_space.n)).float()
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, observation_space[0], (batch_size, 1)).float()
+    next_states = torch.randint(0, observation_space.shape[0], (batch_size, 1)).float()
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
@@ -634,8 +635,8 @@ def test_learns_from_experiences_with_accelerator():
 
 # Updates target network parameters with soft update
 def test_soft_update():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
@@ -715,11 +716,11 @@ def test_soft_update():
 
 # Runs algorithm test loop
 def test_algorithm_test_loop():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     num_envs = 3
 
-    env = DummyEnv(state_size=observation_space, vect=True, num_envs=num_envs)
+    env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = TD3(observation_space=observation_space, action_space=action_space, one_hot=False, max_action=1)
@@ -729,10 +730,10 @@ def test_algorithm_test_loop():
 
 # Runs algorithm test loop with unvectorised env
 def test_algorithm_test_loop_unvectorized():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space, vect=False)
+    env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     agent = TD3(observation_space=observation_space, action_space=action_space, one_hot=False, max_action=1)
     mean_score = agent.test(env, max_steps=10)
@@ -741,10 +742,10 @@ def test_algorithm_test_loop_unvectorized():
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    observation_space = (3, 32, 32)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space, vect=True)
+    env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -768,10 +769,10 @@ def test_algorithm_test_loop_images():
 
 # Runs algorithm test loop with unvectorized images
 def test_algorithm_test_loop_images_unvectorized():
-    observation_space = (32, 32, 3)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
+    action_space = spaces.Discrete(2)
 
-    env = DummyEnv(state_size=observation_space, vect=False)
+    env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -783,7 +784,7 @@ def test_algorithm_test_loop_images_unvectorized():
     }
 
     agent = TD3(
-        observation_space=(3, 32, 32),
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=action_space,
         one_hot=False,
         max_action=1,
@@ -795,8 +796,8 @@ def test_algorithm_test_loop_images_unvectorized():
 
 # Clones the agent and returns an identical agent.
 def test_clone_returns_identical_agent():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
 
@@ -944,8 +945,8 @@ def test_clone_returns_identical_agent():
 
 
 def test_clone_new_index():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
 
     td3 = TD3(observation_space, action_space, one_hot)
@@ -955,16 +956,16 @@ def test_clone_new_index():
 
 
 def test_clone_after_learning():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     batch_size = 8
     td3 = TD3(observation_space, action_space, one_hot)
 
-    states = torch.randn(batch_size, observation_space[0])
-    actions = torch.randn(batch_size, action_space)
+    states = torch.randn(batch_size, observation_space.shape[0])
+    actions = torch.randn(batch_size, action_space.n)
     rewards = torch.rand(batch_size, 1)
-    next_states = torch.randn(batch_size, observation_space[0])
+    next_states = torch.randn(batch_size, observation_space.shape[0])
     dones = torch.zeros(batch_size, 1)
 
     experiences = states, actions, rewards, next_states, dones
@@ -1015,8 +1016,8 @@ def test_clone_after_learning():
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
     td3 = TD3(
-        observation_space=[4],
-        action_space=2,
+        observation_space=spaces.Box(0, 1, shape=(4,)),
+        action_space=spaces.Discrete(2),
         one_hot=False,
         max_action=1,
         accelerator=Accelerator(),
@@ -1033,7 +1034,7 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the td3 agent
-    td3 = TD3(observation_space=[4], action_space=2, one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1072,7 +1073,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    td3 = TD3(observation_space=[4], action_space=2, one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1117,8 +1118,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the td3 agent
     td3 = TD3(
-        observation_space=[3, 32, 32],
-        action_space=2,
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
         one_hot=False,
         max_action=1,
         net_config=net_config_cnn,
@@ -1161,7 +1162,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    td3 = TD3(observation_space=[4], action_space=2, one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1200,8 +1201,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network, input_tensor, request, tmpdir
 ):
-    action_space = 2
-    observation_space = input_tensor.shape
+    action_space = spaces.Discrete(2)
+    observation_space = spaces.Box(0, 1, shape=input_tensor.shape[1:])
     one_hot = False
     max_action = 1
 
@@ -1211,13 +1212,13 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     critic_1_network = MakeEvolvable(
         critic_1_network,
         input_tensor,
-        torch.randn(1, action_space),
+        torch.randn(1, action_space.n),
     )
     critic_2_network = SimpleCNN()
     critic_2_network = MakeEvolvable(
         critic_2_network,
         input_tensor,
-        torch.randn(1, action_space),
+        torch.randn(1, action_space.n),
     )
 
     td3 = TD3(
@@ -1266,7 +1267,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    td3 = TD3(observation_space=[4], action_space=2, one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1298,25 +1299,25 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 @pytest.mark.parametrize(
     "observation_space, net_type",
     [
-        ([4], "mlp"),
-        ([3, 64, 64], "cnn"),
+        (spaces.Box(0, 1, shape=(4,)), "mlp"),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "cnn"),
     ],
 )
 def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     max_action = 1
     if net_type == "mlp":
         actor_network = EvolvableMLP(
-            num_inputs=observation_space[0],
-            num_outputs=action_space,
+            num_inputs=observation_space.shape[0],
+            num_outputs=action_space.n,
             hidden_size=[64, 64],
             mlp_activation="ReLU",
             mlp_output_activation="Tanh",
         )
         critic_networks = [
             EvolvableMLP(
-                num_inputs=observation_space[0] + action_space,
+                num_inputs=observation_space.shape[0] + action_space.n,
                 num_outputs=1,
                 hidden_size=[64, 64],
                 mlp_activation="ReLU",
@@ -1325,8 +1326,8 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
         ]
     else:
         actor_network = EvolvableCNN(
-            input_shape=observation_space,
-            num_outputs=action_space,
+            input_shape=observation_space.shape,
+            num_outputs=action_space.n,
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
@@ -1337,8 +1338,8 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
 
         critic_networks = [
             EvolvableCNN(
-                input_shape=observation_space,
-                num_outputs=action_space,
+                input_shape=observation_space.shape,
+                num_outputs=action_space.n,
                 channel_size=[8, 8],
                 kernel_size=[2, 2],
                 stride_size=[1, 1],
@@ -1386,8 +1387,8 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
 
 
 def test_initialize_td3_with_incorrect_actor_net():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
     actor_network = "dummy"
     critic_networks = "dummy"
@@ -1432,8 +1433,8 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
         min_activation_val, max_activation_val = 0, 1
     action = np.array(action_array_vals)
     td3 = TD3(
-        observation_space=[4],
-        action_space=4,
+        observation_space=spaces.Box(0, 1, shape=(4,)),
+        action_space=spaces.Discrete(4),
         one_hot=False,
         max_action=max_action,
         min_action=min_action,
@@ -1478,7 +1479,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
         min = np.array(min)
     if isinstance(max, list):
         max = np.array(max)
-    td3 = TD3(observation_space=[4], action_space=1, one_hot=False, device=device)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(1), one_hot=False, device=device)
     input = torch.tensor(action, dtype=torch.float32).to(device)
     clamped_actions = td3.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
@@ -1495,7 +1496,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the td3 agent
-    td3 = TD3(observation_space=[4], action_space=2, one_hot=False)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1558,8 +1559,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the td3 agent
     td3 = TD3(
-        observation_space=[3, 32, 32],
-        action_space=2,
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
         one_hot=False,
         net_config={
             "arch": "cnn",
@@ -1624,15 +1625,15 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)

@@ -4,7 +4,6 @@ import warnings
 from datetime import datetime
 from accelerate import Accelerator
 import gymnasium as gym
-
 import numpy as np
 import wandb
 from tqdm import trange
@@ -12,6 +11,11 @@ from tqdm import trange
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.utils.utils import (
+    tournament_selection_and_mutation,
+    save_population_checkpoint,
+    init_wandb
+)
 
 InitDictType = Optional[Dict[str, Any]]
 PopulationType = List[RLAlgorithm]   
@@ -124,47 +128,14 @@ def train_on_policy(
         )
 
     if wb:
-        if not hasattr(wandb, "api"):
-            if wandb_api_key is not None:
-                wandb.login(key=wandb_api_key)
-            else:
-                warnings.warn("Must login to wandb with API key.")
-
-        config_dict = {}
-        if INIT_HP is not None:
-            config_dict.update(INIT_HP)
-        if MUT_P is not None:
-            config_dict.update(MUT_P)
-
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-            if accelerator.is_main_process:
-                wandb.init(
-                    # set the wandb project where this run will be logged
-                    project="AgileRL",
-                    name="{}-EvoHPO-{}-{}".format(
-                        env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                    ),
-                    # track hyperparameters and run metadata
-                    config=config_dict,
-                )
-            accelerator.wait_for_everyone()
-        else:
-            wandb.init(
-                # set the wandb project where this run will be logged
-                project="AgileRL",
-                name="{}-EvoHPO-{}-{}".format(
-                    env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
-                ),
-                # track hyperparameters and run metadata
-                config=config_dict,
-            )
-
-    if accelerator is not None:
-        accel_temp_models_path = f"models/{env_name}"
-        if accelerator.is_main_process:
-            if not os.path.exists(accel_temp_models_path):
-                os.makedirs(accel_temp_models_path)
+        init_wandb(
+            algo=algo,
+            env_name=env_name,
+            init_hyperparams=INIT_HP,
+            mutation_hyperparams=MUT_P,
+            wandb_api_key=wandb_api_key,
+            accelerator=accelerator
+        )
 
     # Detect if environment is vectorised
     if hasattr(env, "num_envs"):
@@ -244,6 +215,7 @@ def train_on_policy(
 
                     if swap_channels:
                         state = np.moveaxis(state, [-1], [-3])
+
                     # Get next action from agent
                     action_mask = info.get("action_mask", None)
                     action, log_prob, _, value = agent.get_action(
@@ -371,38 +343,16 @@ def train_on_policy(
 
         # Tournament selection and population mutation
         if tournament and mutation is not None:
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
-                for model in pop:
-                    model.unwrap_models()
-                accelerator.wait_for_everyone()
-                if accelerator.is_main_process:
-                    elite, pop = tournament.select(pop)
-                    pop = mutation.mutation(pop)
-                    for pop_i, model in enumerate(pop):
-                        model.save_checkpoint(
-                            f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                        )
-                accelerator.wait_for_everyone()
-                if not accelerator.is_main_process:
-                    for pop_i, model in enumerate(pop):
-                        model.load_checkpoint(
-                            f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                        )
-                accelerator.wait_for_everyone()
-                for model in pop:
-                    model.wrap_models()
-            else:
-                elite, pop = tournament.select(pop)
-                pop = mutation.mutation(pop)
-
-            if save_elite:
-                elite_save_path = (
-                    elite_path.split(".pt")[0]
-                    if elite_path is not None
-                    else f"{env_name}-elite_{algo}"
-                )
-                elite.save_checkpoint(f"{elite_save_path}.pt")
+            pop = tournament_selection_and_mutation(
+                population=pop,
+                tournament=tournament,
+                mutation=mutation,
+                env_name=env_name,
+                algo=algo,
+                elite_path=elite_path,
+                save_elite=save_elite,
+                accelerator=accelerator
+            )
 
         if verbose:
             fitness = ["%.2f" % fitness for fitness in fitnesses]
@@ -430,33 +380,12 @@ def train_on_policy(
         # Save model checkpoint
         if checkpoint is not None:
             if pop[0].steps[-1] // checkpoint > checkpoint_count:
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.unwrap_models()
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        for i, agent in enumerate(pop):
-                            current_checkpoint_path = (
-                                f"{save_path}_{i}.pt"
-                                if overwrite_checkpoints
-                                else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                            )
-                            agent.save_checkpoint(current_checkpoint_path)
-                        print("Saved checkpoint.")
-                    accelerator.wait_for_everyone()
-                    for model in pop:
-                        model.wrap_models()
-                    accelerator.wait_for_everyone()
-                else:
-                    for i, agent in enumerate(pop):
-                        current_checkpoint_path = (
-                            f"{save_path}_{i}.pt"
-                            if overwrite_checkpoints
-                            else f"{save_path}_{i}_{agent.steps[-1]}.pt"
-                        )
-                        agent.save_checkpoint(current_checkpoint_path)
-                    print("Saved checkpoint.")
+                save_population_checkpoint(
+                    population=pop,
+                    save_path=save_path,
+                    overwrite_checkpoints=overwrite_checkpoints,
+                    accelerator=accelerator
+                )
                 checkpoint_count += 1
 
     if wb:

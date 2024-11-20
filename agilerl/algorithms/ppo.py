@@ -207,6 +207,7 @@ class PPO(RLAlgorithm):
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
+        self.mut = mut
         self.gae_lambda = gae_lambda
         self.action_std_init = action_std_init
         self.clip_coef = clip_coef

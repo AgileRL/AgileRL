@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.networks.evolvable_cnn import EvolvableCNN
@@ -84,8 +85,8 @@ def simple_cnn():
 
 # initialize NeuralTS with valid parameters
 def test_initialize_bandit_with_minimum_parameters():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
 
     bandit = NeuralTS(observation_space, action_space)
 
@@ -114,8 +115,8 @@ def test_initialize_bandit_with_minimum_parameters():
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_bandit_with_cnn_accelerator():
-    observation_space = [3, 32, 32]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
     index = 0
     net_config_cnn = {
         "arch": "cnn",
@@ -179,14 +180,14 @@ def test_initialize_bandit_with_cnn_accelerator():
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_initialize_bandit_with_actor_network(
     observation_space, actor_network, input_tensor, request
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
@@ -216,10 +217,10 @@ def test_initialize_bandit_with_actor_network(
 
 
 def test_initialize_bandit_with_evo_nets():  #
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     actor_network = EvolvableMLP(
-        num_inputs=observation_space[0], num_outputs=1, hidden_size=[64, 64], layer_norm=False
+        num_inputs=observation_space.shape[0], num_outputs=1, hidden_size=[64, 64], layer_norm=False
     )
 
     bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
@@ -247,8 +248,8 @@ def test_initialize_bandit_with_evo_nets():  #
 
 
 def test_initialize_neuralts_with_incorrect_actor_net_type():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     actor_network = "dummy"
 
     with pytest.raises(AssertionError) as a:
@@ -262,8 +263,8 @@ def test_initialize_neuralts_with_incorrect_actor_net_type():
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
 
     bandit = NeuralTS(observation_space, action_space)
     state = np.array([1, 2, 3, 4])
@@ -273,14 +274,14 @@ def test_returns_expected_action():
     action = bandit.get_action(state, action_mask)
 
     assert action.is_integer()
-    assert action >= 0 and action < action_space
+    assert action >= 0 and action < action_space.n
 
 
 # Returns the expected action when given a state observation and action mask.
 def test_returns_expected_action_mask():
     accelerator = Accelerator()
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
 
     bandit = NeuralTS(observation_space, action_space, accelerator=accelerator)
     state = np.array([1, 2, 3, 4])
@@ -295,15 +296,15 @@ def test_returns_expected_action_mask():
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     batch_size = 64
 
     # Create an instance of the NeuralTS class
     bandit = NeuralTS(observation_space, action_space, batch_size=batch_size)
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space)
+    states = torch.randn(batch_size, *observation_space.shape)
     rewards = torch.randn((batch_size, 1))
 
     experiences = [states, rewards]
@@ -323,8 +324,8 @@ def test_learns_from_experiences():
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences_if_cuda():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     batch_size = 64
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -333,7 +334,7 @@ def test_learns_from_experiences_if_cuda():
     bandit = NeuralTS(observation_space, action_space, batch_size=batch_size, device=device)
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space).to(device)
+    states = torch.randn(batch_size, *observation_space.shape).to(device)
     rewards = torch.randn((batch_size, 1)).to(device)
 
     experiences = [states, rewards]
@@ -353,8 +354,8 @@ def test_learns_from_experiences_if_cuda():
 
 def test_learning_accelerator():
     accelerator = Accelerator()
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     batch_size = 64
 
     # Create an instance of the NeuralTS class
@@ -366,7 +367,7 @@ def test_learning_accelerator():
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space)
+    states = torch.randn(batch_size, *observation_space.shape)
     rewards = torch.randn((batch_size, 1))
 
     experiences = [states, rewards]
@@ -385,8 +386,8 @@ def test_learning_accelerator():
 
 
 def test_learning_cnn():
-    observation_space = (3, 32, 32)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
+    action_space = spaces.Discrete(2)
     batch_size = 64
     net_config = {
         "arch": "cnn",
@@ -406,7 +407,7 @@ def test_learning_cnn():
     )
 
     # Create a batch of experiences
-    states = torch.randn(batch_size, *observation_space)
+    states = torch.randn(batch_size, *observation_space.shape)
     rewards = torch.randn((batch_size, 1))
 
     experiences = [states, rewards]
@@ -426,10 +427,10 @@ def test_learning_cnn():
 
 # Runs algorithm test loop
 def test_algorithm_test_loop():
-    observation_space = (4,)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
 
-    env = DummyBanditEnv(state_size=observation_space, arms=action_space)
+    env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
 
     agent = NeuralTS(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
@@ -438,10 +439,10 @@ def test_algorithm_test_loop():
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    observation_space = (32, 32, 3)
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
+    action_space = spaces.Discrete(2)
 
-    env = DummyBanditEnv(state_size=observation_space, arms=action_space)
+    env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
 
     net_config_cnn = {
         "arch": "cnn",
@@ -453,7 +454,7 @@ def test_algorithm_test_loop_images():
     }
 
     agent = NeuralTS(
-        observation_space=(3, 32, 32),
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=action_space,
         net_config=net_config_cnn,
     )
@@ -466,7 +467,7 @@ def test_algorithm_test_loop_images():
     "observation_space, net_config",
     [
         (
-            (3, 32, 32),
+            spaces.Box(0, 1, shape=(3, 32, 32)),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -476,11 +477,11 @@ def test_algorithm_test_loop_images():
                 "normalize": False,
             },
         ),
-        ((4,), {"arch": "mlp", "hidden_size": [128]}),
+        (spaces.Box(0, 1, shape=(4,)), {"arch": "mlp", "hidden_size": [128]}),
     ],
 )
 def test_clone_returns_identical_agent(observation_space, net_config):
-    action_space = 2
+    action_space = spaces.Discrete(2)
 
     bandit = DummyNeuralTS(observation_space, action_space, net_config)
     bandit.tensor_attribute = torch.randn(1)
@@ -552,8 +553,8 @@ def test_clone_returns_identical_agent(observation_space, net_config):
 
 
 def test_clone_new_index():
-    observation_space = [4]
-    action_space = 2
+    observation_space = spaces.Box(0, 1, shape=(4,))
+    action_space = spaces.Discrete(2)
     one_hot = False
 
     bandit = NeuralTS(observation_space, action_space, one_hot)
@@ -563,10 +564,10 @@ def test_clone_new_index():
 
 
 def test_clone_after_learning():
-    action_space = 2
-    observation_space = (4,)
+    action_space = spaces.Discrete(2)
+    observation_space = spaces.Box(0, 1, shape=(4,))
     batch_size = 4
-    states = torch.randn(batch_size, observation_space[0])
+    states = torch.randn(batch_size, observation_space.shape[0])
     rewards = torch.rand(batch_size, 1)
     experiences = states, rewards
     bandit = NeuralTS(observation_space, action_space, batch_size=batch_size)
@@ -593,7 +594,7 @@ def test_clone_after_learning():
 
 # The method successfully unwraps the actor model when an accelerator is present.
 def test_unwrap_models():
-    bandit = NeuralTS(observation_space=[4], action_space=2, accelerator=Accelerator())
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), accelerator=Accelerator())
     bandit.unwrap_models()
     assert isinstance(bandit.actor, nn.Module)
 
@@ -601,7 +602,7 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=[4], action_space=2)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -625,7 +626,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralTS(observation_space=[4], action_space=2)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
@@ -666,7 +667,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     }
 
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=[3, 32, 32], action_space=2, net_config=net_config_cnn)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(3, 32, 32)), action_space=spaces.Discrete(2), net_config=net_config_cnn)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -690,7 +691,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralTS(observation_space=[4], action_space=2)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
@@ -734,7 +735,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=[3, 64, 64], action_space=2, actor_network=actor_network)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(3, 64, 64)), action_space=spaces.Discrete(2), actor_network=actor_network)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -758,7 +759,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralTS(observation_space=[4], action_space=2)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
@@ -798,7 +799,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=[4], action_space=2)
+    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -849,8 +850,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the NeuralTS agent
     bandit = NeuralTS(
-        observation_space=[3, 32, 32],
-        action_space=2,
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
@@ -902,15 +903,15 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        ([4], "simple_mlp", torch.randn(1, 4)),
-        ([3, 64, 64], "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
-    action_space = 2
+    action_space = spaces.Discrete(2)
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 

@@ -82,7 +82,7 @@ class DummyAgentOffPolicy:
         self.algo = algo
         self.state_size = env.state_size
         self.action_size = env.action_size
-        self.action_space = env.action_size
+        self.action_dim = env.action_size
         self.batch_size = batch_size
         self.beta = beta
         self.learn_step = 1
@@ -157,7 +157,7 @@ class DummyBandit:
     def __init__(self, batch_size, bandit_env, beta=None):
         self.state_size = bandit_env.state_size
         self.action_size = bandit_env.action_size
-        self.action_space = bandit_env.action_size
+        self.action_dim = bandit_env.action_size
         self.batch_size = batch_size
         self.beta = beta
         self.learn_step = 1
@@ -195,11 +195,11 @@ class DummyBandit:
 
 
 class DummyMultiEnv(ParallelEnv):
-    def __init__(self, observation_spaces, action_spaces):
-        self.observation_spaces = observation_spaces
-        self.state_size = self.observation_spaces
-        self.action_spaces = action_spaces
-        self.action_size = self.action_spaces
+    def __init__(self, state_dims, action_dims):
+        self.state_dims = state_dims
+        self.state_size = self.state_dims
+        self.action_dims = action_dims
+        self.action_size = self.action_dims
         self.agents = ["agent_0", "agent_1"]
         self.possible_agents = ["agent_0", "agent_1"]
         self.render_mode = None
@@ -213,12 +213,12 @@ class DummyMultiEnv(ParallelEnv):
 
     def reset(self, seed=None, options=None):
         return {
-            agent: np.random.rand(*self.observation_spaces) for agent in self.agents
+            agent: np.random.rand(*self.state_dims) for agent in self.agents
         }, self.info
 
     def step(self, action):
         return (
-            {agent: np.random.rand(*self.observation_spaces) for agent in self.agents},
+            {agent: np.random.rand(*self.state_dims) for agent in self.agents},
             {agent: np.random.randint(0, 5) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
             {agent: np.random.randint(0, 2) for agent in self.agents},
@@ -229,7 +229,7 @@ class DummyMultiEnv(ParallelEnv):
         return Discrete(5)
 
     def observation_space(self, agent):
-        return Box(0, 255, self.observation_spaces)
+        return Box(0, 255, self.state_dims)
 
 
 class DummyMultiAgent(DummyAgentOffPolicy):
@@ -565,7 +565,7 @@ def mocked_agent_off_policy(env, algo):
     mock_agent.batch_size = 5
     mock_agent.state_size = env.state_size
     mock_agent.action_size = 2
-    mock_agent.action_space = 2
+    mock_agent.action_dim = 2
     mock_agent.beta = 0.4
     mock_agent.scores = []
     mock_agent.steps = [0]
@@ -635,7 +635,7 @@ def mocked_bandit(bandit_env, algo):
     mock_agent.batch_size = 5
     mock_agent.state_size = bandit_env.state_size
     mock_agent.action_size = 2
-    mock_agent.action_space = 2
+    mock_agent.action_dim = 2
     mock_agent.beta = 0.4
     mock_agent.scores = []
     mock_agent.steps = [0]
@@ -2355,7 +2355,7 @@ def test_train_multi_agent_rgb_vectorized(
     action_size,
 ):
     env = make_multi_agent_vect_envs(
-        DummyMultiEnv, num_envs=4, observation_spaces=state_size, action_spaces=action_size
+        DummyMultiEnv, num_envs=4, state_dims=state_size, action_dims=action_size
     )
     for agent in population_multi_agent:
         agent.num_envs = 4

@@ -1,11 +1,12 @@
+from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple
 import random
 from collections import deque, namedtuple
-
+from dataclasses import dataclass
 import numpy as np
+from numpy.typing import ArrayLike
 import torch
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
-
 
 class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
@@ -19,8 +20,8 @@ class ReplayBuffer:
     :type device: str, optional
     """
 
-    def __init__(self, memory_size, field_names, device=None):
-        assert memory_size > 0, "Mmeory size must be greater than zero."
+    def __init__(self, memory_size: int, field_names: List[str], device: Optional[str] = None):
+        assert memory_size > 0, "Memory size must be greater than zero."
         assert len(field_names) > 0, "Field names must contain at least one field name."
 
         self.memory_size = memory_size
@@ -30,16 +31,29 @@ class ReplayBuffer:
         self.counter = 0  # update cycle counter
         self.device = device
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """Returns the current size of internal memory."""
         return len(self.memory)
 
-    def _add(self, *args):
-        """Adds experience to memory."""
+    def _add(self, *args: Any) -> None:
+        """Adds experience to memory.
+
+        :param *args: Variable length argument list. Contains transition elements in consistent order,
+            e.g. state, action, reward, next_state, done
+        """
         e = self.experience(*args)
         self.memory.append(e)
 
-    def _process_transition(self, experiences, np_array=False):
-        """Returns transition dictionary from experiences."""
+    def _process_transition(self, experiences: List[NamedTuple], np_array: bool = False) -> Dict[str, Any]:
+        """Returns transition dictionary from experiences.
+
+        :param experiences: List of experiences
+        :type experiences: list
+        :param np_array: Flag to return numpy arrays instead of torch tensors, defaults to False
+        :type np_array: bool, optional
+        :return: Transition dictionary
+        :rtype: dict
+        """
         transition = {}
         for field in self.field_names:
             ts = [
@@ -70,13 +84,15 @@ class ReplayBuffer:
             transition[field] = ts
         return transition
 
-    def sample(self, batch_size, return_idx=False):
+    def sample(self, batch_size: int, return_idx: bool = False) -> Tuple[Any, ...]:
         """Returns sample of experiences from memory.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
         :param return_idx: Boolean flag to return index of samples randomly selected, defaults to False
-        :type return_idx: bool
+        :type return_idx: bool, optional
+        :return: Tuple of sampled experiences
+        :rtype: tuple
         """
         if return_idx:
             idxs = np.random.choice(len(self.memory), size=batch_size, replace=False)
@@ -89,7 +105,7 @@ class ReplayBuffer:
 
         return tuple(transition.values())
 
-    def save_to_memory_single_env(self, *args):
+    def save_to_memory_single_env(self, *args: Any) -> None:
         """Saves experience to memory.
 
         :param *args: Variable length argument list. Contains transition elements in consistent order,
@@ -98,7 +114,7 @@ class ReplayBuffer:
         self._add(*args)
         self.counter += 1
 
-    def save_to_memory_vect_envs(self, *args):
+    def save_to_memory_vect_envs(self, *args: Any) -> None:
         """Saves multiple experiences to memory.
 
         :param *args: Variable length argument list. Contains batched transition elements in consistent order,
@@ -108,7 +124,7 @@ class ReplayBuffer:
             self._add(*transition)
             self.counter += 1
 
-    def save_to_memory(self, *args, is_vectorised=False):
+    def save_to_memory(self, *args: Any, is_vectorised: bool = False) -> None:
         """Applies appropriate save_to_memory function depending on whether
         the environment is vectorised or not.
 
@@ -143,12 +159,12 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
     def __init__(
         self,
-        memory_size,
-        field_names,
-        num_envs,
-        n_step=3,
-        gamma=0.99,
-        device=None,
+        memory_size: int,
+        field_names: List[str],
+        num_envs: int,
+        n_step: int = 3,
+        gamma: float = 0.99,
+        device: Optional[str] = None,
     ):
         super().__init__(memory_size, field_names, device)
         assert (
@@ -163,16 +179,18 @@ class MultiStepReplayBuffer(ReplayBuffer):
             or "terminated" in field_names
         ), "Done/termination must be saved in replay buffer under the field name 'done', 'termination', or 'terminated'."
         self.num_envs = num_envs
-        self.n_step_buffers = [deque(maxlen=n_step) for i in range(num_envs)]
+        self.n_step_buffers = [deque(maxlen=n_step) for _ in range(num_envs)]
         self.args_deque = deque(maxlen=n_step)
         self.n_step = n_step
         self.gamma = gamma
 
-    def save_to_memory_single_env(self, *args):
+    def save_to_memory_single_env(self, *args: Any) -> Tuple[Any, ...]:
         """Saves experience to memory.
 
         :param *args: Variable length argument list. Contains transition elements in consistent order,
             e.g. state, action, reward, next_state, done
+        :return: The first saved transition
+        :rtype: tuple
         """
         self.args_deque.append(args)
         transition = self.experience(*args)
@@ -189,11 +207,13 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
         return self.args_deque[0]
 
-    def save_to_memory_vect_envs(self, *args):
+    def save_to_memory_vect_envs(self, *args: Any) -> Tuple[Any, ...]:
         """Saves multiple experiences to memory.
 
         :param *args: Variable length argument list. Contains transition elements in consistent order,
             e.g. state, action, reward, next_state, done
+        :return: The first saved transition
+        :rtype: tuple
         """
         self.args_deque.append(args)
         for buffer, *transition in zip(self.n_step_buffers, *args):
@@ -212,20 +232,29 @@ class MultiStepReplayBuffer(ReplayBuffer):
 
             return self.args_deque[0]
 
-    def sample_from_indices(self, idxs):
+    def sample_from_indices(self, idxs: List[int]) -> Tuple[Any, ...]:
         """Returns sample of experiences from memory using provided indices.
 
         :param idxs: Indices to sample
         :type idxs: list[int]
+        :return: Tuple of sampled experiences
+        :rtype: tuple
         """
         experiences = list(map(lambda i: self.memory[i], idxs))
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 
-    def _get_n_step_info(self, n_step_buffer, gamma):
-        """Returns n step reward, next_state, and done, as well as other saved transition elements, in order."""
+    def _get_n_step_info(self, n_step_buffer: Deque[NamedTuple], gamma: float) -> Tuple[Any, ...]:
+        """Returns n step reward, next_state, and done, as well as other saved transition elements, in order.
+
+        :param n_step_buffer: Buffer containing n-step transitions
+        :type n_step_buffer: deque
+        :param gamma: Discount factor
+        :type gamma: float
+        :return: Tuple containing n-step transition elements
+        :rtype: tuple
+        """
         # info of the last transition
-        # t = [n_step_buffer[0]]
         t = [n_step_buffer[0]]
         transition = self._process_transition(t, np_array=True)
 
@@ -289,13 +318,13 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
 
     def __init__(
         self,
-        memory_size,
-        field_names,
-        num_envs,
-        alpha=0.6,
-        n_step=1,
-        gamma=0.99,
-        device=None,
+        memory_size: int,
+        field_names: List[str],
+        num_envs: int,
+        alpha: float = 0.6,
+        n_step: int = 1,
+        gamma: float = 0.99,
+        device: Optional[str] = None,
     ):
         super().__init__(memory_size, field_names, num_envs, n_step, gamma, device)
         self.max_priority, self.tree_ptr = 1.0, 0
@@ -309,19 +338,28 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
         self.sum_tree = SumSegmentTree(tree_capacity)
         self.min_tree = MinSegmentTree(tree_capacity)
 
-    def _add(self, *args):
+    def _add(self, *args: Any) -> None:
+        """Adds experience to memory and updates priority trees.
+
+        :param *args: Variable length argument list. Contains transition elements in consistent order,
+            e.g. state, action, reward, next_state, done
+        """
         super()._add(*args)
         self.sum_tree[self.tree_ptr] = self.max_priority**self.alpha
         self.min_tree[self.tree_ptr] = self.max_priority**self.alpha
         self.tree_ptr = (self.tree_ptr + 1) % self.memory_size
 
-    def sample(self, batch_size, beta=0.4):
+    def sample(self, batch_size: int, beta: float = 0.4) -> Tuple[Any, ...]:
         """Returns sample of experiences from memory.
 
         :param batch_size: Number of samples to return
         :type batch_size: int
+        :param beta: Beta parameter for importance sampling, defaults to 0.4
+        :type beta: float, optional
+        :return: Tuple of sampled experiences
+        :rtype: tuple
         """
-        idxs = self._sample_proprtional(batch_size)
+        idxs = self._sample_proportional(batch_size)
         experiences = [self.memory[i] for i in idxs]
         transition = self._process_transition(experiences)
 
@@ -337,18 +375,26 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
 
         return tuple(transition.values())
 
-    def update_priorities(self, idxs, priorities):
-        """Update priorities of sampled transitions."""
+    def update_priorities(self, idxs: List[int], priorities: List[float]) -> None:
+        """Update priorities of sampled transitions.
+
+        :param idxs: Indices of sampled transitions
+        :type idxs: list[int]
+        :param priorities: New priorities of sampled transitions
+        :type priorities: list[float]
+        """
         for idx, priority in zip(idxs, priorities):
             self.sum_tree[idx] = priority**self.alpha
             self.min_tree[idx] = priority**self.alpha
             self.max_priority = max(self.max_priority, priority)
 
-    def _sample_proprtional(self, batch_size):
+    def _sample_proportional(self, batch_size: int) -> List[int]:
         """Sample indices based on proportions.
 
         :param batch_size: Sample size
         :type batch_size: int
+        :return: List of sampled indices
+        :rtype: list[int]
         """
         idxs = []
         p_total = self.sum_tree.sum(0, len(self) - 1)
@@ -361,8 +407,16 @@ class PrioritizedReplayBuffer(MultiStepReplayBuffer):
             idxs.append(idx)
         return idxs
 
-    def _calculate_weight(self, idx, beta):
-        """Calculate the weight of the experience at idx."""
+    def _calculate_weight(self, idx: int, beta: float) -> float:
+        """Calculate the weight of the experience at idx.
+
+        :param idx: Index of the experience
+        :type idx: int
+        :param beta: Beta parameter for importance sampling
+        :type beta: float
+        :return: Weight of the experience
+        :rtype: float
+        """
         # get max weight
         p_min = self.min_tree.min() / self.sum_tree.sum()
         max_weight = (p_min * len(self)) ** (-beta)

@@ -1092,7 +1092,6 @@ class MATD3(MultiAgentAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
-
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -1239,14 +1238,6 @@ class MATD3(MultiAgentAlgorithm):
                     self.critic_2_optimizers, self.critics_2
                 )
             ]
-
-    def save_checkpoint(self, path: str) -> None:
-        """Saves a checkpoint of agent properties and network weights to path.
-
-        :param path: Location to save checkpoint at
-        :type path: string
-        """
-        super().save_checkpoint(path, exclude_accelerator=True)
 
     def load_checkpoint(self, path):
         """Loads saved agent properties and network weights from checkpoint.

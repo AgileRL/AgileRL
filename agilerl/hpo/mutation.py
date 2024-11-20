@@ -5,8 +5,10 @@ import fastrand
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim import Optimizer
 from accelerate import Accelerator
 
+from agilerl.algorithms.base import EvolvableAlgorithm
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.networks.base import EvolvableModule
 from agilerl.utils.algo_utils import remove_compile_prefix
@@ -14,6 +16,7 @@ from agilerl.utils.algo_utils import remove_compile_prefix
 NetworkConfig = Dict[str, str]
 NetworkList = List[NetworkConfig]
 AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
+PopulationType = List[EvolvableAlgorithm]
 
 def get_return_type(method: Callable) -> Any:
     """Get the return type of a method if annotated, otherwise return None.
@@ -239,7 +242,7 @@ class Mutations:
         else:
             self.algo = self.get_algo_nets(algo)
 
-    def no_mutation(self, individual):
+    def no_mutation(self, individual: EvolvableAlgorithm):
         """Returns individual from population without mutation.
 
         :param individual: Individual agent from population
@@ -248,12 +251,11 @@ class Mutations:
         individual.mut = "None"  # No mutation
         return individual
 
-    # Generic mutation function - gather mutation options and select from these
-    def mutation(self, population, pre_training_mut=False):
+    def mutation(self, population: PopulationType, pre_training_mut: bool=False) -> PopulationType:
         """Returns mutated population.
 
         :param population: Population of agents
-        :type population: list[object]
+        :type population: list[PopulationType]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
         """
@@ -304,7 +306,7 @@ class Mutations:
             if hasattr(individual, "torch_compiler") and individual.torch_compiler:
                 individual.recompile()
             if self.multi_agent:
-                offspring_actors = getattr(individual, self.algo["actor"]["eval"])
+                offspring_actors: List[EvolvableModule] = getattr(individual, self.algo["actor"]["eval"])
                 # Reinitialise target network with frozen weights due to potential
                 # mutation in architecture of value network
                 ind_targets = [
@@ -424,10 +426,10 @@ class Mutations:
             mutated_population.append(individual)
         return mutated_population
 
-    def reinit_opt(self, individual):
+    def reinit_opt(self, individual: EvolvableAlgorithm) -> None:
         if self.multi_agent:
             # Reinitialise optimizer
-            actor_opts = getattr(individual, self.algo["actor"]["optimizer"])
+            actor_opts: List[Optimizer] = getattr(individual, self.algo["actor"]["optimizer"])
 
             net_params = [
                 actor.parameters()
@@ -512,7 +514,7 @@ class Mutations:
                         type(critic_opt)(net_params, lr=individual.lr_critic),
                     )
 
-    def rl_hyperparam_mutation(self, individual):
+    def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with RL hyperparameter mutation.
 
         :param individual: Individual agent from population
@@ -570,11 +572,11 @@ class Mutations:
 
         return individual
 
-    def activation_mutation(self, individual):
+    def activation_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with activation layer mutation.
 
         :param individual: Individual agent from population
-        :type individual: object
+        :type individual: EvolvableAlgorithm
         """
         if individual.algo in ["PPO", "DDPG", "TD3"]:  # Needs to stay constant
             individual.mut = "None"
@@ -655,7 +657,7 @@ class Mutations:
         individual.mut = "act"
         return individual
 
-    def _permutate_activation(self, network: EvolvableModule):
+    def _permutate_activation(self, network: EvolvableModule) -> EvolvableModule:
         # Function to change network activation layer
         possible_activations = copy.deepcopy(self.activation_selection)
         current_activation = network.mlp_activation
@@ -679,11 +681,11 @@ class Mutations:
 
         return network
 
-    def parameter_mutation(self, individual):
+    def parameter_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with network parameters mutation.
 
         :param individual: Individual agent from population
-        :type individual: object
+        :type individual: EvolvableAlgorithm
         """
         # Mutate network parameters
         if self.multi_agent:
@@ -715,18 +717,27 @@ class Mutations:
         individual.mut = "param"
         return individual
 
-    def regularize_weight(self, weight, mag):
+    def regularize_weight(self, weight: float, mag: float) -> float:
+        """Regularize the weight to be within the specified magnitude.
+
+        :param weight: The weight to be regularized
+        :type weight: float
+        :param mag: The magnitude limit
+        :type mag: float
+        :return: The regularized weight
+        :rtype: float
+        """
         if weight > mag:
             weight = mag
         if weight < -mag:
             weight = -mag
         return weight
 
-    def classic_parameter_mutation(self, network):
+    def classic_parameter_mutation(self, network: EvolvableModule) -> EvolvableModule:
         """Returns network with mutated weights.
 
         :param network: Neural network to mutate
-        :type individual: torch.nn.Module
+        :type network: EvolvableModule
         """
         # Function to mutate network weights with Gaussian noise
         mut_strength = self.mutation_sd
@@ -781,7 +792,7 @@ class Mutations:
 
         return network
 
-    def architecture_mutate(self, individual):
+    def architecture_mutate(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with network architecture mutation.
 
         :param individual: Individual agent from population
@@ -927,7 +938,20 @@ class Mutations:
         individual.mut = "arch"
         return individual
 
-    def _reinit_bandit_grads(self, individual, offspring_actor: EvolvableModule, old_exp_layer: nn.Module):
+    def _reinit_bandit_grads(
+            self,
+            individual: EvolvableAlgorithm,
+            offspring_actor: EvolvableModule,
+            old_exp_layer: nn.Module) -> None:
+        """Reinitialise bandit gradients after architecture mutation.
+        
+        :param individual: Individual agent from population
+        :type individual: EvolvableAlgorithm
+        :param offspring_actor: Offspring actor network
+        :type offspring_actor: EvolvableModule
+        :param old_exp_layer: Old linear layer
+        :type old_exp_layer: nn.Module
+        """
         if self.arch == "mlp":
             if isinstance(offspring_actor, EvolvableMLP):
                 exp_layer = offspring_actor.feature_net.mlp_linear_layer_output
@@ -1003,11 +1027,15 @@ class Mutations:
             else individual.accelerator.device
         )
 
+    # TODO: There will be no need for this after refactoring algorithms
     def get_algo_nets(self, algo: str) -> AlgoConfig:
         """Returns dictionary with agent network names.
 
         :param algo: RL algorithm
         :type algo: str
+
+        :return: Dictionary with agent network names
+        :rtype: AlgoConfig
         """
         # Function to return dictionary with names of agent networks to allow mutation
         if algo == "DQN":
