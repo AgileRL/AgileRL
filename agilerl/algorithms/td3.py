@@ -23,8 +23,6 @@ class TD3(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param one_hot: One-hot encoding, used with discrete observation spaces
-    :type one_hot: bool
     :param max_action: Upper bound of the action space, defaults to 1
     :type max_action: float, optional
     :param min_action: Lower bound of the action space, defaults to -1
@@ -77,9 +75,6 @@ class TD3(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        one_hot: bool,
-        max_action: float = 1,
-        min_action: float = -1,
         O_U_noise: bool = True,
         vect_noise_dim: int = 1,
         expl_noise: float = 0.1,
@@ -113,35 +108,6 @@ class TD3(RLAlgorithm):
             name="TD3"
         )
 
-        assert isinstance(
-            one_hot, bool
-        ), "One-hot encoding flag must be boolean value True or False."
-        assert isinstance(
-            max_action,
-            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
-        ), "Max action must be a float or integer."
-        assert isinstance(
-            min_action,
-            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
-        ), "Min action must be a float or integer."
-        if isinstance(min_action, list):
-            assert (
-                len(min_action) == self.action_dim
-            ), "Length of min_action must be equal to action_dim."
-            min_action = np.array(min_action)
-        if isinstance(max_action, list):
-            assert (
-                len(max_action) == self.action_dim
-            ), "Length of max_action must be equal to action_dim."
-            max_action = np.array(max_action)
-        if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
-            assert np.all(
-                max_action > min_action
-            ), "Max action must be greater than min action."
-        else:
-            assert (
-                max_action > min_action
-            ), "Max action must be greater than min action."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
@@ -174,9 +140,6 @@ class TD3(RLAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.one_hot = one_hot
-        self.max_action = max_action
-        self.min_action = min_action
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic

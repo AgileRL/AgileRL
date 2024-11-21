@@ -54,7 +54,6 @@ if __name__ == "__main__":
         algo="NeuralUCB",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
-        one_hot=None,  # One-hot encoding
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size

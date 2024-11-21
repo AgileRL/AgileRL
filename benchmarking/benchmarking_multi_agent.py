@@ -5,12 +5,17 @@ import torch
 import yaml
 from accelerate import Accelerator
 
+from agilerl.algorithms.base import MultiAgentAlgorithm
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.utils.utils import create_population, make_multi_agent_vect_envs
+from agilerl.utils.utils import (
+    create_population,
+    make_multi_agent_vect_envs,
+    observation_space_channels_to_first
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -46,32 +51,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.frame_stack_v1(env, 4)
 
     env.reset()
-    # Configure the multi-agent algo input arguments
-    try:
-        state_dims = [env.single_observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dims = [env.single_observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dims = [env.single_action_space(agent).n for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = True
-        INIT_HP["MAX_ACTION"] = None
-        INIT_HP["MIN_ACTION"] = None
-    except Exception:
-        action_dims = [env.single_action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [
-            env.single_action_space(agent).high for agent in env.agents
-        ]
-        INIT_HP["MIN_ACTION"] = [
-            env.single_action_space(agent).low for agent in env.agents
-        ]
 
+    # Configure the multi-agent algo input arguments
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        state_dims = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dims
-        ]
+        observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
 
     INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
@@ -114,9 +99,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator=accelerator,
     )
 
+    state_dims = MultiAgentAlgorithm.get_state_dims(observation_spaces)
+    action_dims = MultiAgentAlgorithm.get_action_dims(action_spaces)
     total_state_dims = sum(state_dim[0] for state_dim in state_dims)
     total_action_dims = sum(action_dims)
-
     if use_net:
         ## Critic nets currently set-up for MATD3
         actor = [
@@ -151,9 +137,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dims,
-        action_dim=action_dims,
-        one_hot=one_hot,
+        observation_space=observation_spaces,
+        action_space=action_spaces,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         actor_network=actor,

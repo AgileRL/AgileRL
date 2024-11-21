@@ -24,8 +24,6 @@ class PPO(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param one_hot: One-hot encoding, used with discrete observation spaces
-    :type one_hot: bool
     :param discrete_actions: Boolean flag to indicate a discrete action space
     :type discrete_actions: bool, optional
     :param max_action: Upper bound of the action space, defaults to 1
@@ -77,10 +75,6 @@ class PPO(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        one_hot: bool,
-        discrete_actions: bool,
-        max_action: float = 1,
-        min_action: float = -1,
         index: int = 0,
         net_config: Dict[str, Any] = {"arch": "mlp", "hidden_size": [64, 64]},
         batch_size: int = 64,
@@ -113,38 +107,6 @@ class PPO(RLAlgorithm):
             name="PPO"
             )
 
-        assert isinstance(
-            one_hot, bool
-        ), "One-hot encoding flag must be boolean value True or False."
-        assert isinstance(
-            discrete_actions, bool
-        ), "Discrete actions flag must be boolean value True or False."
-        assert isinstance(
-            max_action,
-            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
-        ), "Max action must be a float or integer."
-        assert isinstance(
-            min_action,
-            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
-        ), "Min action must be a float or integer."
-        if isinstance(min_action, list):
-            assert (
-                len(min_action) == self.action_dim
-            ), "Length of min_action must be equal to action_dim."
-            min_action = np.array(min_action)
-        if isinstance(max_action, list):
-            assert (
-                len(max_action) == self.action_dim
-            ), "Length of max_action must be equal to action_dim."
-            max_action = np.array(max_action)
-        if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
-            assert np.all(
-                max_action > min_action
-            ), "Max action must be greater than min action."
-        else:
-            assert (
-                max_action > min_action
-            ), "Max action must be greater than min action."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
@@ -200,10 +162,6 @@ class PPO(RLAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.one_hot = one_hot
-        self.discrete_actions = discrete_actions
-        self.max_action = max_action
-        self.min_action = min_action
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma

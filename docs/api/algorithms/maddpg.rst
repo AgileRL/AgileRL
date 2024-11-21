@@ -114,7 +114,7 @@ Example
     agent = MADDPG(
         state_dims=state_dim,
         action_dims=action_dim,
-        one_hot=one_hot,
+        
         n_agents=n_agents,
         agent_ids=agent_ids,
         max_action=max_action,

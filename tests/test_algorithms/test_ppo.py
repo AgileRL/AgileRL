@@ -224,7 +224,6 @@ def test_initialize_ppo_with_cnn_accelerator():
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
         discrete_actions=True,
         net_config=net_config_cnn,
         batch_size=batch_size,
@@ -460,14 +459,14 @@ def test_initialize_ppo_with_actor_network_no_critic(
 # Converts numpy array to torch tensor of type float
 def test_convert_numpy_array_to_tensor():
     state = np.array([1, 2, 3, 4])
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(5,)), action_space=spaces.Discrete(2), one_hot=True, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(5,)), action_space=spaces.Discrete(2), discrete_actions=True)
     prepared_state = ppo.prepare_state(state)
     assert isinstance(prepared_state, torch.Tensor)
 
 
 def test_unsqueeze_prepare():
     state = np.array([1, 2, 3, 4])
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), discrete_actions=True)
     prepared_state = ppo.prepare_state(state)
     assert isinstance(prepared_state, torch.Tensor)
 
@@ -487,7 +486,6 @@ def test_prepare_state_cnn_accelerator():
     ppo = PPO(
         observation_space=observation_space,
         action_space=spaces.Discrete(2),
-        one_hot=False,
         discrete_actions=True,
         net_config=net_config_cnn,
         accelerator=accelerator,
@@ -586,8 +584,6 @@ def test_returns_expected_action_mask_vectorized(build_ppo):
 def test_learns_from_experiences():
     observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
-    one_hot = False
-    discrete_actions = True
     batch_size = 45
     net_config_cnn = {
         "arch": "cnn",
@@ -601,8 +597,6 @@ def test_learns_from_experiences():
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
-        discrete_actions=discrete_actions,
         net_config=net_config_cnn,
         batch_size=batch_size,
     )
@@ -644,16 +638,12 @@ def test_learns_from_experiences_continuous_accel():
     accelerator = Accelerator()
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
-    one_hot = False
-    discrete_actions = False
     batch_size = 10
     target_kl = 0
 
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
-        discrete_actions=discrete_actions,
         net_config={
             "arch": "mlp",
             "hidden_size": [64, 64],
@@ -705,7 +695,7 @@ def test_algorithm_test_loop():
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
     agent = PPO(
-        observation_space=observation_space, action_space=action_space, one_hot=False, discrete_actions=True
+        observation_space=observation_space, action_space=action_space
     )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -719,7 +709,7 @@ def test_algorithm_test_loop_unvectorized():
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     agent = PPO(
-        observation_space=observation_space, action_space=action_space, one_hot=False, discrete_actions=True
+        observation_space=observation_space, action_space=action_space
     )
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
@@ -744,8 +734,6 @@ def test_algorithm_test_loop_images():
     agent = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=False,
-        discrete_actions=True,
         net_config=net_config_cnn,
     )
     mean_score = agent.test(env, max_steps=10)
@@ -771,8 +759,6 @@ def test_algorithm_test_loop_images_unvectorized():
     agent = PPO(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=action_space,
-        one_hot=False,
-        discrete_actions=True,
         net_config=net_config_cnn,
     )
     mean_score = agent.test(env, max_steps=10, swap_channels=True)
@@ -959,7 +945,7 @@ def test_clone_after_learning():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the ppo agent
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -995,7 +981,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
@@ -1039,8 +1025,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     ppo = PPO(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        one_hot=False,
-        discrete_actions=True,
         net_config=net_config_cnn,
     )
 
@@ -1076,7 +1060,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
@@ -1127,8 +1111,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=False,
-        discrete_actions=True,
         actor_network=actor_network,
         critic_network=critic_network,
     )
@@ -1165,7 +1147,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
     # Load checkpoint
     ppo.load_checkpoint(checkpoint_path)
 
@@ -1200,7 +1182,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the ppo agent
-    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, discrete_actions=True)
+    ppo = PPO(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1241,8 +1223,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the ppo agent
     ppo = PPO(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=spaces.Discrete(2),
-        one_hot=False,
+        action_space=spaces.Box(0, 1, shape=(2,)),
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
@@ -1293,7 +1274,6 @@ def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
     action_space = spaces.Discrete(2)
-    one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
@@ -1301,8 +1281,6 @@ def test_load_from_pretrained_networks(
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
-        discrete_actions=True,
         actor_network=actor_network,
         critic_network=copy.deepcopy(actor_network),
     )

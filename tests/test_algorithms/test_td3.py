@@ -201,7 +201,6 @@ def test_initialize_td3_with_cnn_accelerator():
     td3 = TD3(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
         max_action=max_action,
         min_action=0,
         index=index,
@@ -454,11 +453,11 @@ def test_initialize_td3_with_actor_network_cnn(
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action_training():
     accelerator = Accelerator()
-    observation_space = spaces.Box(0, 1, shape=(4,))
+    observation_space = spaces.Discrete(4)
     action_space = spaces.Discrete(2)
     max_action = 1
 
-    td3 = TD3(observation_space, action_space, one_hot=False, max_action=max_action)
+    td3 = TD3(observation_space, action_space, max_action=max_action)
     state = np.array([1, 2, 3, 4])
     training = False
     action = td3.get_action(state, training)[0]
@@ -471,7 +470,6 @@ def test_returns_expected_action_training():
     td3 = TD3(
         observation_space,
         action_space,
-        one_hot=True,
         max_action=max_action,
         accelerator=accelerator,
     )
@@ -487,7 +485,6 @@ def test_returns_expected_action_training():
     td3 = TD3(
         observation_space,
         action_space,
-        one_hot=True,
         O_U_noise=False,
         max_action=max_action,
         accelerator=accelerator,
@@ -723,7 +720,7 @@ def test_algorithm_test_loop():
     env = DummyEnv(state_size=observation_space.shape, vect=True, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = TD3(observation_space=observation_space, action_space=action_space, one_hot=False, max_action=1)
+    agent = TD3(observation_space=observation_space, action_space=action_space, max_action=1)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
@@ -735,7 +732,7 @@ def test_algorithm_test_loop_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    agent = TD3(observation_space=observation_space, action_space=action_space, one_hot=False, max_action=1)
+    agent = TD3(observation_space=observation_space, action_space=action_space, max_action=1)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
@@ -759,7 +756,6 @@ def test_algorithm_test_loop_images():
     agent = TD3(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=False,
         max_action=1,
         net_config=net_config_cnn,
     )
@@ -786,7 +782,6 @@ def test_algorithm_test_loop_images_unvectorized():
     agent = TD3(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=action_space,
-        one_hot=False,
         max_action=1,
         net_config=net_config_cnn,
     )
@@ -1018,7 +1013,6 @@ def test_unwrap_models():
     td3 = TD3(
         observation_space=spaces.Box(0, 1, shape=(4,)),
         action_space=spaces.Discrete(2),
-        one_hot=False,
         max_action=1,
         accelerator=Accelerator(),
     )
@@ -1034,7 +1028,7 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the td3 agent
-    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), max_action=1)
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1073,7 +1067,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), max_action=1)
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1120,7 +1114,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     td3 = TD3(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        one_hot=False,
         max_action=1,
         net_config=net_config_cnn,
     )
@@ -1162,7 +1155,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), max_action=1)
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1267,7 +1260,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, max_action=1)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), max_action=1)
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1435,7 +1428,6 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     td3 = TD3(
         observation_space=spaces.Box(0, 1, shape=(4,)),
         action_space=spaces.Discrete(4),
-        one_hot=False,
         max_action=max_action,
         min_action=min_action,
         net_config=net_config,
@@ -1479,7 +1471,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
         min = np.array(min)
     if isinstance(max, list):
         max = np.array(max)
-    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(1), one_hot=False, device=device)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(1), device=device)
     input = torch.tensor(action, dtype=torch.float32).to(device)
     clamped_actions = td3.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
@@ -1496,7 +1488,7 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the td3 agent
-    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False)
+    td3 = TD3(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1561,7 +1553,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     td3 = TD3(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        one_hot=False,
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
@@ -1634,7 +1625,6 @@ def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
     action_space = spaces.Discrete(2)
-    one_hot = False
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
@@ -1642,7 +1632,6 @@ def test_load_from_pretrained_networks(
     td3 = TD3(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
         actor_network=actor_network,
         critic_networks=[copy.deepcopy(actor_network), copy.deepcopy(actor_network)],
     )

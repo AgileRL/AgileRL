@@ -5,7 +5,12 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -23,19 +28,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     accelerator.wait_for_everyone()
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
-    try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
 
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(INIT_HP["MEMORY_SIZE"], field_names=field_names)
@@ -68,9 +65,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         population_size=INIT_HP["POP_SIZE"],

@@ -64,13 +64,24 @@ def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.ve
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
+def observation_space_channels_to_first(observation_space: spaces.Box) -> spaces.Box:
+    """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
+
+    :param observation_space: Observation space
+    :type observation_space: spaces.Box
+    :return: Observation space with swapped channels
+    :rtype: spaces.Box
+    """
+    low = observation_space.low.transpose(2, 0, 1)
+    high = observation_space.high.transpose(2, 0, 1)
+    return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
+
 GymSpaceType = Union[spaces.Space, List[spaces.Space]]
 
 def create_population(
     algo: str,
     observation_space: GymSpaceType,
     action_space: GymSpaceType,
-    one_hot: bool,
     net_config: Optional[Dict[str, Any]],
     INIT_HP: Dict[str, Any],
     actor_network: Optional[EvolvableModule] = None,
@@ -89,8 +100,6 @@ def create_population(
     :type observation_space: spaces.Space
     :param action_space: Action space
     :type action_space: spaces.Space
-    :param one_hot: One-hot encoding
-    :type one_hot: bool
     :param net_config: Network configuration
     :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
@@ -118,7 +127,6 @@ def create_population(
             agent = DQN(
                 observation_space=observation_space,
                 action_space=action_space,
-                one_hot=one_hot,
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -138,7 +146,6 @@ def create_population(
             agent = RainbowDQN(
                 observation_space=observation_space,
                 action_space=action_space,
-                one_hot=one_hot,
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -163,9 +170,6 @@ def create_population(
             agent = DDPG(
                 observation_space=observation_space,
                 action_space=action_space,
-                one_hot=one_hot,
-                max_action=INIT_HP["MAX_ACTION"],
-                min_action=INIT_HP["MIN_ACTION"],
                 O_U_noise=INIT_HP["O_U_NOISE"],
                 expl_noise=INIT_HP["EXPL_NOISE"],
                 vect_noise_dim=num_envs,
@@ -193,8 +197,6 @@ def create_population(
             agent = PPO(
                 observation_space=observation_space,
                 action_space=action_space,
-                one_hot=one_hot,
-                discrete_actions=INIT_HP["DISCRETE_ACTIONS"],
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -221,7 +223,6 @@ def create_population(
             agent = CQN(
                 observation_space=observation_space,
                 action_space=action_space,
-                one_hot=one_hot,
                 index=idx,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
@@ -241,9 +242,6 @@ def create_population(
             agent = TD3(
                 observation_space=observation_space,
                 action_space=action_space,
-                one_hot=one_hot,
-                max_action=INIT_HP["MAX_ACTION"],
-                min_action=INIT_HP["MIN_ACTION"],
                 O_U_noise=INIT_HP["O_U_NOISE"],
                 expl_noise=INIT_HP["EXPL_NOISE"],
                 vect_noise_dim=num_envs,
@@ -271,7 +269,6 @@ def create_population(
             agent = MADDPG(
                 observation_spaces=observation_space,
                 action_spaces=action_space,
-                one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
                 O_U_noise=INIT_HP["O_U_NOISE"],
@@ -304,7 +301,6 @@ def create_population(
             agent = MATD3(
                 observation_spaces=observation_space,
                 action_spaces=action_space,
-                one_hot=one_hot,
                 n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
                 O_U_noise=INIT_HP["O_U_NOISE"],
@@ -633,9 +629,8 @@ def print_hyperparams(pop: PopulationType) -> None:
     """Prints current hyperparameters of agents in a population and their fitnesses.
 
     :param pop: Population of agents
-    :type pop: list[object]
+    :type pop: list[EvolvableAlgorithm]
     """
-
     for agent in pop:
         print(
             "Agent ID: {}    Mean 5 Fitness: {:.2f}    Attributes: {}".format(
@@ -647,7 +642,7 @@ def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.
 
     :param pop: Population of agents
-    :type pop: list[object]
+    :type pop: list[EvolvableAlgorithm]
     """
     plt.figure()
     for agent in pop:

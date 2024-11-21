@@ -15,11 +15,12 @@ from agilerl.algorithms.dqn import DQN
 from agilerl.networks.evolvable_cnn import EvolvableCNN
 from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.helper_functions import generate_discrete_space, generate_random_box_space
 
 
 class DummyDQN(DQN):
-    def __init__(self, observation_space, action_space, one_hot, *args, **kwargs):
-        super().__init__(observation_space, action_space, one_hot, *args, **kwargs)
+    def __init__(self, observation_space, action_space, *args, **kwargs):
+        super().__init__(observation_space, action_space, *args, **kwargs)
 
         self.tensor_test = torch.randn(1)
 
@@ -84,15 +85,13 @@ def simple_cnn():
 
 # initialize DQN with valid parameters
 def test_initialize_dqn_with_minimum_parameters():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
 
-    dqn = DQN(observation_space, action_space, one_hot)
+    dqn = DQN(observation_space, action_space)
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.one_hot == one_hot
     assert dqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
@@ -117,9 +116,8 @@ def test_initialize_dqn_with_minimum_parameters():
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
 def test_initialize_dqn_with_cnn_accelerator():
-    observation_space=spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
+    action_space=generate_discrete_space(2)
     index = 0
     net_config_cnn = {
         "arch": "cnn",
@@ -143,7 +141,6 @@ def test_initialize_dqn_with_cnn_accelerator():
     dqn = DQN(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
         index=index,
         net_config=net_config_cnn,
         batch_size=batch_size,
@@ -160,7 +157,6 @@ def test_initialize_dqn_with_cnn_accelerator():
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.one_hot == one_hot
     assert dqn.net_config == net_config_cnn
     assert dqn.batch_size == batch_size
     assert dqn.lr == lr
@@ -186,23 +182,21 @@ def test_initialize_dqn_with_cnn_accelerator():
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
-        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (generate_random_box_space(shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 def test_initialize_dqn_with_actor_network_make_evo(
     observation_space, actor_network, input_tensor, request
 ):
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    action_space=generate_discrete_space(2)
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
-    dqn = DQN(observation_space, action_space, one_hot, actor_network=actor_network)
+    dqn = DQN(observation_space, action_space, actor_network=actor_network)
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.one_hot == one_hot
     assert dqn.net_config is None
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
@@ -227,13 +221,12 @@ def test_initialize_dqn_with_actor_network_make_evo(
 @pytest.mark.parametrize(
     "observation_space, net_type",
     [
-        (spaces.Box(0, 1, shape=(4,)), "mlp"),
-        (spaces.Box(0, 1, shape=(3, 64, 64)), "cnn"),
+        (generate_random_box_space(shape=(4,)), "mlp"),
+        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255), "cnn"),
     ],
 )
 def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    action_space=generate_discrete_space(2)
     if net_type == "mlp":
         actor_network = EvolvableMLP(
             num_inputs=observation_space.shape[0],
@@ -252,11 +245,10 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
             mlp_activation="ReLU",
         )
 
-    dqn = DQN(observation_space, action_space, one_hot, actor_network=actor_network)
+    dqn = DQN(observation_space, action_space, actor_network=actor_network)
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.one_hot == one_hot
     assert dqn.net_config is not None
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
@@ -279,13 +271,12 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
 
 
 def test_initialize_dqn_with_incorrect_actor_net_type():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
     actor_network = "dummy"
 
     with pytest.raises(AssertionError) as a:
-        dqn = DQN(observation_space, action_space, one_hot, actor_network=actor_network)
+        dqn = DQN(observation_space, action_space, actor_network=actor_network)
 
         assert dqn
         assert (
@@ -296,11 +287,10 @@ def test_initialize_dqn_with_incorrect_actor_net_type():
 
 # Returns the expected action when given a state observation and epsilon=0 or 1.
 def test_returns_expected_action_epsilon_greedy():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
 
-    dqn = DQN(observation_space, action_space, one_hot)
+    dqn = DQN(observation_space, action_space)
     state = np.array([1, 2, 3, 4])
 
     action_mask = None
@@ -321,11 +311,10 @@ def test_returns_expected_action_epsilon_greedy():
 # Returns the expected action when given a state observation and action mask.
 def test_returns_expected_action_mask():
     accelerator = Accelerator()
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = True
+    observation_space = spaces.Discrete(4)
+    action_space=generate_discrete_space(2)
 
-    dqn = DQN(observation_space, action_space, one_hot, accelerator=accelerator)
+    dqn = DQN(observation_space, action_space, accelerator=accelerator)
     state = np.array([1])
 
     action_mask = np.array([0, 1])
@@ -345,11 +334,10 @@ def test_returns_expected_action_mask():
 
 def test_returns_expected_action_mask_vectorized():
     accelerator = Accelerator()
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
 
-    dqn = DQN(observation_space, action_space, one_hot, accelerator=accelerator)
+    dqn = DQN(observation_space, action_space, accelerator=accelerator)
     state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
 
     action_mask = np.array([[0, 1], [1, 0]])
@@ -367,13 +355,12 @@ def test_returns_expected_action_mask_vectorized():
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
     batch_size = 64
 
     # Create an instance of the DQN class
-    dqn = DQN(observation_space, action_space, one_hot, batch_size=batch_size)
+    dqn = DQN(observation_space, action_space, batch_size=batch_size)
 
     # Create a batch of experiences
     states = torch.randn(batch_size, observation_space.shape[0])
@@ -404,9 +391,8 @@ def test_learns_from_experiences():
 # handles double Q-learning
 def test_handles_double_q_learning():
     accelerator = Accelerator()
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = True
+    observation_space = generate_discrete_space(4)
+    action_space=generate_discrete_space(2)
     double = True
     batch_size = 64
 
@@ -414,17 +400,16 @@ def test_handles_double_q_learning():
     dqn = DQN(
         observation_space,
         action_space,
-        one_hot,
         double=double,
         batch_size=batch_size,
         accelerator=accelerator,
     )
 
     # Create a batch of experiences
-    states = torch.randint(0, observation_space.shape[0], (batch_size, 1))
+    states = torch.randint(0, observation_space.n, (batch_size, 1))
     actions = torch.randint(0, action_space.n, (batch_size, 1))
     rewards = torch.randn((batch_size, 1))
-    next_states = torch.randint(0, observation_space.shape[0], (batch_size, 1))
+    next_states = torch.randint(0, observation_space.n, (batch_size, 1))
     dones = torch.randint(0, 2, (batch_size, 1))
 
     experiences = [states, actions, rewards, next_states, dones]
@@ -448,9 +433,8 @@ def test_handles_double_q_learning():
 
 # handles double Q-learning with CNN
 def test_handles_double_q_learning_cnn():
-    observation_space=spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
+    action_space=generate_discrete_space(2)
     double = True
     batch_size = 64
     net_config = {
@@ -466,7 +450,6 @@ def test_handles_double_q_learning_cnn():
     dqn = DQN(
         observation_space,
         action_space,
-        one_hot,
         net_config=net_config,
         double=double,
         batch_size=batch_size,
@@ -498,9 +481,8 @@ def test_handles_double_q_learning_cnn():
 
 # Updates target network parameters with soft update
 def test_soft_update():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
     net_config = {"arch": "mlp", "hidden_size": [64, 64]}
     batch_size = 64
     lr = 1e-4
@@ -517,7 +499,6 @@ def test_soft_update():
     dqn = DQN(
         observation_space,
         action_space,
-        one_hot,
         net_config=net_config,
         batch_size=batch_size,
         lr=lr,
@@ -549,34 +530,34 @@ def test_soft_update():
 
 # Runs algorithm test loop
 def test_algorithm_test_loop():
-    observation_space=spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
+    observation_space=generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
     num_envs = 3
 
     env = DummyEnv(observation_space=observation_space, vect=True, num_envs=num_envs)
 
     # env = make_vect_envs("CartPole-v1", num_envs=num_envs)
-    agent = DQN(observation_space=observation_space, action_space=action_space, one_hot=False)
+    agent = DQN(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
 
 # Runs algorithm test loop with unvectorised env
 def test_algorithm_test_loop_unvectorized():
-    observation_space=spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
+    observation_space=generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
 
     env = DummyEnv(observation_space=observation_space, vect=False)
 
-    agent = DQN(observation_space=observation_space, action_space=action_space, one_hot=False)
+    agent = DQN(observation_space=observation_space, action_space=action_space)
     mean_score = agent.test(env, max_steps=10)
     assert isinstance(mean_score, float)
 
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    observation_space=spaces.Box(0, 1, shape=(3, 32, 32))
-    action_space=spaces.Discrete(2)
+    observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
+    action_space=generate_discrete_space(2)
 
     env = DummyEnv(observation_space=observation_space, vect=True)
 
@@ -592,7 +573,6 @@ def test_algorithm_test_loop_images():
     agent = DQN(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=False,
         net_config=net_config_cnn,
     )
     mean_score = agent.test(env, max_steps=10)
@@ -602,7 +582,7 @@ def test_algorithm_test_loop_images():
 # Runs algorithm test loop with unvectorized images
 def test_algorithm_test_loop_images_unvectorized():
     observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
-    action_space=spaces.Discrete(2)
+    action_space=generate_discrete_space(2)
 
     env = DummyEnv(observation_space=observation_space, vect=False)
 
@@ -616,9 +596,8 @@ def test_algorithm_test_loop_images_unvectorized():
     }
 
     agent = DQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=action_space,
-        one_hot=False,
         net_config=net_config_cnn,
     )
     mean_score = agent.test(env, max_steps=10, swap_channels=True)
@@ -627,11 +606,10 @@ def test_algorithm_test_loop_images_unvectorized():
 
 # Clones the agent and returns an identical agent.
 def test_clone_returns_identical_agent():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
 
-    dqn = DummyDQN(observation_space, action_space, one_hot)
+    dqn = DummyDQN(observation_space, action_space)
     dqn.tensor_attribute = torch.randn(1)
     clone_agent = dqn.clone()
 
@@ -660,7 +638,7 @@ def test_clone_returns_identical_agent():
     assert clone_agent.tensor_test == dqn.tensor_test
 
     accelerator = Accelerator()
-    dqn = DQN(observation_space, action_space, one_hot, accelerator=accelerator)
+    dqn = DQN(observation_space, action_space, accelerator=accelerator)
     clone_agent = dqn.clone()
 
     assert clone_agent.observation_space == dqn.observation_space
@@ -686,7 +664,7 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == dqn.scores
 
     accelerator = Accelerator()
-    dqn = DQN(observation_space, action_space, one_hot, accelerator=accelerator, wrap=False)
+    dqn = DQN(observation_space, action_space, accelerator=accelerator, wrap=False)
     clone_agent = dqn.clone(wrap=False)
 
     assert clone_agent.observation_space == dqn.observation_space
@@ -713,22 +691,20 @@ def test_clone_returns_identical_agent():
 
 
 def test_clone_new_index():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
 
-    dqn = DummyDQN(observation_space, action_space, one_hot)
+    dqn = DummyDQN(observation_space, action_space)
     clone_agent = dqn.clone(index=100)
 
     assert clone_agent.index == 100
 
 
 def test_clone_after_learning():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(4,))
+    action_space=generate_discrete_space(2)
     batch_size = 8
-    dqn = DQN(observation_space, action_space, one_hot)
+    dqn = DQN(observation_space, action_space)
 
     states = torch.randn(batch_size, observation_space.shape[0])
     actions = torch.randint(0, 2, (batch_size, 1))
@@ -765,7 +741,7 @@ def test_clone_after_learning():
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
-    dqn = DQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False, accelerator=Accelerator())
+    dqn = DQN(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_discrete_space(2), accelerator=Accelerator())
     dqn.unwrap_models()
     assert isinstance(dqn.actor, nn.Module)
     assert isinstance(dqn.actor_target, nn.Module)
@@ -774,7 +750,7 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the DQN agent
-    dqn = DQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False)
+    dqn = DQN(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_discrete_space(2))
 
     initial_actor_state_dict = dqn.actor.state_dict()
     init_optim_state_dict = dqn.optimizer.state_dict()
@@ -804,7 +780,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False)
+    dqn = DQN(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_discrete_space(2))
     # Load checkpoint
     dqn.load_checkpoint(checkpoint_path)
 
@@ -839,7 +815,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)), action_space=spaces.Discrete(2), one_hot=False, net_config=net_config_cnn
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255), action_space=generate_discrete_space(2), net_config=net_config_cnn
     )
 
     initial_actor_state_dict = dqn.actor.state_dict()
@@ -870,7 +846,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False)
+    dqn = DQN(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_discrete_space(2))
     # Load checkpoint
     dqn.load_checkpoint(checkpoint_path)
 
@@ -908,7 +884,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 64, 64)), action_space=spaces.Discrete(2), one_hot=False, actor_network=actor_network
+        observation_space=generate_random_box_space(shape=(3, 64, 64), low=0, high=255), action_space=generate_discrete_space(2), actor_network=actor_network
     )
 
     initial_actor_state_dict = dqn.actor.state_dict()
@@ -939,7 +915,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), one_hot=False)
+    dqn = DQN(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_discrete_space(2))
     # Load checkpoint
     dqn.load_checkpoint(checkpoint_path)
 
@@ -976,9 +952,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=spaces.Box(0, 1, shape=(4,)),
-        action_space=spaces.Discrete(2),
-        one_hot=False,
+        observation_space=generate_random_box_space(shape=(4,)),
+        action_space=generate_discrete_space(2),
     )
 
     # Save the checkpoint to a file
@@ -1022,9 +997,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
-        action_space=spaces.Discrete(2),
-        one_hot=False,
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        action_space=generate_discrete_space(2),
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
@@ -1068,16 +1042,15 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
-        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (generate_random_box_space(shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255), "simple_cnn", torch.randn(1, 3, 64, 64)),
     ],
 )
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_networks(
     observation_space, actor_network, input_tensor, request, tmpdir
 ):
-    action_space=spaces.Discrete(2)
-    one_hot = False
+    action_space=generate_discrete_space(2)
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
@@ -1085,7 +1058,6 @@ def test_load_from_pretrained_networks(
     dqn = DQN(
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
         actor_network=actor_network,
     )
 

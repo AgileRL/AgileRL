@@ -85,7 +85,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         algo=INIT_HP["ALGO"],
         state_dim=context_dim,
         action_dim=action_dim,
-        one_hot=None,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         actor_network=actor,

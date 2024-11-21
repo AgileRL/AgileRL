@@ -28,18 +28,10 @@ class MADDPG(MultiAgentAlgorithm):
     :type observation_spaces: list[spaces.Space]
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space]
-    :param one_hot: One-hot encoding, used with discrete observation spaces
-    :type one_hot: bool
     :param n_agents: Number of agents
     :type n_agents: int
     :param agent_ids: Agent ID for each agent
     :type agent_ids: list[str]
-    :param max_action: Upper bound of the action space for each agent
-    :type max_action: list[float]
-    :param min_action: Lower bound of the action space for each agent
-    :type min_action: list[float]
-    :param discrete_actions: Boolean flag to indicate a discrete action space
-    :type discrete_actions: bool, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
@@ -92,12 +84,8 @@ class MADDPG(MultiAgentAlgorithm):
         self,
         observation_spaces: List[spaces.Space],
         action_spaces: List[spaces.Space],
-        one_hot: bool,
         n_agents: int,
         agent_ids: List[str],
-        max_action: Optional[List[float]],
-        min_action: Optional[List[float]],
-        discrete_actions: bool,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -131,31 +119,10 @@ class MADDPG(MultiAgentAlgorithm):
             name="MADDPG",
         )
 
-        assert isinstance(
-            one_hot, bool
-        ), "One-hot encoding flag must be boolean value True or False."
         assert isinstance(n_agents, int), "Number of agents must be an integer."
         assert isinstance(
             agent_ids, (tuple, list)
         ), "Agent IDs must be stores in a tuple or list."
-        assert isinstance(
-            discrete_actions, bool
-        ), "Discrete actions flag must be a boolean value True or False."
-        assert (
-            isinstance(max_action, list) or max_action is None
-        ), "Max action must be a list."
-        assert (
-            isinstance(min_action, list) or min_action is None
-        ), "Min action must be a list."
-        assert (max_action is not None) == (
-            min_action is not None
-        ), "Max and min actions must both be supplied, or both be None."
-        if max_action is not None and min_action is not None:
-            for x, n in zip(max_action, min_action):
-                x, n = x[0], n[0]
-                assert x > n, "Max action must be greater than min action."
-                assert x > 0, "Max action must be greater than zero."
-                assert n <= 0, "Min action must be less than or equal to zero."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
@@ -182,7 +149,13 @@ class MADDPG(MultiAgentAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.one_hot = one_hot
+        if self.max_action is not None and self.min_action is not None:
+            for x, n in zip(self.max_action, self.min_action):
+                x, n = x[0], n[0]
+                assert x > n, "Max action must be greater than min action."
+                assert x > 0, "Max action must be greater than zero."
+                assert n <= 0, "Min action must be less than or equal to zero."
+
         self.n_agents = n_agents
         self.multi = True
         self.agent_ids = agent_ids
@@ -193,9 +166,6 @@ class MADDPG(MultiAgentAlgorithm):
         self.tau = tau
         self.torch_compiler = torch_compiler
         self.learn_counter = 0
-        self.max_action = max_action
-        self.min_action = min_action
-        self.discrete_actions = discrete_actions
 
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
@@ -229,7 +199,6 @@ class MADDPG(MultiAgentAlgorithm):
 
         self.actor_networks = actor_networks
         self.critic_networks = critic_networks
-
         if self.actor_networks is not None and self.critic_networks is not None:
             assert (
                 len({type(net) for net in actor_networks}) == 1

@@ -23,12 +23,6 @@ class DDPG(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Environment action space
     :type action_space: gym.spaces.Space
-    :param one_hot: One-hot encoding, used with discrete observation spaces
-    :type one_hot: bool
-    :param max_action: Upper bound of the action space, defaults to 1
-    :type max_action: float, optional
-    :param min_action: Lower bound of the action space, defaults to -1
-    :type min_action: float, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
@@ -77,9 +71,6 @@ class DDPG(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        one_hot: bool,
-        max_action: float = 1,
-        min_action: float = -1,
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
         vect_noise_dim: int = 1,
@@ -113,35 +104,6 @@ class DDPG(RLAlgorithm):
             name="DDPG"
         )
 
-        assert isinstance(
-            one_hot, bool
-        ), "One-hot encoding flag must be boolean value True or False."
-        assert isinstance(
-            max_action,
-            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
-        ), "Max action must be a float or integer."
-        assert isinstance(
-            min_action,
-            (float, int, np.float32, np.float64, np.integer, list, np.ndarray),
-        ), "Min action must be a float or integer."
-        if isinstance(min_action, list):
-            assert (
-                len(min_action) == self.action_dim
-            ), "Length of min_action must be equal to action_dim."
-            min_action = np.array(min_action)
-        if isinstance(max_action, list):
-            assert (
-                len(max_action) == self.action_dim
-            ), "Length of max_action must be equal to action_dim."
-            max_action = np.array(max_action)
-        if isinstance(max_action, np.ndarray) or isinstance(min_action, np.ndarray):
-            assert np.all(
-                max_action > min_action
-            ), "Max action must be greater than min action."
-        else:
-            assert (
-                max_action > min_action
-            ), "Max action must be greater than min action."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
@@ -172,15 +134,13 @@ class DDPG(RLAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.one_hot = one_hot
-        self.max_action = max_action
-        self.min_action = min_action
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
         self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
+        self.wrap = wrap
         self.mut = mut
         self.policy_freq = policy_freq
         self.O_U_noise = O_U_noise
@@ -337,13 +297,14 @@ class DDPG(RLAlgorithm):
         :type convert_to_torch: bool, optional
         """
         if convert_to_torch:
+            device = self.device if self.accelerator is None else self.accelerator.device
             max_action = (
-                torch.from_numpy(self.max_action).to(self.device)
+                torch.from_numpy(self.max_action).to(device)
                 if isinstance(self.max_action, (np.ndarray))
                 else self.max_action
             )
             min_action = (
-                torch.from_numpy(self.min_action).to(self.device)
+                torch.from_numpy(self.min_action).to(device)
                 if isinstance(self.min_action, (np.ndarray))
                 else self.min_action
             )
@@ -442,21 +403,22 @@ class DDPG(RLAlgorithm):
         if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
             return torch.clamp(input, min, max)
 
+        device = self.device if self.accelerator is None else self.accelerator.device
         min = (
-            torch.from_numpy(min).to(self.device)
+            torch.from_numpy(min).to(device)
             if isinstance(min, np.ndarray)
             else min
         )
         max = (
-            torch.from_numpy(max).to(self.device)
+            torch.from_numpy(max).to(device)
             if isinstance(max, np.ndarray)
             else max
         )
 
         if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
-            min = torch.full_like(max, min).to(self.device)
+            min = torch.full_like(max, min).to(device)
         if isinstance(min, torch.Tensor) and isinstance(max, (int, float)):
-            max = torch.full_like(min, max).to(self.device)
+            max = torch.full_like(min, max).to(device)
 
         output = torch.max(torch.min(input, max), min).type(input.dtype)
 
@@ -624,6 +586,7 @@ class DDPG(RLAlgorithm):
 
         if self.accelerator is not None:
             self.unwrap_models()
+
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         critic = self.critic.clone()

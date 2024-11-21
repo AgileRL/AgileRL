@@ -3,19 +3,24 @@ import torch
 import torch.nn as nn
 import yaml
 
+from agilerl.algorithms.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.training.train_offline import train_offline
-from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.training.train_offline import train_offline
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams
+)
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
 # import sys
 # sys.path.append('../')
-
 
 class BasicNetActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
@@ -48,20 +53,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
     print(f"DEVICE: {device}")
 
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
-    try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
 
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
+    state_dim = RLAlgorithm.get_state_dim(observation_space)
+    action_dim = RLAlgorithm.get_action_dim(action_space)
+    
     actor = BasicNetActor(state_dim[0], [32, 32], action_dim)
     actor_network = MakeEvolvable(
         actor, input_tensor=torch.ones(state_dim), device=device
@@ -100,9 +100,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         actor_network=actor_network,
         INIT_HP=INIT_HP,

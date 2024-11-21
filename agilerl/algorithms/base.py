@@ -25,37 +25,6 @@ OptimizerType = Union[Optimizer, Iterable[Optimizer]]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
-
-def _get_state_dim(observation_space: spaces.Space) -> Tuple[int, ...]:
-    """Returns the dimension of the state space.
-    
-    :param observation_space: The observation space of the environment.
-    :type observation_space: spaces.Space.
-    
-    :return: The dimension of the state space.
-    :rtype: Tuple[int, ...]."""
-    if isinstance(observation_space, spaces.Discrete):
-        return (observation_space.n,)
-    elif isinstance(observation_space, spaces.Box):
-        return observation_space.shape
-    else:
-        raise AttributeError(f"Can't access state dimensions for {type(observation_space)} spaces.")
-    
-def _get_action_dim(action_space: spaces.Space) -> int:
-    """Returns the dimension of the action space.
-    
-    :param action_space: The action space of the environment.
-    :type action_space: spaces.Space.
-    
-    :return: The dimension of the action space.
-    :rtype: int.
-    """
-    if isinstance(action_space, spaces.Discrete):
-        return action_space.n
-    elif isinstance(action_space, spaces.Box):
-        return action_space.shape[0] # NOTE: Here we assume the action space only has one dimension
-    else:
-        raise AttributeError(f"Can't access state dimensions for {type(action_space)} spaces.")
     
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
@@ -109,8 +78,8 @@ class EvolvableAlgorithm(ABC):
         assert isinstance(accelerator, (type(None), Accelerator)), "Accelerator must be an instance of Accelerator."
         assert isinstance(name, (type(None), str)), "Name must be a string."
 
-        self.device = device
         self.accelerator = accelerator
+        self.device = device
         self.learn_step = learn_step
         self.algo = name if name is not None else self.__class__.__name__
 
@@ -203,22 +172,22 @@ class EvolvableAlgorithm(ABC):
         """
         raise NotImplementedError
 
-    def __init_subclass__(cls, **kwargs):
-        """Ensure the mapping method runs after initialization in subclasses."""
-        original_init = cls.__init__
+    # def __init_subclass__(cls, **kwargs):
+    #     """Ensure the mapping method runs after initialization in subclasses."""
+    #     original_init = cls.__init__
 
-        def wrapped_init(self: EvolvableAlgorithm, *args, **kwargs):
-            original_init(self, *args, **kwargs)  # Call the original __init__ method
-            self._init_evolvable_mappings()  # Automatically run the mapping method
+    #     def wrapped_init(self: EvolvableAlgorithm, *args, **kwargs):
+    #         original_init(self, *args, **kwargs)  # Call the original __init__ method
+    #         self._init_evolvable_mappings()  # Automatically run the mapping method
 
-        cls.__init__ = wrapped_init  # Replace the subclass's __init__ with the wrapped version
-        super().__init_subclass__(**kwargs)
+    #     cls.__init__ = wrapped_init  # Replace the subclass's __init__ with the wrapped version
+    #     super().__init_subclass__(**kwargs)
 
     def _init_evolvable_mappings(self):
         """Automatically map optimizers to the modules they optimize."""
+        self._identify_param_to_modules()
         for attr_name, attr in self.evolvable_attributes().items():
             if isinstance(attr, (AcceleratedOptimizer, Optimizer)):
-                print("Found optimizer:", attr_name)
                 # Extract modules from the optimizer's parameter groups
                 modules = self._extract_modules_from_optimizer(attr)
                 self.optim_to_modules[attr] = modules
@@ -237,15 +206,24 @@ class EvolvableAlgorithm(ABC):
                     linked_modules = set()
 
                 # Look for modules in the current class attributes
-                for attr_name in self.evolvable_attributes():
-                    attr = getattr(self, attr_name)
-                    if isinstance(attr, nn.Module) and param in attr.parameters(recurse=False):
+                for attr_name, attr in self.evolvable_attributes().items():
+                    if isinstance(attr, nn.Module) and attr_name in param._evol_module:
                         linked_modules.add(attr_name)
 
                 self.param_to_modules[param] = linked_modules
                 modules.update(linked_modules)
 
         return list(modules)
+
+    def _identify_param_to_modules(self) -> None:
+        """Add an attribute identifying the parameter to the module/s it belongs to."""
+        for attr_name, attr in self.evolvable_attributes().items():
+            if isinstance(attr, nn.Module):
+                for param in attr.parameters():
+                    if not hasattr(param, "module"):
+                        param._evol_module = set([attr_name])
+                    else:
+                        param._evol_module.add(attr_name)
 
     def obs_to_tensor(self, observation: NumpyObsType) -> TorchObsType:
         """Prepares state for forward pass through neural network.
@@ -342,6 +320,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
+    multi: bool = True # NOTE: This is to maintain compatibility
+
     def __init__(
             self,
             observation_space: spaces.Space,
@@ -364,8 +344,53 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
 
         # TODO: This is a bit of a temporary hack until we fully refactor the framework
-        self.state_dim = _get_state_dim(observation_space)
-        self.action_dim = _get_action_dim(action_space)
+        self.state_dim = self.get_state_dim(observation_space)
+        self.action_dim = self.get_action_dim(action_space)
+        self.one_hot = isinstance(observation_space, spaces.Discrete)
+        self.discrete_actions = isinstance(action_space, spaces.Discrete)
+        self.min_action = action_space.low if hasattr(action_space, "low") else None
+        self.max_action = action_space.high if hasattr(action_space, "high") else None
+
+        # Convert to np.ndarray if a list
+        if isinstance(self.min_action, list) and isinstance(self.max_action, list):
+            self.min_action = np.array(self.min_action)
+            self.max_action = np.array(self.max_action)
+
+    @staticmethod
+    def get_state_dim(observation_space: spaces.Space) -> Tuple[int, ...]:
+        """Returns the dimension of the state space.
+        
+        :param observation_space: The observation space of the environment.
+        :type observation_space: spaces.Space.
+        
+        :return: The dimension of the state space.
+        :rtype: Tuple[int, ...]."""
+        if isinstance(observation_space, spaces.Discrete):
+            return (observation_space.n,)
+        elif isinstance(observation_space, spaces.Box):
+            return observation_space.shape
+        else:
+            raise AttributeError(f"Can't access state dimensions for {type(observation_space)} spaces.")
+
+    @staticmethod
+    def get_action_dim(action_space: spaces.Space) -> int:
+        """Returns the dimension of the action space.
+        
+        :param action_space: The action space of the environment.
+        :type action_space: spaces.Space.
+        
+        :return: The dimension of the action space.
+        :rtype: int.
+        """
+        if isinstance(action_space, spaces.Discrete):
+            return action_space.n
+        elif isinstance(action_space, spaces.Box):
+            # NOTE: Here we assume the action space only has one dimension
+            #       (i.e. the actions correspond to a one-dimensional vector)
+            return action_space.shape[0]
+        else:
+            raise AttributeError(f"Can't access state dimensions for {type(action_space)} spaces.")
+        
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
@@ -418,6 +443,8 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
+    multi: bool = True # NOTE: This is to maintain compatibility
+
     def __init__(
             self,
             observation_spaces: Iterable[spaces.Space],
@@ -445,8 +472,17 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         )
 
         # TODO: This is a bit of a temporary hack until we fully refactor the framework
-        self.state_dims = [_get_state_dim(space) for space in observation_spaces]
-        self.action_dims = [_get_action_dim(space) for space in action_spaces]
+        self.state_dims = self.get_state_dims(observation_spaces)
+        self.action_dims = self.get_action_dims(action_spaces)
+        self.one_hot = all(isinstance(space, spaces.Discrete) for space in observation_spaces)
+        self.discrete_actions = all(isinstance(space, spaces.Discrete) for space in action_spaces)
+
+        # For continuous action spaces, store the min and max action values
+        if not self.discrete_actions:
+            self.min_action = [space.low for space in action_spaces]
+            self.max_action = [space.high for space in action_spaces]
+        else:
+            self.min_action, self.max_action = None, None
 
         self.torch_compiler = torch_compiler
         self.net_config = net_config
@@ -454,6 +490,29 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         self.action_spaces = action_spaces
         self.total_actions = sum(self.action_dims)
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
+
+    @staticmethod
+    def get_state_dims(observation_spaces: Iterable[spaces.Space]) -> List[Tuple[int, ...]]:
+        """Returns the dimension of the state space.
+        
+        :param observation_space: The observation space of the environment.
+        :type observation_space: spaces.Space.
+        
+        :return: The dimension of the state space.
+        :rtype: Tuple[int, ...]."""
+        return [RLAlgorithm.get_state_dim(space) for space in observation_spaces]
+    
+    @staticmethod
+    def get_action_dims(action_spaces: Iterable[spaces.Space]) -> List[int]:
+        """Returns the dimension of the action space.
+        
+        :param action_space: The action space of the environment.
+        :type action_space: spaces.Space.
+        
+        :return: The dimension of the action space.
+        :rtype: int.
+        """
+        return [RLAlgorithm.get_action_dim(space) for space in action_spaces]
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.

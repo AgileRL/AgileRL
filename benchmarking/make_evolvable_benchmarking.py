@@ -14,6 +14,7 @@ from networks import (
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
+from agilerl.algorithms.base import RLAlgorithm, MultiAgentAlgorithm
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -22,9 +23,13 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams
+)
 
 def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -33,41 +38,24 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         ####
         if not atari:
             env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=INIT_HP["NUM_ENVS"])
-            try:
-                state_dims = env.single_observation_space.n
-                one_hot = True
-            except Exception:
-                state_dims = env.single_observation_space.shape
-                one_hot = False
-            try:
-                action_dims = env.single_action_space.n
-            except Exception:
-                action_dims = env.single_action_space.shape[0]
         else:
             env = gym.make(INIT_HP["ENV_NAME_ATARI"])
             env = AtariPreprocessing(env)
             env = ClipReward(env)
             env = ss.frame_stack_v1(env, 4)
-            try:
-                state_dims = env.observation_space.n
-                one_hot = True
-            except Exception:
-                state_dims = env.observation_space.shape
-                one_hot = False
-            try:
-                action_dims = env.action_space.n
-            except Exception:
-                action_dims = env.action_space.shape[0]
 
+
+        observation_space = env.single_observation_space
+        action_space = env.single_action_space
         if INIT_HP["CHANNELS_LAST"]:
-            state_dims = (state_dims[2], state_dims[0], state_dims[1])
+            observation_space = observation_space_channels_to_first(observation_space)
 
         if INIT_HP["ALGO"] == "TD3":
-            max_action = float(env.single_action_space.high[0])
-            INIT_HP["MAX_ACTION"] = max_action
+            min_action = float(action_space.low[0])
+            INIT_HP["MIN_ACTION"] = min_action
 
         if INIT_HP["ALGO"] == "TD3":
-            max_action = float(env.single_action_space.high[0])
+            max_action = float(action_space.high[0])
             INIT_HP["MAX_ACTION"] = max_action
 
         if NET_CONFIG is not None:
@@ -76,7 +64,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         else:
             NET_CONFIG = None
 
-            ####
+            action_dims = RLAlgorithm.get_action_dim(action_space)
+            state_dims = RLAlgorithm.get_state_dim(observation_space)
             if atari:
                 # DQN
                 network_actor = SimpleCNNActor(action_dims)
@@ -216,43 +205,21 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             env = simple_speaker_listener_v4.parallel_env(
                 continuous_actions=True, max_cycles=25
             )
-        env.reset()
-        # Configure the multi-agent algo input arguments
-        try:
-            state_dims = [env.observation_space(agent).n for agent in env.agents]
-            one_hot = True
-        except Exception:
-            state_dims = [env.observation_space(agent).shape for agent in env.agents]
-            one_hot = False
-        try:
-            action_dims = [env.action_space(agent).n for agent in env.agents]
-            INIT_HP["DISCRETE_ACTIONS"] = True
-            INIT_HP["MAX_ACTION"] = None
-            INIT_HP["MIN_ACTION"] = None
-        except Exception:
-            action_dims = [env.action_space(agent).shape[0] for agent in env.agents]
-            INIT_HP["DISCRETE_ACTIONS"] = False
-            INIT_HP["MAX_ACTION"] = [
-                env.action_space(agent).high for agent in env.agents
-            ]
-            INIT_HP["MIN_ACTION"] = [
-                env.action_space(agent).low for agent in env.agents
-            ]
 
+        env.reset()
+
+        # Configure the multi-agent algo input arguments
+        observation_space = [env.observation_space(agent) for agent in env.agents]
+        action_space = [env.action_space(agent) for agent in env.agents]
         if INIT_HP["CHANNELS_LAST"]:
-            state_dims = [
-                (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dims
-            ]
+            observation_space = [observation_space_channels_to_first(obs) for obs in observation_space]
 
         INIT_HP["N_AGENTS"] = env.num_agents
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
-
-        ####
-        if atari:
-            pass
-
-        else:
+        if not atari:
             # MLPs
+            state_dims = MultiAgentAlgorithm.get_state_dims(observation_space)
+            action_dims = MultiAgentAlgorithm.get_action_dims(action_space)
             total_state_dims = sum(state_dim[0] for state_dim in state_dims)
             total_actions = sum(action_dims)
             actor = [
@@ -332,9 +299,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
 
     agent_pop = create_population(
         INIT_HP["ALGO"],
-        state_dims,
-        action_dims,
-        one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         actor_network=actor,

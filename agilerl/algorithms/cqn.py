@@ -25,8 +25,6 @@ class CQN(RLAlgorithm):
     :type observation_space: spaces.Space
     :param action_space: The action space of the environment.
     :type action_space: spaces.Space
-    :param one_hot: One-hot encoding, used with discrete observation spaces
-    :type one_hot: bool
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
@@ -59,7 +57,6 @@ class CQN(RLAlgorithm):
         self,
         observation_space: spaces.Space,
         action_space: spaces.Space,
-        one_hot: bool,
         index: int = 0,
         net_config: Dict[str, Any] = {"arch": "mlp", "hidden_size": [64, 64]},
         batch_size: int = 64,
@@ -86,9 +83,6 @@ class CQN(RLAlgorithm):
             name="CQN"
             )
 
-        assert isinstance(
-            one_hot, bool
-        ), "One-hot encoding flag must be boolean value True or False."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
@@ -103,7 +97,6 @@ class CQN(RLAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.one_hot = one_hot
         self.batch_size = batch_size
         self.lr = lr
         self.gamma = gamma
