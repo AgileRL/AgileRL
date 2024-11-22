@@ -42,9 +42,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
     :type env_fns: list[Callable]
     :param copy: Boolean flag to copy the observation data when it is returned with either .step() or .reset(), recommended, defaults to True
     :type copy: bool, optional
+    :param context: Context for multiprocessing
     """
 
-    def __init__(self, env_fns, experience_spec=None, copy=True):
+    def __init__(self, env_fns, experience_spec=None, copy=True, context=None):
+
         # Core class attributes
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
@@ -63,14 +65,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         self.copy = copy
 
         if experience_spec is None:
-            env = env_fns[0]()
-            self.experience_spec = PettingZooExperienceSpec(env, self.num_envs)
-            del env
+            self.experience_spec = PettingZooExperienceSpec(self.num_envs)
         else:
             self.experience_spec = experience_spec
 
-        ctx = mp.get_context()
-        dummy_env = env_fns[0]()
+        ctx = mp.get_context(context)
         self.experience_spec.detect_space_info(dummy_env)
         del dummy_env
 
@@ -203,10 +202,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("reset", env_kwargs))
         self._state = AsyncState.WAITING_RESET
 
-    def reset_wait(self, timeout=60):
+    def reset_wait(self, timeout=None):
         """Waits for the calls triggered by :meth:`reset_async` to finish and returns the results.
 
-        :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to ``reset_wait`` never times out, defaults to 60
+        :param timeout: Number of seconds before the call to ``reset_wait`` times out. If `None`, the call to ``reset_wait`` never times out, defaults to 0
         :type timeout: int | float | None, optional
         """
         self._assert_is_running()
@@ -264,11 +263,11 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("step", action))
         self._state = AsyncState.WAITING_STEP
 
-    def step_wait(self, timeout=60):
+    def step_wait(self, timeout=None):
         """
         Wait for the calls to :obj:`step` in each sub-environment to finish.
 
-        :param timeout: Number of seconds before the call to ``step_wait`` times out. If `None`, the call to ``step_wait`` never times out, defaults to 60
+        :param timeout: Number of seconds before the call to ``step_wait`` times out. If `None`, the call to ``step_wait`` never times out, defaults to 0
         :type timeout: int | float | None, optional
         """
 
@@ -361,10 +360,10 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
             pipe.send(("_call", (name, args, kwargs)))
         self._state = AsyncState.WAITING_CALL
 
-    def call_wait(self, timeout=60):
+    def call_wait(self, timeout=None):
         """Calls all parent pipes and waits for the results.
 
-        :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default), the call to :meth:`call_wait` never times out, defaults to 60
+        :param timeout: Number of seconds before the call to :meth:`call_wait` times out. If ``None`` (default), the call to :meth:`call_wait` never times out, defaults to 0
         :type timeout: int | float | None, optional
         """
         self._assert_is_running()
@@ -424,13 +423,13 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         _, successes = zip(*[pipe.recv() for pipe in self.parent_pipes])
         self._raise_if_errors(successes)
 
-    def close_extras(self, timeout=60, terminate=False):
+    def close_extras(self, timeout=None, terminate=False):
         """
         Close the environments & clean up the extra resources (processes and pipes).
 
         :param timeout: Number of seconds before the call to :meth:`close` times out. If ``None``,
                 the call to :meth:`close` never times out. If the call to :meth:`close`
-                times out, then all processes are terminated, defaults to 60
+                times out, then all processes are terminated, defaults to 0
         :type timeout: int | float | None, optional
         :param terminate: If ``True``, then the :meth:`close` operation is forced and all processes are terminated, defaults to False
         :type terminate: bool, optional
@@ -563,20 +562,23 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         """On deleting the object, checks that the vector environment is closed."""
         if not getattr(self, "closed", True) and hasattr(self, "_state"):
             self.close(terminate=True)
+        if hasattr(self, "_obs_buffer"):
+            del self._obs_buffer
+        if hasattr(self, "observations"):
+            del self.observations
+        if hasattr(self, "experience_spec"):
+            del self.experience_spec
 
 
 class PettingZooExperienceSpec:
     """Class for formatting experiences when being returned by a vectorized environment
 
-    :param env_fn: Function that returns environment instance when called
-    :type env_fn: Callable
     :param num_envs: Number of environments to vectorize
     :type num_envs: int
     """
 
-    def __init__(self, env, num_envs):
+    def __init__(self, num_envs):
         self.num_envs = num_envs
-        self.detect_space_info(env)
 
     def detect_space_info(self, dummy_env):
 
@@ -643,6 +645,7 @@ class PettingZooExperienceSpec:
         self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
 
         dummy_env.close()
+        del dummy_env
 
     def get_placeholder_value(self, agent, transition_name, observations=None):
         """When an agent is killed, used to obtain a placeholder value to return for associated experience.
@@ -654,14 +657,17 @@ class PettingZooExperienceSpec:
         :param observations: Observations numpy array backed by RawArray, defaults to None
         :type observations: agilerl.vector.pz_async_vec_env.Observations, optional
         """
-        if transition_name == "reward":
-            return 0
-        if transition_name == "truncated" or transition_name == "terminated":
-            return True
-        if transition_name == "info":
-            return {}
-        if transition_name == "observation":
-            return observations[agent]
+        match transition_name:
+            case "reward":
+                return 0
+            case "truncated":
+                return False
+            case "terminated":
+                return True
+            case "info":
+                return {}
+            case "observation":
+                return -np.ones_like(observations[agent])
 
     def process_transition(self, transitions, observations, transition_names):
         transition_list = list(transitions)
@@ -903,4 +909,5 @@ def _async_worker(
         pipe.send((None, False))
 
     finally:
+        del observations
         env.close()
