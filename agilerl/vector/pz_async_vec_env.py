@@ -645,6 +645,7 @@ class PettingZooExperienceSpec:
         self.agent_index_map = {agent: i for i, agent in enumerate(self.agents)}
 
         dummy_env.close()
+        del dummy_env
 
     def get_placeholder_value(self, agent, transition_name, observations=None):
         """When an agent is killed, used to obtain a placeholder value to return for associated experience.
@@ -665,7 +666,7 @@ class PettingZooExperienceSpec:
                 return True
             case "info":
                 return {}
-            case "observtion":
+            case "observation":
                 return -np.ones_like(observations[agent])
 
     def process_transition(self, transitions, observations, transition_names):
