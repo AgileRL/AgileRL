@@ -104,6 +104,7 @@ class DDPG(RLAlgorithm):
             name="DDPG"
         )
 
+        assert isinstance(action_space, spaces.Box), "DDPG only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)

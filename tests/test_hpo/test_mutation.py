@@ -9,6 +9,12 @@ from gymnasium import spaces
 from agilerl.hpo.mutation import Mutations
 from agilerl.networks.evolvable_bert import EvolvableBERT
 from agilerl.utils.utils import create_population
+from tests.helper_functions import (
+    generate_random_box_space,
+    generate_discrete_space,
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces
+)
 
 # from pytest_mock import mocker
 
@@ -31,7 +37,6 @@ SHARED_INIT_HP = {
     "V_MAX": 200,
     "N_STEP": 3,
     "POLICY_FREQ": 10,
-    "DISCRETE_ACTIONS": True,
     "GAE_LAMBDA": 0.95,
     "ACTION_STD_INIT": 0.6,
     "CLIP_COEF": 0.2,
@@ -40,8 +45,6 @@ SHARED_INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "MAX_ACTION": 1,
-    "MIN_ACTION": -1,
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
@@ -71,7 +74,6 @@ SHARED_INIT_HP_MA = {
     "V_MAX": 200,
     "N_STEP": 3,
     "POLICY_FREQ": 10,
-    "DISCRETE_ACTIONS": True,
     "GAE_LAMBDA": 0.95,
     "ACTION_STD_INIT": 0.6,
     "CLIP_COEF": 0.2,
@@ -80,8 +82,6 @@ SHARED_INIT_HP_MA = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "MAX_ACTION": [(1,), (1,)],
-    "MIN_ACTION": [(-1,), (-1,)],
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
@@ -318,13 +318,12 @@ def test_returns_regularize_weight():
 
 # Checks no mutations if all probabilities set to zero
 @pytest.mark.parametrize(
-    "algo, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -337,7 +336,6 @@ def test_mutation_no_options(
     algo,
     observation_space,
     action_space,
-    one_hot,
     net_config,
     INIT_HP,
     population_size,
@@ -364,14 +362,13 @@ def test_mutation_no_options(
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -381,9 +378,8 @@ def test_mutation_no_options(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -393,9 +389,8 @@ def test_mutation_no_options(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -405,9 +400,8 @@ def test_mutation_no_options(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -417,9 +411,8 @@ def test_mutation_no_options(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((4,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -429,9 +422,8 @@ def test_mutation_no_options(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((4,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -441,9 +433,8 @@ def test_mutation_no_options(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((4,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -453,9 +444,8 @@ def test_mutation_no_options(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((4,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -465,9 +455,8 @@ def test_mutation_no_options(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -477,9 +466,8 @@ def test_mutation_no_options(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -489,9 +477,8 @@ def test_mutation_no_options(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -501,9 +488,8 @@ def test_mutation_no_options(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -513,9 +499,8 @@ def test_mutation_no_options(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -525,9 +510,8 @@ def test_mutation_no_options(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -537,9 +521,8 @@ def test_mutation_no_options(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -549,9 +532,8 @@ def test_mutation_no_options(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -605,14 +587,13 @@ def test_mutation_applies_random_mutations(
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -622,9 +603,8 @@ def test_mutation_applies_random_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -634,9 +614,8 @@ def test_mutation_applies_random_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -646,9 +625,8 @@ def test_mutation_applies_random_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -658,9 +636,8 @@ def test_mutation_applies_random_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -670,9 +647,8 @@ def test_mutation_applies_random_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -682,9 +658,8 @@ def test_mutation_applies_random_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -694,9 +669,8 @@ def test_mutation_applies_random_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -706,9 +680,8 @@ def test_mutation_applies_random_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -718,9 +691,8 @@ def test_mutation_applies_random_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -730,9 +702,8 @@ def test_mutation_applies_random_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -742,9 +713,8 @@ def test_mutation_applies_random_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -754,9 +724,8 @@ def test_mutation_applies_random_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -766,9 +735,8 @@ def test_mutation_applies_random_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -778,9 +746,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -790,9 +757,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -802,9 +768,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -814,9 +779,8 @@ def test_mutation_applies_random_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -859,14 +823,13 @@ def test_mutation_applies_no_mutations(
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -876,9 +839,8 @@ def test_mutation_applies_no_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -888,9 +850,8 @@ def test_mutation_applies_no_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -900,9 +861,8 @@ def test_mutation_applies_no_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -912,9 +872,8 @@ def test_mutation_applies_no_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -924,9 +883,8 @@ def test_mutation_applies_no_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -936,9 +894,8 @@ def test_mutation_applies_no_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -948,9 +905,8 @@ def test_mutation_applies_no_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -960,9 +916,8 @@ def test_mutation_applies_no_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -972,9 +927,8 @@ def test_mutation_applies_no_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -984,9 +938,8 @@ def test_mutation_applies_no_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -996,9 +949,8 @@ def test_mutation_applies_no_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1008,9 +960,8 @@ def test_mutation_applies_no_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1020,9 +971,8 @@ def test_mutation_applies_no_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1032,9 +982,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1044,9 +993,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1056,9 +1004,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1068,9 +1015,8 @@ def test_mutation_applies_no_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1120,14 +1066,13 @@ def test_mutation_applies_no_mutations_pre_training_mut(
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1137,9 +1082,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1149,9 +1093,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -1161,9 +1104,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -1173,9 +1115,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1185,9 +1126,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1197,9 +1137,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1209,9 +1148,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1221,9 +1159,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1233,9 +1170,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1245,9 +1181,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1257,9 +1192,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1269,9 +1203,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1281,9 +1214,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1293,9 +1225,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1305,9 +1236,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1317,9 +1247,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1329,9 +1258,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1398,14 +1326,13 @@ def test_mutation_applies_rl_hp_mutations(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1415,9 +1342,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1427,9 +1353,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -1439,9 +1364,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -1451,9 +1375,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1463,9 +1386,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1475,9 +1397,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1487,9 +1408,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1499,9 +1419,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1511,9 +1430,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1523,9 +1441,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1535,9 +1452,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1547,9 +1463,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1559,9 +1474,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1571,9 +1485,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1583,9 +1496,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1595,9 +1507,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1607,9 +1518,8 @@ def test_mutation_applies_rl_hp_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1654,14 +1564,13 @@ def test_mutation_applies_activation_mutations(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1671,9 +1580,8 @@ def test_mutation_applies_activation_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -1720,14 +1628,13 @@ def test_mutation_applies_activation_mutations_no_skip(
 
 # The mutation method applies CNN activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1744,9 +1651,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1763,9 +1669,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8, 8],
@@ -1782,9 +1687,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8, 8],
@@ -1801,9 +1705,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1820,9 +1723,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1839,9 +1741,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1858,9 +1759,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1877,9 +1777,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1896,9 +1795,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1915,9 +1813,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1934,9 +1831,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1953,9 +1849,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1972,9 +1867,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -1991,9 +1885,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2010,9 +1903,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2029,9 +1921,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2048,9 +1939,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2102,14 +1992,13 @@ def test_mutation_applies_cnn_activation_mutations(
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2119,9 +2008,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2131,9 +2019,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -2143,9 +2030,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -2155,9 +2041,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2167,9 +2052,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2179,9 +2063,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2191,9 +2074,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2203,9 +2085,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2215,9 +2096,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2227,9 +2107,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2239,9 +2118,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2251,9 +2129,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2263,9 +2140,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2275,9 +2151,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2287,9 +2162,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2299,9 +2173,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2311,9 +2184,8 @@ def test_mutation_applies_cnn_activation_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2356,14 +2228,13 @@ def test_mutation_applies_parameter_mutations(
 
 # The mutation method applies CNN parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2380,9 +2251,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2399,9 +2269,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8, 8],
@@ -2418,9 +2287,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8, 8],
@@ -2437,9 +2305,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2456,9 +2323,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2475,9 +2341,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2494,9 +2359,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2513,9 +2377,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2532,9 +2395,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2551,9 +2413,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2570,9 +2431,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2589,9 +2449,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2608,9 +2467,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2627,9 +2485,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2646,9 +2503,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2665,9 +2521,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2684,9 +2539,8 @@ def test_mutation_applies_parameter_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -2737,14 +2591,13 @@ def test_mutation_applies_cnn_parameter_mutations(
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2754,9 +2607,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2766,9 +2618,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -2778,9 +2629,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -2790,9 +2640,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2802,9 +2651,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2814,9 +2662,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2826,9 +2673,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2838,9 +2684,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2850,9 +2695,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2862,9 +2706,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2874,9 +2717,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2886,9 +2728,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2898,9 +2739,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2910,9 +2750,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2922,9 +2761,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2934,9 +2772,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -2946,9 +2783,8 @@ def test_mutation_applies_cnn_parameter_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -3001,14 +2837,13 @@ def test_mutation_applies_architecture_mutations(
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3025,9 +2860,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3044,9 +2878,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "Rainbow DQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8, 8],
@@ -3063,9 +2896,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "Rainbow DQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8, 8],
@@ -3082,9 +2914,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3101,9 +2932,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3120,9 +2950,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "TD3",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3139,9 +2968,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "TD3",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_random_box_space((2,), low=-1, high=1),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3158,9 +2986,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "PPO",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3177,9 +3004,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "PPO",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3196,9 +3022,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "CQN",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3215,9 +3040,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "CQN",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3234,9 +3058,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "ILQL",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3253,9 +3076,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "ILQL",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3272,9 +3094,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralUCB",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3291,9 +3112,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralUCB",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3310,9 +3130,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralTS",
             False,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3329,9 +3148,8 @@ def test_mutation_applies_architecture_mutations(
         (
             "NeuralTS",
             True,
-            spaces.Box(0, 1, shape=(3, 32, 32)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((3, 32, 32)),
+            generate_discrete_space(2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -3382,14 +3200,13 @@ def test_mutation_applies_cnn_architecture_mutations(
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator, mut_method",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, mut_method",
     [
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -3405,9 +3222,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -3423,9 +3239,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             False,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -3436,9 +3251,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         (
             "DDPG",
             True,
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -3509,14 +3323,13 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3526,9 +3339,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3538,9 +3350,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3550,9 +3361,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3605,14 +3415,13 @@ def test_mutation_applies_random_mutations_multi_agent(
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3622,9 +3431,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3634,9 +3442,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3646,9 +3453,8 @@ def test_mutation_applies_random_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3693,14 +3499,13 @@ def test_mutation_applies_no_mutations_multi_agent(
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3710,9 +3515,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3722,9 +3526,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3734,9 +3537,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3803,14 +3605,13 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3820,9 +3621,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3832,9 +3632,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3844,9 +3643,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3896,14 +3694,13 @@ def test_mutation_applies_activation_mutations_multi_agent(
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3913,9 +3710,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3925,9 +3721,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3937,9 +3732,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -3991,14 +3785,13 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 
 # The mutation method applies CNN activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4015,9 +3808,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4034,9 +3826,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4053,9 +3844,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4112,14 +3902,13 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4129,9 +3918,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4141,9 +3929,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4153,9 +3940,8 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4199,14 +3985,13 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 
 # The mutation method applies CNN parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4223,9 +4008,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4242,9 +4026,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4261,9 +4044,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4315,14 +4097,13 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4332,9 +4113,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4344,9 +4124,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4356,9 +4135,8 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4412,14 +4190,13 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4436,9 +4213,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4455,9 +4231,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4474,9 +4249,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(3, 32, 32)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {
                 "arch": "cnn",
                 "hidden_size": [8],
@@ -4528,14 +4302,13 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator, mut_method",
+    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, mut_method",
     [
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4551,9 +4324,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4569,9 +4341,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4587,9 +4358,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4600,9 +4370,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4613,9 +4382,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MADDPG",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4626,9 +4394,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             False,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4639,9 +4406,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         (
             "MATD3",
             True,
-            [spaces.Box(0, 1, shape=(4,)) for _ in range(2)],
-            [spaces.Discrete(2) for _ in range(2)],
-            False,
+            generate_multi_agent_box_spaces(2, shape=(4,)),
+            generate_multi_agent_discrete_spaces(2, 2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP_MA,
             1,
@@ -4766,13 +4532,12 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
 
 
 @pytest.mark.parametrize(
-    "algo, observation_space, action_space, one_hot, net_config, INIT_HP, population_size, device, accelerator",
+    "algo, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator",
     [
         (
             "DQN",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -4781,9 +4546,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "Rainbow DQN",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8, 8]},
             SHARED_INIT_HP,
             1,
@@ -4792,9 +4556,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "DDPG",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -4803,9 +4566,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "TD3",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_random_box_space((2,), low=-1, high=1),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -4814,9 +4576,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "PPO",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -4825,9 +4586,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "CQN",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -4836,9 +4596,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "NeuralUCB",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,
@@ -4847,9 +4606,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ),
         (
             "NeuralTS",
-            spaces.Box(0, 1, shape=(4,)),
-            spaces.Discrete(2),
-            False,
+            generate_random_box_space((4,)),
+            generate_discrete_space(2),
             {"arch": "mlp", "hidden_size": [8]},
             SHARED_INIT_HP,
             1,

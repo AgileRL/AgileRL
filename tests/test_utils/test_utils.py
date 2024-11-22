@@ -43,7 +43,6 @@ SHARED_INIT_HP = {
     "V_MAX": 200,
     "N_STEP": 3,
     "POLICY_FREQ": 10,
-    "DISCRETE_ACTIONS": True,
     "GAE_LAMBDA": 0.95,
     "ACTION_STD_INIT": 0.6,
     "CLIP_COEF": 0.2,
@@ -52,8 +51,6 @@ SHARED_INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "MAX_ACTION": 1,
-    "MIN_ACTION": -1,
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
@@ -65,12 +62,6 @@ SHARED_INIT_HP = {
     "THETA": 0.15,
     "DT": 0.01,
 }
-
-
-SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
-SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
-SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
-
 
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
 def test_returns_asyncvectorenv_object():
@@ -102,8 +93,8 @@ def test_returns_asyncvectorenv_object_skill():
 # Can create a population of agent for each single agent algorithm
 def test_create_initial_population_single_agent():
     observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space = spaces.Discrete(2)
-    one_hot = False
+    continuous_action_space = spaces.Box(0, 1, shape=(2,))
+    discrete_action_space = spaces.Discrete(2)
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
@@ -119,11 +110,15 @@ def test_create_initial_population_single_agent():
     }
 
     for algo in algo_classes.keys():
+        if algo in ["TD3", "DDPG"]:
+            action_space = continuous_action_space
+        else:
+            action_space = discrete_action_space
+
         population = create_population(
             algo=algo,
             observation_space=observation_space,
             action_space=action_space,
-            one_hot=one_hot,
             net_config=net_config,
             INIT_HP=SHARED_INIT_HP,
             population_size=population_size,
@@ -135,7 +130,7 @@ def test_create_initial_population_single_agent():
             assert isinstance(agent, algo_classes[algo])
             assert agent.observation_space == observation_space
             assert agent.action_space == action_space
-            assert agent.one_hot == one_hot
+            assert agent.one_hot == False
             assert agent.net_config == net_config
             assert agent.device == "cpu"
             assert agent.accelerator is None
@@ -145,7 +140,6 @@ def test_create_initial_population_single_agent():
 def test_create_initial_population_multi_agent():
     observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
     action_space = [spaces.Discrete(2) for _ in range(2)]
-    one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 4
     device = "cpu"
@@ -161,9 +155,8 @@ def test_create_initial_population_multi_agent():
             algo=algo,
             observation_space=observation_space,
             action_space=action_space,
-            one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP_MA,
+            INIT_HP=SHARED_INIT_HP,
             population_size=population_size,
             device=device,
             accelerator=accelerator,
@@ -173,7 +166,7 @@ def test_create_initial_population_multi_agent():
             assert isinstance(agent, algo_classes[algo])
             assert agent.observation_spaces == observation_space
             assert agent.action_spaces == action_space
-            assert agent.one_hot == one_hot
+            assert agent.one_hot == False
             assert agent.net_config == net_config
             assert agent.device == "cpu"
             assert agent.accelerator is None
@@ -249,7 +242,6 @@ def test_prints_hyperparams():
     # Arrange
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
-    one_hot = False
     net_config = {"arch": "mlp", "hidden_size": [8]}
     population_size = 1
     device = "cpu"
@@ -260,7 +252,6 @@ def test_prints_hyperparams():
         algo=algo,
         observation_space=observation_space,
         action_space=action_space,
-        one_hot=one_hot,
         net_config=net_config,
         INIT_HP=SHARED_INIT_HP,
         population_size=population_size,

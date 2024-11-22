@@ -346,15 +346,10 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         # TODO: This is a bit of a temporary hack until we fully refactor the framework
         self.state_dim = self.get_state_dim(observation_space)
         self.action_dim = self.get_action_dim(action_space)
-        self.one_hot = isinstance(observation_space, spaces.Discrete)
+        self.one_hot = isinstance(observation_space, spaces.Discrete) and observation_space.n > 1
         self.discrete_actions = isinstance(action_space, spaces.Discrete)
-        self.min_action = action_space.low if hasattr(action_space, "low") else None
-        self.max_action = action_space.high if hasattr(action_space, "high") else None
-
-        # Convert to np.ndarray if a list
-        if isinstance(self.min_action, list) and isinstance(self.max_action, list):
-            self.min_action = np.array(self.min_action)
-            self.max_action = np.array(self.max_action)
+        self.min_action = np.array(action_space.low) if hasattr(action_space, "low") else None
+        self.max_action = np.array(action_space.high) if hasattr(action_space, "high") else None
 
     @staticmethod
     def get_state_dim(observation_space: spaces.Space) -> Tuple[int, ...]:
@@ -474,7 +469,7 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         # TODO: This is a bit of a temporary hack until we fully refactor the framework
         self.state_dims = self.get_state_dims(observation_spaces)
         self.action_dims = self.get_action_dims(action_spaces)
-        self.one_hot = all(isinstance(space, spaces.Discrete) for space in observation_spaces)
+        self.one_hot = all(isinstance(space, spaces.Discrete) and space.n > 1 for space in observation_spaces)
         self.discrete_actions = all(isinstance(space, spaces.Discrete) for space in action_spaces)
 
         # For continuous action spaces, store the min and max action values

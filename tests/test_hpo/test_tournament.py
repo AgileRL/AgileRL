@@ -11,9 +11,15 @@ from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
+from tests.helper_functions import (
+    generate_random_box_space,
+    generate_discrete_space,
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces
+)
 
 # Shared HP dict that can be used by any algorithm
-SHARED_INIT_HP = {
+INIT_HP = {
     "POPULATION_SIZE": 4,
     "DOUBLE": True,
     "BATCH_SIZE": 128,
@@ -30,7 +36,6 @@ SHARED_INIT_HP = {
     "V_MAX": 200,
     "N_STEP": 3,
     "POLICY_FREQ": 10,
-    "DISCRETE_ACTIONS": True,
     "GAE_LAMBDA": 0.95,
     "ACTION_STD_INIT": 0.6,
     "CLIP_COEF": 0.2,
@@ -39,8 +44,6 @@ SHARED_INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "MAX_ACTION": 1,
-    "MIN_ACTION": -1,
     "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
@@ -52,11 +55,6 @@ SHARED_INIT_HP = {
     "THETA": 0.15,
     "DT": 0.01,
 }
-
-SHARED_INIT_HP_MA = copy.deepcopy(SHARED_INIT_HP)
-SHARED_INIT_HP_MA["MAX_ACTION"] = [(1,), (1,)]
-SHARED_INIT_HP_MA["MIN_ACTION"] = [(-1,), (-1,)]
-
 
 # Initializes the 'TournamentSelection' object with the given parameters.
 def test_initialization_with_given_parameters():
@@ -76,9 +74,9 @@ def test_initialization_with_given_parameters():
 ### Single-agent algorithms ###
 # Returns best agent and new population of agents following tournament selection.
 def test_returns_best_agent_and_new_population():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space = spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space((4,))
+    discrete_action_space = generate_discrete_space(2)
+    continuous_action_space = generate_random_box_space((2,))
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
@@ -97,13 +95,17 @@ def test_returns_best_agent_and_new_population():
     }
 
     for algo in algo_classes.keys():
+        if algo in ['TD3', 'DDPG']:
+            action_space = continuous_action_space
+        else:
+            action_space = discrete_action_space
+
         population = create_population(
             algo=algo,
             observation_space=observation_space,
             action_space=action_space,
-            one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP,
+            INIT_HP=INIT_HP,
             population_size=population_size,
             device=device,
         )
@@ -129,9 +131,9 @@ def test_returns_best_agent_and_new_population():
 
 # Returns best agent and new population of agents following tournament selection without elitism.
 def test_returns_best_agent_and_new_population_without_elitism():
-    observation_space = spaces.Box(0, 1, shape=(4,))
-    action_space = spaces.Discrete(2)
-    one_hot = False
+    observation_space = generate_random_box_space((4,))
+    discrete_action_space = generate_discrete_space(2)
+    continuous_action_space = generate_random_box_space((2,))
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
@@ -150,13 +152,17 @@ def test_returns_best_agent_and_new_population_without_elitism():
     }
 
     for algo in algo_classes.keys():
+        if algo in ['TD3', 'DDPG']:
+            action_space = continuous_action_space
+        else:
+            action_space = discrete_action_space
+
         population = create_population(
             algo=algo,
             observation_space=observation_space,
             action_space=action_space,
-            one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP,
+            INIT_HP=INIT_HP,
             population_size=population_size,
             device=device,
         )
@@ -181,9 +187,8 @@ def test_returns_best_agent_and_new_population_without_elitism():
 ### Multi-agent algorithms ###
 # Returns best agent and new population of agents following tournament selection.
 def test_returns_best_agent_and_new_population_multi_agent():
-    observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
-    action_space = [spaces.Discrete(2) for _ in range(2)]
-    one_hot = False
+    observation_space = generate_multi_agent_box_spaces(2, (4,))
+    action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
@@ -199,9 +204,8 @@ def test_returns_best_agent_and_new_population_multi_agent():
             algo=algo,
             observation_space=observation_space,
             action_space=action_space,
-            one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP_MA,
+            INIT_HP=INIT_HP,
             population_size=population_size,
             device=device,
         )
@@ -227,9 +231,8 @@ def test_returns_best_agent_and_new_population_multi_agent():
 
 # Returns best agent and new population of agents following tournament selection without elitism.
 def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
-    observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
-    action_space = [spaces.Discrete(2) for _ in range(2)]
-    one_hot = False
+    observation_space = generate_multi_agent_box_spaces(2, (4,))
+    action_space = generate_multi_agent_discrete_spaces(2, 2)
     net_config = {"arch": "mlp", "hidden_size": [8, 8]}
     population_size = 4
     device = "cpu"
@@ -245,9 +248,8 @@ def test_returns_best_agent_and_new_population_without_elitism_multi_agent():
             algo=algo,
             observation_space=observation_space,
             action_space=action_space,
-            one_hot=one_hot,
             net_config=net_config,
-            INIT_HP=SHARED_INIT_HP_MA,
+            INIT_HP=INIT_HP,
             population_size=population_size,
             device=device,
         )

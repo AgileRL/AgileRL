@@ -581,12 +581,8 @@ def test_policy_q_learning_with_probe_env():
     algo_args = {
         "observation_spaces": [env.observation_space[agent] for agent in env.agents],
         "action_spaces": [env.action_space[agent] for agent in env.agents],
-        "one_hot": True,
         "n_agents": env.num_agents,
         "agent_ids": env.possible_agents,
-        "max_action": [(1.0,), (1.0,)],
-        "min_action": [(0.0,), (0.0,)],
-        "discrete_actions": True,
         "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
         "batch_size": 256,
     }
@@ -610,12 +606,8 @@ def test_policy_q_learning_with_probe_env_mlp():
     algo_args = {
         "observation_spaces": [env.observation_space[agent] for agent in env.agents],
         "action_spaces": [env.action_space[agent] for agent in env.agents],
-        "one_hot": True,
         "n_agents": env.num_agents,
         "agent_ids": env.possible_agents,
-        "max_action": [(1.0,), (1.0,)],
-        "min_action": [(0.0,), (0.0,)],
-        "discrete_actions": False,
         "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
         "batch_size": 256,
     }
@@ -639,12 +631,8 @@ def test_policy_q_learning_with_probe_env_cnn():
     algo_args = {
         "observation_spaces": [env.observation_space[agent] for agent in env.agents],
         "action_spaces": [env.action_space[agent] for agent in env.agents],
-        "one_hot": False,
         "n_agents": env.num_agents,
         "agent_ids": env.possible_agents,
-        "max_action": [(1.0,), (1.0,)],
-        "min_action": [(0.0,), (0.0,)],
-        "discrete_actions": False,
         "net_config": {
             "arch": "cnn",  # Network architecture
             "hidden_size": [32],  # Network hidden size

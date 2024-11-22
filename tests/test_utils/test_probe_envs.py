@@ -287,7 +287,6 @@ def test_q_learning_with_probe_env():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "one_hot": True if env.observation_space.n > 1 else False,
         "lr": 1e-2,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -306,9 +305,6 @@ def test_policy_q_learning_with_probe_env():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "one_hot": True if env.observation_space.n > 1 else False,
-        "max_action": 1.0,
-        "min_action": 0.0,
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
     }
@@ -330,7 +326,6 @@ def test_policy_q_learning_with_probe_env_cnn():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "one_hot": False,
         "net_config": {
             "arch": "cnn",  # Network architecture
             "hidden_size": [64],  # Network hidden size
@@ -339,8 +334,6 @@ def test_policy_q_learning_with_probe_env_cnn():
             "stride_size": [1],  # CNN stride size
             "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
-        "max_action": 1.0,
-        "min_action": 0.0,
         "policy_freq": 2,
         "lr_actor": 0.1,
         "lr_critic": 0.1,
@@ -363,9 +356,7 @@ def test_policy_on_policy_with_probe_env():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "one_hot": True if env.observation_space.n > 1 else False,
         "lr": 0.01,
-        "discrete_actions": False,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
 
@@ -377,7 +368,6 @@ def test_policy_on_policy_with_probe_env_cnn():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "one_hot": False,
         "net_config": {
             "arch": "cnn",  # Network architecture
             "hidden_size": [64],  # Network hidden size
@@ -386,7 +376,6 @@ def test_policy_on_policy_with_probe_env_cnn():
             "stride_size": [1],  # CNN stride size
             "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
-        "discrete_actions": False,
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)

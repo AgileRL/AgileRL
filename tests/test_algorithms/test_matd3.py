@@ -1,5 +1,6 @@
 import copy
 from pathlib import Path
+import os
 from unittest.mock import MagicMock
 
 import dill
@@ -21,7 +22,10 @@ from agilerl.networks.evolvable_mlp import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
-from tests.helper_functions import generate_multi_agent_box_spaces, generate_multi_agent_discrete_spaces
+from tests.helper_functions import (
+    generate_multi_agent_box_spaces,
+    generate_multi_agent_discrete_spaces
+)
 
 class MultiAgentCNNActor(nn.Module):
     def __init__(self):
@@ -143,7 +147,6 @@ def cnn_critic():
 @pytest.fixture
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
-
 
 @pytest.fixture
 def mocked_accelerator():
@@ -866,20 +869,20 @@ def test_matd3_init_with_compile_error(mode):
 @pytest.mark.parametrize(
     "training, observation_spaces, action_spaces, compile_mode",
     [
-        (1, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), None),
-        (0, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), None),
+        (1, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,)), None),
+        (0, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,)), None),
         (1, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_discrete_spaces(2, 2), None),
         (0, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_discrete_spaces(2, 2), None),
-        (1, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), None),
-        (0, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), None),
+        (1, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,)), None),
+        (0, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,)), None),
         (1, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_discrete_spaces(2, 2), None),
         (0, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_discrete_spaces(2, 2), None),
-        (1, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), "default"),
-        (0, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), "default"),
+        (1, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,)), "default"),
+        (0, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_box_spaces(2, (2,)), "default"),
         (1, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_discrete_spaces(2, 2), "default"),
         (0, generate_multi_agent_box_spaces(2, (6,)), generate_multi_agent_discrete_spaces(2, 2), "default"),
-        (1, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), "default"),
-        (0, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,), low=-1, high=1), "default"),
+        (1, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,)), "default"),
+        (0, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_box_spaces(2, (2,)), "default"),
         (1, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_discrete_spaces(2, 2), "default"),
         (0, generate_multi_agent_discrete_spaces(2, 6), generate_multi_agent_discrete_spaces(2, 2), "default"),
     ],
@@ -890,7 +893,7 @@ def test_matd3_get_action_mlp(
     agent_ids = ["agent_0", "agent_1"]
     if all(isinstance(space, spaces.Discrete) for space in observation_spaces):
         state = {
-            agent: np.random.randint(0, observation_spaces[idx].shape, 1)
+            agent: np.random.randint(0, observation_spaces[idx].n, 1)
             for idx, agent in enumerate(agent_ids)
         }
     else:
@@ -1901,6 +1904,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     assert clone_agent.one_hot == matd3.one_hot
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
+    print(clone_agent.max_action)
     assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
     assert np.all(np.stack(clone_agent.min_action) == np.stack(matd3.min_action))
     assert np.array_equal(clone_agent.expl_noise, matd3.expl_noise)
@@ -1987,7 +1991,7 @@ def test_clone_after_learning(compile_mode):
         for idx, agent_id in enumerate(agent_ids)
     }
     actions = {
-        agent_id: torch.randn(batch_size, action_spaces[idx].n)
+        agent_id: torch.randn(batch_size, action_spaces[idx].shape[0])
         for idx, agent_id in enumerate(agent_ids)
     }
     rewards = {agent_id: torch.randn(batch_size, 1) for agent_id in agent_ids}
@@ -2088,6 +2092,7 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         n_agents=1,
         agent_ids=["agent_0"],
+        net_config=net_config,
         torch_compiler=compile_mode,
         device=device,
         accelerator=accelerator,
@@ -2668,8 +2673,8 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     assert new_matd3.one_hot == matd3.one_hot
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
-    assert np.all(np.stack(new_matd3.max_action) == np.stack(matd3.max_action))
-    assert np.all(np.stack(new_matd3.min_action) == np.stack(matd3.min_action))
+    assert new_matd3.min_action == matd3.min_action
+    assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
@@ -2786,8 +2791,8 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     assert new_matd3.one_hot == matd3.one_hot
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
-    assert np.all(np.stack(new_matd3.max_action) == np.stack(matd3.max_action))
-    assert np.all(np.stack(new_matd3.min_action) == np.stack(matd3.min_action))
+    assert new_matd3.min_action == matd3.min_action
+    assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
@@ -2910,7 +2915,6 @@ def test_load_from_pretrained_networks(
     compile_mode,
     device,
 ):
-    one_hot = False
     if arch == "mlp":
         actor_network = mlp_actor
         critic_network = mlp_critic
@@ -2929,7 +2933,6 @@ def test_load_from_pretrained_networks(
     matd3 = MATD3(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        one_hot=one_hot,
         n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         actor_networks=[actor_network, copy.deepcopy(actor_network)],
@@ -2953,8 +2956,8 @@ def test_load_from_pretrained_networks(
     assert new_matd3.one_hot == matd3.one_hot
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
-    assert np.all(np.stack(new_matd3.max_action) == np.stack(matd3.max_action))
-    assert np.all(np.stack(new_matd3.min_action) == np.stack(matd3.min_action))
+    assert new_matd3.min_action == matd3.min_action
+    assert new_matd3.max_action == matd3.max_action
     assert new_matd3.net_config == matd3.net_config
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic

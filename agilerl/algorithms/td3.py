@@ -108,6 +108,7 @@ class TD3(RLAlgorithm):
             name="TD3"
         )
 
+        assert isinstance(action_space, spaces.Box), "TD3 only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
@@ -332,13 +333,14 @@ class TD3(RLAlgorithm):
         :type convert_to_torch: bool, optional
         """
         if convert_to_torch:
+            device = self.device if self.accelerator is None else self.accelerator.device
             max_action = (
-                torch.from_numpy(self.max_action).to(self.device)
+                torch.from_numpy(self.max_action).to(device)
                 if isinstance(self.max_action, (np.ndarray))
                 else self.max_action
             )
             min_action = (
-                torch.from_numpy(self.min_action).to(self.device)
+                torch.from_numpy(self.min_action).to(device)
                 if isinstance(self.min_action, (np.ndarray))
                 else self.min_action
             )
@@ -372,13 +374,14 @@ class TD3(RLAlgorithm):
         if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
             return torch.clamp(input, min, max)
 
+        device = self.device if self.accelerator is None else self.accelerator.device
         min = (
-            torch.from_numpy(min).to(self.device)
+            torch.from_numpy(min).to(device)
             if isinstance(min, np.ndarray)
             else min
         )
         max = (
-            torch.from_numpy(max).to(self.device)
+            torch.from_numpy(max).to(device)
             if isinstance(max, np.ndarray)
             else max
         )
