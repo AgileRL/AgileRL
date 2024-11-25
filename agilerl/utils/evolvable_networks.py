@@ -9,8 +9,7 @@ from collections import OrderedDict
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
-from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
-from agilerl.typing import TensorDict, NumpyObsType, TorchObsType
+from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGELU
 
 def unwrap_optimizer(
         optimizer: Union[Optimizer, AcceleratedOptimizer],
@@ -121,24 +120,6 @@ def get_normalization(normalization_name: str, layer_size: int) -> nn.Module:
 
     return normalization_functions[normalization_name](layer_size)
 
-class new_gelu(nn.Module):
-    """
-    Implementation of the GELU activation function currently in Google BERT repo (identical to OpenAI GPT).
-    Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
-    """
-
-    def forward(self, x):
-        return (
-            0.5
-            * x
-            * (
-                1.0
-                + torch.tanh(
-                    math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))
-                )
-            )
-        )
-
 def get_activation(activation_name: Optional[str], gpt: bool = False) -> nn.Module:
     """Returns activation function for corresponding activation name.
 
@@ -156,7 +137,7 @@ def get_activation(activation_name: Optional[str], gpt: bool = False) -> nn.Modu
         "Softmax": nn.Softmax,
         "LeakyReLU": nn.LeakyReLU,
         "PReLU": nn.PReLU,
-        "GELU": nn.GELU if not gpt else new_gelu,
+        "GELU": nn.GELU if not gpt else NewGELU,
         "Identity": nn.Identity,
     }
 

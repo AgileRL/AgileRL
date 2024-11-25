@@ -11,9 +11,9 @@ import torch.optim as optim
 from gymnasium import spaces
 
 from agilerl.algorithms.base import MultiAgentAlgorithm
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.networks.base import EvolvableModule
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
     compile_model,
     key_in_nested_dict,

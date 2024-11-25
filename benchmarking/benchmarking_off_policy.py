@@ -5,7 +5,7 @@ from agilerl.algorithms.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
@@ -22,7 +22,7 @@ from agilerl.utils.utils import (
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu") # torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 

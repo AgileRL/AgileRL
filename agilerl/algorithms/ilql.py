@@ -12,8 +12,8 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from agilerl.data.rl_data import DataPoint
-from agilerl.networks.evolvable_gpt import EvolvableGPT
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.gpt import EvolvableGPT
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,

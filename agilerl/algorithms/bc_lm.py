@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from agilerl.data.language_environment import Language_Observation, interact_environment
 from agilerl.data.rl_data import DataPoint, RL_Dataset
-from agilerl.networks.evolvable_gpt import EvolvableGPT
+from agilerl.modules.gpt import EvolvableGPT
 from agilerl.utils.sampling_utils import (
     always_terminate,
     map_all_kvs,

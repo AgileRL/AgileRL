@@ -7,7 +7,7 @@ from accelerate import Accelerator
 from gymnasium import spaces
 
 from agilerl.hpo.mutation import Mutations
-from agilerl.networks.evolvable_bert import EvolvableBERT
+from agilerl.modules.bert import EvolvableBERT
 from agilerl.utils.utils import create_population
 from tests.helper_functions import (
     generate_random_box_space,

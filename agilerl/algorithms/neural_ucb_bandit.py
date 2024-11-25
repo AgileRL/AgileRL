@@ -11,8 +11,8 @@ import torch.optim as optim
 from gymnasium import spaces
 
 from agilerl.algorithms.base import RLAlgorithm
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 

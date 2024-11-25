@@ -19,7 +19,7 @@ from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
@@ -44,19 +44,10 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             env = ClipReward(env)
             env = ss.frame_stack_v1(env, 4)
 
-
         observation_space = env.single_observation_space
         action_space = env.single_action_space
         if INIT_HP["CHANNELS_LAST"]:
             observation_space = observation_space_channels_to_first(observation_space)
-
-        if INIT_HP["ALGO"] == "TD3":
-            min_action = float(action_space.low[0])
-            INIT_HP["MIN_ACTION"] = min_action
-
-        if INIT_HP["ALGO"] == "TD3":
-            max_action = float(action_space.high[0])
-            INIT_HP["MAX_ACTION"] = max_action
 
         if NET_CONFIG is not None:
             actor = None

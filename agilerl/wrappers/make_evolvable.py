@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 
 from agilerl.typing import ArrayOrTensor
-from agilerl.networks.custom_components import GumbelSoftmax, NoisyLinear
-from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
+from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import (
     get_activation,
     get_normalization,

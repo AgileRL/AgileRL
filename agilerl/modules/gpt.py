@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.mlp import EvolvableMLP
 
 class EvolvableGPT(EvolvableModule):
     """The Evolvable GPT class.

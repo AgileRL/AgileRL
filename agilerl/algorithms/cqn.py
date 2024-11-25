@@ -10,9 +10,9 @@ import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
-from agilerl.networks.evolvable_composed import EvolvableComposed
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
@@ -68,7 +68,6 @@ class CQN(RLAlgorithm):
         mut: Optional[str] = None,
         actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
-
         accelerator: Optional[Any] = None,
         wrap: bool = True
     ) -> None:
@@ -200,7 +199,7 @@ class CQN(RLAlgorithm):
                     "latent_dim" in self.net_config.keys()
                 ), "Net config must contain latent_dim: int."
 
-                self.actor = EvolvableComposed(
+                self.actor = EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     channel_size=self.net_config["channel_size"],

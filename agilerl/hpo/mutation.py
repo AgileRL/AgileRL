@@ -9,8 +9,8 @@ from torch.optim import Optimizer
 from accelerate import Accelerator
 
 from agilerl.algorithms.base import EvolvableAlgorithm
-from agilerl.networks.evolvable_mlp import EvolvableMLP
-from agilerl.networks.base import EvolvableModule
+from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import remove_compile_prefix
 
 NetworkConfig = Dict[str, str]

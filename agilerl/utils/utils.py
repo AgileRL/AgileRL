@@ -21,7 +21,7 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-from agilerl.networks.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 

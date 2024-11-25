@@ -8,8 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
-from agilerl.utils.evolvable_networks import get_activation
+from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 
 class EvolvableBERT(EvolvableModule):
     """The Evolvable BERT class.

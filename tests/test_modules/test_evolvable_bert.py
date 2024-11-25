@@ -3,7 +3,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from agilerl.networks.evolvable_bert import (
+from agilerl.modules.bert import (
     EvolvableBERT,
     PositionalEncoding,
     TokenEmbedding,

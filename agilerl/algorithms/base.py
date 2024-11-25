@@ -1,5 +1,6 @@
 from typing import Optional, Union, Tuple, Iterable, TypeGuard, Any, Dict, List, Set
 import inspect
+import copy
 from abc import ABC, abstractmethod
 from gymnasium import spaces
 from accelerate import Accelerator
@@ -13,7 +14,7 @@ from torch._dynamo import OptimizedModule
 import dill
 
 from agilerl.typing import NumpyObsType, TorchObsType
-from agilerl.networks.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
     obs_to_tensor,
     recursive_check_module_attrs,
@@ -88,10 +89,7 @@ class EvolvableAlgorithm(ABC):
         self.scores = []
         self.fitness = []
         self.steps = [0]
-
-        self.optim_to_modules: Dict[str, List[str]] = {}
-        self.module_to_optim: Dict[str, str] = {}
-        self.param_to_modules: Dict[nn.Parameter, Set[str]] = {}
+        self.optimizer_module_mapping = {}
 
     @property
     def index(self) -> int:
@@ -112,12 +110,6 @@ class EvolvableAlgorithm(ABC):
     def mut(self, value: Optional[str]) -> None:
         """Sets the mutation object of the algorithm."""
         self._mut = value
-    
-    # TODO: Is it too ambitious to generalise this too?
-    @abstractmethod
-    def clone() -> "EvolvableAlgorithm":
-        """Abstract method for cloning the algorithm."""
-        raise NotImplementedError
 
     # TODO: Can this be generalised to all algorithms?
     @abstractmethod
@@ -172,59 +164,6 @@ class EvolvableAlgorithm(ABC):
         """
         raise NotImplementedError
 
-    # def __init_subclass__(cls, **kwargs):
-    #     """Ensure the mapping method runs after initialization in subclasses."""
-    #     original_init = cls.__init__
-
-    #     def wrapped_init(self: EvolvableAlgorithm, *args, **kwargs):
-    #         original_init(self, *args, **kwargs)  # Call the original __init__ method
-    #         self._init_evolvable_mappings()  # Automatically run the mapping method
-
-    #     cls.__init__ = wrapped_init  # Replace the subclass's __init__ with the wrapped version
-    #     super().__init_subclass__(**kwargs)
-
-    def _init_evolvable_mappings(self):
-        """Automatically map optimizers to the modules they optimize."""
-        self._identify_param_to_modules()
-        for attr_name, attr in self.evolvable_attributes().items():
-            if isinstance(attr, (AcceleratedOptimizer, Optimizer)):
-                # Extract modules from the optimizer's parameter groups
-                modules = self._extract_modules_from_optimizer(attr)
-                self.optim_to_modules[attr] = modules
-                for module in modules:
-                    self.module_to_optim[module] = attr_name
-
-    def _extract_modules_from_optimizer(self, optimizer: Optimizer) -> List[str]:
-        """Extract modules from the optimizer's parameter groups."""
-        modules = set()
-        for param_group in optimizer.param_groups:
-            for param in param_group['params']:
-                if param in self.param_to_modules:
-                    # Already linked to one or more modules
-                    linked_modules = self.param_to_modules[param]
-                else:
-                    linked_modules = set()
-
-                # Look for modules in the current class attributes
-                for attr_name, attr in self.evolvable_attributes().items():
-                    if isinstance(attr, nn.Module) and attr_name in param._evol_module:
-                        linked_modules.add(attr_name)
-
-                self.param_to_modules[param] = linked_modules
-                modules.update(linked_modules)
-
-        return list(modules)
-
-    def _identify_param_to_modules(self) -> None:
-        """Add an attribute identifying the parameter to the module/s it belongs to."""
-        for attr_name, attr in self.evolvable_attributes().items():
-            if isinstance(attr, nn.Module):
-                for param in attr.parameters():
-                    if not hasattr(param, "module"):
-                        param._evol_module = set([attr_name])
-                    else:
-                        param._evol_module.add(attr_name)
-
     def obs_to_tensor(self, observation: NumpyObsType) -> TorchObsType:
         """Prepares state for forward pass through neural network.
 
@@ -251,6 +190,14 @@ class EvolvableAlgorithm(ABC):
             and not attr.startswith("_") and not attr.endswith("_")
             and not "network" in attr # NOTE: We shouldn't need to do this...
         }
+    
+    def register_optimizer(self, optimizer_name: str, module_names: List[str]) -> None:
+        """
+        Registers an optimizer and the modules it manages.
+        :param optimizer_name: Name of the optimizer attribute (e.g., 'actor_optimizer').
+        :param module_names: List of module attribute names managed by the optimizer (e.g., ['actor']).
+        """
+        self.optimizer_module_mapping[optimizer_name] = module_names
     
     def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
         """
@@ -300,6 +247,51 @@ class EvolvableAlgorithm(ABC):
                     setattr(self, attr, [self.accelerator.prepare(m) for m in obj])
                 else:
                     setattr(self, attr, self.accelerator.prepare(obj))
+    
+    def clone(self, index: Optional[int] = None, wrap: bool = False) -> "EvolvableAlgorithm":
+        """Creates a clone of the algorithm.
+
+        :param index: The index of the clone, defaults to None
+        :type index: Optional[int], optional
+        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :type wrap: bool, optional
+
+        :return: A clone of the algorithm
+        :rtype: EvolvableAlgorithm
+        """
+        # Make copy using input arguments
+        input_args = self.inspect_attributes(input_args_only=True)
+        input_args["wrap"] = wrap
+        clone = type(self)(**input_args)
+
+        # TODO: Copy over evolvable attributes
+        # Here we need to know which evolvable modules belong to which optimizers,
+        # which is hard to determine systematically without user input -> Need to 
+        # think harder about this...
+
+        # Copy non-evolvable attributes back to clone
+        for attribute in self.inspect_attributes().keys():
+            if hasattr(self, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                else:
+                    if attr != clone_attr:
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+
+        if index is not None:
+            clone.index = index
+        
+        return clone
 
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):

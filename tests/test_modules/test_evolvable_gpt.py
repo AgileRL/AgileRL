@@ -2,8 +2,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from agilerl.utils.evolvable_networks import new_gelu
-from agilerl.networks.evolvable_gpt import (
+from agilerl.modules.custom_components import NewGELU
+from agilerl.modules.gpt import (
     MLP,
     CausalSelfAttention,
     EvolvableGPT,
@@ -95,7 +95,7 @@ def test_returns_activation():
         "Softmax": nn.Softmax,
         "LeakyReLU": nn.LeakyReLU,
         "PReLU": nn.PReLU,
-        "GELU": new_gelu,
+        "GELU": NewGELU,
     }
 
     model = EvolvableGPT()
@@ -316,7 +316,7 @@ def test_returns_activation_mlp():
         "Softmax": nn.Softmax,
         "LeakyReLU": nn.LeakyReLU,
         "PReLU": nn.PReLU,
-        "GELU": new_gelu,
+        "GELU": NewGELU,
     }
 
     model = MLP(32, 0.1, 64)

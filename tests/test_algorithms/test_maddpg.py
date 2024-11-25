@@ -16,9 +16,9 @@ from pettingzoo import ParallelEnv
 from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.maddpg import MADDPG
-from agilerl.networks.custom_components import GumbelSoftmax
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.custom_components import GumbelSoftmax
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import generate_multi_agent_box_spaces, generate_multi_agent_discrete_spaces

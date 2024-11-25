@@ -5,7 +5,7 @@ from ucimlrepo import fetch_ucirepo
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_bandits import train_bandits
 from agilerl.utils.utils import create_population, print_hyperparams
 from agilerl.wrappers.learning import BanditEnv

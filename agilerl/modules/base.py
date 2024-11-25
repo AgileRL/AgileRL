@@ -6,8 +6,8 @@ from enum import Enum
 import torch
 import torch.nn as nn
 
+from agilerl.modules.custom_components import NoisyLinear, GumbelSoftmax, NewGELU
 from agilerl.utils.evolvable_networks import get_activation
-from agilerl.networks.custom_components import NoisyLinear
 
 class MutationType(Enum):
     LAYER = "layer"
@@ -54,9 +54,9 @@ class EvolvableModule(nn.Module, ABC):
     advantage_net: Optional[nn.Module]
 
     def __init__(self, gpt: bool = False) -> None:
-        nn.Module.__init__(self)  # Properly initialize nn.Module
+        nn.Module.__init__(self)
 
-        self._fetch_activation_fn = partial(get_activation, gpt=gpt)
+        self.gpt = gpt
 
         # Initialize dictionaries to store mutation methods by type
         self._layer_mutation_methods = {}
@@ -163,14 +163,14 @@ class EvolvableModule(nn.Module, ABC):
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
     
-    def get_activation(self, name: str):
+    def get_activation(self, name: Optional[str] = None) -> nn.Module:
         """Get the activation function by name.
 
         param name: The name of the activation function.
         type name: str
         return: The activation function.
         """
-        return self._fetch_activation_fn(name)
+        return get_activation(name, self.gpt)
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods.

@@ -10,9 +10,9 @@ from torch.distributions import Categorical, MultivariateNormal
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
-from agilerl.networks.evolvable_composed import EvolvableComposed
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.algorithms.base import RLAlgorithm
@@ -316,14 +316,14 @@ class PPO(RLAlgorithm):
                     "latent_dim" in self.net_config.keys()
                 ), "Net config must contain latent_dim: int."
 
-                self.actor = EvolvableComposed(
+                self.actor = EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
-                self.critic = EvolvableComposed(
+                self.critic = EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=1,
                     device=self.device,

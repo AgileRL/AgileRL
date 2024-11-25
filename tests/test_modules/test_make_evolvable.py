@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from agilerl.networks.custom_components import NoisyLinear
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import unpack_network
 

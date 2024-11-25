@@ -9,14 +9,14 @@ from accelerate import Accelerator
 
 from agilerl.typing import ArrayOrTensor
 from agilerl.utils.evolvable_networks import is_image_space
-from agilerl.networks.base import EvolvableModule, register_mutation_fn, MutationType
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule, register_mutation_fn, MutationType
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 
 ModuleType = Union[EvolvableModule, nn.Module]
 SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP]
 
-class EvolvableComposed(EvolvableModule):
+class EvolvableMultiInput(EvolvableModule):
     """
     General object that allows for the composition of multiple evolvable networks given a dictionary 
     observation space. For each key in the space, either a `EvolvableCNN` or `EvolvableMLP` object is 
@@ -733,13 +733,13 @@ class EvolvableComposed(EvolvableModule):
         mut_dict["key"] = key
         return mut_dict
     
-    def clone(self) -> "EvolvableComposed":
+    def clone(self) -> "EvolvableMultiInput":
         """Returns clone of neural net with identical parameters.
         
         :return: Clone of neural network
-        :rtype: EvolvableComposed
+        :rtype: EvolvableMultiInput
         """
-        clone = EvolvableComposed(**copy.deepcopy(self.init_dict))
+        clone = EvolvableMultiInput(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())
         return clone
 

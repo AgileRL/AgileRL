@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import accelerate
 
 from agilerl.typing import ArrayOrTensor
-from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import create_mlp
 
 class EvolvableMLP(EvolvableModule):

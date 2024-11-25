@@ -8,7 +8,7 @@ from torch.optim import Optimizer
 from torch.nn import Module
 from torch._dynamo import OptimizedModule
 
-from agilerl.networks.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule
 from agilerl.typing import NumpyObsType, TorchObsType, NetworkType, OptimizerType
 
 def unwrap_optimizer(

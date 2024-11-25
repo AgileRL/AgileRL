@@ -1,5 +1,4 @@
-from typing import List, Optional, Tuple, Union, Dict, Any
-import copy
+from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,7 +6,7 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 
 from agilerl.typing import ArrayOrTensor
-from agilerl.networks.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import (
     get_activation,
     calc_max_kernel_sizes,

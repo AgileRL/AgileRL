@@ -16,9 +16,9 @@ from gymnasium import spaces
 from gymnasium.spaces import Discrete
 
 from agilerl.algorithms.matd3 import MATD3
-from agilerl.networks.custom_components import GumbelSoftmax
-from agilerl.networks.evolvable_cnn import EvolvableCNN
-from agilerl.networks.evolvable_mlp import EvolvableMLP
+from agilerl.modules.custom_components import GumbelSoftmax
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
