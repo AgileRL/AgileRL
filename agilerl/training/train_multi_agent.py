@@ -35,7 +35,6 @@ def train_multi_agent(
     sum_scores: bool = True,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
-    net_config: InitDictType = None,
     swap_channels: bool = False,
     max_steps: int = 50000,
     evo_steps: int = 25,
@@ -74,8 +73,6 @@ def train_multi_agent(
     :type INIT_HP: dict
     :param MUT_P: Dictionary containing mutation parameters, defaults to None
     :type MUT_P: dict, optional
-    :param net_config: Network configuration dictionary, defaults to None
-    :type net_config: dict
     :param swap_channels: Swap image channels dimension from last to first
         [H, W, C] -> [C, H, W], defaults to False
     :type swap_channels: bool, optional

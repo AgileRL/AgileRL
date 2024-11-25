@@ -6,7 +6,7 @@ from tqdm import trange
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population
+from agilerl.utils.utils import create_population, observation_space_channels_to_first
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -53,28 +53,11 @@ if __name__ == "__main__":
     env.reset()
 
     # Configure the multi-agent algo input arguments
-    try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = True
-        INIT_HP["MAX_ACTION"] = None
-        INIT_HP["MIN_ACTION"] = None
-    except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
-        INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
-    # Not applicable to MPE environments, used when images are used for observations (Atari environments)
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim
-        ]
+        observation_spaces = [observation_space_channels_to_first(space) for space in observation_spaces]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     INIT_HP["N_AGENTS"] = env.num_agents
@@ -83,9 +66,8 @@ if __name__ == "__main__":
     # Create a population ready for evolutionary hyper-parameter optimisation
     pop = create_population(
         "MADDPG",
-        state_dim,
-        action_dim,
-        one_hot,
+        observation_spaces,
+        action_spaces,
         NET_CONFIG,
         INIT_HP,
         population_size=INIT_HP["POP_SIZE"],

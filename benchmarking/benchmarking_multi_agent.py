@@ -159,7 +159,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         sum_scores=True,
         INIT_HP=INIT_HP,
         MUT_P=MUTATION_PARAMS,
-        net_config=NET_CONFIG,
         swap_channels=INIT_HP["CHANNELS_LAST"],
         max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],

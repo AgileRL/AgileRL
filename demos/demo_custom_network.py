@@ -2,13 +2,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import trange
+from gymnasium import spaces
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population, make_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-
 
 class MLPActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
@@ -54,31 +54,21 @@ if __name__ == "__main__":
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
-    try:
-        state_dim = env.single_observation_space.n
-        one_hot = True
-    except Exception:
-        state_dim = env.single_observation_space.shape
-        one_hot = False
-    try:
-        action_dim = env.single_action_space.n
-    except Exception:
-        action_dim = env.single_action_space.shape[0]
-
     # Instantiate mlp and then make it evolvable
-    mlp = MLPActor(state_dim[0], [32, 32], action_dim)
+    observation_space = env.single_observation_space
+    action_space: spaces.Discrete = env.single_action_space
+    mlp = MLPActor(observation_space.shape[0], [32, 32], action_space.n)
     evolvable_mlp = MakeEvolvable(
         mlp,
-        input_tensor=torch.ones(state_dim),  # Example input tensor to the network
+        input_tensor=torch.ones(observation_space.shape[0]),  # Example input tensor to the network
         device=device,
     )
 
     # Create a population of DQN agents
     pop = create_population(
         algo="DQN",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        observation_space=env.observation_space,  # Observation space
+        action_space=env.action_space,  # Action space
         net_config=None,  # Network configuration set as None
         actor_network=evolvable_mlp,  # Custom evolvable actor
         INIT_HP=INIT_HP,  # Initial hyperparameters
@@ -86,6 +76,7 @@ if __name__ == "__main__":
         num_envs=num_envs,  # Number of vectorized envs
         device=device,
     )
+
 
     # Create the replay buffer
     field_names = ["state", "action", "reward", "next_state", "done"]

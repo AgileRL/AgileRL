@@ -9,7 +9,7 @@ from tqdm import trange
 import gymnasium as gym
 from accelerate import Accelerator
 
-from agilerl.components.replay_buffer import ReplayBuffer
+from agilerl.components.replay_buffer import PrioritizedReplayBuffer, MultiStepReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.algorithms.base import RLAlgorithm
@@ -29,7 +29,7 @@ def train_off_policy(
     env_name: str,
     algo: str,
     pop: PopulationType,
-    memory: ReplayBuffer,
+    memory: PrioritizedReplayBuffer,
     INIT_HP: InitDictType = None,
     MUT_P: InitDictType = None,
     swap_channels: bool = False,
@@ -44,7 +44,7 @@ def train_off_policy(
     target: Optional[float] = None,
     n_step: bool = False,
     per: bool = False,
-    n_step_memory: Optional[ReplayBuffer] = None,
+    n_step_memory: Optional[MultiStepReplayBuffer] = None,
     tournament: Optional[TournamentSelection] = None,
     mutation: Optional[Mutations] = None,
     checkpoint: Optional[int] = None,

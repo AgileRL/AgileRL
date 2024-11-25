@@ -33,10 +33,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     if INIT_HP["CHANNELS_LAST"]:
         observation_space = observation_space_channels_to_first(observation_space)
 
-    if INIT_HP["ALGO"] == "TD3":
-        max_action = float(env.single_action_space.high[0])
-        INIT_HP["MAX_ACTION"] = max_action
-
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
         memory_size=INIT_HP["MEMORY_SIZE"], field_names=field_names, device=device
