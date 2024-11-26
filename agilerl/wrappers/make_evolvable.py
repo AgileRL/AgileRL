@@ -162,6 +162,26 @@ class MakeEvolvable(EvolvableModule):
 
         self.feature_net, self.value_net, self.advantage_net = self.build_networks()
 
+        # Need to remove CNN mutation methods if network is not a CNN
+        if not self.has_conv_layers:
+            self._mutation_methods = [
+                method
+                for method in self._mutation_methods
+                if "cnn" not in method.__name__
+            ]
+
+            self._layer_mutation_methods = {
+                key: value
+                for key, value in self._layer_mutation_methods.items()
+                if "cnn" not in key
+            }
+
+            self._node_mutation_methods = {
+                key: value
+                for key, value in self._node_mutation_methods.items()
+                if "cnn" not in key
+            }
+
     def forward(self, x: ArrayOrTensor, xc: ArrayOrTensor = None, q: bool = True):
         """Returns output of neural network.
 
@@ -943,6 +963,76 @@ class MakeEvolvable(EvolvableModule):
         else:
             self.add_cnn_channel()
 
+    @register_mutation_fn(MutationType.NODE)
+    def change_cnn_kernel(self):
+        """Randomly alters convolution kernel of random CNN layer."""
+        max_kernels = self.calc_max_kernel_sizes()
+        # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
+        if len(self.channel_size) > 1:
+            hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+            kernel_size_values = tuple(
+                np.random.choice([3, 4, 5, 7]) for _ in self.kernel_size[-1]
+            )
+            kernel_size_values = tuple(
+                i if i <= max_kernels[-1][idx] else int(max_kernels[-1][idx])
+                for idx, i in enumerate(kernel_size_values)
+            )
+            self.kernel_size[hidden_layer] = kernel_size_values
+            self.recreate_nets()
+        else:
+            self.add_cnn_layer()
+
+    @register_mutation_fn(MutationType.NODE)
+    def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
+        """Adds channel to hidden layer of Convolutional Neural Network.
+
+        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
+        :type numb_new_channels: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
+        if numb_new_channels is None:
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+
+        if (
+            self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size
+        ):  # HARD LIMIT
+            self.channel_size[hidden_layer] += numb_new_channels
+
+            self.recreate_nets()
+
+        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
+
+    @register_mutation_fn(MutationType.NODE)
+    def remove_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
+        """Remove channel from hidden layer of convolutional neural network.
+
+        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
+        :type hidden_layer: int, optional
+        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
+        :type numb_new_channels: int, optional
+        """
+        if hidden_layer is None:
+            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
+        else:
+            hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
+        if numb_new_channels is None:
+            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
+
+        if (
+            self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size
+        ):  # HARD LIMIT
+            self.channel_size[hidden_layer] -= numb_new_channels
+
+            self.recreate_nets(shrink_params=True)
+
+        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
+
+
     def calc_max_kernel_sizes(self):
         "Calculates the max kernel size for each convolutional layer of the feature net."
         max_kernel_list = []
@@ -1060,75 +1150,6 @@ class MakeEvolvable(EvolvableModule):
                 depth_in = depth_out
 
         return stride_range_list
-
-    @register_mutation_fn(MutationType.NODE)
-    def change_cnn_kernel(self):
-        """Randomly alters convolution kernel of random CNN layer."""
-        max_kernels = self.calc_max_kernel_sizes()
-        # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
-        if len(self.channel_size) > 1:
-            hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
-            kernel_size_values = tuple(
-                np.random.choice([3, 4, 5, 7]) for _ in self.kernel_size[-1]
-            )
-            kernel_size_values = tuple(
-                i if i <= max_kernels[-1][idx] else int(max_kernels[-1][idx])
-                for idx, i in enumerate(kernel_size_values)
-            )
-            self.kernel_size[hidden_layer] = kernel_size_values
-            self.recreate_nets()
-        else:
-            self.add_cnn_layer()
-
-    @register_mutation_fn(MutationType.NODE)
-    def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
-        """Adds channel to hidden layer of Convolutional Neural Network.
-
-        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
-        :type hidden_layer: int, optional
-        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
-        :type numb_new_channels: int, optional
-        """
-        if hidden_layer is None:
-            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
-        else:
-            hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
-        if numb_new_channels is None:
-            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
-
-        if (
-            self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size
-        ):  # HARD LIMIT
-            self.channel_size[hidden_layer] += numb_new_channels
-
-            self.recreate_nets()
-
-        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
-
-    @register_mutation_fn(MutationType.NODE)
-    def remove_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
-        """Remove channel from hidden layer of convolutional neural network.
-
-        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
-        :type hidden_layer: int, optional
-        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
-        :type numb_new_channels: int, optional
-        """
-        if hidden_layer is None:
-            hidden_layer = np.random.randint(0, len(self.channel_size), 1)[0]
-        else:
-            hidden_layer = min(hidden_layer, len(self.channel_size) - 1)
-        if numb_new_channels is None:
-            numb_new_channels = np.random.choice([8, 16, 32], 1)[0]
-
-        if (
-            self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size
-        ):  # HARD LIMIT
-            self.channel_size[hidden_layer] -= numb_new_channels
-
-            self.recreate_nets(shrink_params=True)
-
-        return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
     def recreate_nets(self, shrink_params=False):
         """Recreates neural networks.

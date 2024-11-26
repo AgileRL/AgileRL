@@ -131,5 +131,7 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
         return torch.as_tensor(obs, device=device)
     elif isinstance(obs, dict):
         return {key: torch.as_tensor(_obs, device=device) for (key, _obs) in obs.items()}
+    elif isinstance(obs, tuple):
+        return tuple(torch.as_tensor(_obs, device=device) for _obs in obs)
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")

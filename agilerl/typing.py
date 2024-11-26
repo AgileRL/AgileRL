@@ -7,11 +7,13 @@ from accelerate.optimizer import AcceleratedOptimizer
 
 ArrayOrTensor = Union[ArrayLike, torch.Tensor]
 TensorDict = Dict[str, torch.Tensor]
+TensorTuple = Tuple[torch.Tensor, ...]
 ArrayDict = Dict[str, ArrayOrTensor]
+ArrayTuple = Tuple[ArrayLike, ...]
 NetConfigType = Dict[str, Any]
 
-NumpyObsType = Union[ArrayLike, ArrayDict]
-TorchObsType = Union[torch.Tensor, TensorDict]
+NumpyObsType = Union[ArrayLike, ArrayDict, ArrayTuple]
+TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple]
 
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 NetworkType = Union[Module, List[Module], Tuple[Module, ...]]

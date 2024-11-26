@@ -47,7 +47,8 @@ def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], Mu
     return decorator
 
 class EvolvableModule(nn.Module, ABC):
-    """Base class for evolvable neural networks. Provides methods that allow for seamless network mutations."""
+    """Base class for evolvable neural networks. Provides methods that allow for 
+    seamless network mutations."""
 
     feature_net: nn.Module
     value_net: Optional[nn.Module]

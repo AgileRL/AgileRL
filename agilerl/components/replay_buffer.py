@@ -1,9 +1,7 @@
 from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple
 import random
 from collections import deque, namedtuple
-from dataclasses import dataclass
 import numpy as np
-from numpy.typing import ArrayLike
 import torch
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree

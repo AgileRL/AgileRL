@@ -15,6 +15,20 @@ from agilerl.modules.mlp import EvolvableMLP
 
 ModuleType = Union[EvolvableModule, nn.Module]
 SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP]
+TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
+TupleOrDictObservation = Union[Dict[str, ArrayOrTensor], Tuple[ArrayOrTensor]]
+
+def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
+    """Converts a Tuple observation space to a Dict observation space.
+    
+    :param observation_space: Tuple observation space.
+    :type observation_space: spaces.Tuple
+    :return: Dictionary observation space.
+    :rtype: spaces.Dict
+    """
+    return spaces.Dict({
+        f"observation_{i}": space for i, space in enumerate(observation_space.spaces)
+    })
 
 class EvolvableMultiInput(EvolvableModule):
     """
@@ -33,8 +47,8 @@ class EvolvableMultiInput(EvolvableModule):
         The mutations are done on the basis of the allowed methods in the `EvolvableCNN` and `EvolvableMLP`
         classes. For any selected method, we choose a random module containing the method to apply it against.
 
-    :param observation_space: Dictionary space of the observations.
-    :type observation_space: spaces.Dict
+    :param observation_space: Dictionary or Tuple space of observations.
+    :type observation_space: spaces.Dict, spaces.Tuple
     :param channel_size: List of channel sizes for the convolutional layers.
     :type channel_size: List[int]
     :param kernel_size: List of kernel sizes for the convolutional layers.
@@ -108,13 +122,13 @@ class EvolvableMultiInput(EvolvableModule):
 
     def __init__(
             self,
-            observation_space: spaces.Dict,
+            observation_space: TupleOrDictSpace,
             channel_size: List[int],
             kernel_size: List[int],
             stride_size: List[int],
             hidden_size: List[int],
-            latent_dim: int,
             num_outputs: int,
+            latent_dim: int = 16,
             num_atoms: int = 51,
             vector_space_mlp: bool = False,
             init_dicts: Dict[str, Dict[str, Any]] = {},
@@ -144,6 +158,11 @@ class EvolvableMultiInput(EvolvableModule):
         ):
         super().__init__()
 
+        assert isinstance(observation_space, (spaces.Dict, spaces.Tuple)), "Observation space must be a Dict or Tuple space."
+
+        if isinstance(observation_space, spaces.Tuple):
+            observation_space = tuple_to_dict_space(observation_space)
+        
         self.arch = arch
         self.observation_space = observation_space
         self.vector_space_mlp = vector_space_mlp
@@ -177,7 +196,10 @@ class EvolvableMultiInput(EvolvableModule):
         self.noise_std = noise_std
         self.output_vanish = output_vanish
         self.init_dicts = init_dicts
-        self.vector_spaces = [key for key, space in observation_space.spaces.items() if not is_image_space(space)]
+        self.vector_spaces = [
+            key for key, space in observation_space.spaces.items() if not is_image_space(space)
+            ]
+
         self._net_config = {
             "arch": self.arch,
             "channel_size": self.channel_size,
@@ -388,8 +410,7 @@ class EvolvableMultiInput(EvolvableModule):
                 )
 
         # Collect all vector space shapes for concatenation
-        vector_spaces = [key for key, space in self.observation_space.spaces.items() if not is_image_space(space)]
-        vector_input_dim = sum([spaces.flatdim(self.observation_space.spaces[key]) for key in vector_spaces])
+        vector_input_dim = sum([spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces])
 
         # Optional MLP for all concatenated vector inputs
         if self.vector_space_mlp:
@@ -454,13 +475,13 @@ class EvolvableMultiInput(EvolvableModule):
 
         return feature_net, value_net, advantage_net
 
-    def forward(self, x: Dict[str, ArrayOrTensor], xc: Optional[ArrayOrTensor] = None, q: bool = True) -> torch.Tensor:
+    def forward(self, x: TupleOrDictObservation, xc: Optional[ArrayOrTensor] = None, q: bool = True) -> torch.Tensor:
         """Forward pass of the composed network. Extracts features from each observation key and concatenates
         them with the corresponding observation key if specified. The concatenated features are then passed
         through the final MLP to produce the output tensor.
         
         :param x: Dictionary of observations.
-        :type x: Dict[str, ArrayOrTensor]
+        :type x: Dict[str, ArrayOrTensor], Tuple[ArrayOrTensor]
         :param xc: Optional additional input tensor for critic network, defaults to None.
         :type xc: Optional[ArrayOrTensor], optional
         :param q: Flag to indicate if Q-values should be computed, defaults to True.
@@ -468,12 +489,16 @@ class EvolvableMultiInput(EvolvableModule):
         :return: Output tensor.
         :rtype: torch.Tensor
         """
+        if isinstance(x, tuple):
+            x = dict(zip(self.observation_space.spaces.keys(), x))
+
         # Convert observations to tensors
         for key, obs in x.items():
             x[key] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         
         # Extract features from image spaces
-        image_features = torch.cat([self.feature_net[key](x[key]) for key in x.keys() if key in self.feature_net.keys()], dim=1)
+        image_features = [self.feature_net[key](x[key]) for key in x.keys() if key in self.feature_net.keys()]
+        image_features = torch.cat(image_features, dim=1)
 
         # Extract raw features from vector spaces
         vector_inputs = []

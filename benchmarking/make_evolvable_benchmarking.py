@@ -3,7 +3,7 @@ import supersuit as ss
 import torch
 import yaml
 from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
-from networks import (
+from benchmarking.networks import (
     BasicNetActor,
     BasicNetCritic,
     ClipReward,
@@ -427,7 +427,7 @@ if __name__ == "__main__":
         # net_config_mlp = ddpg_config["MLP"]
         if standard:
             print("-" * 20, "DDPG Lunar Lander using make evolvable", "-" * 20)
-            main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=None)
+            main(INIT_HP, MUTATION_PARAMS, atari=False, multi=False, NET_CONFIG=None)
             # print("-" * 20, "DDPG Lunar Lander using net_config", "-" * 20)
             # main(INIT_HP, MUTATION_PARAMS, atari=False, NET_CONFIG=net_config_mlp)
 

@@ -349,28 +349,6 @@ class PPO(RLAlgorithm):
             self.actor = self.actor.to(self.device)
             self.critic = self.critic.to(self.device)
 
-    def prepare_state(self, state):
-        """Prepares state for forward pass through neural network.
-
-        :param state: Observation of environment
-        :type state: np.Array() or list
-        """
-        state = self.obs_to_tensor(state)
-
-        if self.one_hot:
-            state = (
-                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-
-        if (self.arch == "mlp" and len(state.size()) < 2) or (
-            self.arch == "cnn" and len(state.size()) < 4
-        ):
-            state = state.unsqueeze(0)
-
-        return state.float()
-
     def scale_to_action_space(self, action, convert_to_torch=False):
         """Scales actions to action space defined by self.min_action and self.max_action.
 

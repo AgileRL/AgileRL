@@ -243,8 +243,8 @@ class Mutations:
         self.min_learn_step = min_learn_step
         self.max_learn_step = max_learn_step
 
-        self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(True)
-        self.mut_options, self.mut_proba = self.get_mutations_options(False)
+        self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(pretraining=True)
+        self.mut_options, self.mut_proba = self.get_mutations_options()
 
         if algo in ["MADDPG", "MATD3"]:
             self.multi_agent = True
@@ -258,7 +258,7 @@ class Mutations:
         else:
             self.algo = self.get_algo_nets(algo)
     
-    def get_mutations_options(self, pretraining: bool) -> Tuple[List[Callable], List[float]]:
+    def get_mutations_options(self, pretraining: bool = False) -> Tuple[List[Callable], List[float]]:
         """Get the mutation options and probabilities for the given mutation 
         configuration.
         
@@ -313,19 +313,11 @@ class Mutations:
         mutation_choice = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
-        choice_mapping = {
-            self.no_mutation: "None",
-            self.architecture_mutate: "arch",
-            self.parameter_mutation: "param",
-            self.activation_mutation: "act",
-            self.rl_hyperparam_mutation: "rl"
-        }
+
         # If not mutating elite member of population (first in list from tournament selection),
         # set this as the first mutation choice
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
-
-        print(f"Mutation choices: {[choice_mapping[m] for m in mutation_choice]}")
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):

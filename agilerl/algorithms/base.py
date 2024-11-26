@@ -155,6 +155,23 @@ class EvolvableAlgorithm(ABC):
         :type path: string
         """
         raise NotImplementedError
+    
+    @abstractmethod
+    def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
+        """Preprocesses observations for forward pass through neural network.
+
+        :param observations: Observations of environment
+        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]]
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def preprocess_experiences(self, *args, **kwargs) -> Tuple[Iterable[ArrayLike], ...]:
+        """Preprocesses experiences for learning the algorithm."""
+        raise NotImplementedError
 
     @abstractmethod
     def learn(self, experiences: Tuple[Iterable[ArrayLike], ...], **kwargs) -> None:
@@ -374,7 +391,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
-    multi: bool = True # NOTE: This is to maintain compatibility
+    multi: bool = False # NOTE: This is to maintain compatibility
 
     def __init__(
             self,
@@ -404,8 +421,31 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.discrete_actions = isinstance(action_space, spaces.Discrete)
         self.min_action = np.array(action_space.low) if hasattr(action_space, "low") else None
         self.max_action = np.array(action_space.high) if hasattr(action_space, "high") else None
+    
+    def preprocess_observations(self, observations: NumpyObsType) -> TorchObsType:
+        """Preprocesses observations for forward pass through neural network.
 
+        :param observations: Observations of environment
+        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]] or Tuple[numpy.ndarray[float], ...]
 
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        """
+        state = self.obs_to_tensor(state)
+
+        if self.one_hot:
+            state = (
+                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
+                .float()
+                .squeeze()
+            )
+
+        if (self.arch == "mlp" and len(state.size()) < 2) or (
+            self.arch == "cnn" and len(state.size()) < 4
+        ):
+            state = state.unsqueeze(0)
+
+        return state.float()
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
 

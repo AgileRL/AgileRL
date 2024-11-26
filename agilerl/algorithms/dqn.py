@@ -205,7 +205,6 @@ class DQN(RLAlgorithm):
             state = state.to(self.accelerator.device)
 
         if self.one_hot:
-
             state = (
                 nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
                 .float()

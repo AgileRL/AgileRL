@@ -42,6 +42,23 @@ def generate_random_box_space(
 def generate_discrete_space(n: int) -> spaces.Discrete:
     return spaces.Discrete(n)
 
+def generate_dict_or_tuple_space(
+        n_image: int,
+        n_vector: int,
+        image_shape: Tuple[int, ...] = (3, 128, 128),
+        vector_shape: Tuple[int] = (5,)
+        ) -> Union[spaces.Dict, spaces.Tuple]:
+    dict_space = True if random.random() < 0.5 else False
+    image_spaces = [generate_random_box_space(image_shape) for _ in range(n_image)]
+    vector_spaces = [generate_random_box_space(vector_shape) for _ in range(n_vector)]
+
+    if dict_space:
+        image_spaces = {"image_{}".format(i): space for i, space in enumerate(image_spaces)}
+        vector_spaces = {"vector_{}".format(i): space for i, space in enumerate(vector_spaces)}
+        return spaces.Dict(image_spaces | vector_spaces)
+
+    return spaces.Tuple(image_spaces + vector_spaces)
+
 def generate_multi_agent_box_spaces(
         n_agents: int,
         shape: Tuple[int, ...],
