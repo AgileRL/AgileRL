@@ -3,7 +3,6 @@
 INIT_HP:
     ENV_NAME: LunarLander-v2   # Gym environment name
     ALGO: PPO                  # Algorithm
-    DISCRETE_ACTIONS: true     # Environment has discrete action space
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training

@@ -209,8 +209,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
         if not atari:
             # MLPs
-            state_dims = MultiAgentAlgorithm.get_state_dims(observation_space)
-            action_dims = MultiAgentAlgorithm.get_action_dims(action_space)
+            state_dims = MultiAgentAlgorithm.get_state_dim(observation_space)
+            action_dims = MultiAgentAlgorithm.get_action_dim(action_space)
             total_state_dims = sum(state_dim[0] for state_dim in state_dims)
             total_actions = sum(action_dims)
             actor = [

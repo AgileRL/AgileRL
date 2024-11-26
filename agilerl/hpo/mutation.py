@@ -1,10 +1,10 @@
-from typing import List, Optional, Union, Dict, Callable, Any
+from typing import List, Optional, Union, Dict, Callable, Any, Tuple
 import inspect
 import copy
-import fastrand
 import numpy as np
 import torch
 import torch.nn as nn
+import fastrand
 from torch.optim import Optimizer
 from accelerate import Accelerator
 
@@ -39,6 +39,18 @@ def get_return_type(method: Callable) -> Any:
     except ValueError as e:
         print(f"Error inspecting {method}: {e}")
         return None
+
+def set_global_seed(seed: int) -> None:
+    """Set the global seed for random number generators.
+
+    :param seed: Random seed for repeatability
+    :type seed: int
+    """
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    fastrand.pcg32_seed(seed)
 
 class Mutations:
     """The Mutations class for evolutionary hyperparameter optimization.
@@ -204,7 +216,8 @@ class Mutations:
             assert rand_seed >= 0, "Random seed must be greater than or equal to zero."
 
         # Random seed for repeatability
-        self.rng = np.random.RandomState(rand_seed)
+        set_global_seed(rand_seed)
+        self.rng = np.random.default_rng(rand_seed)
 
         self.arch = arch  # Network architecture type
 
@@ -230,6 +243,9 @@ class Mutations:
         self.min_learn_step = min_learn_step
         self.max_learn_step = max_learn_step
 
+        self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(True)
+        self.mut_options, self.mut_proba = self.get_mutations_options(False)
+
         if algo in ["MADDPG", "MATD3"]:
             self.multi_agent = True
         else:
@@ -241,6 +257,34 @@ class Mutations:
             self.algo = algo
         else:
             self.algo = self.get_algo_nets(algo)
+    
+    def get_mutations_options(self, pretraining: bool) -> Tuple[List[Callable], List[float]]:
+        """Get the mutation options and probabilities for the given mutation 
+        configuration.
+        
+        :param pretraining: Boolean flag indicating if the mutation is before the training loop
+        :type pretraining: bool
+        :return: Mutation functions and their respective relative probabilities
+        :rtype: Tuple[List[Callable], List[float]]
+        """
+        # Create lists of possible mutation functions and their 
+        # respective relative probabilities
+        mutation_options = [
+            (self.no_mutation, self.no_mut),
+            (self.architecture_mutate, self.architecture_mut),
+            (self.parameter_mutation, self.parameters_mut),
+            (self.activation_mutation, self.activation_mut),
+            (self.rl_hyperparam_mutation, self.rl_hp_mut)
+        ]
+
+        if pretraining:
+            mutation_options[0] = (self.no_mutation, 0)
+
+        mutation_options = [(func, prob) for func, prob in mutation_options if prob > 0]
+
+        mutation_funcs, mutation_proba = zip(*mutation_options)
+        mutation_proba = np.array(mutation_proba) / np.sum(mutation_proba)
+        return mutation_funcs, mutation_proba
 
     def no_mutation(self, individual: EvolvableAlgorithm):
         """Returns individual from population without mutation.
@@ -261,43 +305,27 @@ class Mutations:
         """
         # Create lists of possible mutation functions and their respective
         # relative probabilities
-        mutation_options = []
-        mutation_proba = []
-        if self.no_mut:
-            mutation_options.append(self.no_mutation)
-            if pre_training_mut:
-                mutation_proba.append(float(0))
-            else:
-                mutation_proba.append(float(self.no_mut))
-        if self.architecture_mut:
-            mutation_options.append(self.architecture_mutate)
-            mutation_proba.append(float(self.architecture_mut))
-        if self.parameters_mut:
-            mutation_options.append(self.parameter_mutation)
-            mutation_proba.append(float(self.parameters_mut))
-        if self.activation_mut:
-            mutation_options.append(self.activation_mutation)
-            mutation_proba.append(float(self.activation_mut))
-        if self.rl_hp_mut:
-            mutation_options.append(self.rl_hyperparam_mutation)
-            mutation_proba.append(float(self.rl_hp_mut))
-
-        if len(mutation_options) == 0:  # Return if no mutation options
-            return population
-
-        mutation_proba = np.array(mutation_proba) / np.sum(
-            mutation_proba
-        )  # Normalize probs
+        mutation_options = self.pretraining_mut_options if pre_training_mut else self.mut_options
+        mutation_proba = self.pretraining_mut_proba if pre_training_mut else self.mut_proba
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
         mutation_choice = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
+        choice_mapping = {
+            self.no_mutation: "None",
+            self.architecture_mutate: "arch",
+            self.parameter_mutation: "param",
+            self.activation_mutation: "act",
+            self.rl_hyperparam_mutation: "rl"
+        }
         # If not mutating elite member of population (first in list from tournament selection),
         # set this as the first mutation choice
         if not self.mutate_elite:
             mutation_choice[0] = self.no_mutation
+
+        print(f"Mutation choices: {[choice_mapping[m] for m in mutation_choice]}")
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
@@ -661,10 +689,12 @@ class Mutations:
         # Function to change network activation layer
         possible_activations = copy.deepcopy(self.activation_selection)
         current_activation = network.mlp_activation
+
         # Remove current activation from options to ensure different new
         # activation layer
         if len(possible_activations) > 1 and current_activation in possible_activations:
             possible_activations.remove(current_activation)
+
         new_activation = self.rng.choice(possible_activations, size=1)[0]  # Select new activation
         net_dict = network.init_dict
         if self.arch == "cnn":
@@ -672,6 +702,7 @@ class Mutations:
             net_dict["cnn_activation"] = new_activation
         else:  # mlp, gpt or bert
             net_dict["mlp_activation"] = new_activation
+
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
         network = new_network
@@ -755,8 +786,8 @@ class Mutations:
                 if len(W.shape) == 2:  # Weights, no bias
                     potential_keys.append(key)
 
-        how_many = np.random.randint(1, len(potential_keys) + 1, 1)[0]
-        chosen_keys = np.random.choice(potential_keys, how_many, replace=False)
+        how_many = self.rng.integers(1, len(potential_keys) + 1, 1)[0]
+        chosen_keys = self.rng.choice(potential_keys, how_many, replace=False)
 
         for key in chosen_keys:
             # References to the variable keys
@@ -804,7 +835,7 @@ class Mutations:
             actors: List[EvolvableModule] = getattr(individual, self.algo["actor"]["eval"])
             nested_critics: List[List[EvolvableModule]] = [getattr(individual, critics["eval"]) for critics in self.algo["critics"]]
             offspring_actors = [actor.clone()for actor in actors]
-            offspring_critics_list = [[critic.clone() for critic in critics]for critics in nested_critics]
+            offspring_critics_list = [[critic.clone() for critic in critics] for critics in nested_critics]
 
             # Actors and critics must use same EvolvableModule, so use first actor 
             # to determine available mutations

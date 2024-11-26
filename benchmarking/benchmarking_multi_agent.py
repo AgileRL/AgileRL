@@ -99,8 +99,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         accelerator=accelerator,
     )
 
-    state_dims = MultiAgentAlgorithm.get_state_dims(observation_spaces)
-    action_dims = MultiAgentAlgorithm.get_action_dims(action_spaces)
+    state_dims = MultiAgentAlgorithm.get_state_dim(observation_spaces)
+    action_dims = MultiAgentAlgorithm.get_action_dim(action_spaces)
     total_state_dims = sum(state_dim[0] for state_dim in state_dims)
     total_action_dims = sum(action_dims)
     if use_net:

@@ -26,6 +26,7 @@ OptimizerType = Union[Optimizer, Iterable[Optimizer]]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
+GymSpaceType = Union[spaces.Space, Iterable[spaces.Space]]
     
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
@@ -48,6 +49,25 @@ def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimiz
     :rtype: bool.
     """
     return all(isinstance(inner_obj, Optimizer) for inner_obj in obj)
+
+def assert_supported_space(space: spaces.Space) -> bool:
+    """Checks if the space is supported by the AgileRL framework.
+    
+    :param space: The space to check.
+    :type space: spaces.Space.
+    
+    :return: True if the space is supported, False otherwise.
+    :rtype: bool.
+    """
+    # Nested Dict or Tuple spaces are not supported
+    if isinstance(space, spaces.Dict) and any(
+        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces.values()
+    ):
+        raise TypeError(f"Nested {type(space)} spaces are not supported.")
+    elif isinstance(space, spaces.Tuple) and any(
+        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces
+    ):
+        raise TypeError(f"Nested {type(space)} spaces are not supported.")
 
 class EvolvableAlgorithm(ABC):
     """Base object for all algorithms in the AgileRL framework. 
@@ -163,6 +183,49 @@ class EvolvableAlgorithm(ABC):
         :rtype: EvolvableAlgorithm
         """
         raise NotImplementedError
+
+    @staticmethod
+    def get_state_dim(observation_space: GymSpaceType) -> Tuple[int, ...]:
+        """Returns the dimension of the state space.
+        
+        :param observation_space: The observation space of the environment.
+        :type observation_space: spaces.Space or List[spaces.Space].
+        
+        :return: The dimension of the state space.
+        :rtype: Tuple[int, ...]."""
+        if isinstance(observation_space, (list, tuple, spaces.Tuple)):
+            assert_supported_space(observation_space)
+            return tuple(EvolvableAlgorithm.get_state_dim(space) for space in observation_space)
+        elif isinstance(observation_space, spaces.Discrete):
+            return (observation_space.n,)
+        elif isinstance(observation_space, spaces.Box):
+            return observation_space.shape
+        elif isinstance(observation_space, spaces.Dict):
+            assert_supported_space(observation_space)
+            return {key: EvolvableAlgorithm.get_state_dim(subspace) for key, subspace in observation_space.spaces.items()}
+        else:
+            raise AttributeError(f"Can't access state dimensions for {type(observation_space)} spaces.")
+
+    @staticmethod
+    def get_action_dim(action_space: GymSpaceType) -> int:
+        """Returns the dimension of the action space.
+        
+        :param action_space: The action space of the environment.
+        :type action_space: spaces.Space or List[spaces.Space].
+        
+        :return: The dimension of the action space.
+        :rtype: int.
+        """
+        if isinstance(action_space, (list, tuple)):
+            return tuple(EvolvableAlgorithm.get_action_dim(space) for space in action_space)
+        if isinstance(action_space, spaces.Discrete):
+            return action_space.n
+        elif isinstance(action_space, spaces.Box):
+            # NOTE: Here we assume the action space only has one dimension
+            #       (i.e. the actions correspond to a one-dimensional vector)
+            return action_space.shape[0]
+        else:
+            raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
 
     def obs_to_tensor(self, observation: NumpyObsType) -> TorchObsType:
         """Prepares state for forward pass through neural network.
@@ -293,7 +356,6 @@ class EvolvableAlgorithm(ABC):
         
         return clone
 
-
 class RLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all single-agent algorithms in the AgileRL framework. 
     
@@ -335,7 +397,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_space = observation_space
         self.action_space = action_space
 
-        # TODO: This is a bit of a temporary hack until we fully refactor the framework
+        # TODO: This is a bit of a temporary hack to support legacy code
         self.state_dim = self.get_state_dim(observation_space)
         self.action_dim = self.get_action_dim(action_space)
         self.one_hot = isinstance(observation_space, spaces.Discrete) and observation_space.n > 1
@@ -343,41 +405,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.min_action = np.array(action_space.low) if hasattr(action_space, "low") else None
         self.max_action = np.array(action_space.high) if hasattr(action_space, "high") else None
 
-    @staticmethod
-    def get_state_dim(observation_space: spaces.Space) -> Tuple[int, ...]:
-        """Returns the dimension of the state space.
-        
-        :param observation_space: The observation space of the environment.
-        :type observation_space: spaces.Space.
-        
-        :return: The dimension of the state space.
-        :rtype: Tuple[int, ...]."""
-        if isinstance(observation_space, spaces.Discrete):
-            return (observation_space.n,)
-        elif isinstance(observation_space, spaces.Box):
-            return observation_space.shape
-        else:
-            raise AttributeError(f"Can't access state dimensions for {type(observation_space)} spaces.")
-
-    @staticmethod
-    def get_action_dim(action_space: spaces.Space) -> int:
-        """Returns the dimension of the action space.
-        
-        :param action_space: The action space of the environment.
-        :type action_space: spaces.Space.
-        
-        :return: The dimension of the action space.
-        :rtype: int.
-        """
-        if isinstance(action_space, spaces.Discrete):
-            return action_space.n
-        elif isinstance(action_space, spaces.Box):
-            # NOTE: Here we assume the action space only has one dimension
-            #       (i.e. the actions correspond to a one-dimensional vector)
-            return action_space.shape[0]
-        else:
-            raise AttributeError(f"Can't access state dimensions for {type(action_space)} spaces.")
-        
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
@@ -458,9 +485,9 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             "Action spaces must be instances of gym.spaces.Space."
         )
 
-        # TODO: This is a bit of a temporary hack until we fully refactor the framework
-        self.state_dims = self.get_state_dims(observation_spaces)
-        self.action_dims = self.get_action_dims(action_spaces)
+         # TODO: This is a bit of a temporary hack to support legacy code
+        self.state_dims = self.get_state_dim(observation_spaces)
+        self.action_dims = self.get_action_dim(action_spaces)
         self.one_hot = all(isinstance(space, spaces.Discrete) and space.n > 1 for space in observation_spaces)
         self.discrete_actions = all(isinstance(space, spaces.Discrete) for space in action_spaces)
 
@@ -477,29 +504,6 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         self.action_spaces = action_spaces
         self.total_actions = sum(self.action_dims)
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
-
-    @staticmethod
-    def get_state_dims(observation_spaces: Iterable[spaces.Space]) -> List[Tuple[int, ...]]:
-        """Returns the dimension of the state space.
-        
-        :param observation_space: The observation space of the environment.
-        :type observation_space: spaces.Space.
-        
-        :return: The dimension of the state space.
-        :rtype: Tuple[int, ...]."""
-        return [RLAlgorithm.get_state_dim(space) for space in observation_spaces]
-    
-    @staticmethod
-    def get_action_dims(action_spaces: Iterable[spaces.Space]) -> List[int]:
-        """Returns the dimension of the action space.
-        
-        :param action_space: The action space of the environment.
-        :type action_space: spaces.Space.
-        
-        :return: The dimension of the action space.
-        :rtype: int.
-        """
-        return [RLAlgorithm.get_action_dim(space) for space in action_spaces]
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
