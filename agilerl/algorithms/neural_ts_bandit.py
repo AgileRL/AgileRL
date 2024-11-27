@@ -62,6 +62,7 @@ class NeuralTS(RLAlgorithm):
         reg: float = 0.000625,
         batch_size: int = 64,
         lr: float = 3e-3,
+        normalize_images: bool = True,
         learn_step: int = 2,
         mut: Optional[str] = None,
         actor_network: Optional[nn.Module] = None,
@@ -77,6 +78,7 @@ class NeuralTS(RLAlgorithm):
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
+            normalize_images=normalize_images,
             name="NeuralTS",
             )
 
@@ -160,12 +162,7 @@ class NeuralTS(RLAlgorithm):
                     assert (
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
+
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=1,
@@ -237,13 +234,7 @@ class NeuralTS(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        state = torch.from_numpy(state).float()
-        state = state.to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-
-        if len(state.size()) < 2:
-            state = state.unsqueeze(0)
+        state = self.preprocess_observation(state)
 
         mu = self.actor(state)
         g = torch.zeros((self.action_dim, self.numel)).to(

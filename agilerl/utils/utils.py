@@ -269,7 +269,6 @@ def create_population(
             agent = MADDPG(
                 observation_spaces=observation_space,
                 action_spaces=action_space,
-                n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
                 O_U_noise=INIT_HP["O_U_NOISE"],
                 expl_noise=INIT_HP["EXPL_NOISE"],
@@ -298,7 +297,6 @@ def create_population(
             agent = MATD3(
                 observation_spaces=observation_space,
                 action_spaces=action_space,
-                n_agents=INIT_HP["N_AGENTS"],
                 agent_ids=INIT_HP["AGENT_IDS"],
                 O_U_noise=INIT_HP["O_U_NOISE"],
                 expl_noise=INIT_HP["EXPL_NOISE"],

@@ -124,7 +124,6 @@ def test_initialize_bandit_with_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     batch_size = 64
     lr = 1e-3
@@ -410,7 +409,6 @@ def test_learning_cnn():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Create an instance of the NeuralUCB class
@@ -465,7 +463,6 @@ def test_algorithm_test_loop_images():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = NeuralUCB(
@@ -488,8 +485,7 @@ def test_algorithm_test_loop_images():
                 "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
-                "stride_size": [1],
-                "normalize": False,
+                "stride_size": [1]
             },
         ),
         (spaces.Box(0, 1, shape=(4,)), {"arch": "mlp", "hidden_size": [128]}),
@@ -571,9 +567,8 @@ def test_clone_returns_identical_agent(observation_space, net_config):
 def test_clone_new_index():
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
-    one_hot = False
 
-    bandit = NeuralUCB(observation_space, action_space, one_hot)
+    bandit = NeuralUCB(observation_space, action_space)
     clone_agent = bandit.clone(index=100)
 
     assert clone_agent.index == 100
@@ -712,7 +707,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the NeuralUCB agent
@@ -907,8 +901,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         },
     )
 

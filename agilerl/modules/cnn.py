@@ -110,7 +110,6 @@ class EvolvableCNN(EvolvableModule):
         rainbow: bool = False,
         noise_std: float = 0.5,
         critic: bool = False,
-        normalize: bool = True,
         init_layers: bool = True,
         output_vanish: bool = False,
         device: str = "cpu",
@@ -171,7 +170,6 @@ class EvolvableCNN(EvolvableModule):
         self.support = support
         self.rainbow = rainbow
         self.critic = critic
-        self.normalize = normalize
         self.init_layers = init_layers
         self.device = device
         self.accelerator = accelerator
@@ -183,7 +181,6 @@ class EvolvableCNN(EvolvableModule):
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
-            "normalize": self.normalize,
             "cnn_activation": self.cnn_activation,
             "hidden_size": self.hidden_size,
             "mlp_activation": self.mlp_activation,
@@ -217,7 +214,6 @@ class EvolvableCNN(EvolvableModule):
             "n_agents": self.n_agents,
             "num_atoms": self.num_atoms,
             "support": self.support,
-            "normalize": self.normalize,
             "mlp_activation": self.mlp_activation,
             "cnn_activation": self.cnn_activation,
             "mlp_output_activation": self.mlp_output_activation,
@@ -444,10 +440,6 @@ class EvolvableCNN(EvolvableModule):
             x = x.type(torch.float32)
 
         batch_size = x.size(0)
-
-        if self.normalize:
-            x = x / 255.0
-
         x: torch.Tensor = self.feature_net(x)
         x = x.reshape(batch_size, -1)
 

@@ -154,12 +154,7 @@ class DQN(RLAlgorithm):
                     assert (
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
+
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
@@ -198,23 +193,7 @@ class DQN(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        state = torch.from_numpy(state).float()
-        if self.accelerator is None:
-            state = state.to(self.device)
-        else:
-            state = state.to(self.accelerator.device)
-
-        if self.one_hot:
-            state = (
-                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-
-        if (self.arch == "mlp" and len(state.size()) < 2) or (
-            self.arch == "cnn" and len(state.size()) < 4
-        ):
-            state = state.unsqueeze(0)
+        state = self.preprocess_observation(state)
 
         # epsilon-greedy
         if random.random() < epsilon:
@@ -258,17 +237,8 @@ class DQN(RLAlgorithm):
             next_states = next_states.to(self.accelerator.device)
             dones = dones.to(self.accelerator.device)
 
-        if self.one_hot:
-            states = (
-                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-            next_states = (
-                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
+        states = self.preprocess_observation(states)
+        next_states = self.preprocess_observation(next_states)
 
         if self.double:  # Double Q-learning
             q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)

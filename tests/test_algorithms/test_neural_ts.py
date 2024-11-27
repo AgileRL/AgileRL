@@ -123,8 +123,7 @@ def test_initialize_bandit_with_cnn_accelerator():
         "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
-        "stride_size": [1],
-        "normalize": False,
+        "stride_size": [1]
     }
     batch_size = 64
     lr = 1e-3
@@ -394,8 +393,7 @@ def test_learning_cnn():
         "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
-        "stride_size": [1],
-        "normalize": False,
+        "stride_size": [1]
     }
 
     # Create an instance of the NeuralTS class
@@ -449,8 +447,7 @@ def test_algorithm_test_loop_images():
         "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
-        "stride_size": [1],
-        "normalize": False,
+        "stride_size": [1]
     }
 
     agent = NeuralTS(
@@ -473,8 +470,7 @@ def test_algorithm_test_loop_images():
                 "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
-                "stride_size": [1],
-                "normalize": False,
+                "stride_size": [1]
             },
         ),
         (spaces.Box(0, 1, shape=(4,)), {"arch": "mlp", "hidden_size": [128]}),
@@ -555,9 +551,8 @@ def test_clone_returns_identical_agent(observation_space, net_config):
 def test_clone_new_index():
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
-    one_hot = False
 
-    bandit = NeuralTS(observation_space, action_space, one_hot)
+    bandit = NeuralTS(observation_space, action_space)
     clone_agent = bandit.clone(index=100)
 
     assert clone_agent.index == 100
@@ -662,8 +657,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
-        "stride_size": [1],
-        "normalize": False,
+        "stride_size": [1]
     }
 
     # Initialize the NeuralTS agent
@@ -857,8 +851,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         },
     )
 

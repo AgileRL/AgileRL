@@ -10,13 +10,15 @@ from numpy.typing import ArrayLike
 from torch.optim import Optimizer
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 import dill
 
-from agilerl.typing import NumpyObsType, TorchObsType
+from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
-    obs_to_tensor,
+    compile_model,
+    preprocess_observation,
     recursive_check_module_attrs,
     remove_compile_prefix
 )
@@ -157,7 +159,7 @@ class EvolvableAlgorithm(ABC):
         raise NotImplementedError
     
     @abstractmethod
-    def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
+    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
 
         :param observations: Observations of environment
@@ -166,11 +168,6 @@ class EvolvableAlgorithm(ABC):
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]]
         """
-        raise NotImplementedError
-
-    @abstractmethod
-    def preprocess_experiences(self, *args, **kwargs) -> Tuple[Iterable[ArrayLike], ...]:
-        """Preprocesses experiences for learning the algorithm."""
         raise NotImplementedError
 
     @abstractmethod
@@ -243,18 +240,6 @@ class EvolvableAlgorithm(ABC):
             return action_space.shape[0]
         else:
             raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
-
-    def obs_to_tensor(self, observation: NumpyObsType) -> TorchObsType:
-        """Prepares state for forward pass through neural network.
-
-        :param state: Observation of environment
-        :type state: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
-
-        :return: Preprocessed state
-        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]]
-        """
-        device = self.device if self.accelerator is None else self.accelerator.device
-        return obs_to_tensor(observation, device)
 
     def evolvable_attributes(self) -> EvolvableAttributeDict:
         """Returns the attributes related to the evolvable networks in the algorithm. Includes 
@@ -388,10 +373,12 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
     :type accelerator: Optional[Accelerator], optional
+    :param normalize_images: If True, normalize images, defaults to True
+    :type normalize_images: bool, optional
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
-    multi: bool = False # NOTE: This is to maintain compatibility
+    multi: bool = False # NOTE: This is for backwards compatibility
 
     def __init__(
             self,
@@ -402,6 +389,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             learn_step: int = 2048,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
+            normalize_images: bool = True,
             name: Optional[str] = None,
             ) -> None:
 
@@ -413,39 +401,31 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.net_config = net_config
         self.observation_space = observation_space
         self.action_space = action_space
+        self.normalize_images = normalize_images
 
         # TODO: This is a bit of a temporary hack to support legacy code
         self.state_dim = self.get_state_dim(observation_space)
         self.action_dim = self.get_action_dim(action_space)
-        self.one_hot = isinstance(observation_space, spaces.Discrete) and observation_space.n > 1
         self.discrete_actions = isinstance(action_space, spaces.Discrete)
         self.min_action = np.array(action_space.low) if hasattr(action_space, "low") else None
         self.max_action = np.array(action_space.high) if hasattr(action_space, "high") else None
     
-    def preprocess_observations(self, observations: NumpyObsType) -> TorchObsType:
+    def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
 
         :param observations: Observations of environment
-        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]] or Tuple[numpy.ndarray[float], ...]
+        :type observations: ObservationType
 
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
-        state = self.obs_to_tensor(state)
+        return preprocess_observation(
+            observation=observation,
+            observation_space=self.observation_space,
+            device=self.device if self.accelerator is None else self.accelerator.device,
+            normalize_images=self.normalize_images
+        )
 
-        if self.one_hot:
-            state = (
-                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-
-        if (self.arch == "mlp" and len(state.size()) < 2) or (
-            self.arch == "cnn" and len(state.size()) < 4
-        ):
-            state = state.unsqueeze(0)
-
-        return state.float()
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
 
@@ -486,7 +466,9 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
     :type observation_spaces: List[spaces.Space]
     :param action_space: The action spaces of the agent environments.
     :type action_space: List[spaces.Space]
-    :param index: The index of the individual.
+    :param agent_ids: The agent IDs of the agents in the environment.
+    :type agent_ids: List[int]
+    :param index: The index of the individual in the population.
     :type index: int.
     :param learn_step: Learning frequency, defaults to 2048
     :type learn_step: int, optional
@@ -494,41 +476,58 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
     :type device: str, optional
     :param accelerator: Accelerator object for distributed computing, defaults to None
     :type accelerator: Optional[Accelerator], optional
+    :param normalize_images: If True, normalize images, defaults to True
+    :type normalize_images: bool, optional
+    :param torch_compiler: The torch compiler mode to use, defaults to None
+    :type torch_compiler: Optional[Any], optional
     :param name: Name of the algorithm, defaults to the class name
     :type name: Optional[str], optional
     """
-    multi: bool = True # NOTE: This is to maintain compatibility
+    multi: bool = True # NOTE: This is for backwards compatibility
 
     def __init__(
             self,
             observation_spaces: Iterable[spaces.Space],
             action_spaces: Iterable[spaces.Space],
+            agent_ids: Iterable[int],
             index: int,
             net_config: Dict[str, Any],
             learn_step: int = 2048,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
+            normalize_images: bool = True,
             torch_compiler: Optional[Any] = None,
             name: Optional[str] = None,
             ) -> None:
 
         super().__init__(index, learn_step, device, accelerator, name)
 
+        assert isinstance(
+            agent_ids, (tuple, list)
+        ), "Agent IDs must be stores in a tuple or list."
+        assert len(agent_ids) == len(observation_spaces), "Number of agent IDs must match number of observation spaces."
         assert isinstance(observation_spaces, (list, tuple)), "Observation spaces must be a list or tuple."
         assert (
-            all(isinstance(observation_space, spaces.Space) for observation_space in observation_spaces),
+            all(isinstance(_space, spaces.Space) for _space in observation_spaces),
             "Observation spaces must be instances of gym.spaces.Space."
         )
         assert isinstance(action_spaces, (list, tuple)), "Action spaces must be a list or tuple."
         assert (
-            all(isinstance(action_space, spaces.Space) for action_space in action_spaces),
+            all(isinstance(_space, spaces.Space) for _space in action_spaces),
             "Action spaces must be instances of gym.spaces.Space."
         )
+
+        if torch_compiler:
+            assert torch_compiler in [
+                "default",
+                "reduce-overhead",
+                "max-autotune",
+            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
 
          # TODO: This is a bit of a temporary hack to support legacy code
         self.state_dims = self.get_state_dim(observation_spaces)
         self.action_dims = self.get_action_dim(action_spaces)
-        self.one_hot = all(isinstance(space, spaces.Discrete) and space.n > 1 for space in observation_spaces)
+        self.one_hot = all(isinstance(space, spaces.Discrete) for space in observation_spaces)
         self.discrete_actions = all(isinstance(space, spaces.Discrete) for space in action_spaces)
 
         # For continuous action spaces, store the min and max action values
@@ -538,12 +537,57 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         else:
             self.min_action, self.max_action = None, None
 
+        self.agent_ids = agent_ids
+        self.n_agents = len(agent_ids)
         self.torch_compiler = torch_compiler
         self.net_config = net_config
+        self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
         self.total_actions = sum(self.action_dims)
         self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
+
+        # Build observation and action space dictionaries using agent IDs
+        self.observation_space = spaces.Dict({
+            agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)
+        })
+        self.action_space = spaces.Dict({
+            agent_id: space for agent_id, space in zip(agent_ids, action_spaces)
+        })
+    
+    def recompile(self) -> None:
+        """Recompiles the modules in the algorithm with the specified torch compiler."""
+        for name, obj in self.evolvable_attributes().items():
+            if is_module_list(obj):
+                compiled_modules = []
+                for module in obj:
+                    compiled_modules.append(compile_model(module, self.torch_compiler))
+
+                setattr(self, name, compiled_modules)
+
+    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
+        """Preprocesses observations for forward pass through neural network.
+
+        :param observations: Observations of environment
+        :type observations: numpy.ndarray[float] or dict[str, numpy.ndarray[float]]
+
+        :return: Preprocessed observations
+        :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+        """
+        preprocessed_obs = preprocess_observation(
+            observation=observation,
+            observation_space=self.observation_space,
+            device=self.device if self.accelerator is None else None,
+            normalize_images=self.normalize_images
+        )
+
+        # Need to unsqueeze 2nd dimension in image spaces for multi-agent algorithms
+        # (N, C, H, W) -> (N, C, 1, H, W)
+        for agent_id, obs in preprocessed_obs.items():
+            if len(obs.shape) == 4:
+                preprocessed_obs[agent_id] = obs.unsqueeze(2)
+        
+        return preprocessed_obs
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.

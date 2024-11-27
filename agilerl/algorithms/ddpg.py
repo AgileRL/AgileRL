@@ -85,6 +85,7 @@ class DDPG(RLAlgorithm):
         learn_step: int = 5,
         gamma: float = 0.99,
         tau: float = 1e-3,
+        normalize_images: bool = True,
         mut: Optional[str] = None,
         policy_freq: int = 2,
         actor_network: Optional[nn.Module] = None,
@@ -101,6 +102,7 @@ class DDPG(RLAlgorithm):
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
+            normalize_images=normalize_images,
             name="DDPG"
         )
 
@@ -138,7 +140,6 @@ class DDPG(RLAlgorithm):
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
-        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.wrap = wrap
@@ -245,12 +246,7 @@ class DDPG(RLAlgorithm):
                     assert (
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
+
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
@@ -344,24 +340,7 @@ class DDPG(RLAlgorithm):
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         """
-        state = torch.from_numpy(state).float()
-        if self.accelerator is None:
-            state = state.to(self.device)
-        else:
-            state = state.to(self.accelerator.device)
-
-        if self.one_hot:
-            state = (
-                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-
-        if (self.arch == "mlp" and len(state.size()) < 2) or (
-            self.arch == "cnn" and len(state.size()) < 4
-        ):
-            state = state.unsqueeze(0)
-
+        state = self.preprocess_observation(state)
         self.actor.eval()
         with torch.no_grad():
             action_values = self.actor(state)
@@ -448,17 +427,8 @@ class DDPG(RLAlgorithm):
             next_states = next_states.to(self.accelerator.device)
             dones = dones.to(self.accelerator.device)
 
-        if self.one_hot:
-            states = (
-                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-            next_states = (
-                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
+        states = self.preprocess_observation(states)
+        next_states = self.preprocess_observation(next_states)
 
         if self.arch == "mlp":
             input_combined = torch.cat([states, actions], 1)

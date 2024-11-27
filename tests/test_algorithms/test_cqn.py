@@ -120,7 +120,6 @@ def test_initialize_cqn_with_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     batch_size = 64
     lr = 1e-4
@@ -483,7 +482,6 @@ def test_algorithm_test_loop_images():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = CQN(
@@ -508,7 +506,6 @@ def test_algorithm_test_loop_images_unvectorized():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = CQN(
@@ -558,7 +555,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == cqn.observation_space
     assert clone_agent.action_space == cqn.action_space
-    assert clone_agent.one_hot == cqn.one_hot
     assert clone_agent.net_config == cqn.net_config
     assert clone_agent.actor_network == cqn.actor_network
     assert clone_agent.batch_size == cqn.batch_size
@@ -584,7 +580,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == cqn.observation_space
     assert clone_agent.action_space == cqn.action_space
-    assert clone_agent.one_hot == cqn.one_hot
     assert clone_agent.net_config == cqn.net_config
     assert clone_agent.actor_network == cqn.actor_network
     assert clone_agent.batch_size == cqn.batch_size
@@ -681,7 +676,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the cqn agent
@@ -821,7 +815,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert new_cqn.one_hot == cqn.one_hot
     assert new_cqn.net_config == cqn.net_config
     assert isinstance(new_cqn.actor, EvolvableMLP)
     assert isinstance(new_cqn.actor_target, EvolvableMLP)
@@ -860,7 +853,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
-            "normalize": False,
         },
     )
 
@@ -874,7 +866,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert new_cqn.one_hot == cqn.one_hot
     assert new_cqn.net_config == cqn.net_config
     assert isinstance(new_cqn.actor, EvolvableCNN)
     assert isinstance(new_cqn.actor_target, EvolvableCNN)
@@ -926,7 +917,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert new_cqn.one_hot == cqn.one_hot
     assert new_cqn.net_config == cqn.net_config
     assert isinstance(new_cqn.actor, nn.Module)
     assert isinstance(new_cqn.actor_target, nn.Module)

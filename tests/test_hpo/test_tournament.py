@@ -44,7 +44,6 @@ INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
     "REG": 0.000625,

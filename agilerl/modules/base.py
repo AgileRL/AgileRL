@@ -54,27 +54,12 @@ class EvolvableModule(nn.Module, ABC):
     value_net: Optional[nn.Module]
     advantage_net: Optional[nn.Module]
 
+    # TODO: There has to be a more elegant way to differences in GPT activation functions
     def __init__(self, gpt: bool = False) -> None:
         nn.Module.__init__(self)
 
         self.gpt = gpt
-
-        # Initialize dictionaries to store mutation methods by type
-        self._layer_mutation_methods = {}
-        self._node_mutation_methods = {}
-
-        # Populate mutation methods based on type
-        for name, method in vars(self.__class__).items():
-            if isinstance(method, MutationMethod):
-                if method._mutation_type == MutationType.LAYER:
-                    self._layer_mutation_methods[name] = method
-                elif method._mutation_type == MutationType.NODE:
-                    self._node_mutation_methods[name] = method
-        
-        self._mutation_methods = (
-            list(self._layer_mutation_methods.values()) +  
-            list(self._node_mutation_methods.values())
-        )
+        self._init_mutation_methods()
 
     @property
     @abstractmethod
@@ -84,6 +69,9 @@ class EvolvableModule(nn.Module, ABC):
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("forward method must be implemented in order to use the neural network.")
+    
+    def __call__(self, *args, **kwargs) -> torch.Tensor:
+        return self.forward(*args, **kwargs)
     
     # TODO: Will remove the need for this in the future by creating a `networks` module
     @abstractmethod
@@ -163,6 +151,22 @@ class EvolvableModule(nn.Module, ABC):
             for layer in net.modules():
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
+    
+    def _init_mutation_methods(self) -> None:
+        # Initialize dictionaries to store mutation methods by type
+        self._layer_mutation_methods = {}
+        self._node_mutation_methods = {}
+        for name, method in vars(self.__class__).items():
+            if isinstance(method, MutationMethod):
+                if method._mutation_type == MutationType.LAYER:
+                    self._layer_mutation_methods[name] = method
+                elif method._mutation_type == MutationType.NODE:
+                    self._node_mutation_methods[name] = method
+        
+        self._mutation_methods = (
+            list(self._layer_mutation_methods.values()) +  
+            list(self._node_mutation_methods.values())
+        )
     
     def get_activation(self, name: Optional[str] = None) -> nn.Module:
         """Get the activation function by name.

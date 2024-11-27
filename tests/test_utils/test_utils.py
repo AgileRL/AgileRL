@@ -51,7 +51,6 @@ SHARED_INIT_HP = {
     "MAX_GRAD_NORM": 0.5,
     "TARGET_KL": None,
     "UPDATE_EPOCHS": 4,
-    "N_AGENTS": 2,
     "AGENT_IDS": ["agent1", "agent2"],
     "LAMBDA": 1.0,
     "REG": 0.000625,
@@ -130,7 +129,6 @@ def test_create_initial_population_single_agent():
             assert isinstance(agent, algo_classes[algo])
             assert agent.observation_space == observation_space
             assert agent.action_space == action_space
-            assert agent.one_hot == False
             assert agent.net_config == net_config
             assert agent.device == "cpu"
             assert agent.accelerator is None
@@ -166,7 +164,6 @@ def test_create_initial_population_multi_agent():
             assert isinstance(agent, algo_classes[algo])
             assert agent.observation_spaces == observation_space
             assert agent.action_spaces == action_space
-            assert agent.one_hot == False
             assert agent.net_config == net_config
             assert agent.device == "cpu"
             assert agent.accelerator is None

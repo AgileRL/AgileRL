@@ -191,7 +191,6 @@ def test_initialize_dqn_with_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     batch_size = 64
     lr = 1e-4
@@ -371,7 +370,6 @@ def test_returns_expected_action_mask_vectorized():
                 "kernel_size": [8, 4, 3],
                 "stride_size": [4, 2, 1],
                 "hidden_size": [64, 64],
-                "normalize": False,
             },
             spaces.Box(0, 1, shape=(4, 84, 84)),
         ),
@@ -754,7 +752,6 @@ def test_algorithm_test_loop_images():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = RainbowDQN(
@@ -779,7 +776,6 @@ def test_algorithm_test_loop_images_unvectorized():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = RainbowDQN(
@@ -805,7 +801,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.one_hot == dqn.one_hot
     assert clone_agent.net_config == dqn.net_config
     assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
@@ -833,7 +828,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.one_hot == dqn.one_hot
     assert clone_agent.net_config == dqn.net_config
     assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
@@ -861,7 +855,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.one_hot == dqn.one_hot
     assert clone_agent.net_config == dqn.net_config
     assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
@@ -910,7 +903,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == rainbow_dqn.observation_space
     assert clone_agent.action_space == rainbow_dqn.action_space
-    assert clone_agent.one_hot == rainbow_dqn.one_hot
     assert clone_agent.net_config == rainbow_dqn.net_config
     assert clone_agent.actor_network == rainbow_dqn.actor_network
     assert clone_agent.batch_size == rainbow_dqn.batch_size
@@ -1009,7 +1001,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the DQN agent
@@ -1156,7 +1147,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert new_dqn.one_hot == dqn.one_hot
     assert new_dqn.net_config == dqn.net_config
     assert isinstance(new_dqn.actor, EvolvableMLP)
     assert isinstance(new_dqn.actor_target, EvolvableMLP)
@@ -1194,8 +1184,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "hidden_size": [8, 8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         },
     )
 
@@ -1209,7 +1198,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert new_dqn.one_hot == dqn.one_hot
     assert new_dqn.net_config == dqn.net_config
     assert isinstance(new_dqn.actor, EvolvableCNN)
     assert isinstance(new_dqn.actor_target, EvolvableCNN)
@@ -1261,7 +1249,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert new_dqn.one_hot == dqn.one_hot
     assert new_dqn.net_config == dqn.net_config
     assert isinstance(new_dqn.actor, nn.Module)
     assert isinstance(new_dqn.actor_target, nn.Module)

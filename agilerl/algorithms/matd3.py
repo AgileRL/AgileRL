@@ -1,4 +1,4 @@
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Tuple, Dict
 import copy
 import inspect
 import warnings
@@ -9,12 +9,13 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
+from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict
 from agilerl.algorithms.base import MultiAgentAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
-    compile_model,
     key_in_nested_dict,
     unwrap_optimizer,
 )
@@ -75,12 +76,17 @@ class MATD3(MultiAgentAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+    actors: List[EvolvableModule]
+    actor_targets: List[EvolvableModule]
+    critics_1: List[EvolvableModule]
+    critic_targets_1: List[EvolvableModule]
+    critics_2: List[EvolvableModule]
+    critic_targets_2: List[EvolvableModule]
 
     def __init__(
         self,
         observation_spaces: List[spaces.Space],
         action_spaces: List[spaces.Space],
-        n_agents: int,
         agent_ids: List[str],
         O_U_noise: bool = True,
         expl_noise: float = 0.1,
@@ -97,6 +103,7 @@ class MATD3(MultiAgentAlgorithm):
         learn_step: int = 5,
         gamma: float = 0.95,
         tau: float = 0.01,
+        normalize_images: bool = True,
         mut: Optional[str] = None,
         actor_networks: Optional[List[nn.Module]] = None,
         critic_networks: Optional[List[List[nn.Module]]] = None,
@@ -108,17 +115,17 @@ class MATD3(MultiAgentAlgorithm):
         super().__init__(
             observation_spaces,
             action_spaces,
+            agent_ids,
             index=index,
             net_config=net_config,
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
+            normalize_images=normalize_images,
+            torch_compiler=torch_compiler,
             name="MATD3",
         )
-        assert isinstance(n_agents, int), "Number of agents must be an integer."
-        assert isinstance(
-            agent_ids, (tuple, list)
-        ), "Agent IDs must be stores in a tuple or list."
+
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
@@ -132,41 +139,20 @@ class MATD3(MultiAgentAlgorithm):
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(policy_freq, int), "Policy frequency must be an integer."
         assert policy_freq > 0, "Policy frequency must be greater than zero."
-        assert n_agents == len(
-            agent_ids
-        ), "Number of agents must be equal to the length of the agent IDs list."
-
         if (actor_networks is not None) != (critic_networks is not None):
             warnings.warn(
                 "Actor and critic network lists must both be supplied to use custom networks. Defaulting to net config."
             )
-        if torch_compiler:
-            assert torch_compiler in [
-                "default",
-                "reduce-overhead",
-                "max-autotune",
-            ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
         assert isinstance(
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        if self.max_action is not None and self.min_action is not None:
-            for x, n in zip(self.max_action, self.min_action):
-                x, n = x[0], n[0]
-                assert x > n, "Max action must be greater than min action."
-                assert x > 0, "Max action must be greater than zero."
-                assert n <= 0, "Min action must be less than or equal to zero."
-
-        self.n_agents = n_agents
-        self.agent_ids = agent_ids
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
-        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mut
-        self.torch_compiler = torch_compiler
         self.policy_freq = policy_freq
         self.learn_counter = {agent: 0 for agent in self.agent_ids}
         self.O_U_noise = O_U_noise
@@ -390,26 +376,16 @@ class MATD3(MultiAgentAlgorithm):
 
         self.criterion = nn.MSELoss()
 
-    def recompile(self):
-        """Recompile all models"""
-        self.actors = [compile_model(a, self.torch_compiler) for a in self.actors]
-        self.actor_targets = [
-            compile_model(at, self.torch_compiler) for at in self.actor_targets
-        ]
-        self.critics_1 = [compile_model(c, self.torch_compiler) for c in self.critics_1]
-        self.critic_targets_1 = [
-            compile_model(ct, self.torch_compiler) for ct in self.critic_targets_1
-        ]
-        self.critics_2 = [compile_model(c, self.torch_compiler) for c in self.critics_2]
-        self.critic_targets_2 = [
-            compile_model(ct, self.torch_compiler) for ct in self.critic_targets_2
-        ]
-
-    def scale_to_action_space(self, action, idx):
+    def scale_to_action_space(self, action: np.ndarray, idx: int) -> torch.Tensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
         :type action: numpy.ndarray
+        :param idx: Index of agent
+        :type idx: int
+
+        :return: Scaled action
+        :rtype: torch.Tensor
         """
         mlp_output_activation = self.actors[idx].mlp_output_activation
         if mlp_output_activation in ["Tanh"]:
@@ -439,11 +415,14 @@ class MATD3(MultiAgentAlgorithm):
             self.max_action[idx][0] - self.min_action[idx][0]
         ) * (action - pre_scaled_min) / (pre_scaled_max - pre_scaled_min)
 
-    def extract_action_masks(self, infos):
+    def extract_action_masks(self, infos: InfosDict) -> ArrayDict:
         """Extract observations and action masks into two separate dictionaries
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
+
+        :return: Action masks
+        :rtype: Dict[str, np.ndarray]
         """
         action_masks = {
             agent: info.get("action_mask", None) if isinstance(info, dict) else None
@@ -453,11 +432,14 @@ class MATD3(MultiAgentAlgorithm):
 
         return action_masks
 
-    def extract_agent_masks(self, infos):
+    def extract_agent_masks(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict]:
         """Extract env_defined_actions from info dictionary and determine agent masks
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
+
+        :return: env_defined_actions, agent_masks
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
         if all(not info for agent, info in infos.items() if agent in self.agent_ids):
             return None, None
@@ -502,7 +484,7 @@ class MATD3(MultiAgentAlgorithm):
 
         return env_defined_actions, agent_masks
 
-    def process_infos(self, infos):
+    def process_infos(self, infos: InfosDict) -> Tuple[ArrayDict, ArrayDict, ArrayDict]:
         """
         Process the information, extract env_defined_actions, action_masks and agent_masks
 
@@ -511,11 +493,17 @@ class MATD3(MultiAgentAlgorithm):
         """
         if infos is None:
             infos = {agent: {} for agent in self.agent_ids}
+
         env_defined_actions, agent_masks = self.extract_agent_masks(infos)
         action_masks = self.extract_action_masks(infos)
         return action_masks, env_defined_actions, agent_masks
 
-    def get_action(self, states, training=True, infos=None):
+    def get_action(
+            self,
+            states: NumpyObsType,
+            training: bool = True,
+            infos: Optional[InfosDict] = None
+            ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -524,43 +512,20 @@ class MATD3(MultiAgentAlgorithm):
         :type state: Dict[str, numpy.Array]
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
-        :param env_defined_actions: Dictionary of actions defined by the environment: {'agent_0': np.array, ..., 'agent_n': np.array}
-        :type env_defined_actions: Dict[str, np.array]
+        :param infos: Information dictionary from environment, defaults to None
+        :type infos: Dict[str, Dict[...]], optional
+
+        :return: Action to take in the environment
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
             states, "action_mask"
         ), "AgileRL requires action masks to be defined in the information dictionary."
+
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
-        # Convert states to a list of torch tensors
-        states = [torch.from_numpy(state).float() for state in states.values()]
-
-        # Configure accelerator
-        if self.accelerator is None:
-            states = [state.to(self.device) for state in states]
-
-        if self.one_hot:
-            states = [
-                nn.functional.one_hot(state.long(), num_classes=state_dim[0])
-                .float()
-                .squeeze(1)
-                for state, state_dim in zip(states, self.state_dims)
-            ]
-
-        if self.arch == "mlp":
-            states = [
-                state.unsqueeze(0) if len(state.size()) < 2 else state
-                for state in states
-            ]
-        elif self.arch == "cnn":
-            states = [
-                (
-                    state.unsqueeze(0).unsqueeze(2)
-                    if len(state.size()) < 4
-                    else state.unsqueeze(2)
-                )
-                for state in states
-            ]
+        # Preprocess observations
+        states = list(self.preprocess_observation(states).values())
 
         action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(
@@ -621,14 +586,14 @@ class MATD3(MultiAgentAlgorithm):
 
         return (action_dict, discrete_action_dict)
 
-    def action_noise(self, idx):
+    def action_noise(self, idx: int) -> torch.Tensor:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
             from a normal distribution.
 
         :param idx: Agent index for action dims
         :type idx: int
         :return: Action noise
-        :rtype: np.ndArray
+        :rtype: torch.Tensor
         """
         if self.O_U_noise:
             noise = (
@@ -648,79 +613,59 @@ class MATD3(MultiAgentAlgorithm):
             noise = self.sample_gaussian[idx]
         return noise
 
-    def reset_action_noise(self, indices):
-        """Reset action noise."""
+    def reset_action_noise(self, indices: List[int]) -> None:
+        """Reset action noise.
+        
+        :param indices: List of indices to reset noise for
+        :type indices: List[int]
+        """
         for i in range(len(self.current_noise)):
             for idx in indices:
                 self.current_noise[i][idx, :] = 0
 
-    def learn(self, experiences):
+    def learn(self, experiences: Tuple[TensorDict, ...]) -> Dict[str, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: Tuple of dictionaries containing batched states, actions, rewards, next_states,
         dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
+
+        :return: Losses for each agent
+        :rtype: Dict[str, float]
         """
         states, actions, rewards, next_states, dones = experiences
-        if self.one_hot:
-            states = {
-                agent_id: nn.functional.one_hot(state.long(), num_classes=state_dim[0])
-                .float()
-                .squeeze(1)
-                for (agent_id, state), state_dim in zip(states.items(), self.state_dims)
-            }
-            next_states = {
-                agent_id: nn.functional.one_hot(
-                    next_state.long(), num_classes=state_dim[0]
-                )
-                .float()
-                .squeeze(1)
-                for (agent_id, next_state), state_dim in zip(
-                    next_states.items(), self.state_dims
-                )
-            }
+
+        # Preprocess observations
+        states = self.preprocess_observation(states)
+        next_states = self.preprocess_observation(next_states)
+
         next_actions = []
         with torch.no_grad():
-            if self.arch == "mlp":
-                for i, agent_id_label in enumerate(self.agent_ids):
-                    unscaled_actions = self.actor_targets[i](
-                        next_states[agent_id_label]
+            for i, agent_id_label in enumerate(self.agent_ids):
+                unscaled_actions = self.actor_targets[i](
+                    next_states[agent_id_label]
+                )
+                if not self.discrete_actions:
+                    scaled_actions = torch.where(
+                        unscaled_actions > 0,
+                        unscaled_actions * self.max_action[i][0],
+                        unscaled_actions * -self.min_action[i][0],
                     )
-                    if not self.discrete_actions:
-                        scaled_actions = torch.where(
-                            unscaled_actions > 0,
-                            unscaled_actions * self.max_action[i][0],
-                            unscaled_actions * -self.min_action[i][0],
-                        )
-                        next_actions.append(scaled_actions)
-                    else:
-                        next_actions.append(unscaled_actions)
-                action_values = list(actions.values())
-                state_values = list(states.values())
-                input_combined = torch.cat(state_values + action_values, 1)
-            elif self.arch == "cnn":
-                for i, agent_id_label in enumerate(self.agent_ids):
-                    unscaled_actions = self.actor_targets[i](
-                        next_states[agent_id_label].unsqueeze(2)
-                    )
-                    if not self.discrete_actions:
-                        scaled_actions = torch.where(
-                            unscaled_actions > 0,
-                            unscaled_actions * self.max_action[i][0],
-                            unscaled_actions * -self.min_action[i][0],
-                        )
-                        next_actions.append(scaled_actions)
-                    else:
-                        next_actions.append(unscaled_actions)
-                stacked_states = torch.stack(list(states.values()), dim=2)
-                stacked_actions = torch.cat(list(actions.values()), dim=1)
-                stacked_next_states = torch.stack(list(next_states.values()), dim=2)
+                    next_actions.append(scaled_actions)
+                else:
+                    next_actions.append(unscaled_actions)
 
         if self.arch == "mlp":
+            action_values = list(actions.values())
+            state_values = list(states.values())
+            input_combined = torch.cat(state_values + action_values, dim=1)
             next_input_combined = torch.cat(
-                list(next_states.values()) + next_actions, 1
+                list(next_states.values()) + next_actions, dim=1
             )
         elif self.arch == "cnn":
+            stacked_states = torch.stack(list(states.values()), dim=2).squeeze()
+            stacked_actions = torch.cat(list(actions.values()), dim=1)
+            stacked_next_states = torch.stack(list(next_states.values()), dim=2).squeeze()
             stacked_next_actions = torch.cat(next_actions, dim=1)
 
         loss_dict = {}
@@ -794,29 +739,74 @@ class MATD3(MultiAgentAlgorithm):
 
     def learn_individual(
         self,
-        idx,
-        agent_id,
-        actor,
-        critic_1,
-        critic_target_1,
-        critic_2,
-        critic_target_2,
-        actor_optimizer,
-        critic_1_optimizer,
-        critic_2_optimizer,
-        input_combined,
-        stacked_states,
-        stacked_actions,
-        next_input_combined,
-        stacked_next_states,
-        stacked_next_actions,
-        states,
-        actions,
-        rewards,
-        dones,
-    ):
-        """Inner call to each agent for the learning/algo training
-        steps, up until the soft updates. Applies all forward/backward props
+        idx: int,
+        agent_id: str,
+        actor: nn.Module,
+        critic_1: nn.Module,
+        critic_target_1: nn.Module,
+        critic_2: nn.Module,
+        critic_target_2: nn.Module,
+        actor_optimizer: optim.Optimizer,
+        critic_1_optimizer: optim.Optimizer,
+        critic_2_optimizer: optim.Optimizer,
+        input_combined: Optional[torch.Tensor],
+        stacked_states: Optional[torch.Tensor],
+        stacked_actions: Optional[torch.Tensor],
+        next_input_combined: Optional[torch.Tensor],
+        stacked_next_states: Optional[torch.Tensor],
+        stacked_next_actions: Optional[torch.Tensor],
+        states: TensorDict,
+        actions: TensorDict,
+        rewards: TensorDict,
+        dones: TensorDict,
+    ) -> Tuple[Optional[float], float]:
+        """
+        Inner call to each agent for the learning/algo training steps, up until the soft updates. 
+        Applies all forward/backward props.
+
+        :param idx: Index of the agent
+        :type idx: int
+        :param agent_id: ID of the agent
+        :type agent_id: str
+        :param actor: Actor network of the agent
+        :type actor: nn.Module
+        :param critic_1: First critic network of the agent
+        :type critic_1: nn.Module
+        :param critic_target_1: Target network for the first critic
+        :type critic_target_1: nn.Module
+        :param critic_2: Second critic network of the agent
+        :type critic_2: nn.Module
+        :param critic_target_2: Target network for the second critic
+        :type critic_target_2: nn.Module
+        :param actor_optimizer: Optimizer for the actor network
+        :type actor_optimizer: optim.Optimizer
+        :param critic_1_optimizer: Optimizer for the first critic network
+        :type critic_1_optimizer: optim.Optimizer
+        :param critic_2_optimizer: Optimizer for the second critic network
+        :type critic_2_optimizer: optim.Optimizer
+        :param input_combined: Combined input tensor for MLP architecture
+        :type input_combined: Optional[torch.Tensor]
+        :param stacked_states: Stacked states tensor for CNN architecture
+        :type stacked_states: Optional[torch.Tensor]
+        :param stacked_actions: Stacked actions tensor for CNN architecture
+        :type stacked_actions: Optional[torch.Tensor]
+        :param next_input_combined: Combined input tensor for next states in MLP architecture
+        :type next_input_combined: Optional[torch.Tensor]
+        :param stacked_next_states: Stacked next states tensor for CNN architecture
+        :type stacked_next_states: Optional[torch.Tensor]
+        :param stacked_next_actions: Stacked next actions tensor for CNN architecture
+        :type stacked_next_actions: Optional[torch.Tensor]
+        :param states: Dictionary of current states for each agent
+        :type states: TensorDict
+        :param actions: Dictionary of actions taken by each agent
+        :type actions: TensorDict
+        :param rewards: Dictionary of rewards received by each agent
+        :type rewards: TensorDict
+        :param dones: Dictionary of done flags for each agent
+        :type dones: TensorDict
+
+        :return: Tuple containing actor loss (if applicable) and critic loss
+        :rtype: Tuple[Optional[float], float]
         """
         if self.arch == "mlp":
             if self.accelerator is not None:
@@ -885,23 +875,25 @@ class MATD3(MultiAgentAlgorithm):
 
         actor_loss = None
 
+        # Calculate actions and actor loss
+        if self.accelerator is not None:
+            with actor.no_sync():
+                action = actor(states[agent_id])
+        else:
+            action = actor(states[agent_id])
+        if not self.discrete_actions:
+            action = torch.where(
+                action > 0,
+                action * self.max_action[idx][0],
+                action * -self.min_action[idx][0],
+            )
+        detached_actions = copy.deepcopy(actions)
+        detached_actions[agent_id] = action
+
         # update actor and targets every policy_freq learn steps
         self.learn_counter[agent_id] += 1
         if self.learn_counter[agent_id] % self.policy_freq == 0:
             if self.arch == "mlp":
-                if self.accelerator is not None:
-                    with actor.no_sync():
-                        action = actor(states[agent_id])
-                else:
-                    action = actor(states[agent_id])
-                if not self.discrete_actions:
-                    action = torch.where(
-                        action > 0,
-                        action * self.max_action[idx][0],
-                        action * -self.min_action[idx][0],
-                    )
-                detached_actions = copy.deepcopy(actions)
-                detached_actions[agent_id] = action
                 input_combined = torch.cat(
                     list(states.values()) + list(detached_actions.values()), 1
                 )
@@ -912,19 +904,6 @@ class MATD3(MultiAgentAlgorithm):
                     actor_loss = -critic_1(input_combined).mean()
 
             elif self.arch == "cnn":
-                if self.accelerator is not None:
-                    with actor.no_sync():
-                        action = actor(states[agent_id].unsqueeze(2))
-                else:
-                    action = actor(states[agent_id].unsqueeze(2))
-                if not self.discrete_actions:
-                    action = torch.where(
-                        action > 0,
-                        action * self.max_action[idx][0],
-                        action * -self.min_action[idx][0],
-                    )
-                detached_actions = copy.deepcopy(actions)
-                detached_actions[agent_id] = action
                 stacked_detached_actions = torch.cat(
                     list(detached_actions.values()), dim=1
                 )

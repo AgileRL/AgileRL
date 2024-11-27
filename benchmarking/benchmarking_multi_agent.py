@@ -58,7 +58,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
     if INIT_HP["CHANNELS_LAST"]:
         observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
 
-    INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
     field_names = ["state", "action", "reward", "next_state", "done"]

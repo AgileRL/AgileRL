@@ -154,7 +154,6 @@ def test_initializes_with_default_values():
     assert ppo.algo == "PPO"
     assert ppo.observation_space ==generate_random_box_space(shape=(4,), low=0, high=1)
     assert ppo.action_space == generate_random_box_space(shape=(2,), low=-1, high=1)
-    assert ppo.one_hot == False
     assert ppo.discrete_actions == False
     assert ppo.net_config == {
         "arch": "mlp",
@@ -199,7 +198,6 @@ def test_initialize_ppo_with_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     batch_size = 64
     lr = 1e-4
@@ -244,7 +242,6 @@ def test_initialize_ppo_with_cnn_accelerator():
 
     assert ppo.observation_space == observation_space
     assert ppo.action_space == action_space
-    assert ppo.one_hot == False
     assert ppo.discrete_actions == True
     assert ppo.net_config == net_config_cnn
     assert ppo.batch_size == batch_size
@@ -292,7 +289,6 @@ def test_initialize_ppo_with_actor_network(
 
     assert ppo.observation_space == obs_space
     assert ppo.action_space == action_space
-    assert ppo.one_hot == False
     assert ppo.net_config is None
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
@@ -375,7 +371,6 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
 
     assert ppo.observation_space == observation_space
     assert ppo.action_space == action_space
-    assert ppo.one_hot == False
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -444,14 +439,14 @@ def test_initialize_ppo_with_actor_network_no_critic(
 def test_convert_numpy_array_to_tensor():
     state = np.array([1, 2, 3, 4])
     ppo = PPO(observation_space=generate_random_box_space(shape=(5,), low=0, high=1), action_space=generate_discrete_space(2))
-    prepared_state = ppo.prepare_state(state)
+    prepared_state = ppo.preprocess_observation(state)
     assert isinstance(prepared_state, torch.Tensor)
 
 
 def test_unsqueeze_prepare():
     state = np.array([1, 2, 3, 4])
     ppo = PPO(observation_space=generate_random_box_space(shape=(4,), low=0, high=1), action_space=generate_discrete_space(2))
-    prepared_state = ppo.prepare_state(state)
+    prepared_state = ppo.preprocess_observation(state)
     assert isinstance(prepared_state, torch.Tensor)
 
 
@@ -465,7 +460,6 @@ def test_prepare_state_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     ppo = PPO(
         observation_space=observation_space,
@@ -473,7 +467,7 @@ def test_prepare_state_cnn_accelerator():
         net_config=net_config_cnn,
         accelerator=accelerator,
     )
-    prepared_state = ppo.prepare_state(state)
+    prepared_state = ppo.preprocess_observation(state)
     assert isinstance(prepared_state, torch.Tensor)
     assert prepared_state.dtype == torch.float32
 
@@ -569,7 +563,6 @@ def test_learns_from_experiences():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     ppo = PPO(
@@ -706,7 +699,6 @@ def test_algorithm_test_loop_images():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = PPO(
@@ -731,7 +723,6 @@ def test_algorithm_test_loop_images_unvectorized():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = PPO(
@@ -757,7 +748,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.one_hot == ppo.one_hot
     assert clone_agent.net_config == ppo.net_config
     assert clone_agent.actor_network == ppo.actor_network
     assert clone_agent.critic_network == ppo.critic_network
@@ -790,7 +780,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.one_hot == ppo.one_hot
     assert clone_agent.net_config == ppo.net_config
     assert clone_agent.actor_network == ppo.actor_network
     assert clone_agent.critic_network == ppo.critic_network
@@ -826,7 +815,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.one_hot == ppo.one_hot
     assert clone_agent.net_config == ppo.net_config
     assert clone_agent.actor_network == ppo.actor_network
     assert clone_agent.critic_network == ppo.critic_network
@@ -881,7 +869,6 @@ def test_clone_after_learning():
     clone_agent = ppo.clone()
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.one_hot == ppo.one_hot
     assert clone_agent.net_config == ppo.net_config
     assert clone_agent.actor_network == ppo.actor_network
     assert clone_agent.critic_network == ppo.critic_network
@@ -989,7 +976,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the ppo agent
@@ -1174,7 +1160,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
-    assert new_ppo.one_hot == ppo.one_hot
     assert new_ppo.discrete_actions == ppo.discrete_actions
     assert new_ppo.net_config == ppo.net_config
     assert isinstance(new_ppo.actor, EvolvableMLP)
@@ -1209,8 +1194,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         }
     )
 
@@ -1224,7 +1208,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
-    assert new_ppo.one_hot == ppo.one_hot
     assert new_ppo.discrete_actions == ppo.discrete_actions
     assert new_ppo.net_config == ppo.net_config
     assert isinstance(new_ppo.actor, EvolvableCNN)
@@ -1274,7 +1257,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
-    assert new_ppo.one_hot == ppo.one_hot
     assert new_ppo.discrete_actions == ppo.discrete_actions
     assert new_ppo.net_config == ppo.net_config
     assert isinstance(new_ppo.actor, nn.Module)

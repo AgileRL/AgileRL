@@ -1,11 +1,13 @@
 from collections import OrderedDict
-from typing import Union, Dict, Any
+from typing import Union, Dict, Any, Tuple
 import torch
 import numpy as np
+from gymnasium import spaces
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from torch.optim import Optimizer
 from torch.nn import Module
+import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 
 from agilerl.modules.base import EvolvableModule
@@ -135,3 +137,102 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
         return tuple(torch.as_tensor(_obs, device=device) for _obs in obs)
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
+    
+def maybe_add_batch_dim(obs: TorchObsType, space_shape: Tuple[int, ...]) -> TorchObsType:
+    """Adds batch dimension if necessary
+
+    :param obs: Observation tensor
+    :type obs: torch.Tensor[float]
+    :param space_shape: Observation space shape
+    :type space_shape: Tuple[int, ...]
+    :return: Observation tensor with batch dimension
+    :rtype: torch.Tensor[float]
+    """
+    if obs.dim() == len(space_shape):
+        obs = obs.unsqueeze(0)
+    elif obs.dim() == len(space_shape) + 2:
+        obs = obs.view(-1, *space_shape)
+    elif obs.dim() != len(space_shape) + 1:
+        raise ValueError(
+            f"Expected observation to have {len(space_shape) + 1} dimensions, got {obs.dim()}."
+            )
+
+    return obs
+
+def preprocess_observation(
+        observation: NumpyObsType,
+        observation_space: spaces.Space,
+        device: Union[str, torch.device] = "cpu",
+        normalize_images: bool = True
+        ) -> TorchObsType:
+    """Preprocesses observations for forward pass through neural network.
+
+    :param observations: Observations of environment
+    :type observations: ObservationType
+    :param observation_space: The observation space of the environment, defaults to the agent's observation space
+    :type observation_space: spaces.Space
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to "cpu"
+    :type device: Union[str, torch.device], optional
+    :param normalize_images: Normalize images from [0. 255] to [0, 1], defaults to True
+    :type normalize_images: bool, optional
+
+    :return: Preprocessed observations
+    :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
+    """
+    observation = obs_to_tensor(observation, device)
+
+    # Preprocess different spaces accordingly
+    if isinstance(observation_space, spaces.Dict):
+        assert isinstance(observation, dict), f"Expected dict, got {type(observation)}"
+        preprocessed_obs = {}
+        for key, _obs in observation.items():
+            preprocessed_obs[key] = preprocess_observation(
+                observation=_obs,
+                observation_space=observation_space[key],
+                device=device,
+                normalize_images=normalize_images
+                )
+
+        return preprocessed_obs
+    
+    elif isinstance(observation_space, spaces.Tuple):
+        assert isinstance(observation, tuple), f"Expected tuple, got {type(observation)}"
+        return tuple(
+            preprocess_observation(_obs, _space, device, normalize_images) for _obs, _space in zip(observation, observation_space.spaces)
+            )
+    
+    assert isinstance(observation, torch.Tensor), f"Expected torch.Tensor, got {type(observation)}"
+    
+    if isinstance(observation_space, spaces.Box):
+        # Normalize images if applicable and specified
+        if len(observation_space.shape) == 3 and normalize_images:
+            observation /= 255.0
+
+        observation = observation.float()
+        space_shape = observation_space.shape
+    
+    elif isinstance(observation_space, spaces.Discrete):
+        # One hot encoding of discrete observation
+        observation = F.one_hot(observation.long(), num_classes=int(observation_space.n)).float()
+        if observation_space.n > 1:
+            observation = observation.squeeze() # If n == 1 then squeeze removes obs dim
+
+        space_shape = (observation_space.n,)
+
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        # Tensor concatenation of one hot encodings of each Categorical sub-space
+        observation = torch.cat(
+            [
+                F.one_hot(obs_.long(), num_classes=int(observation_space.nvec[idx])).float()
+                for idx, obs_ in enumerate(torch.split(observation.long(), 1, dim=1))
+            ],
+            dim=-1,
+        )
+        space_shape = (sum(observation_space.nvec),)
+    else:
+        raise TypeError(f"AgileRL currently doesn't support {type(observation_space)} spaces.")
+    
+    # Check add batch dimension if necessary
+    observation = maybe_add_batch_dim(observation, space_shape)
+
+    return observation

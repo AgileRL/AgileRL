@@ -40,12 +40,15 @@ def get_return_type(method: Callable) -> Any:
         print(f"Error inspecting {method}: {e}")
         return None
 
-def set_global_seed(seed: int) -> None:
+def set_global_seed(seed: Optional[int]) -> None:
     """Set the global seed for random number generators.
 
     :param seed: Random seed for repeatability
     :type seed: int
     """
+    if seed is None:
+        return
+
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -281,6 +284,11 @@ class Mutations:
             mutation_options[0] = (self.no_mutation, 0)
 
         mutation_options = [(func, prob) for func, prob in mutation_options if prob > 0]
+
+        # This will really only happen when pretraining is True and user has set 
+        # all mutation probabilities to zero, hence we apply no mutation
+        if len(mutation_options) == 0:
+            mutation_options = [(self.no_mutation, 1)]
 
         mutation_funcs, mutation_proba = zip(*mutation_options)
         mutation_proba = np.array(mutation_proba) / np.sum(mutation_proba)

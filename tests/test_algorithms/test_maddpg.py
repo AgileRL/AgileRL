@@ -260,7 +260,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             False,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -273,7 +272,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             True,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -287,7 +285,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             False,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -300,7 +297,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             True,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -312,7 +308,6 @@ def test_initialize_maddpg_with_net_config(
     net_config, accelerator_flag, observation_spaces, device, compile_mode
 ):
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     batch_size = 64
@@ -324,7 +319,6 @@ def test_initialize_maddpg_with_net_config(
         observation_spaces=observation_spaces,
         net_config=net_config,
         action_spaces=action_spaces,
-        n_agents=n_agents,
         agent_ids=agent_ids,
         accelerator=accelerator,
         device=device,
@@ -333,7 +327,7 @@ def test_initialize_maddpg_with_net_config(
     net_config.update({"mlp_output_activation": "Softmax"})
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
-    assert maddpg.n_agents == n_agents
+    assert maddpg.n_agents == len(agent_ids)
     assert maddpg.agent_ids == agent_ids
     for noise_vec in maddpg.expl_noise:
         assert torch.all(noise_vec == expl_noise)
@@ -414,7 +408,6 @@ def test_initialize_maddpg_with_mlp_networks(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -491,7 +484,6 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         net_config=net_config,
         device=device,
         torch_compiler=compile_mode,
@@ -542,7 +534,6 @@ def test_initialize_maddpg_with_cnn_networks(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -657,7 +648,6 @@ def test_initialize_maddpg_with_evo_networks(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -731,7 +721,6 @@ def test_initialize_maddpg_with_incorrect_evo_networks(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=["agent_0", "agent_1"],
-            n_agents=len(observation_spaces),
             actor_networks=evo_actors,
             critic_networks=evo_critics,
             torch_compiler=compile_mode,
@@ -757,7 +746,6 @@ def test_maddpg_init_warning(mlp_actor, observation_spaces, action_spaces, devic
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=["agent_0", "agent_1"],
-            n_agents=len(observation_spaces),
             actor_networks=evo_actors,
             device=device,
             torch_compiler=compile_mode,
@@ -772,7 +760,6 @@ def test_maddpg_init_torch_compiler_no_error(mode):
         observation_spaces=generate_multi_agent_box_spaces(2, (1,)),
         action_spaces=generate_multi_agent_discrete_spaces(2, 1),
         agent_ids=["agent_0", "agent_1"],
-        n_agents=2,
         device="cuda" if torch.cuda.is_available() else "cpu",
         torch_compiler=mode,
     )
@@ -809,7 +796,6 @@ def test_maddpg_init_torch_compiler_error(mode):
             observation_spaces=generate_multi_agent_box_spaces(2, (1,)),
             action_spaces=generate_multi_agent_discrete_spaces(2, 1),
             agent_ids=["agent_0", "agent_1"],
-            n_agents=2,
             device="cuda" if torch.cuda.is_available() else "cpu",
             torch_compiler=mode,
         )
@@ -855,7 +841,6 @@ def test_maddpg_get_action_mlp(
         observation_spaces,
         action_spaces,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -906,7 +891,6 @@ def test_maddpg_get_action_action_masking_exception(
         observation_spaces,
         action_spaces,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
     )
@@ -938,7 +922,6 @@ def test_maddpg_get_action_action_masking(
         observation_spaces,
         action_spaces,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
     )
@@ -969,7 +952,6 @@ def test_maddpg_get_action_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
@@ -977,7 +959,6 @@ def test_maddpg_get_action_cnn(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         net_config=net_config,
         device=device,
@@ -1033,7 +1014,6 @@ def test_get_action_distributed(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         accelerator=accelerator,
         torch_compiler=compile_mode,
@@ -1097,7 +1077,6 @@ def test_maddpg_get_action_distributed_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
@@ -1105,7 +1084,6 @@ def test_maddpg_get_action_distributed_cnn(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         net_config=net_config,
         accelerator=accelerator,
@@ -1119,7 +1097,6 @@ def test_maddpg_get_action_distributed_cnn(
             kernel_size=net_config["kernel_size"],
             stride_size=net_config["stride_size"],
             hidden_size=net_config["hidden_size"],
-            normalize=net_config["normalize"],
             mlp_output_activation=net_config["mlp_output_activation"],
             n_agents=actor.n_agents,
             accelerator=accelerator,
@@ -1183,7 +1160,6 @@ def test_maddpg_get_action_agent_masking(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -1235,7 +1211,6 @@ def test_maddpg_get_action_vectorized_agent_masking(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
     )
@@ -1277,7 +1252,6 @@ def test_maddpg_learns_from_experiences_mlp(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -1355,7 +1329,6 @@ def test_maddpg_learns_from_experiences_mlp_distributed(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         accelerator=accelerator,
         torch_compiler=compile_mode,
@@ -1442,12 +1415,10 @@ def test_maddpg_learns_from_experiences_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         net_config=net_config,
         agent_ids=agent_ids,
         device=device,
@@ -1540,12 +1511,10 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         net_config=net_config,
         agent_ids=agent_ids,
         accelerator=accelerator,
@@ -1605,7 +1574,6 @@ def test_maddpg_soft_update(device, compile_mode):
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         accelerator=accelerator,
         device=device,
@@ -1653,7 +1621,6 @@ def test_maddpg_algorithm_test_loop(device, sum_score, compile_mode):
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         accelerator=accelerator,
         device=device,
@@ -1677,7 +1644,6 @@ def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compil
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
@@ -1685,7 +1651,6 @@ def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compil
     maddpg = MADDPG(
         agent_observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         net_config=net_config,
         accelerator=accelerator,
@@ -1713,7 +1678,6 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mo
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
@@ -1723,7 +1687,6 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mo
     maddpg = MADDPG(
         agent_observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         net_config=net_config,
         accelerator=accelerator,
@@ -1756,7 +1719,6 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
     # Clones the agent and returns an identical copy.
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,), low=-1, high=1)
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     index = 0
@@ -1779,7 +1741,6 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents,
         agent_ids,
         expl_noise=expl_noise,
         index=index,
@@ -1841,13 +1802,11 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
 def test_clone_new_index(compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
 
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents,
         agent_ids,
         torch_compiler=compile_mode,
     )
@@ -1860,14 +1819,12 @@ def test_clone_new_index(compile_mode):
 def test_clone_after_learning(compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
     batch_size = 8
 
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents,
         agent_ids,
         batch_size=batch_size,
         torch_compiler=compile_mode,
@@ -1955,7 +1912,6 @@ def test_save_load_checkpoint_correct_data_and_format(
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         net_config=net_config,
         torch_compiler=compile_mode,
@@ -1998,7 +1954,6 @@ def test_save_load_checkpoint_correct_data_and_format(
     loaded_maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         torch_compiler=compile_mode,
         device=device,
@@ -2075,14 +2030,12 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the maddpg agent
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         net_config=net_config_cnn,
         torch_compiler=compile_mode,
@@ -2125,7 +2078,6 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     loaded_maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         torch_compiler=compile_mode,
         device=device,
@@ -2223,7 +2175,6 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        n_agents=1,
         agent_ids=["agent_0"],
         actor_networks=evo_actors,
         critic_networks=evo_critics,
@@ -2266,7 +2217,6 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     loaded_maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         device=device,
         torch_compiler=compile_mode,
@@ -2331,7 +2281,6 @@ def test_maddpg_unwrap_models(compile_mode):
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         accelerator=accelerator,
         torch_compiler=compile_mode,
@@ -2356,7 +2305,6 @@ def test_action_scaling(compile_mode):
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(5, (4,)),
         action_spaces=generate_multi_agent_box_spaces(5, (1,), low=lows, high=highs),
-        n_agents=5,
         agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
         torch_compiler=compile_mode,
     )
@@ -2403,7 +2351,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(2, (4,)),
         action_spaces=generate_multi_agent_discrete_spaces(2, 2),
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         torch_compiler=compile_mode,
         accelerator=accelerator,
@@ -2498,15 +2445,13 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_box_spaces(2, (1,)),
-        n_agents=2,
         agent_ids=["agent_a", "agent_b"],
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         },
         torch_compiler=compile_mode,
         accelerator=accelerator,
@@ -2652,7 +2597,6 @@ def test_load_from_pretrained_networks(
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         actor_networks=[actor_network, copy.deepcopy(actor_network)],
         critic_networks=[critic_network, copy.deepcopy(critic_network)],

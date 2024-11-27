@@ -231,7 +231,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             False,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -244,7 +243,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             True,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -258,7 +256,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             False,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -271,7 +268,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-                "normalize": False,
             },
             True,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
@@ -283,7 +279,6 @@ def test_initialize_matd3_with_net_config(
     net_config, accelerator_flag, observation_spaces, device, compile_mode
 ):
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     batch_size = 64
@@ -296,7 +291,6 @@ def test_initialize_matd3_with_net_config(
         observation_spaces=observation_spaces,
         net_config=net_config,
         action_spaces=action_spaces,
-        n_agents=n_agents,
         agent_ids=agent_ids,
         accelerator=accelerator,
         device=device,
@@ -307,7 +301,7 @@ def test_initialize_matd3_with_net_config(
     assert matd3.observation_spaces == observation_spaces
     assert matd3.action_spaces == action_spaces
     assert matd3.policy_freq == policy_freq
-    assert matd3.n_agents == n_agents
+    assert matd3.n_agents == len(agent_ids)
     assert matd3.agent_ids == agent_ids
     for noise_vec in matd3.expl_noise:
         assert torch.all(noise_vec == expl_noise)
@@ -393,7 +387,6 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         net_config=net_config,
         device=device,
         torch_compiler=compile_mode,
@@ -440,7 +433,6 @@ def test_initialize_matd3_with_mlp_networks(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -460,7 +452,6 @@ def test_initialize_matd3_with_mlp_networks(
     assert matd3.arch == "mlp"
     assert matd3.observation_spaces == observation_spaces
     assert matd3.action_spaces == action_spaces
-    assert matd3.one_hot is False
     assert matd3.n_agents == 2
     assert matd3.policy_freq == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
@@ -553,7 +544,6 @@ def test_initialize_matd3_with_cnn_networks(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -574,7 +564,6 @@ def test_initialize_matd3_with_cnn_networks(
     assert matd3.observation_spaces == observation_spaces
     assert matd3.policy_freq == 2
     assert matd3.action_spaces == action_spaces
-    assert matd3.one_hot is False
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
     assert matd3.discrete_actions is True
@@ -686,7 +675,6 @@ def test_initialize_matd3_with_evo_networks(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
         agent_ids=["agent_0", "agent_1"],
-        n_agents=len(observation_spaces),
         actor_networks=evo_actors,
         critic_networks=evo_critics,
         device=device,
@@ -716,7 +704,6 @@ def test_initialize_matd3_with_evo_networks(
     assert matd3.observation_spaces == observation_spaces
     assert matd3.policy_freq == 2
     assert matd3.action_spaces == action_spaces
-    assert matd3.one_hot is False
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
     assert matd3.discrete_actions is True
@@ -774,7 +761,6 @@ def test_initialize_matd3_with_incorrect_evo_networks(
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=["agent_0", "agent_1"],
-            n_agents=len(observation_spaces),
             actor_networks=evo_actors,
             critic_networks=evo_critics,
             torch_compiler=compile_mode,
@@ -800,7 +786,6 @@ def test_matd3_init_warning(mlp_actor, observation_spaces, action_spaces, device
             observation_spaces=observation_spaces,
             action_spaces=action_spaces,
             agent_ids=["agent_0", "agent_1"],
-            n_agents=len(observation_spaces),
             actor_networks=evo_actors,
             device=device,
             torch_compiler=compile_mode,
@@ -815,7 +800,6 @@ def test_matd3_init_with_compile_no_error(mode):
         observation_spaces=generate_multi_agent_box_spaces(2, (1,)),
         action_spaces=generate_multi_agent_discrete_spaces(2, 1),
         agent_ids=["agent_0", "agent_1"],
-        n_agents=2,
         device="cuda" if torch.cuda.is_available() else "cpu",
         torch_compiler=mode,
     )
@@ -860,7 +844,6 @@ def test_matd3_init_with_compile_error(mode):
             observation_spaces=generate_multi_agent_box_spaces(2, (1,)),
             action_spaces=generate_multi_agent_discrete_spaces(2, 1),
             agent_ids=["agent_0", "agent_1"],
-            n_agents=2,
             device="cuda" if torch.cuda.is_available() else "cpu",
             torch_compiler=mode,
         )
@@ -906,7 +889,6 @@ def test_matd3_get_action_mlp(
         observation_spaces,
         action_spaces,
         net_config={"arch": "mlp", "hidden_size": [8, 8]},
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -958,7 +940,6 @@ def test_matd3_get_action_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
@@ -966,7 +947,6 @@ def test_matd3_get_action_cnn(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         net_config=net_config,
         device=device,
@@ -1021,7 +1001,6 @@ def test_matd3_get_action_distributed(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         accelerator=accelerator,
         torch_compiler=compile_mode,
@@ -1093,7 +1072,6 @@ def test_matd3_get_action_agent_masking(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -1149,7 +1127,6 @@ def test_matd3_get_action_vectorized_agent_masking(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -1187,7 +1164,6 @@ def test_matd3_get_action_action_masking_exception(
         observation_spaces,
         action_spaces,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
     )
@@ -1219,7 +1195,6 @@ def test_matd3_get_action_action_masking(
         observation_spaces,
         action_spaces,
         net_config={"arch": "mlp", "hidden_size": [64, 64]},
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
     )
@@ -1255,7 +1230,6 @@ def test_matd3_learns_from_experiences_mlp(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         device=device,
         policy_freq=policy_freq,
@@ -1351,7 +1325,6 @@ def test_matd3_learns_from_experiences_mlp_distributed(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=agent_ids,
         accelerator=accelerator,
         policy_freq=policy_freq,
@@ -1467,12 +1440,10 @@ def test_matd3_learns_from_experiences_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         net_config=net_config,
         agent_ids=agent_ids,
         device=device,
@@ -1580,13 +1551,11 @@ def test_matd3_learns_from_experiences_cnn_distributed(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     policy_freq = 2
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         net_config=net_config,
         agent_ids=agent_ids,
         accelerator=accelerator,
@@ -1678,7 +1647,6 @@ def test_matd3_soft_update(device, compile_mode):
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         accelerator=accelerator,
         device=device,
@@ -1750,7 +1718,6 @@ def test_matd3_algorithm_test_loop(device, compile_mode, sum_score):
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         accelerator=accelerator,
         device=device,
@@ -1775,7 +1742,6 @@ def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
@@ -1783,7 +1749,6 @@ def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
     matd3 = MATD3(
         agent_observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         net_config=net_config,
         accelerator=accelerator,
@@ -1810,7 +1775,6 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mod
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
@@ -1820,7 +1784,6 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mod
     matd3 = MATD3(
         agent_observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         net_config=net_config,
         accelerator=accelerator,
@@ -1851,7 +1814,6 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     # Clones the agent and returns an identical copy.
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,), low=-1, high=1)
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     index = 0
@@ -1875,7 +1837,6 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents,
         agent_ids,
         expl_noise=expl_noise,
         index=index,
@@ -1901,10 +1862,8 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     assert isinstance(clone_agent, MATD3)
     assert clone_agent.observation_spaces == matd3.observation_spaces
     assert clone_agent.action_spaces == matd3.action_spaces
-    assert clone_agent.one_hot == matd3.one_hot
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
-    print(clone_agent.max_action)
     assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
     assert np.all(np.stack(clone_agent.min_action) == np.stack(matd3.min_action))
     assert np.array_equal(clone_agent.expl_noise, matd3.expl_noise)
@@ -1955,13 +1914,11 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
 def test_clone_new_index(compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
 
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents,
         agent_ids,
         torch_compiler=compile_mode,
     )
@@ -1973,14 +1930,12 @@ def test_clone_new_index(compile_mode):
 def test_clone_after_learning(compile_mode):
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
     action_spaces = generate_multi_agent_box_spaces(2, (2,))
-    n_agents = 2
     agent_ids = ["agent_0", "agent_1"]
     batch_size = 8
 
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents,
         agent_ids,
         batch_size=batch_size,
         torch_compiler=compile_mode,
@@ -2007,7 +1962,6 @@ def test_clone_after_learning(compile_mode):
     assert isinstance(clone_agent, MATD3)
     assert clone_agent.observation_spaces == matd3.observation_spaces
     assert clone_agent.action_spaces == matd3.action_spaces
-    assert clone_agent.one_hot == matd3.one_hot
     assert clone_agent.n_agents == matd3.n_agents
     assert clone_agent.agent_ids == matd3.agent_ids
     assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
@@ -2090,7 +2044,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         net_config=net_config,
         torch_compiler=compile_mode,
@@ -2139,7 +2092,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     loaded_matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         torch_compiler=compile_mode,
         device=device,
@@ -2237,14 +2189,12 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     policy_freq = 2
     # Initialize the ddpg agent
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         net_config=net_config_cnn,
         policy_freq=policy_freq,
@@ -2294,7 +2244,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     loaded_matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         torch_compiler=compile_mode,
         device=device,
@@ -2419,7 +2368,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     matd3 = MATD3(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        n_agents=1,
         agent_ids=["agent_0"],
         actor_networks=evo_actors,
         critic_networks=evo_critics,
@@ -2468,7 +2416,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     loaded_matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
-        n_agents=1,
         agent_ids=["agent_0"],
         device=device,
         torch_compiler=compile_mode,
@@ -2553,7 +2500,6 @@ def test_matd3_unwrap_models(compile_mode):
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         accelerator=accelerator,
         torch_compiler=compile_mode,
@@ -2592,7 +2538,6 @@ def test_action_scaling(compile_mode):
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(5, (4,)),
         action_spaces=generate_multi_agent_box_spaces(5, (1,), low=lows, high=highs),
-        n_agents=5,
         agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
         torch_compiler=compile_mode,
     )
@@ -2653,7 +2598,6 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(2, (4,)),
         action_spaces=generate_multi_agent_discrete_spaces(2, 2),
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         torch_compiler=compile_mode,
         accelerator=accelerator,
@@ -2670,7 +2614,6 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_matd3.observation_spaces == matd3.observation_spaces
     assert new_matd3.action_spaces == matd3.action_spaces
-    assert new_matd3.one_hot == matd3.one_hot
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
     assert new_matd3.min_action == matd3.min_action
@@ -2763,15 +2706,13 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_box_spaces(2, (1,)),
-        n_agents=2,
         agent_ids=["agent_a", "agent_b"],
         net_config={
             "arch": "cnn",
             "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         },
         torch_compiler=compile_mode,
         accelerator=accelerator,
@@ -2788,7 +2729,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_matd3.observation_spaces == matd3.observation_spaces
     assert new_matd3.action_spaces == matd3.action_spaces
-    assert new_matd3.one_hot == matd3.one_hot
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
     assert new_matd3.min_action == matd3.min_action
@@ -2933,7 +2873,6 @@ def test_load_from_pretrained_networks(
     matd3 = MATD3(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
-        n_agents=2,
         agent_ids=["agent_0", "agent_1"],
         actor_networks=[actor_network, copy.deepcopy(actor_network)],
         critic_networks=[
@@ -2953,7 +2892,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_matd3.observation_spaces == matd3.observation_spaces
     assert new_matd3.action_spaces == matd3.action_spaces
-    assert new_matd3.one_hot == matd3.one_hot
     assert new_matd3.n_agents == matd3.n_agents
     assert new_matd3.agent_ids == matd3.agent_ids
     assert new_matd3.min_action == matd3.min_action

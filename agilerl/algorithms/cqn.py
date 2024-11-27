@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import copy
 import inspect
 import random
@@ -16,7 +16,7 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.typing import NumpyObsType, TorchObsType
+from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
 
 class CQN(RLAlgorithm):
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
@@ -65,6 +65,7 @@ class CQN(RLAlgorithm):
         gamma: float = 0.99,
         tau: float = 1e-3,
         double: bool = False,
+        normalize_images: bool = True,
         mut: Optional[str] = None,
         actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
@@ -79,6 +80,7 @@ class CQN(RLAlgorithm):
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
+            normalize_images=normalize_images,
             name="CQN"
             )
 
@@ -155,12 +157,7 @@ class CQN(RLAlgorithm):
                     assert (
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
+
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
@@ -168,7 +165,6 @@ class CQN(RLAlgorithm):
                     kernel_size=self.net_config["kernel_size"],
                     stride_size=self.net_config["stride_size"],
                     hidden_size=self.net_config["hidden_size"],
-                    normalize=self.net_config["normalize"],
                     device=self.device,
                     accelerator=self.accelerator,
                 )
@@ -189,12 +185,6 @@ class CQN(RLAlgorithm):
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
 
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
                 assert (
                     "latent_dim" in self.net_config.keys()
                 ), "Net config must contain latent_dim: int."
@@ -249,19 +239,7 @@ class CQN(RLAlgorithm):
         :return: Action to take in the environment
         :rtype: numpy.ndarray[int]
         """
-        state = self.obs_to_tensor(state)
-
-        if self.one_hot:
-            state = (
-                nn.functional.one_hot(state.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-
-        if (self.arch == "mlp" and len(state.size()) < 2) or (
-            self.arch == "cnn" and len(state.size()) < 4
-        ):
-            state = state.unsqueeze(0)
+        state = self.preprocess_observation(state)
 
         # epsilon-greedy
         if random.random() < epsilon:
@@ -291,11 +269,14 @@ class CQN(RLAlgorithm):
 
         return action
 
-    def learn(self, experiences):
+    def learn(self, experiences: Tuple[torch.Tensor, ...]) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
         :type state: list[torch.Tensor[float]]
+
+        :return: Loss from learning
+        :rtype: float
         """
         states, actions, rewards, next_states, dones = experiences
         if self.accelerator is not None:
@@ -305,17 +286,8 @@ class CQN(RLAlgorithm):
             next_states = next_states.to(self.accelerator.device)
             dones = dones.to(self.accelerator.device)
 
-        if self.one_hot:
-            states = (
-                nn.functional.one_hot(states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
-            next_states = (
-                nn.functional.one_hot(next_states.long(), num_classes=self.state_dim[0])
-                .float()
-                .squeeze()
-            )
+        states = self.preprocess_observation(states)
+        next_states = self.preprocess_observation(next_states)
 
         if self.double:  # Double Q-learning
             q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
@@ -339,6 +311,7 @@ class CQN(RLAlgorithm):
             self.accelerator.backward(q1_loss)
         else:
             q1_loss.backward()
+
         clip_grad_norm_(self.actor.parameters(), 1)
         self.optimizer.step()
 
@@ -347,7 +320,7 @@ class CQN(RLAlgorithm):
 
         return q1_loss.item()
 
-    def soft_update(self):
+    def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
             self.actor.parameters(), self.actor_target.parameters()
@@ -356,7 +329,7 @@ class CQN(RLAlgorithm):
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(self, env, swap_channels: bool = False, max_steps: Optional[int] = None, loop: int=3):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -396,11 +369,13 @@ class CQN(RLAlgorithm):
         self.fitness.append(mean_fit)
         return mean_fit
 
-    def clone(self, index=None, wrap=True):
+    def clone(self, index: Optional[int] = None, wrap: bool = True) -> "CQN":
         """Returns cloned agent identical to self.
 
         :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
         :type index: int, optional
+        :param wrap: Wrap models for distributed training upon creation, defaults to True
+        :type wrap: bool, optional
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap

@@ -89,6 +89,7 @@ class PPO(RLAlgorithm):
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         target_kl: Optional[float] = None,
+        normalize_images: bool = True,
         update_epochs: int = 4,
         actor_network: Optional[nn.Module] = None,
         critic_network: Optional[nn.Module] = None,
@@ -104,6 +105,7 @@ class PPO(RLAlgorithm):
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
+            normalize_images=normalize_images,
             name="PPO"
             )
 
@@ -269,12 +271,7 @@ class PPO(RLAlgorithm):
                     assert (
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
+
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
@@ -306,12 +303,6 @@ class PPO(RLAlgorithm):
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
 
-                assert (
-                    "normalize" in self.net_config.keys()
-                ), "Net config must contain normalize: True or False."
-                assert isinstance(
-                    self.net_config["normalize"], bool
-                ), "Net config normalize must be boolean value True or False."
                 assert (
                     "latent_dim" in self.net_config.keys()
                 ), "Net config must contain latent_dim: int."
@@ -412,7 +403,7 @@ class PPO(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        state = self.prepare_state(state)
+        state = self.preprocess_observation(state)
 
         if not grad:
             self.actor.eval()
@@ -490,7 +481,7 @@ class PPO(RLAlgorithm):
         # Bootstrapping
         with torch.no_grad():
             num_steps = rewards.size(0)
-            next_state = self.prepare_state(next_state)
+            next_state = self.preprocess_observation(next_state)
             next_value = self.critic(next_state).reshape(1, -1).cpu()
             advantages = torch.zeros_like(rewards).float()
             for t in range(num_steps):
@@ -512,10 +503,7 @@ class PPO(RLAlgorithm):
                 advantages[t] = a_t
             returns = advantages + values
 
-        if self.one_hot:
-            states = states.reshape(-1)
-        else:
-            states = states.reshape((-1,) + self.state_dim)
+        states = self.preprocess_observation(states)
 
         if self.discrete_actions:
             actions = actions.reshape(-1)

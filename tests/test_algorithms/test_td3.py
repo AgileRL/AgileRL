@@ -135,7 +135,6 @@ def test_initialize_td3_with_minimum_parameters():
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert td3.one_hot == False
     assert np.all(td3.max_action == 1)
     assert td3.net_config == {
         "arch": "mlp",
@@ -181,7 +180,6 @@ def test_initialize_td3_with_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     batch_size = 64
     lr_actor = 1e-4
@@ -213,7 +211,6 @@ def test_initialize_td3_with_cnn_accelerator():
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert td3.one_hot == False
     assert np.all(td3.max_action == max_action)
     assert td3.net_config == net_config_cnn
     assert td3.batch_size == batch_size
@@ -285,7 +282,6 @@ def test_initialize_td3_with_actor_network(
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert td3.one_hot == False
     assert np.all(td3.max_action == max_action)
     assert td3.net_config is None
     assert td3.batch_size == 64
@@ -351,7 +347,6 @@ def test_initialize_td3_with_actor_network_no_critics(
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert td3.one_hot == False
     assert np.all(td3.max_action == max_action)
     assert td3.net_config is not None
     assert td3.batch_size == 64
@@ -412,7 +407,6 @@ def test_initialize_td3_with_actor_network_cnn(
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert td3.one_hot == False
     assert np.all(td3.max_action == max_action)
     assert td3.net_config is None
     assert td3.batch_size == 64
@@ -500,7 +494,6 @@ def test_learns_from_experiences(min_action, max_action):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Create an instance of the td3 class
@@ -728,7 +721,6 @@ def test_algorithm_test_loop_images():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = TD3(
@@ -753,7 +745,6 @@ def test_algorithm_test_loop_images_unvectorized():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = TD3(
@@ -779,7 +770,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert clone_agent.one_hot == td3.one_hot
     assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.net_config == td3.net_config
     assert clone_agent.actor_network == td3.actor_network
@@ -826,7 +816,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert clone_agent.one_hot == td3.one_hot
     assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.net_config == td3.net_config
     assert clone_agent.actor_network == td3.actor_network
@@ -873,7 +862,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert clone_agent.one_hot == td3.one_hot
     assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.net_config == td3.net_config
     assert clone_agent.actor_network == td3.actor_network
@@ -941,7 +929,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert clone_agent.one_hot == td3.one_hot
     assert clone_agent.net_config == td3.net_config
     assert clone_agent.actor_network == td3.actor_network
     assert clone_agent.critic_networks == td3.critic_networks
@@ -1084,7 +1071,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the td3 agent
@@ -1329,7 +1315,6 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
 
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
-    assert td3.one_hot == False
     assert np.all(td3.max_action == max_action)
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
@@ -1478,7 +1463,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_td3.observation_space == td3.observation_space
     assert new_td3.action_space == td3.action_space
-    assert new_td3.one_hot == td3.one_hot
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
     assert new_td3.net_config == td3.net_config
@@ -1537,7 +1521,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
-            "normalize": False,
         },
     )
 
@@ -1551,7 +1534,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_td3.observation_space == td3.observation_space
     assert new_td3.action_space == td3.action_space
-    assert new_td3.one_hot == td3.one_hot
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
     assert new_td3.net_config == td3.net_config
@@ -1624,7 +1606,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_td3.observation_space == td3.observation_space
     assert new_td3.action_space == td3.action_space
-    assert new_td3.one_hot == td3.one_hot
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
     assert new_td3.net_config == td3.net_config

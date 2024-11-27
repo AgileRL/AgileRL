@@ -175,7 +175,6 @@ def test_initialize_ddpg_with_cnn_accelerator():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
     batch_size = 64
     lr_actor = 1e-4
@@ -467,7 +466,6 @@ def test_learns_from_experiences():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Create an instance of the ddpg class
@@ -671,7 +669,6 @@ def test_algorithm_test_loop_images():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = DDPG(
@@ -696,7 +693,6 @@ def test_algorithm_test_loop_images_unvectorized():
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     agent = DDPG(
@@ -722,7 +718,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
@@ -760,7 +755,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
@@ -797,7 +791,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
@@ -859,7 +852,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.one_hot == ddpg.one_hot
     assert clone_agent.net_config == ddpg.net_config
     assert clone_agent.actor_network == ddpg.actor_network
     assert clone_agent.critic_network == ddpg.critic_network
@@ -976,7 +968,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "normalize": False,
     }
 
     # Initialize the ddpg agent
@@ -1243,7 +1234,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_ddpg.observation_space == ddpg.observation_space
     assert new_ddpg.action_space == ddpg.action_space
-    assert new_ddpg.one_hot == ddpg.one_hot
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
     assert new_ddpg.net_config == ddpg.net_config
@@ -1291,8 +1281,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
             "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
-            "stride_size": [1],
-            "normalize": False,
+            "stride_size": [1]
         },
     )
 
@@ -1306,7 +1295,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_ddpg.observation_space == ddpg.observation_space
     assert new_ddpg.action_space == ddpg.action_space
-    assert new_ddpg.one_hot == ddpg.one_hot
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
     assert new_ddpg.net_config == ddpg.net_config
@@ -1369,7 +1357,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_ddpg.observation_space == ddpg.observation_space
     assert new_ddpg.action_space == ddpg.action_space
-    assert new_ddpg.one_hot == ddpg.one_hot
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
     assert new_ddpg.net_config == ddpg.net_config

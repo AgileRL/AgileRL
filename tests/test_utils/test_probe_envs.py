@@ -332,7 +332,6 @@ def test_policy_q_learning_with_probe_env_cnn():
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
-            "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
         "policy_freq": 2,
         "lr_actor": 0.1,
@@ -374,7 +373,6 @@ def test_policy_on_policy_with_probe_env_cnn():
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
-            "normalize": False,  # Normalize image from range [0,255] to [0,1]
         },
         "lr": 0.01,
     }

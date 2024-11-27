@@ -14,6 +14,8 @@ NetConfigType = Dict[str, Any]
 
 NumpyObsType = Union[ArrayLike, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple]
+ObservationType = Union[NumpyObsType, TorchObsType]
+InfosDict = Dict[str, Dict[str, Any]]
 
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 NetworkType = Union[Module, List[Module], Tuple[Module, ...]]
