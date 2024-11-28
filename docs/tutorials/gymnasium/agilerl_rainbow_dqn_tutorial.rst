@@ -248,7 +248,7 @@ function and is an example of how we might choose to train an AgileRL agent.
         steps = 0
         for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
             if INIT_HP["CHANNELS_LAST"]:
-                state = np.moveaxis(state, [-1], [-3])
+                state = obs_channels_to_first(state)
 
             # Get next action from agent
             action = rainbow_dqn.get_action(state)
@@ -269,7 +269,7 @@ function and is an example of how we might choose to train an AgileRL agent.
                     state,
                     action,
                     reward,
-                    np.moveaxis(next_state, [-1], [-3]),
+                    obs_channels_to_first(next_state),
                     done,
                 )
             else:
@@ -375,7 +375,7 @@ Test loop for inference
             for step in range(max_testing_steps):
                 # If your state is an RGB image
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 # Get next action from agent
                 action, *_ = rainbow_dqn.get_action(state, training=False)

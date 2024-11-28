@@ -329,7 +329,7 @@ Alternatively, use a custom training loop. Combining all of the above:
 
             for idx_step in range(evo_steps // num_envs):
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 action = agent.get_action(state, epsilon)  # Get next action from agent
                 epsilon = max(
@@ -355,7 +355,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                         state,
                         action,
                         reward,
-                        np.moveaxis(next_state, [-1], [-3]),
+                        obs_channels_to_first(next_state),
                         terminated,
                         is_vectorised=True,
                     )

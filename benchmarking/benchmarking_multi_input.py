@@ -4,7 +4,6 @@ import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import Box, Dict
 
-from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.multi_input import EvolvableMultiInput
@@ -20,6 +19,11 @@ from agilerl.utils.utils import (
 
 # import sys
 # sys.path.append('../')
+
+import sys
+sys.path.append('../racecar_gym')
+
+import racecar_gym
 
 class FlattenActionWrapper(gym.Wrapper):
     def __init__(self, env):
@@ -65,11 +69,11 @@ class FlattenActionWrapper(gym.Wrapper):
 
 def make_vect_envs(env_name, num_envs):
     return gym.vector.AsyncVectorEnv(
-        [lambda: FlattenActionWrapper(gym.make(env_name)) for i in range(num_envs)]
+        [lambda: FlattenActionWrapper(gym.make(env_name, render_mode="rgb_array_birds_eye")) for i in range(num_envs)]
     )
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 

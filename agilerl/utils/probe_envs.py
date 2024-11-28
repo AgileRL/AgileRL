@@ -551,7 +551,7 @@ class PolicyContActionsImageEnv(gym.Env):
 
 
 def check_q_learning_with_probe_env(
-    env, algo_class, algo_args, memory, learn_steps=1000, device="cpu"
+    env, algo_class, algo_args, memory, learn_steps=10000, device="cpu"
 ):
     print(f"Probe environment: {type(env).__name__}")
 
@@ -574,18 +574,18 @@ def check_q_learning_with_probe_env(
 
     for sample_obs, q_values in zip(env.sample_obs, env.q_values):
         predicted_q_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
-        assert np.allclose(q_values, predicted_q_values, atol=0.1)
+        assert np.allclose(q_values, predicted_q_values, atol=0.1), f"{q_values} != {predicted_q_values}"
 
 
 def check_policy_q_learning_with_probe_env(
-    env, algo_class, algo_args, memory, learn_steps=1000, device="cpu"
+    env, algo_class, algo_args, memory, learn_steps=10000, device="cpu"
 ):
     print(f"Probe environment: {type(env).__name__}")
 
     agent = algo_class(**algo_args, device=device)
 
     state, _ = env.reset()
-    for _ in range(5000):
+    for _ in range(1000):
         action = (
             (agent.max_action - agent.min_action)
             * np.random.rand(1, agent.action_dim).astype("float32")
@@ -615,13 +615,13 @@ def check_policy_q_learning_with_probe_env(
             predicted_q_values = agent.critic(state, action).detach().cpu().numpy()[0]
         # print("---")
         # print("q", q_values, predicted_q_values)
-        assert np.allclose(q_values, predicted_q_values, atol=0.1)
+        assert np.allclose(q_values, predicted_q_values, atol=0.1), f"{q_values} != {predicted_q_values}"
 
         if policy_values is not None:
             predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
 
             # print("pol", policy_values, predicted_policy_values)
-            assert np.allclose(policy_values, predicted_policy_values, atol=0.1)
+            assert np.allclose(policy_values, predicted_policy_values, atol=0.1), f"{policy_values} != {predicted_policy_values}"
 
 
 def check_policy_on_policy_with_probe_env(

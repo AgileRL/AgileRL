@@ -61,7 +61,7 @@ Example
   while True:
       for step in range(agent.learn_step):
           if channels_last:
-              state = np.moveaxis(state, [-1], [-3])
+              state = obs_channels_to_first(state)
           # Get next action from agent
           action, log_prob, _, value = agent.get_action(state)
           next_state, reward, done, trunc, _ = env.step(action)  # Act in environment

@@ -11,6 +11,7 @@ from tqdm import trange
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     tournament_selection_and_mutation,
     save_population_checkpoint,
@@ -214,7 +215,7 @@ def train_on_policy(
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
 
                     # Get next action from agent
                     action_mask = info.get("action_mask", None)
@@ -226,6 +227,7 @@ def train_on_policy(
                         action = action[0]
                         log_prob = log_prob[0]
                         value = value[0]
+                    
                     next_state, reward, done, trunc, info = env.step(
                         action
                     )  # Act in environment
@@ -258,7 +260,7 @@ def train_on_policy(
                 pbar.update(learn_steps // len(pop))
 
                 if swap_channels:
-                    next_state = np.moveaxis(next_state, [-1], [-3])
+                    next_state = obs_channels_to_first(next_state)
 
                 experiences = (
                     states,

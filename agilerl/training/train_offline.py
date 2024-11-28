@@ -16,6 +16,7 @@ from agilerl.utils.minari_utils import minari_to_agile_buffer
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     tournament_selection_and_mutation,
     save_population_checkpoint,
@@ -175,8 +176,8 @@ def train_offline(
         #     state = dataset['observations'][i]
         #     next_state = dataset['next_observations'][i]
         #     if swap_channels:
-        #         state = np.moveaxis(state, [-1], [-3])
-        #         next_state = np.moveaxis(next_state, [-1], [-3])
+        #         state = obs_channels_to_first(state)
+        #         next_state = obs_channels_to_first(next_state)
         #     action = dataset['actions'][i]
         #     reward = dataset['rewards'][i]
         #     done = bool(dataset['terminals'][i])
@@ -185,8 +186,8 @@ def train_offline(
             state = dataset["observations"][i]
             next_state = dataset["observations"][i + 1]
             if swap_channels:
-                state = np.moveaxis(state, [-1], [-3])
-                next_state = np.moveaxis(next_state, [-1], [-3])
+                state = obs_channels_to_first(state)
+                next_state = obs_channels_to_first(next_state)
             action = dataset["actions"][i]
             reward = dataset["rewards"][i]
             done = bool(dataset["terminals"][i])

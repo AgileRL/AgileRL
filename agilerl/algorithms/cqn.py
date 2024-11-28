@@ -14,7 +14,7 @@ from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.algorithms.base import RLAlgorithm
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
+from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
 
@@ -352,7 +352,8 @@ class CQN(RLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
+
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(state, epsilon=0, action_mask=action_mask)
                     state, reward, done, trunc, info = env.step(action)

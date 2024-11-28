@@ -314,7 +314,7 @@ Alternatively, use a custom bandit training loop:
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
                 if INIT_HP["CHANNELS_LAST"]:
-                    context = np.moveaxis(context, [-1], [-3])
+                    context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment

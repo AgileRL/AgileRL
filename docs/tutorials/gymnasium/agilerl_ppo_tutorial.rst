@@ -289,7 +289,7 @@ function and is an example of how we might choose to make use of a population of
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
                     if INIT_HP["CHANNELS_LAST"]:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
 
                     # Get next action from agent
                     action, log_prob, _, value = agent.get_action(state)
@@ -320,7 +320,7 @@ function and is an example of how we might choose to make use of a population of
                 pbar.update(learn_steps // len(pop))
 
                 if INIT_HP["CHANNELS_LAST"]:
-                    next_state = np.moveaxis(next_state, [-1], [-3])
+                    next_state = obs_channels_to_first(next_state)
 
                 experiences = (
                     states,
@@ -408,7 +408,7 @@ Test loop for inference
             for step in range(max_testing_steps):
                 # If your state is an RGB image
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 # Get next action from agent
                 action, *_ = ppo.get_action(state)

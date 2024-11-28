@@ -306,7 +306,7 @@ Alternatively, use a custom on-policy training loop:
 
                 for idx_step in range(-(agent.learn_step // -num_envs)):
                     if INIT_HP["CHANNELS_LAST"]:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
 
                     # Get next action from agent
                     action, log_prob, _, value = agent.get_action(state)
@@ -337,7 +337,7 @@ Alternatively, use a custom on-policy training loop:
                 pbar.update(learn_steps // len(pop))
 
                 if INIT_HP["CHANNELS_LAST"]:
-                    next_state = np.moveaxis(next_state, [-1], [-3])
+                    next_state = obs_channels_to_first(next_state)
 
                 experiences = (
                     states,

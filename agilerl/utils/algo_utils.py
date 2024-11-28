@@ -116,6 +116,25 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
         ]
     )
 
+def obs_channels_to_first(observation: Union[np.ndarray, Dict[str, np.ndarray]]) ->  Union[np.ndarray, Dict[str, np.ndarray]]:
+    """Converts observation space from channels last to channels first format.
+
+    :param observation_space: Observation space
+    :type observation_space: Union[spaces.Box, spaces.Dict]
+    :return: Observation space with channels first format
+    :rtype: Union[spaces.Box, spaces.Dict]
+    """
+    if isinstance(observation, np.ndarray):
+        if observation.ndim == 3 or observation.ndim == 4:
+            return np.moveaxis(observation, -1, -3)
+        else:
+            return observation
+
+    elif isinstance(observation, dict):
+        return {key: obs_channels_to_first(obs) for key, obs in observation.items()}
+    else:
+        raise TypeError(f"Expected np.ndarray or dict, got {type(observation)}")
+
 def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchObsType:
     """
     Moves the observation to the given device.
@@ -206,9 +225,8 @@ def preprocess_observation(
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
-            observation /= 255.0
+            observation = observation.float() / 255.0
 
-        observation = observation.float()
         space_shape = observation_space.shape
     
     elif isinstance(observation_space, spaces.Discrete):

@@ -62,13 +62,13 @@ Example
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
       if channels_last:
-          state = np.moveaxis(state, [-1], [-3])
+          state = obs_channels_to_first(state)
       action = agent.get_action(state, training=True)    # Get next action from agent
       next_state, reward, done, _, _ = env.step(action)   # Act in environment
 
       # Save experience to replay buffer
       if channels_last:
-          memory.save_to_memory_vect_envs(state, action, reward, np.moveaxis(next_state, [-1], [-3]), done)
+          memory.save_to_memory_vect_envs(state, action, reward, obs_channels_to_first(next_state), done)
       else:
           memory.save_to_memory_vect_envs(state, action, reward, next_state, done)
 

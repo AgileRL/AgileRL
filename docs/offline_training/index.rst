@@ -111,8 +111,8 @@ We must fill the replay buffer with our offline data so that we can sample and l
         state = dataset["observations"][i]
         next_state = dataset["observations"][i + 1]
         if INIT_HP["CHANNELS_LAST"]:
-            state = np.moveaxis(state, [-1], [-3])
-            next_state = np.moveaxis(next_state, [-1], [-3])
+            state = obs_channels_to_first(state)
+            next_state = obs_channels_to_first(next_state)
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])
@@ -292,8 +292,8 @@ Alternatively, use a custom training loop. Combining all of the above:
         state = dataset["observations"][i]
         next_state = dataset["observations"][i + 1]
         if INIT_HP["CHANNELS_LAST"]:
-            state = np.moveaxis(state, [-1], [-3])
-            next_state = np.moveaxis(next_state, [-1], [-3])
+            state = obs_channels_to_first(state)
+            next_state = obs_channels_to_first(next_state)
         action = dataset["actions"][i]
         reward = dataset["rewards"][i]
         done = bool(dataset["terminals"][i])

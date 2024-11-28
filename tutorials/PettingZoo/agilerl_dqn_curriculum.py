@@ -489,7 +489,7 @@ def transform_and_flip(observation, player):
     """
     state = observation["observation"]
     # Pre-process dimensions for PyTorch (N, C, H, W)
-    state = np.moveaxis(state, [-1], [-3])
+    state = obs_channels_to_first(state)
     if player == 1:
         # Swap pieces so that the agent always sees the board from the same perspective
         state[[0, 1], :, :] = state[[1, 0], :, :]

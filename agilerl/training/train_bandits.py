@@ -16,6 +16,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     tournament_selection_and_mutation,
     save_population_checkpoint,
@@ -205,7 +206,7 @@ def train_bandits(
             context = env.reset()  # Reset environment at start of episode
             for idx_step in range(episode_steps):
                 if swap_channels:
-                    context = np.moveaxis(context, [-1], [-3])
+                    context = obs_channels_to_first(context)
                 # Get next action from agent
                 action = agent.get_action(context)
                 next_context, reward = env.step(action)  # Act in environment

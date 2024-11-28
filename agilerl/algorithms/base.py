@@ -2,6 +2,7 @@ from typing import Optional, Union, Tuple, Iterable, TypeGuard, Any, Dict, List,
 import inspect
 import copy
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from gymnasium import spaces
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
@@ -14,7 +15,7 @@ import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 import dill
 
-from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
+from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, ArrayOrTensor
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
     compile_model,
@@ -29,6 +30,7 @@ EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
 GymSpaceType = Union[spaces.Space, Iterable[spaces.Space]]
+MaybeObsList = Union[List[NumpyObsType], NumpyObsType]
     
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
@@ -425,6 +427,89 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             device=self.device if self.accelerator is None else self.accelerator.device,
             normalize_images=self.normalize_images
         )
+    
+    def stack_experiences(self, *experiences: MaybeObsList, to_torch: bool = True) -> Tuple[ArrayOrTensor, ...]:
+        """Stacks experiences into a single array or tensor.
+
+        :param experiences: Experiences to stack
+        :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
+        :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
+        :type to_torch: bool, optional
+
+        :return: Stacked experiences
+        :rtype: Tuple[ArrayOrTensor, ...]
+        """
+        stacked_experiences = []
+        for exp in experiences:
+            # Some cases where an experience just involves e.g. a single "next_state"
+            if not isinstance(exp, list):
+                stacked_experiences.append(exp)
+            elif isinstance(exp[0], dict):
+                stacked_exp = defaultdict(list)
+                for it in exp:
+                    for key, value in it.items():
+                        stacked_exp[key].append(value)
+
+                stacked_exp = {key: np.array(value) for key, value in stacked_exp.items()}
+                if to_torch:
+                    stacked_exp = {key: torch.from_numpy(value) for key, value in stacked_exp.items()}
+                
+                stacked_experiences.append(stacked_exp)
+            elif isinstance(exp[0], np.ndarray):
+                stacked_exp = np.array(exp)
+                if to_torch:
+                    stacked_exp = torch.from_numpy(stacked_exp)
+                
+                stacked_experiences.append(stacked_exp)
+            else:
+                raise TypeError(f"Unsupported experience type: {type(exp)}")
+
+        return tuple(stacked_experiences)
+    
+    def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+        """Moves experiences to the device.
+
+        :param experiences: Experiences to move to device
+        :type experiences: Tuple[torch.Tensor[float], ...]
+
+        :return: Experiences on the device
+        :rtype: Tuple[torch.Tensor[float], ...]
+        """
+        device = self.device if self.accelerator is None else self.accelerator.device
+        for exp in experiences:
+            if isinstance(exp, dict):
+                for key, value in exp.items():
+                    exp[key] = value.to(device)
+            elif isinstance(exp, torch.Tensor):
+                exp = exp.to(device)
+            else:
+                raise TypeError(f"Unsupported experience type: {type(exp)}")
+        
+        return experiences
+    
+    def get_samples(self, minibatch_indices: np.ndarray, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+        """Samples experiences given minibatch indices.
+
+        :param minibatch_indices: Minibatch indices
+        :type minibatch_indices: numpy.ndarray[int]
+        :param experiences: Experiences to sample from
+        :type experiences: Tuple[torch.Tensor[float], ...]
+
+        :return: Sampled experiences
+        :rtype: Tuple[torch.Tensor[float], ...]
+        """
+        sampled_experiences = []
+        for exp in experiences:
+            if isinstance(exp, dict):
+                sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
+            elif isinstance(exp, torch.Tensor):
+                sampled_exp = exp[minibatch_indices]
+            else:
+                raise TypeError(f"Unsupported experience type: {type(exp)}")
+            
+            sampled_experiences.append(sampled_exp)
+        
+        return tuple(sampled_experiences)
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.

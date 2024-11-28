@@ -105,8 +105,6 @@ class EvolvableMultiInput(EvolvableModule):
         is a single value, otherwise it is a vector of probabilities over the passed action space.
         Default is False.
     :type critic: bool, optional
-    :param normalize: Whether to normalize the input. Default is True.
-    :type normalize: bool, optional
     :param init_layers: Whether to initialize the layers. Default is True.
     :type init_layers: bool, optional
     :param output_vanish: Whether the output of the network vanishes. Default is False.
@@ -149,7 +147,6 @@ class EvolvableMultiInput(EvolvableModule):
             rainbow: bool = False,
             noise_std: float = 0.5,
             critic: bool = False,
-            normalize: bool = True,
             init_layers: bool = True,
             output_vanish: bool = False,
             device: str = "cpu",
@@ -188,7 +185,6 @@ class EvolvableMultiInput(EvolvableModule):
         self.support = support
         self.rainbow = rainbow
         self.critic = critic
-        self.normalize = normalize
         self.init_layers = init_layers
         self.device = device if accelerator is None else accelerator.device
         self.accelerator = accelerator
@@ -205,7 +201,6 @@ class EvolvableMultiInput(EvolvableModule):
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
-            "normalize": self.normalize,
             "cnn_activation": self.cnn_activation,
             "hidden_size": self.hidden_size,
             "mlp_activation": self.mlp_activation,
@@ -265,7 +260,6 @@ class EvolvableMultiInput(EvolvableModule):
             "support": self.support,
             "rainbow": self.rainbow,
             "critic": self.critic,
-            "normalize": self.normalize,
             "init_layers": self.init_layers,
             "output_vanish": self.output_vanish,
             "device": self.device,
@@ -302,7 +296,6 @@ class EvolvableMultiInput(EvolvableModule):
             "layer_norm": self.layer_norm,
             "support": self.support,
             "noise_std": self.noise_std,
-            "normalize": self.normalize,
             "init_layers": self.init_layers,
             "output_vanish": self.output_vanish,
             "device": self.device,

@@ -4,7 +4,7 @@ INIT_HP:
     ENV_NAME: SingleAgentCircle_agile-v0  # Gym environment name
     ALGO: PPO                  # Algorithm
     # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-    CHANNELS_LAST: false
+    CHANNELS_LAST: true
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
@@ -47,8 +47,12 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    arch: mlp
+    arch: composed
+    channel_size: [16, 16]
+    kernel_size: [3, 3]
+    stride_size: [1, 1]
     hidden_size: [64, 64]
+    latent_dim: 16
     mlp_activation: Tanh
     min_hidden_layers: 1
     max_hidden_layers: 3

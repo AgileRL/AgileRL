@@ -67,8 +67,8 @@ Example
       state = dataset['observations'][i]
       next_state = dataset['observations'][i+1]
       if channels_last:
-          state = np.moveaxis(state, [-1], [-3])
-          next_state = np.moveaxis(next_state, [-1], [-3])
+          state = obs_channels_to_first(state)
+          next_state = obs_channels_to_first(next_state)
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])

@@ -9,11 +9,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
+import gymnasium as gym
 
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
+from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 class DDPG(RLAlgorithm):
@@ -506,7 +507,7 @@ class DDPG(RLAlgorithm):
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(self, env: gym.Env, swap_channels: bool = False, max_steps: Optional[int] = None, loop: int = 3) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -529,7 +530,7 @@ class DDPG(RLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
                     action = self.get_action(state, training=False)
                     state, reward, done, trunc, _ = env.step(action)
                     step += 1

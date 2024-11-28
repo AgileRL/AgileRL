@@ -9,11 +9,12 @@ import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
+import gymnasium as gym
 
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
+from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.algorithms.base import RLAlgorithm
 
@@ -472,13 +473,11 @@ class PPO(RLAlgorithm):
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        experiences = [torch.from_numpy(np.array(exp)) for exp in experiences]
-        states, actions, log_probs, rewards, dones, values, next_state = experiences
-        if self.accelerator is not None:
-            next_state = next_state.to(self.accelerator.device)
-        dones = dones.long()
+        
+        states, actions, log_probs, rewards, dones, values, next_state = self.stack_experiences(*experiences)
 
         # Bootstrapping
+        dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
             next_state = self.preprocess_observation(next_state)
@@ -503,6 +502,7 @@ class PPO(RLAlgorithm):
                 advantages[t] = a_t
             returns = advantages + values
 
+        # Preprocess the observations
         states = self.preprocess_observation(states)
 
         if self.discrete_actions:
@@ -515,40 +515,35 @@ class PPO(RLAlgorithm):
         returns = returns.reshape(-1)
         values = values.reshape(-1)
 
-        if self.accelerator is None:
-            states, actions, log_probs, advantages, returns, values = (
-                states.to(self.device),
-                actions.to(self.device),
-                log_probs.to(self.device),
-                advantages.to(self.device),
-                returns.to(self.device),
-                values.to(self.device),
-            )
-        else:
-            states = states.to(self.accelerator.device)
-            actions = actions.to(self.accelerator.device)
-            log_probs = log_probs.to(self.accelerator.device)
-            advantages = advantages.to(self.accelerator.device)
-            returns = returns.to(self.accelerator.device)
-            values = values.to(self.accelerator.device)
+        experiences = (states, actions, log_probs, advantages, returns, values)
+        experiences = self.to_device(*experiences)
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
         clipfracs = []
 
         mean_loss = 0
-        for epoch in range(self.update_epochs):
+        for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
+                (
+                    batch_states, 
+                    batch_actions, 
+                    batch_log_probs, 
+                    batch_advantages, 
+                    batch_returns, 
+                    batch_values
+                 ) = self.get_samples(minibatch_idxs, *experiences)
+
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(
-                        state=states[minibatch_idxs],
-                        action=actions[minibatch_idxs],
+                        state=batch_states,
+                        action=batch_actions,
                         grad=True,
                     )
 
-                    logratio = log_prob - log_probs[minibatch_idxs]
+                    logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
 
                     with torch.no_grad():
@@ -557,7 +552,7 @@ class PPO(RLAlgorithm):
                             ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
                         ]
 
-                    minibatch_advs = advantages[minibatch_idxs]
+                    minibatch_advs = batch_advantages
                     minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
                         minibatch_advs.std() + 1e-8
                     )
@@ -571,11 +566,11 @@ class PPO(RLAlgorithm):
 
                     # Value loss
                     value = value.view(-1)
-                    v_loss_unclipped = (value - returns[minibatch_idxs]) ** 2
-                    v_clipped = values[minibatch_idxs] + torch.clamp(
-                        value - values[minibatch_idxs], -self.clip_coef, self.clip_coef
+                    v_loss_unclipped = (value - batch_returns) ** 2
+                    v_clipped = batch_values + torch.clamp(
+                        value - batch_values, -self.clip_coef, self.clip_coef
                     )
-                    v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
+                    v_loss_clipped = (v_clipped - batch_returns) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                     entropy_loss = entropy.mean()
@@ -601,7 +596,13 @@ class PPO(RLAlgorithm):
         mean_loss /= num_samples * self.update_epochs
         return mean_loss
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(
+        self,
+        env: gym.Env,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -624,7 +625,8 @@ class PPO(RLAlgorithm):
                 step = 0
                 while not np.all(finished):
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
+
                     action_mask = info.get("action_mask", None)
                     action, _, _, _ = self.get_action(state, action_mask=action_mask)
                     state, reward, done, trunc, info = env.step(action)

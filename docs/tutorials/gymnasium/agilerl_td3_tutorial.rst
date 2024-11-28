@@ -314,7 +314,7 @@ function and is an example of how we might choose to make use of a population of
 
             for idx_step in range(INIT_HP["EVO_STEPS"] // num_envs):
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 action = agent.get_action(state)  # Get next action from agent
 
@@ -340,7 +340,7 @@ function and is an example of how we might choose to make use of a population of
                         state,
                         action,
                         reward,
-                        np.moveaxis(next_state, [-1], [-3]),
+                        obs_channels_to_first(next_state),
                         terminated,
                         is_vectorised=True,
                     )
@@ -441,7 +441,7 @@ Test loop for inference
             for step in range(max_testing_steps):
                 # If your state is an RGB image
                 if INIT_HP["CHANNELS_LAST"]:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 # Get next action from agent
                 action, *_ = td3.get_action(state, training=False)

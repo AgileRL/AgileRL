@@ -13,7 +13,7 @@ from gymnasium import spaces
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
+from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 class NeuralTS(RLAlgorithm):
@@ -335,7 +335,7 @@ class NeuralTS(RLAlgorithm):
                 score = 0
                 for idx_step in range(max_steps):
                     if swap_channels:
-                        state = np.moveaxis(state, [-1], [-3])
+                        state = obs_channels_to_first(state)
                     state = torch.from_numpy(state)
                     state = state.to(
                         self.device

@@ -15,6 +15,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     tournament_selection_and_mutation,
     save_population_checkpoint,
@@ -247,7 +248,7 @@ def train_off_policy(
 
             for idx_step in range(evo_steps // num_envs):
                 if swap_channels:
-                    state = np.moveaxis(state, [-1], [-3])
+                    state = obs_channels_to_first(state)
 
                 # Get next action from agent
                 if algo in ["DQN"]:
@@ -298,7 +299,7 @@ def train_off_policy(
                             state,
                             action,
                             reward,
-                            np.moveaxis(next_state, [-1], [-3]),
+                            obs_channels_to_first(next_state),
                             done,
                         )
                     else:
@@ -317,7 +318,7 @@ def train_off_policy(
                             state,
                             action,
                             reward,
-                            np.moveaxis(next_state, [-1], [-3]),
+                            obs_channels_to_first(next_state),
                             done,
                             is_vectorised=is_vectorised,
                         )
