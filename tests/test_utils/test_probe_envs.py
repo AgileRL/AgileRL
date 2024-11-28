@@ -9,25 +9,35 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.probe_envs import (
     ConstantRewardContActionsEnv,
     ConstantRewardContActionsImageEnv,
+    ConstantRewardContActionsDictEnv,
     ConstantRewardEnv,
     ConstantRewardImageEnv,
+    ConstantRewardDictEnv,
     DiscountedRewardContActionsEnv,
     DiscountedRewardContActionsImageEnv,
+    DiscountedRewardContActionsDictEnv,
     DiscountedRewardEnv,
     DiscountedRewardImageEnv,
+    DiscountedRewardDictEnv,
     FixedObsPolicyContActionsEnv,
     FixedObsPolicyContActionsImageEnv,
+    FixedObsPolicyContActionsDictEnv,
     FixedObsPolicyEnv,
     FixedObsPolicyImageEnv,
+    FixedObsPolicyDictEnv,
     ObsDependentRewardContActionsEnv,
     ObsDependentRewardContActionsImageEnv,
+    ObsDependentRewardContActionsDictEnv,
     ObsDependentRewardEnv,
     ObsDependentRewardImageEnv,
+    ObsDependentRewardDictEnv,
     PolicyContActionsEnv,
     PolicyContActionsImageEnv,
     PolicyContActionsImageEnvSimple,
+    PolicyContActionsDictEnv,
     PolicyEnv,
     PolicyImageEnv,
+    PolicyDictEnv,
     check_policy_on_policy_with_probe_env,
     check_policy_q_learning_with_probe_env,
     check_q_learning_with_probe_env,
@@ -41,6 +51,8 @@ from agilerl.utils.probe_envs import (
         (ConstantRewardImageEnv, 0, 1, True, False, {}),
         (ConstantRewardContActionsEnv, 0, 1, True, False, {}),
         (ConstantRewardContActionsImageEnv, 0, 1, True, False, {}),
+        (ConstantRewardDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
+        (ConstantRewardContActionsDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
     ],
 )
 def test_constant_reward_envs(
@@ -52,7 +64,12 @@ def test_constant_reward_envs(
         action = [env.action_space.sample()]
         state, reward, terminated, truncated, info = env.step(action)
 
-        assert int(np.mean(np.array(state))) == exp_state
+        if isinstance(exp_state, dict):
+            assert int(np.mean(np.array(state['box']))) == exp_state['box']
+            assert state['discrete'] == exp_state['discrete']
+        else:
+            assert int(np.mean(np.array(state))) == exp_state
+
         assert reward == exp_reward
         assert terminated == exp_terminated
         assert truncated == exp_truncated
@@ -69,10 +86,18 @@ def test_constant_reward_envs(
         (ObsDependentRewardEnv, 1, 1, True, False, {}),
         (ObsDependentRewardImageEnv, 0, -1, True, False, {}),
         (ObsDependentRewardImageEnv, 1, 1, True, False, {}),
+        (ObsDependentRewardDictEnv, {"discrete": 0, "box": 1}, -1, True, False, {}),
+        (ObsDependentRewardDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
+        (ObsDependentRewardDictEnv, {"discrete": 1, "box": 0}, -1, True, False, {}),
+        (ObsDependentRewardDictEnv, {"discrete": 1, "box": 1}, 1, True, False, {}),
         (ObsDependentRewardContActionsEnv, 0, -1, True, False, {}),
         (ObsDependentRewardContActionsEnv, 1, 1, True, False, {}),
         (ObsDependentRewardContActionsImageEnv, 0, -1, True, False, {}),
         (ObsDependentRewardContActionsImageEnv, 1, 1, True, False, {}),
+        (ObsDependentRewardContActionsDictEnv, {"discrete": 0, "box": 1}, -1, True, False, {}),
+        (ObsDependentRewardContActionsDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
+        (ObsDependentRewardContActionsDictEnv, {"discrete": 1, "box": 0}, -1, True, False, {}),
+        (ObsDependentRewardContActionsDictEnv, {"discrete": 1, "box": 1}, 1, True, False, {})
     ],
 )
 def test_observation_dependent_reward_envs(
@@ -84,8 +109,13 @@ def test_observation_dependent_reward_envs(
         action = [env.action_space.sample()]
         state, reward, terminated, truncated, info = env.step(action)
 
-        if int(np.mean(np.array(state))) == exp_state:
-            assert reward == exp_reward
+        if isinstance(exp_state, dict):
+            if all([int(np.mean(np.array(state[key]))) == exp_state[key] for key in exp_state.keys()]):
+                assert reward == exp_reward
+        else:
+            if int(np.mean(np.array(state))) == exp_state:
+                assert reward == exp_reward
+
         assert terminated == exp_terminated
         assert truncated == exp_truncated
         assert info == exp_info
@@ -101,10 +131,18 @@ def test_observation_dependent_reward_envs(
         (DiscountedRewardEnv, 1, 1, False, {}),
         (DiscountedRewardImageEnv, 0, 0, False, {}),
         (DiscountedRewardImageEnv, 1, 1, False, {}),
+        (DiscountedRewardDictEnv, {"discrete": 0, "box": 1}, 1, False, {}),
+        (DiscountedRewardDictEnv, {"discrete": 0, "box": 0}, 0, False, {}),
+        (DiscountedRewardDictEnv, {"discrete": 1, "box": 0}, 1, False, {}),
+        (DiscountedRewardDictEnv, {"discrete": 1, "box": 1}, 2, False, {}),
         (DiscountedRewardContActionsEnv, 0, 0, False, {}),
         (DiscountedRewardContActionsEnv, 1, 1, False, {}),
         (DiscountedRewardContActionsImageEnv, 0, 0, False, {}),
         (DiscountedRewardContActionsImageEnv, 1, 1, False, {}),
+        (DiscountedRewardContActionsDictEnv, {"discrete": 0, "box": 1}, 1, False, {}),
+        (DiscountedRewardContActionsDictEnv, {"discrete": 0, "box": 0}, 0, False, {}),
+        (DiscountedRewardContActionsDictEnv, {"discrete": 1, "box": 0}, 1, False, {}),
+        (DiscountedRewardContActionsDictEnv, {"discrete": 1, "box": 1}, 2, False, {}),
     ],
 )
 def test_discounted_reward_envs(
@@ -116,9 +154,14 @@ def test_discounted_reward_envs(
         action = [env.action_space.sample()]
         next_state, reward, terminated, truncated, info = env.step(action)
 
-        if int(np.mean(np.array(state))) == exp_state:
-            assert reward == exp_reward
-        assert terminated == int(np.mean(np.array(state)))
+        if isinstance(exp_state, dict):
+            if all([int(np.mean(np.array(state[key]))) == exp_state[key] for key in exp_state.keys()]):
+                assert reward == exp_reward
+            assert terminated == int(np.mean(state["box"])) 
+        else:
+            if int(np.mean(np.array(state))) == exp_state:
+                assert reward == exp_reward
+            assert terminated == int(np.mean(np.array(state)))
         assert truncated == exp_truncated
         assert info == exp_info
 
@@ -135,6 +178,8 @@ def test_discounted_reward_envs(
         (FixedObsPolicyEnv, 0, 1, 1, True, False, {}),
         (FixedObsPolicyImageEnv, 0, 0, -1, True, False, {}),
         (FixedObsPolicyImageEnv, 0, 1, 1, True, False, {}),
+        (FixedObsPolicyDictEnv, {"discrete": 0, "box": 0}, 0, -1, True, False, {}),
+        (FixedObsPolicyDictEnv, {"discrete": 0, "box": 0}, 1, 1, True, False, {}),
     ],
 )
 def test_discrete_actions_fixed_observation_policy_reward_envs(
@@ -152,7 +197,12 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
         action = [env.action_space.sample()]
         state, reward, terminated, truncated, info = env.step(action)
 
-        assert int(np.mean(np.array(state))) == exp_state
+        if isinstance(exp_state, dict):
+            assert int(np.mean(np.array(state['box']))) == exp_state['box']
+            assert state['discrete'] == exp_state['discrete']
+        else:
+            assert int(np.mean(np.array(state))) == exp_state
+
         if action == exp_action:
             assert reward == exp_reward
         assert terminated == exp_terminated
@@ -168,6 +218,7 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
     [
         (FixedObsPolicyContActionsEnv, 0, 1, True, False, {}),
         (FixedObsPolicyContActionsImageEnv, 0, 1, True, False, {}),
+        (FixedObsPolicyContActionsDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
     ],
 )
 def test_continuous_actions_fixed_observation_policy_reward_envs(
@@ -179,7 +230,12 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
         action = [env.action_space.sample()]
         state, reward, terminated, truncated, info = env.step(action)
 
-        assert int(np.mean(np.array(state))) == exp_state
+        if isinstance(exp_state, dict):
+            assert int(np.mean(np.array(state['box']))) == exp_state['box']
+            assert state['discrete'] == exp_state['discrete']
+        else:
+            assert int(np.mean(np.array(state))) == exp_state
+
         assert reward == -((exp_action - action[0]) ** 2)
         assert terminated == exp_terminated
         assert truncated == exp_truncated
@@ -194,6 +250,7 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
     [
         (PolicyEnv, 1, -1, True, False, {}),
         (PolicyImageEnv, 1, -1, True, False, {}),
+        (PolicyDictEnv, 1, -1, True, False, {}),
     ],
 )
 def test_discrete_actions_policy_envs(
@@ -205,10 +262,17 @@ def test_discrete_actions_policy_envs(
         action = [env.action_space.sample()]
         state, reward, terminated, truncated, info = env.step(action)
 
-        if int(np.mean(np.array(state))) == action:
-            assert reward == same_reward
+        if isinstance(state, dict):
+            if (int(np.mean(np.array(state['box']))) == action[0]
+                and state['discrete'] == action[0]):
+                assert reward == same_reward, f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
+            else:
+                assert reward == diff_reward
         else:
-            assert reward == diff_reward
+            if int(np.mean(np.array(state))) == action:
+                assert reward == same_reward
+            else:
+                assert reward == diff_reward
         assert terminated == exp_terminated
         assert truncated == exp_truncated
         assert info == exp_info
@@ -222,6 +286,7 @@ def test_discrete_actions_policy_envs(
     [
         (PolicyContActionsEnv, 0, 1, True, False, {}),
         (PolicyContActionsImageEnv, 0, 1, True, False, {}),
+        (PolicyContActionsDictEnv, 0, 1, True, False, {}),
     ],
 )
 def test_continuous_actions_policy_envs(
@@ -233,18 +298,32 @@ def test_continuous_actions_policy_envs(
         action = env.action_space.sample()
         state, reward, terminated, truncated, info = env.step(action)
 
-        if int(np.mean(np.array(state))):
-            assert (
-                reward
-                == -((reward_goal_0 - action[0]) ** 2)
-                - (reward_goal_1 - action[1]) ** 2
-            )
+        if isinstance(state, dict):
+            if int(np.mean(np.array(state['box']))) and int(np.mean(state['discrete'])):
+                assert (
+                    reward
+                    == -((reward_goal_0 - action[0]) ** 2)
+                    - (reward_goal_1 - action[1]) ** 2
+                )
+            else:
+                assert (
+                    reward
+                    == -((reward_goal_1 - action[0]) ** 2)
+                    - (reward_goal_0 - action[1]) ** 2
+                )
         else:
-            assert (
-                reward
-                == -((reward_goal_1 - action[0]) ** 2)
-                - (reward_goal_0 - action[1]) ** 2
-            )
+            if int(np.mean(np.array(state))):
+                assert (
+                    reward
+                    == -((reward_goal_0 - action[0]) ** 2)
+                    - (reward_goal_1 - action[1]) ** 2
+                )
+            else:
+                assert (
+                    reward
+                    == -((reward_goal_1 - action[0]) ** 2)
+                    - (reward_goal_0 - action[1]) ** 2
+                )
         assert terminated == exp_terminated
         assert truncated == exp_truncated
         assert info == exp_info
@@ -349,7 +428,7 @@ def test_policy_q_learning_with_probe_env_cnn():
 
 
 def test_policy_on_policy_with_probe_env():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     env = ConstantRewardContActionsEnv()
     learn_steps = 100
     algo_args = {

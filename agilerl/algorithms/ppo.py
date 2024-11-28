@@ -11,6 +11,7 @@ from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 import gymnasium as gym
 
+from agilerl.typing import ExperiencesType
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
@@ -391,7 +392,8 @@ class PPO(RLAlgorithm):
         state: np.ndarray,
         action: Optional[torch.Tensor] = None,
         grad: bool = False,
-        action_mask: Optional[np.ndarray] = None
+        action_mask: Optional[np.ndarray] = None,
+        preprocess_obs: bool = True,
     ) -> Tuple[Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns the next action to take in the environment.
 
@@ -403,8 +405,11 @@ class PPO(RLAlgorithm):
         :type grad: bool, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :param preprocess_obs: Flag to preprocess observations, defaults to True
+        :type preprocess_obs: bool, optional
         """
-        state = self.preprocess_observation(state)
+        if preprocess_obs:
+            state = self.preprocess_observation(state)
 
         if not grad:
             self.actor.eval()
@@ -463,20 +468,33 @@ class PPO(RLAlgorithm):
                 state_values.cpu().data.numpy(),
             )
 
-    def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
+    def learn(
+            self,
+            experiences: ExperiencesType,
+            noise_clip: float = 0.5,
+            policy_noise: float = 0.2
+            ) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
-        :type experience: list[torch.Tensor[float]]
+        :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
         :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
+        (
+            states,
+            actions,
+            log_probs,
+            rewards,
+            dones,
+            values,
+            next_state
         
-        states, actions, log_probs, rewards, dones, values, next_state = self.stack_experiences(*experiences)
+        ) = self.stack_experiences(*experiences)
 
-        # Bootstrapping
+        # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
         with torch.no_grad():
             num_steps = rewards.size(0)
@@ -501,9 +519,6 @@ class PPO(RLAlgorithm):
 
                 advantages[t] = a_t
             returns = advantages + values
-
-        # Preprocess the observations
-        states = self.preprocess_observation(states)
 
         if self.discrete_actions:
             actions = actions.reshape(-1)
@@ -540,7 +555,7 @@ class PPO(RLAlgorithm):
                     _, log_prob, entropy, value = self.get_action(
                         state=batch_states,
                         action=batch_actions,
-                        grad=True,
+                        grad=True
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -570,6 +585,7 @@ class PPO(RLAlgorithm):
                     v_clipped = batch_values + torch.clamp(
                         value - batch_values, -self.clip_coef, self.clip_coef
                     )
+
                     v_loss_clipped = (v_clipped - batch_returns) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()

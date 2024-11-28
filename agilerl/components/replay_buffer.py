@@ -1,10 +1,15 @@
-from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple
+from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple, Union
+from numbers import Number
 import random
 from collections import deque, namedtuple
 import numpy as np
+from numpy.typing import ArrayLike
 import torch
 
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
+
+NpTransitionType = Union[Number, ArrayLike, Dict[str, ArrayLike]]
+TorchTransitionType = Union[torch.Tensor, Dict[str, torch.Tensor]]
 
 class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
@@ -54,14 +59,24 @@ class ReplayBuffer:
         """
         transition = {}
         for field in self.field_names:
-            ts = [
-                np.expand_dims(getattr(e, field), axis=0)
-                for e in experiences
-                if e is not None
-            ]
-            ts = np.vstack(ts)
+            # Extract all of the transitions for the current field
+            field_transitions: NpTransitionType = [getattr(e, field) for e in experiences if e is not None]
+            is_dict_field = isinstance(field_transitions[0], dict)
 
-            # Handle numpy stacking
+            # Stack the transitions into a single array or dictionary of arrays
+            ts = []
+            for ft in field_transitions:
+                if is_dict_field:
+                    ts.append({k: np.expand_dims(v, axis=0) for k, v in ft.items()})
+                else:
+                    ts.append(np.expand_dims(ft, axis=0))
+
+            if is_dict_field:
+                ts = {k: np.vstack([t[k] for t in ts]) for k in ts[0].keys()}
+            else:
+                ts = np.vstack(ts)
+
+            # Handle integer fields
             if field in [
                 "done",
                 "termination",
@@ -71,15 +86,23 @@ class ReplayBuffer:
             ]:
                 ts = ts.astype(np.uint8)
 
+            # Convert to torch tensor if specified
             if not np_array:
                 # Handle torch tensor creation
-                ts = torch.from_numpy(ts).float()
+                if is_dict_field:
+                    ts = {k: torch.from_numpy(v).float() for k, v in ts.items()}
+                else:
+                    ts = torch.from_numpy(ts).float()
 
                 # Place on device
                 if self.device is not None:
-                    ts = ts.to(self.device)
+                    if is_dict_field:
+                        ts = {k: v.to(self.device) for k, v in ts.items()}
+                    else:
+                        ts = ts.to(self.device)
 
             transition[field] = ts
+
         return transition
 
     def sample(self, batch_size: int, return_idx: bool = False) -> Tuple[Any, ...]:

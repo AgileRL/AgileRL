@@ -1,21 +1,19 @@
 from typing import Optional, Union, Tuple, Iterable, TypeGuard, Any, Dict, List, Set
 import inspect
 import copy
+from numbers import Number
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from gymnasium import spaces
 from accelerate import Accelerator
-from accelerate.optimizer import AcceleratedOptimizer
 import numpy as np
 from numpy.typing import ArrayLike
 from torch.optim import Optimizer
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 import dill
 
-from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, ArrayOrTensor
+from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, ArrayOrTensor, MaybeObsList
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
     compile_model,
@@ -30,7 +28,6 @@ EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
 GymSpaceType = Union[spaces.Space, Iterable[spaces.Space]]
-MaybeObsList = Union[List[NumpyObsType], NumpyObsType]
     
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
@@ -455,14 +452,14 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
                     stacked_exp = {key: torch.from_numpy(value) for key, value in stacked_exp.items()}
                 
                 stacked_experiences.append(stacked_exp)
-            elif isinstance(exp[0], np.ndarray):
+            elif isinstance(exp[0], (np.ndarray, Number)):
                 stacked_exp = np.array(exp)
                 if to_torch:
                     stacked_exp = torch.from_numpy(stacked_exp)
                 
                 stacked_experiences.append(stacked_exp)
             else:
-                raise TypeError(f"Unsupported experience type: {type(exp)}")
+                raise TypeError(f"Unsupported experience type: {type(exp[0])}")
 
         return tuple(stacked_experiences)
     
@@ -476,6 +473,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         :rtype: Tuple[torch.Tensor[float], ...]
         """
         device = self.device if self.accelerator is None else self.accelerator.device
+        on_device = []
         for exp in experiences:
             if isinstance(exp, dict):
                 for key, value in exp.items():
@@ -484,8 +482,10 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
                 exp = exp.to(device)
             else:
                 raise TypeError(f"Unsupported experience type: {type(exp)}")
+            
+            on_device.append(exp)
         
-        return experiences
+        return on_device
     
     def get_samples(self, minibatch_indices: np.ndarray, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
         """Samples experiences given minibatch indices.

@@ -16,6 +16,8 @@ NumpyObsType = Union[ArrayLike, ArrayDict, ArrayTuple]
 TorchObsType = Union[torch.Tensor, TensorDict, TensorTuple]
 ObservationType = Union[NumpyObsType, TorchObsType]
 InfosDict = Dict[str, Dict[str, Any]]
+MaybeObsList = Union[List[NumpyObsType], NumpyObsType]
+ExperiencesType = Tuple[MaybeObsList, ...]
 
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 NetworkType = Union[Module, List[Module], Tuple[Module, ...]]

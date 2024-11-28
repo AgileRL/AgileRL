@@ -12,10 +12,14 @@ from gymnasium import spaces
 
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first
+)
 
 class RainbowDQN(RLAlgorithm):
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -236,6 +240,38 @@ class RainbowDQN(RLAlgorithm):
 
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
+                    num_outputs=self.action_dim,
+                    num_atoms=self.num_atoms,
+                    support=self.support,
+                    rainbow=True,
+                    noise_std=noise_std,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **self.net_config,
+                )
+            elif self.net_config["arch"] == "composed": # Dict observations
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+
+                assert (
+                    "latent_dim" in self.net_config.keys()
+                ), "Net config must contain latent_dim: int."
+
+                self.actor = EvolvableMultiInput(
+                    observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     num_atoms=self.num_atoms,
                     support=self.support,
@@ -533,6 +569,7 @@ class RainbowDQN(RLAlgorithm):
                 while not np.all(finished):
                     if swap_channels:
                         state = obs_channels_to_first(state)
+
                     action_mask = info.get("action_mask", None)
                     action = self.get_action(
                         state, training=False, action_mask=action_mask

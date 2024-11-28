@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from numbers import Number
 from typing import Union, Dict, Any, Tuple
 import torch
 import numpy as np
@@ -154,6 +155,8 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
         return {key: torch.as_tensor(_obs, device=device) for (key, _obs) in obs.items()}
     elif isinstance(obs, tuple):
         return tuple(torch.as_tensor(_obs, device=device) for _obs in obs)
+    elif isinstance(obs, Number):
+        return torch.tensor(obs, device=device)
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
     

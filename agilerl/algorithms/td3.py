@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import copy
 import inspect
 import warnings
@@ -10,11 +10,17 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
+from agilerl.typing import NumpyObsType, ExperiencesType
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
+from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first
+)
 
 class TD3(RLAlgorithm):
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
@@ -167,7 +173,6 @@ class TD3(RLAlgorithm):
         self.dt = dt
         self.actor_network = actor_network
         self.critic_networks = critic_networks
-
         self.learn_counter = 0
 
         if self.actor_network is not None and self.critic_networks is not None:
@@ -290,6 +295,52 @@ class TD3(RLAlgorithm):
                     **critic_net_config,
                 )
 
+            elif self.net_config["arch"] == "composed":  # Convolutional Neural Network
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+
+                assert (
+                    "latent_dim" in self.net_config.keys()
+                ), "Net config must contain latent_dim: int."
+
+                self.actor = EvolvableMultiInput(
+                    observation_space=self.observation_space,
+                    num_outputs=self.action_dim,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **self.net_config,
+                )
+                self.critic_1 = EvolvableMultiInput(
+                    observation_space=self.observation_space,
+                    num_outputs=self.action_dim,
+                    critic=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **critic_net_config,
+                )
+                self.critic_2 = EvolvableMultiInput(
+                    observation_space=self.observation_space,
+                    num_outputs=self.action_dim,
+                    critic=True,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **critic_net_config,
+                )
+
+
         self.actor_target = copy.deepcopy(self.actor)
         self.critic_target_1 = copy.deepcopy(self.critic_1)
         self.critic_target_2 = copy.deepcopy(self.critic_2)
@@ -321,7 +372,7 @@ class TD3(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
-    def scale_to_action_space(self, action, convert_to_torch=False):
+    def scale_to_action_space(self, action: np.ndarray, convert_to_torch: bool = False) -> np.ndarray:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
@@ -366,8 +417,18 @@ class TD3(RLAlgorithm):
             pre_scaled_max - pre_scaled_min
         )
 
-    def multi_dim_clamp(self, min, max, input):
-        """Multi-dimensional clamp function"""
+    def multi_dim_clamp(self, min: Any, max: Any, input: torch.Tensor) -> torch.Tensor:
+        """Multi-dimensional clamp function
+
+        :param min: Minimum value to clamp to, can be a scalar or array-like
+        :type min: Any
+        :param max: Maximum value to clamp to, can be a scalar or array-like
+        :type max: Any
+        :param input: Input tensor to be clamped
+        :type input: torch.Tensor
+        :return: Clamped tensor
+        :rtype: torch.Tensor
+        """
         if not isinstance(min, np.ndarray) and not isinstance(max, np.ndarray):
             return torch.clamp(input, min, max)
 
@@ -390,13 +451,13 @@ class TD3(RLAlgorithm):
 
         return torch.max(torch.min(input, max), min)
 
-    def get_action(self, state, training=True):
+    def get_action(self, state: NumpyObsType, training: bool = True):
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
         :param state: Environment observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        :type state: numpy.ndarray[float], dict, tuple
         :param training: Agent is training, use exploration noise, defaults to True
         :type training: bool, optional
         """
@@ -416,7 +477,7 @@ class TD3(RLAlgorithm):
 
         return action
 
-    def action_noise(self):
+    def action_noise(self) -> np.ndarray:
         """Create action noise for exploration, either Ornstein Uhlenbeck or
             from a normal distribution.
 
@@ -440,11 +501,16 @@ class TD3(RLAlgorithm):
             )
         return noise.astype(np.float32)
 
-    def reset_action_noise(self, indices):
+    def reset_action_noise(self, indices: np.ndarray) -> None:
         """Reset action noise."""
         self.current_noise[indices] = self.mean_noise[indices]
 
-    def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
+    def learn(
+            self,
+            experiences: ExperiencesType,
+            noise_clip: float = 0.5,
+            policy_noise: float = 0.2
+            ) -> Tuple[Optional[float], float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, rewards, next_states, dones in that order.

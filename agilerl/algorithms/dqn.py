@@ -13,8 +13,13 @@ from gymnasium import spaces
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer
+from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first
+)
 
 class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
@@ -157,6 +162,34 @@ class DQN(RLAlgorithm):
 
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
+                    num_outputs=self.action_dim,
+                    device=self.device,
+                    accelerator=self.accelerator,
+                    **self.net_config,
+                )
+            elif self.net_config["arch"] == "composed": # Dict observations
+                for key in [
+                    "channel_size",
+                    "kernel_size",
+                    "stride_size",
+                    "hidden_size",
+                ]:
+                    assert (
+                        key in self.net_config.keys()
+                    ), f"Net config must contain {key}: int."
+                    assert isinstance(
+                        self.net_config[key], list
+                    ), f"Net config {key} must be a list."
+                    assert (
+                        len(self.net_config[key]) > 0
+                    ), f"Net config {key} must contain at least one element."
+
+                assert (
+                    "latent_dim" in self.net_config.keys()
+                ), "Net config must contain latent_dim: int."
+
+                self.actor = EvolvableMultiInput(
+                    observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,

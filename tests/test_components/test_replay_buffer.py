@@ -346,6 +346,32 @@ def test_process_transition_from_experiences_images():
     assert isinstance(transition["reward"], torch.Tensor)
     assert transition["reward"].shape == (len(experiences), 1)
 
+# Can process transition from experiences with _process_transition method
+def test_process_transition_from_experiences_dicts():
+    action_space = 1
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    device = "cpu"
+
+    buffer = ReplayBuffer(memory_size, field_names, device)
+
+    # Create experiences
+    sample_state = {"image1": np.random.rand(3, 128, 128), "vec1": np.random.rand(3)}
+    experience1 = buffer.experience(sample_state, 2, 3)
+    experience2 = buffer.experience(sample_state, 5, 6)
+    experiences = [experience1, experience2]
+
+    # Process transition from experiences
+    transition = buffer._process_transition(experiences)
+
+    assert isinstance(transition["state"], dict)
+    assert all(isinstance(v, torch.Tensor) for v in transition["state"].values())
+    assert transition["state"]["image1"].shape == (len(experiences), 3, 128, 128)
+    assert transition["state"]["vec1"].shape == (len(experiences), 3)
+    assert isinstance(transition["action"], torch.Tensor)
+    assert transition["action"].shape == (len(experiences), action_space)
+    assert isinstance(transition["reward"], torch.Tensor)
+    assert transition["reward"].shape == (len(experiences), 1)
 
 ##### MultiStepReplayBuffer class tests #####
 # Initializes the MultiStepReplayBuffer class with the given parameters.

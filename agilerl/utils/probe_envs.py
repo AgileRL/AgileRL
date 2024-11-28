@@ -1,5 +1,5 @@
 import random
-
+from collections import defaultdict
 import gymnasium as gym
 import numpy as np
 import torch
@@ -47,6 +47,29 @@ class ConstantRewardImageEnv(gym.Env):
 
     def reset(self):
         observation = np.zeros((1, 3, 3))
+        info = {}
+        return observation, info
+    
+class ConstantRewardDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Discrete(1)
+        self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
+        self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
+
+    def step(self, action):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        reward = 1  # Constant reward of 1
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return observation, info
 
@@ -97,6 +120,31 @@ class ConstantRewardContActionsImageEnv(gym.Env):
         observation = np.zeros((1, 3, 3))
         info = {}
         return observation, info
+    
+class ConstantRewardContActionsDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Box(0.0, 1.0, (1,))
+        self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
+        self.sample_actions = [{"action": np.array([[1.0]])}]
+        self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[1.0]]  # Correct V values to learn, s table
+        self.policy_values = [None]  # Correct policy to learn
+
+    def step(self, action):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        reward = 1  # Constant reward of 1
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        info = {}
+        return observation, info
 
 
 class ObsDependentRewardEnv(gym.Env):
@@ -143,6 +191,34 @@ class ObsDependentRewardImageEnv(gym.Env):
 
     def reset(self):
         self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
+        info = {}
+        return self.last_obs, info
+    
+class ObsDependentRewardDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Discrete(1)
+        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        self.sample_obs = [
+            {"discrete": [np.array([[0]]), np.array([[1]])],
+             "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
+             }
+        ]
+        self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
+
+    def step(self, action):
+        observation = {"discrete": self.last_obs["discrete"], "box": self.last_obs["box"]}
+        reward = -1 if np.mean(self.last_obs["box"]) != self.last_obs['discrete'] else 1  # Reward depends on observation
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        self.last_obs = {"discrete": random.choice([0, 1]), "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])}
         info = {}
         return self.last_obs, info
 
@@ -198,6 +274,36 @@ class ObsDependentRewardContActionsImageEnv(gym.Env):
         info = {}
         return self.last_obs, info
 
+class ObsDependentRewardContActionsDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Box(0.0, 1.0, (1,))
+        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        self.sample_obs = [
+            {"discrete": [np.array([[0]]), np.array([[1]])],
+             "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
+             }
+        ]
+        self.sample_actions = [{"action": np.array([[1.0]]), "action": np.array([[1.0]])}]
+        self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
+        self.policy_values = [None]  # Correct policy to learn
+
+    def step(self, action):
+        observation = {"discrete": self.last_obs["discrete"], "box": self.last_obs["box"]}
+        reward = -1 if np.mean(self.last_obs["box"]) != self.last_obs['discrete'] else 1  # Reward depends on observation
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        self.last_obs = {"discrete": random.choice([0, 1]), "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])}
+        info = {}
+        return self.last_obs, info
+
 
 class DiscountedRewardEnv(gym.Env):
     def __init__(self):
@@ -243,6 +349,35 @@ class DiscountedRewardImageEnv(gym.Env):
 
     def reset(self):
         self.last_obs = np.zeros((1, 3, 3))
+        info = {}
+        return self.last_obs, info
+
+class DiscountedRewardDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Discrete(1)
+        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        self.sample_obs = [
+            {"discrete": [np.array([[0]]), np.array([[1]])],
+             "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))]
+             }
+        ]
+        self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
+
+    def step(self, action):
+        observation = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        reward = np.mean(self.last_obs["box"]) + self.last_obs['discrete'] # Reward depends on observation
+        terminated = int(np.mean(self.last_obs["box"]))  # Terminate after second step
+        truncated = False
+        info = {}
+        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return self.last_obs, info
 
@@ -298,6 +433,35 @@ class DiscountedRewardContActionsImageEnv(gym.Env):
         info = {}
         return self.last_obs, info
 
+class DiscountedRewardContActionsDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Box(0.0, 1.0, (1,))
+        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        self.sample_obs = [
+            {"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))},
+            {"discrete": np.array([[1]]), "box": np.ones((1, 1, 3, 3))}     
+        ]
+        self.sample_actions = [{"action": np.array([[1.0]]), "action": np.array([[1.0]])}]
+        self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
+        self.policy_values = [None]  # Correct policy to learn
+
+    def step(self, action):
+        observation = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        reward = np.mean(self.last_obs["box"]) + self.last_obs['discrete']  # Reward depends on observation
+        terminated = int(np.mean(self.last_obs["box"]))  # Terminate after second step
+        truncated = False
+        info = {}
+        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        info = {}
+        return self.last_obs, info
 
 class FixedObsPolicyEnv(gym.Env):
     def __init__(self):
@@ -346,6 +510,31 @@ class FixedObsPolicyImageEnv(gym.Env):
         info = {}
         return observation, info
 
+class FixedObsPolicyDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 0.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Discrete(2)
+        self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
+        self.q_values = [[-1.0, 1.0]]  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
+
+    def step(self, action):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        if isinstance(action, (np.ndarray, list)):
+            action = action[0]
+        reward = [-1, 1][action]  # Reward depends on action
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        info = {}
+        return observation, info
+
 
 class FixedObsPolicyContActionsEnv(gym.Env):
     def __init__(self):
@@ -391,6 +580,31 @@ class FixedObsPolicyContActionsImageEnv(gym.Env):
 
     def reset(self):
         observation = np.zeros((1, 3, 3))
+        info = {}
+        return observation, info
+
+class FixedObsPolicyContActionsDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Box(0.0, 1.0, (1,))
+        self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
+        self.sample_actions = [np.array([[1.0]])]
+        self.q_values = np.array([[0.0]])  # Correct Q values to learn, s x a table
+        self.v_values = [None]  # Correct V values to learn, s table
+        self.policy_values = [[1.0]]  # Correct policy to learn
+
+    def step(self, action):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        reward = -((1 - action[0]) ** 2)  # Reward depends on action
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        observation = {"discrete": 0, "box": np.zeros((1, 3, 3))}
         info = {}
         return observation, info
 
@@ -447,6 +661,43 @@ class PolicyImageEnv(gym.Env):
 
     def reset(self):
         self.last_obs = random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])
+        info = {}
+        return self.last_obs, info
+    
+
+class PolicyDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(2), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+        )
+        self.action_space = spaces.Discrete(2)
+        self.last_obs = {"discrete": 1, "box": np.ones((1, 3, 3))}
+        self.sample_obs = [
+            {"discrete": 0, "box": np.zeros((1, 3, 3))},
+            {"discrete": 0, "box": np.ones((1, 3, 3))},
+            {"discrete": 1, "box": np.zeros((1, 3, 3))},
+            {"discrete": 1, "box": np.ones((1, 3, 3))},
+        ]
+        self.q_values = [
+            [1.0, -1.0],  # discrete=0, box=0
+            [-1.0, -1.0],  # discrete=0, box=1
+            [-1.0, -1.0],  # discrete=1, box=0
+            [-1.0, 1.0],  # discrete=1, box=1
+        ]
+        self.v_values = [None]
+
+    def step(self, action):
+        if isinstance(action, (np.ndarray, list)):
+            action = action[0]
+        observation = {"discrete": self.last_obs["discrete"], "box": self.last_obs["box"]}
+        reward = 1 if action == self.last_obs["discrete"] and action == int(np.mean(self.last_obs["box"])) else -1
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        self.last_obs = {"discrete": random.choice([0, 1]), "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])}
         info = {}
         return self.last_obs, info
 
@@ -549,6 +800,40 @@ class PolicyContActionsImageEnv(gym.Env):
         info = {}
         return self.last_obs, info
 
+class PolicyContActionsDictEnv(gym.Env):
+    def __init__(self):
+        self.observation_space = spaces.Dict(
+            {"discrete": spaces.Discrete(1), "box": spaces.Box(0.0, 1.0, (1, 3, 3))}
+            )
+        self.action_space = spaces.Box(0.0, 1.0, (2,))
+        self.last_obs = {"discrete": 0, "box": np.zeros((1, 3, 3))}
+        self.sample_obs = [
+            {"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))},
+            {"discrete": np.array([[1]]), "box": np.ones((1, 1, 3, 3))}     
+        ]
+        self.sample_actions = [
+            {"action": np.array([[1.0, 0.0]]), "action": np.array([[0.0, 1.0]])}
+        ]
+        self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
+        self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
+        self.v_values = [None]  # Correct V values to learn, s table
+
+    def step(self, action):
+        observation = {"discrete": self.last_obs["discrete"], "box": self.last_obs["box"]}
+        if self.last_obs["discrete"] and int(np.mean(self.last_obs['box'])):  # last obs = 1, policy should be [0, 1]
+            reward = -((0 - action[0]) ** 2) - (1 - action[1]) ** 2
+        else:  # last obs = 0, policy should be [1, 0]
+            reward = -((1 - action[0]) ** 2) - (0 - action[1]) ** 2
+        terminated = True
+        truncated = False
+        info = {}
+        return observation, reward, terminated, truncated, info
+
+    def reset(self):
+        self.last_obs = {"discrete": random.choice([0, 1]), "box": random.choice([np.zeros((1, 3, 3)), np.ones((1, 3, 3))])}
+        info = {}
+        return self.last_obs, info
+
 
 def check_q_learning_with_probe_env(
     env, algo_class, algo_args, memory, learn_steps=10000, device="cpu"
@@ -558,8 +843,12 @@ def check_q_learning_with_probe_env(
     agent = algo_class(**algo_args, device=device)
 
     state, _ = env.reset()
-    for _ in range(500):
-        action = agent.get_action(np.expand_dims(state, 0), epsilon=1)
+    for _ in range(5000):
+        if isinstance(state, dict):
+            state = {k: np.expand_dims(v, 0) for k, v in state.items()}
+        else:
+            state = np.expand_dims(state, 0)
+        action = agent.get_action(state, epsilon=1)
         next_state, reward, done, _, _ = env.step(action)
         memory.save_to_memory(state, action, reward, next_state, done)
         state = next_state
@@ -605,8 +894,12 @@ def check_policy_q_learning_with_probe_env(
 
     for sample_obs, sample_action, q_values, policy_values in zip(
         env.sample_obs, env.sample_actions, env.q_values, env.policy_values
-    ):
-        state = torch.tensor(sample_obs).float().to(device)
+    ):  
+        if isinstance(sample_obs, dict):
+            state = {k: torch.tensor(v).float().to(device) for k, v in sample_obs.items()}
+        else:
+            state = torch.tensor(sample_obs).float().to(device)
+
         action = torch.tensor(sample_action).float().to(device)
         if agent.arch == "mlp":
             input_combined = torch.cat([state, action], 1)
@@ -642,7 +935,13 @@ def check_policy_on_policy_with_probe_env(
         truncs = []
 
         for _ in range(100):
-            action, log_prob, _, value = agent.get_action(np.expand_dims(state, 0))
+            if isinstance(state, dict):
+                state = {k: np.expand_dims(v, 0) for k, v in state.items()}
+            else:
+                state = np.expand_dims(state, 0)
+
+            action, log_prob, _, value = agent.get_action(state)
+
             action = action[0]
             log_prob = log_prob[0]
             value = value[0]
@@ -672,19 +971,23 @@ def check_policy_on_policy_with_probe_env(
         agent.learn(experiences)
 
     for sample_obs, v_values in zip(env.sample_obs, env.v_values):
-        state = torch.tensor(sample_obs).float().to(device)
+        if isinstance(sample_obs, dict):
+            state = {k: torch.tensor(v).float().to(device) for k, v in sample_obs.items()}
+        else:
+            state = torch.tensor(sample_obs).float().to(device)
+
         if v_values is not None:
             predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
             # print("---")
             # print("v", v_values, predicted_v_values)
-            assert np.allclose(v_values, predicted_v_values, atol=0.1)
+            assert np.allclose(v_values, predicted_v_values, atol=0.1), f"{v_values} != {predicted_v_values}"
 
     if hasattr(env, "sample_actions"):
         for sample_action, policy_values in zip(env.sample_actions, env.policy_values):
             action = torch.tensor(sample_action).float().to(device)
             if policy_values is not None:
                 predicted_policy_values = (
-                    agent.actor(sample_obs).detach().cpu().numpy()[0]
+                    agent.actor(state).detach().cpu().numpy()[0]
                 )
                 # print("pol", policy_values, predicted_policy_values)
                 assert np.allclose(policy_values, predicted_policy_values, atol=0.1)

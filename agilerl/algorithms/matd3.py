@@ -13,6 +13,7 @@ from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict
 from agilerl.algorithms.base import MultiAgentAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.base import EvolvableModule
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
@@ -221,10 +222,13 @@ class MATD3(MultiAgentAlgorithm):
                 ), "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
                                 type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
         else:
-
             # model
+            critic_net_config = copy.deepcopy(self.net_config)
+            critic_net_config["mlp_output_activation"] = (
+                None  # Critic must have no output activation
+            )
+            self.actors = []
             if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-                self.actors = []
                 for idx, (action_dim, state_dim) in enumerate(
                     zip(self.action_dims, self.state_dims)
                 ):
@@ -245,10 +249,7 @@ class MATD3(MultiAgentAlgorithm):
                             **self.net_config,
                         )
                     )
-                critic_net_config = copy.deepcopy(self.net_config)
-                critic_net_config["mlp_output_activation"] = (
-                    None  # Critic must have no output activation
-                )
+
                 self.critics_1 = [
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
@@ -270,7 +271,6 @@ class MATD3(MultiAgentAlgorithm):
                     for _ in range(self.n_agents)
                 ]
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                self.actors = []
                 for idx, (action_dim, state_dim) in enumerate(
                     zip(self.action_dims, self.state_dims)
                 ):
@@ -282,6 +282,7 @@ class MATD3(MultiAgentAlgorithm):
                                 self.net_config["mlp_output_activation"] = "Sigmoid"
                         else:
                             self.net_config["mlp_output_activation"] = "GumbelSoftmax"
+
                     self.actors.append(
                         EvolvableCNN(
                             input_shape=state_dim,
@@ -292,10 +293,7 @@ class MATD3(MultiAgentAlgorithm):
                             **self.net_config,
                         )
                     )
-                critic_net_config = copy.deepcopy(self.net_config)
-                critic_net_config["mlp_output_activation"] = (
-                    None  # Critic must have no output activation
-                )
+
                 self.critics_1 = [
                     EvolvableCNN(
                         input_shape=state_dim,
@@ -319,6 +317,54 @@ class MATD3(MultiAgentAlgorithm):
                         **critic_net_config,
                     )
                     for state_dim in self.state_dims
+                ]
+            elif self.net_config["arch"] == "composed":  # Multi Input
+                for idx, (action_dim, obs_space) in enumerate(
+                    zip(self.action_dims, self.observation_spaces)
+                ):
+                    if "mlp_output_activation" not in self.net_config.keys():
+                        if not self.discrete_actions:
+                            if self.min_action[idx][0] < 0:
+                                self.net_config["mlp_output_activation"] = "Tanh"
+                            else:
+                                self.net_config["mlp_output_activation"] = "Sigmoid"
+                        else:
+                            self.net_config["mlp_output_activation"] = "GumbelSoftmax"
+
+                    self.actors.append(
+                        EvolvableMultiInput(
+                            observation_space=obs_space,
+                            num_outputs=action_dim,
+                            n_agents=self.n_agents,
+                            device=self.device,
+                            accelerator=self.accelerator,
+                            **self.net_config,
+                        )
+                    )
+
+                self.critics_1 = [
+                    EvolvableMultiInput(
+                        observation_space=obs_space,
+                        num_outputs=self.total_actions,
+                        critic=True,
+                        n_agents=self.n_agents,
+                        device=self.device,
+                        accelerator=self.accelerator,
+                        **critic_net_config,
+                    )
+                    for obs_space in self.observation_spaces
+                ]
+                self.critics_2 = [
+                    EvolvableMultiInput(
+                        observation_space=obs_space,
+                        num_outputs=self.total_actions,
+                        critic=True,
+                        n_agents=self.n_agents,
+                        device=self.device,
+                        accelerator=self.accelerator,
+                        **critic_net_config,
+                    )
+                    for obs_space in self.observation_spaces
                 ]
 
         # Assign architecture
