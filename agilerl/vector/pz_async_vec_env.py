@@ -704,7 +704,7 @@ class Observations:
         for shm, agent in zip(shared_memory, exp_spec.agents):
             self.obs_view.append(
                 np.frombuffer(
-                    shm, dtype=exp_spec.single_observation_space[agent]
+                    shm.get_obj(), dtype=exp_spec.single_observation_space[agent]
                 ).reshape((num_envs, *exp_spec.observation_shapes[agent]))
             )
 
@@ -772,7 +772,7 @@ class Observations:
         for shm, agent in zip(self.shared_memory, self.exp_spec.agents):
             self.obs_view.append(
                 np.frombuffer(
-                    shm, dtype=self.exp_spec.single_observation_space[agent]
+                    shm.get_obj(), dtype=self.exp_spec.single_observation_space[agent]
                 ).reshape((self.num_envs, *self.exp_spec.observation_shapes[agent]))
             )
 
@@ -797,7 +797,7 @@ class SharedMemory:
                 * exp_spec.observation_widths[agent]
                 * num_envs
             )
-            shared_memory = context.RawArray("c", total_bytes)
+            shared_memory = context.Array("c", total_bytes)
             self.shared_memory.append(shared_memory)
 
 
