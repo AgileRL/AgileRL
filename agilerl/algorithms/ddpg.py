@@ -471,7 +471,7 @@ class DDPG(RLAlgorithm):
         if self.arch == "mlp":
             input_combined = torch.cat([states, actions], 1)
             q_value = self.critic(input_combined)
-        elif self.arch == "cnn":
+        else:
             q_value = self.critic(states, actions)
 
         with torch.no_grad():
@@ -489,7 +489,7 @@ class DDPG(RLAlgorithm):
             if self.arch == "mlp":
                 next_input_combined = torch.cat([next_states, next_actions], 1)
                 q_value_next_state = self.critic_target(next_input_combined)
-            elif self.arch == "cnn":
+            else:
                 q_value_next_state = self.critic_target(next_states, next_actions)
 
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
@@ -514,7 +514,7 @@ class DDPG(RLAlgorithm):
             if self.arch == "mlp":
                 input_combined = torch.cat([states, policy_actions], 1)
                 actor_loss = -self.critic(input_combined).mean()
-            elif self.arch == "cnn":
+            else:
                 actor_loss = -self.critic(states, policy_actions).mean()
 
             # actor loss backprop

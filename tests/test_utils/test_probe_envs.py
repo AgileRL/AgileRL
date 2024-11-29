@@ -426,6 +426,34 @@ def test_policy_q_learning_with_probe_env_cnn():
         env, DDPG, algo_args, memory, learn_steps, device
     )
 
+def test_policy_q_learning_with_probe_env_dict():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = FixedObsPolicyContActionsDictEnv()
+    learn_steps = 1000
+    algo_args = {
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "net_config": {
+            "arch": "composed",  # Network architecture
+            "hidden_size": [64],  # Network hidden size
+            "latent_dim": 16,  # Latent dimension
+            "channel_size": [32],  # CNN channel size
+            "kernel_size": [3],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+        },
+        "policy_freq": 2,
+        "lr_actor": 0.1,
+        "lr_critic": 0.1,
+    }
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        memory_size=1000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
+        device=device,
+    )
+    check_policy_q_learning_with_probe_env(
+        env, DDPG, algo_args, memory, learn_steps, device
+    )
 
 def test_policy_on_policy_with_probe_env():
     device = torch.device("cpu")
@@ -449,6 +477,25 @@ def test_policy_on_policy_with_probe_env_cnn():
         "net_config": {
             "arch": "cnn",  # Network architecture
             "hidden_size": [64],  # Network hidden size
+            "channel_size": [32],  # CNN channel size
+            "kernel_size": [3],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+        },
+        "lr": 0.01,
+    }
+    check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
+
+def test_policy_on_policy_with_probe_env_dict():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = FixedObsPolicyContActionsDictEnv()
+    learn_steps = 100
+    algo_args = {
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "net_config": {
+            "arch": "composed",  # Network architecture
+            "hidden_size": [64],  # Network hidden size
+            "latent_dim": 16,  # Latent dimension
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size

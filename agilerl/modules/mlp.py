@@ -169,7 +169,8 @@ class EvolvableMLP(EvolvableModule):
                 hidden_size=self.hidden_size,
                 output_vanish=self.output_vanish,
                 output_activation=self.mlp_output_activation,
-                gpt_activations=self.gpt_activations
+                gpt_activations=self.gpt_activations,
+                layer_norm=self.layer_norm
             )
             if self.accelerator is None:
                 feature_net = feature_net.to(self.device)

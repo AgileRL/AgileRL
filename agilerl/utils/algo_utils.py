@@ -385,3 +385,23 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
         flattened_experiences.append(flattened_exp)
     
     return tuple(flattened_experiences)
+
+def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
+    """Checks if experiences are vectorised.
+
+    :param experiences: Experiences to check
+    :type experiences: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
+
+    :return: True if experiences are vectorised, False otherwise
+    :rtype: bool
+    """
+    is_vec_ls = []
+    for exp in experiences:
+        if isinstance(exp, dict):
+            is_vec = all(value.ndim > 1 for value in exp.values())
+        else:
+            is_vec = exp.ndim > 1
+
+        is_vec_ls.append(is_vec)
+    
+    return all(is_vec_ls)

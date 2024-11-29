@@ -22,6 +22,7 @@ from agilerl.utils.algo_utils import (
     stack_experiences,
     get_experiences_samples,
     flatten_experiences,
+    is_vectorized_experiences,
 )
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.algorithms.base import RLAlgorithm
@@ -529,7 +530,7 @@ class PPO(RLAlgorithm):
         # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
         # after checking if experiences are vectorized
         experiences = (states, actions, log_probs, advantages, returns, values)
-        if all(exp.ndim > 1 for exp in experiences):
+        if is_vectorized_experiences(*experiences):
             experiences = flatten_experiences(*experiences)
 
         # Move experiences to algo device
