@@ -843,7 +843,7 @@ def check_q_learning_with_probe_env(
     agent = algo_class(**algo_args, device=device)
 
     state, _ = env.reset()
-    for _ in range(5000):
+    for _ in range(500):
         if isinstance(state, dict):
             state = {k: np.expand_dims(v, 0) for k, v in state.items()}
         else:
@@ -874,7 +874,7 @@ def check_policy_q_learning_with_probe_env(
     agent = algo_class(**algo_args, device=device)
 
     state, _ = env.reset()
-    for _ in range(1000):
+    for _ in range(5000):
         action = (
             (agent.max_action - agent.min_action)
             * np.random.rand(1, agent.action_dim).astype("float32")
