@@ -1,30 +1,13 @@
-from typing import Any, Dict, List, Protocol, Callable, Optional, runtime_checkable
+from typing import Any, Dict, List, Callable, Optional, runtime_checkable
 import copy
-from functools import wraps, partial
+from functools import wraps
 from abc import ABC, abstractmethod
-from enum import Enum
 import torch
 import torch.nn as nn
 
-from agilerl.modules.custom_components import NoisyLinear, GumbelSoftmax, NewGELU
+from agilerl.protocols import MutationType, MutationMethod
+from agilerl.modules.custom_components import NoisyLinear
 from agilerl.utils.evolvable_networks import get_activation
-
-class MutationType(Enum):
-    LAYER = "layer"
-    NODE = "node"
-
-@runtime_checkable
-class MutationMethod(Protocol):
-    """Protocol for module mutation methods. Architecture mutations can be abstracted 
-    into two types: layer mutations and node mutations.
-    
-    :attribute _mutation_type: The type of mutation function.
-    :type _mutation_type: MutationType
-    """
-    _mutation_type: MutationType
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        ...
 
 def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], MutationMethod]:
     """Decorator to register a method as a mutation function of a specific type.
@@ -205,7 +188,7 @@ class EvolvableModule(nn.Module, ABC):
         
         return probs
 
-    def clone(self):
+    def clone(self) -> "EvolvableModule":
         """Returns clone of neural net with identical parameters."""
         clone = self.__class__(**copy.deepcopy(self.init_dict))
         clone.load_state_dict(self.state_dict())

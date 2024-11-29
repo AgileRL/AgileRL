@@ -1,15 +1,19 @@
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 import os
 import warnings
+from numbers import Number
+from collections import defaultdict
 from datetime import datetime
 import gymnasium as gym
 from gymnasium import spaces
 import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
 from accelerate import Accelerator
 import numpy as np
 import wandb
 
-from agilerl.algorithms.base import EvolvableAlgorithm
+from agilerl.typing import GymSpaceType, TorchObsType, MaybeObsList, ArrayOrTensor, NumpyObsType, PopulationType
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -24,8 +28,6 @@ from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.modules.base import EvolvableModule
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
-
-PopulationType = list[EvolvableAlgorithm]
 
 def make_vect_envs(env_name: str, num_envs: int = 1) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
@@ -63,26 +65,6 @@ def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.ve
     return gym.vector.AsyncVectorEnv(
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
-
-def observation_space_channels_to_first(observation_space: Union[spaces.Box, spaces.Dict]) -> spaces.Box:
-    """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
-
-    :param observation_space: Observation space
-    :type observation_space: spaces.Box
-    :return: Observation space with swapped channels
-    :rtype: spaces.Box
-    """
-    if isinstance(observation_space, spaces.Dict):
-        for key in observation_space.spaces.keys():
-            if isinstance(observation_space[key], spaces.Box) and len(observation_space[key].shape) == 3:
-                observation_space[key] = observation_space_channels_to_first(observation_space[key])
-        return observation_space
-    
-    low = observation_space.low.transpose(2, 0, 1)
-    high = observation_space.high.transpose(2, 0, 1)
-    return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
-
-GymSpaceType = Union[spaces.Space, List[spaces.Space]]
 
 def create_population(
     algo: str,

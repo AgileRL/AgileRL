@@ -1365,6 +1365,7 @@ def check_policy_q_learning_with_probe_env(
     # Learn from experiences
     for _ in trange(learn_steps):
         experiences = memory.sample(agent.batch_size)
+
         # Learn according to agent's RL algorithm
         agent.learn(experiences)
 

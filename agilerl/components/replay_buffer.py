@@ -6,6 +6,8 @@ import numpy as np
 from numpy.typing import ArrayLike
 import torch
 
+from agilerl.typing import NumpyObsType
+from agilerl.utils.algo_utils import obs_to_tensor
 from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
 NpTransitionType = Union[Number, ArrayLike, Dict[str, ArrayLike]]
@@ -38,6 +40,38 @@ class ReplayBuffer:
         """Returns the current size of internal memory."""
         return len(self.memory)
 
+    @staticmethod
+    def stack_transitions(transitions: List[NumpyObsType]) -> NumpyObsType:
+        """Stacks transitions into a single array/dictionary/tuple of arrays.
+
+        :param transitions: List of transitions
+        :type transitions: list[NumpyObsType]
+
+        :return: Stacked transitions
+        :rtype: NumpyObsType
+        """
+        # Identify the type of the transition
+        field_type = type(transitions[0])
+
+        # Stack the transitions into a single array or tuple/dictionary of arrays
+        ts = []
+        for ft in transitions:
+            if field_type == dict:
+                ts.append({k: np.expand_dims(v, axis=0) for k, v in ft.items()})
+            elif field_type == tuple:
+                ts.append(tuple(np.expand_dims(v, axis=0) for v in ft))
+            else:
+                ts.append(np.expand_dims(ft, axis=0))
+
+        if field_type == dict:
+            ts = {k: np.vstack([t[k] for t in ts]) for k in ts[0].keys()}
+        elif field_type == tuple:
+            ts = tuple(np.vstack([t[i] for t in ts]) for i in range(len(ts[0])))
+        else:
+            ts = np.vstack(ts)
+        
+        return ts
+
     def _add(self, *args: Any) -> None:
         """Adds experience to memory.
 
@@ -60,21 +94,14 @@ class ReplayBuffer:
         transition = {}
         for field in self.field_names:
             # Extract all of the transitions for the current field
-            field_transitions: NpTransitionType = [getattr(e, field) for e in experiences if e is not None]
-            is_dict_field = isinstance(field_transitions[0], dict)
+            field_transitions: NpTransitionType = [
+                getattr(e, field) 
+                for e in experiences 
+                if e is not None
+                ]
 
-            # Stack the transitions into a single array or dictionary of arrays
-            ts = []
-            for ft in field_transitions:
-                if is_dict_field:
-                    ts.append({k: np.expand_dims(v, axis=0) for k, v in ft.items()})
-                else:
-                    ts.append(np.expand_dims(ft, axis=0))
-
-            if is_dict_field:
-                ts = {k: np.vstack([t[k] for t in ts]) for k in ts[0].keys()}
-            else:
-                ts = np.vstack(ts)
+            # Stack the transitions into a single array or tuple/dictionary of arrays
+            ts = ReplayBuffer.stack_transitions(field_transitions)
 
             # Handle integer fields
             if field in [
@@ -88,18 +115,7 @@ class ReplayBuffer:
 
             # Convert to torch tensor if specified
             if not np_array:
-                # Handle torch tensor creation
-                if is_dict_field:
-                    ts = {k: torch.from_numpy(v).float() for k, v in ts.items()}
-                else:
-                    ts = torch.from_numpy(ts).float()
-
-                # Place on device
-                if self.device is not None:
-                    if is_dict_field:
-                        ts = {k: v.to(self.device) for k, v in ts.items()}
-                    else:
-                        ts = ts.to(self.device)
+                ts = obs_to_tensor(ts, self.device)
 
             transition[field] = ts
 

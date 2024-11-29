@@ -1,9 +1,16 @@
-from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple
+from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple, Union
 import random
 from collections import deque, namedtuple
 import numpy as np
+from numbers import Number
+from numpy.typing import ArrayLike
 import torch
 
+from agilerl.typing import NumpyObsType
+from agilerl.utils.algo_utils import obs_to_tensor
+
+NpTransitionType = Union[Number, ArrayLike, Dict[str, ArrayLike]]
+TorchTransitionType = Union[torch.Tensor, Dict[str, torch.Tensor]]
 
 class MultiAgentReplayBuffer:
     """The Multi-Agent Experience Replay Buffer class. Used to store multiple agents'
@@ -41,6 +48,50 @@ class MultiAgentReplayBuffer:
         """
         return len(self.memory)
 
+    @staticmethod
+    def stack_transitions(transitions: List[NumpyObsType]) -> NumpyObsType:
+        """Stacks transitions into a single array/dictionary/tuple of arrays.
+
+        :param transitions: List of transitions
+        :type transitions: list[NumpyObsType]
+
+        :return: Stacked transitions
+        :rtype: NumpyObsType
+        """
+        # Identify the type of the transition
+        field_type = type(transitions[0])
+
+        # Stack the transitions into a single array or tuple/dictionary of arrays
+        ts = []
+        for ft in transitions:
+            if field_type == dict:
+                ft = {k: np.array(v) for k, v in ft.items()}
+            elif field_type == tuple:
+                ft = tuple(np.array(v) for v in ft)
+
+            ts.append(ft)
+
+        if field_type == dict:
+            _ts = {}
+            for k in ts[0].keys():
+                kts = np.array([t[k] for t in ts])
+                _ts[k] = np.expand_dims(kts, axis=1) if kts.ndim == 1 else kts
+
+            ts = _ts
+        elif field_type == tuple:
+            _ts = []
+            for i in range(len(ts[0])):
+                its = np.array([t[i] for t in ts])
+                _ts.append(np.expand_dims(its, axis=1) if its.ndim == 1 else its)
+
+            ts = _ts
+        else:
+            ts = np.array(ts)
+            if ts.ndim == 1:
+                ts = np.expand_dims(ts, axis=1)
+        
+        return ts
+
     def _add(self, *args: Any) -> None:
         """
         Adds experience to memory.
@@ -75,20 +126,17 @@ class MultiAgentReplayBuffer:
             ]
 
             for agent_id in self.agent_ids:
-                ts = np.array(
-                    [getattr(e, field)[agent_id] for e in experiences_filtered]
-                )
+                # Get field values for each agent
+                ts = [getattr(e, field)[agent_id] for e in experiences_filtered]
 
-                if ts.ndim == 1:
-                    ts = np.expand_dims(ts, axis=1)
+                # Stack transitions if necessary
+                ts = MultiAgentReplayBuffer.stack_transitions(ts)
 
                 if is_binary_field:
                     ts = ts.astype(np.uint8)
 
                 if not np_array:
-                    ts = torch.tensor(ts, dtype=torch.float32)
-                    if self.device is not None:
-                        ts = ts.to(self.device)
+                    ts = obs_to_tensor(ts, self.device)
 
                 transition[field][agent_id] = ts
 

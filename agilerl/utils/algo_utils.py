@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from numbers import Number
 from typing import Union, Dict, Any, Tuple
 import torch
@@ -12,7 +12,14 @@ import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 
 from agilerl.modules.base import EvolvableModule
-from agilerl.typing import NumpyObsType, TorchObsType, NetworkType, OptimizerType
+from agilerl.typing import (
+    NumpyObsType,
+    TorchObsType,
+    NetworkType,
+    OptimizerType,
+    MaybeObsList,
+    ArrayOrTensor
+)
 
 def unwrap_optimizer(
         optimizer: OptimizerType,
@@ -41,7 +48,7 @@ def unwrap_optimizer(
     else:
         return optimizer
     
-def recursive_check_module_attrs(obj: Any) -> bool:
+def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     """Recursively check if the object has any attributes that are EvolvableModule's or Optimizer's.
 
     :param obj: The object to check for EvolvableModule's or Optimizer's.
@@ -49,12 +56,16 @@ def recursive_check_module_attrs(obj: Any) -> bool:
     :return: True if the object has any attributes that are EvolvableModule's or Optimizer's, False otherwise.
     :rtype: bool
     """
-    if isinstance(obj, (OptimizedModule, EvolvableModule, Optimizer)):
+    check_types = (OptimizedModule, EvolvableModule)
+    if not networks_only:
+        check_types += (Optimizer,)
+
+    if isinstance(obj, check_types):
         return True
     if isinstance(obj, dict):
-        return any(recursive_check_module_attrs(v) for v in obj.values())
+        return any(recursive_check_module_attrs(v, networks_only=networks_only) for v in obj.values())
     if isinstance(obj, list):
-        return any(recursive_check_module_attrs(v) for v in obj)
+        return any(recursive_check_module_attrs(v, networks_only=networks_only) for v in obj)
     return False
 
 def chkpt_attribute_to_device(chkpt_dict: Dict[str, torch.Tensor], device: str) -> Dict[str, Any]:
@@ -117,7 +128,25 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
         ]
     )
 
-def obs_channels_to_first(observation: Union[np.ndarray, Dict[str, np.ndarray]]) ->  Union[np.ndarray, Dict[str, np.ndarray]]:
+def observation_space_channels_to_first(observation_space: Union[spaces.Box, spaces.Dict]) -> spaces.Box:
+    """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
+
+    :param observation_space: Observation space
+    :type observation_space: spaces.Box
+    :return: Observation space with swapped channels
+    :rtype: spaces.Box
+    """
+    if isinstance(observation_space, spaces.Dict):
+        for key in observation_space.spaces.keys():
+            if isinstance(observation_space[key], spaces.Box) and len(observation_space[key].shape) == 3:
+                observation_space[key] = observation_space_channels_to_first(observation_space[key])
+        return observation_space
+    
+    low = observation_space.low.transpose(2, 0, 1)
+    high = observation_space.high.transpose(2, 0, 1)
+    return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
+
+def obs_channels_to_first(observation: NumpyObsType) ->  NumpyObsType:
     """Converts observation space from channels last to channels first format.
 
     :param observation_space: Observation space
@@ -148,15 +177,15 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
     :rtype: TorchObsType
     """
     if isinstance(obs, torch.Tensor):
-        return obs.to(device)
+        return obs.float().to(device)
     if isinstance(obs, np.ndarray):
-        return torch.as_tensor(obs, device=device)
+        return torch.as_tensor(obs, device=device).float()
     elif isinstance(obs, dict):
-        return {key: torch.as_tensor(_obs, device=device) for (key, _obs) in obs.items()}
+        return {key: torch.as_tensor(_obs, device=device).float() for (key, _obs) in obs.items()}
     elif isinstance(obs, tuple):
-        return tuple(torch.as_tensor(_obs, device=device) for _obs in obs)
+        return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
     elif isinstance(obs, Number):
-        return torch.tensor(obs, device=device)
+        return torch.tensor(obs, device=device).float()
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
     
@@ -257,3 +286,104 @@ def preprocess_observation(
     observation = maybe_add_batch_dim(observation, space_shape)
 
     return observation
+
+def get_experiences_samples(minibatch_indices: np.ndarray, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+    """Samples experiences given minibatch indices.
+
+    :param minibatch_indices: Minibatch indices
+    :type minibatch_indices: numpy.ndarray[int]
+    :param experiences: Experiences to sample from
+    :type experiences: Tuple[torch.Tensor[float], ...]
+
+    :return: Sampled experiences
+    :rtype: Tuple[torch.Tensor[float], ...]
+    """
+    sampled_experiences = []
+    for exp in experiences:
+        if isinstance(exp, dict):
+            sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
+        elif isinstance(exp, torch.Tensor):
+            print(exp.size())
+            sampled_exp = exp[minibatch_indices]
+        else:
+            raise TypeError(f"Unsupported experience type: {type(exp)}")
+        
+        sampled_experiences.append(sampled_exp)
+    
+    return tuple(sampled_experiences)
+
+def stack_experiences(*experiences: MaybeObsList, to_torch: bool = True) -> Tuple[ArrayOrTensor, ...]:
+    """Stacks experiences into a single array or tensor.
+
+    :param experiences: Experiences to stack
+    :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
+    :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
+    :type to_torch: bool, optional
+
+    :return: Stacked experiences
+    :rtype: Tuple[ArrayOrTensor, ...]
+    """
+    stacked_experiences = []
+    for exp in experiences:
+        # Some cases where an experience just involves e.g. a single "next_state"
+        if not isinstance(exp, list):
+            stacked_exp = exp
+            if to_torch and isinstance(exp, np.ndarray):
+                stacked_exp = torch.from_numpy(stacked_exp)
+
+        elif isinstance(exp[0], dict):
+            stacked_exp = defaultdict(list)
+            for it in exp:
+                for key, value in it.items():
+                    stacked_exp[key].append(value)
+
+            stacked_exp = {key: np.array(value) for key, value in stacked_exp.items()}
+            if to_torch:
+                stacked_exp = {key: torch.from_numpy(value) for key, value in stacked_exp.items()}
+            
+        elif isinstance(exp[0], (np.ndarray, Number)):
+            stacked_exp = np.array(exp)
+            if to_torch:
+                stacked_exp = torch.from_numpy(stacked_exp)
+            
+        elif isinstance(exp[0], torch.Tensor):
+            stacked_exp = torch.stack(exp)
+
+        else:
+            raise TypeError(f"Unsupported experience type: {type(exp[0])}")
+
+        stacked_experiences.append(stacked_exp)
+
+    return tuple(stacked_experiences)
+
+def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...]:
+    """Flattens experiences into a single array or tensor.
+
+    :param experiences: Experiences to flatten
+    :type experiences: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
+
+    :return: Flattened experiences
+    :rtype: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
+    """
+    def flatten(arr: ArrayOrTensor) -> ArrayOrTensor:
+        # Need to flatten batch and n_env dimensions
+        shape = arr.shape
+        if len(shape) < 3:
+            shape = (*shape, 1)
+        
+        arr = arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
+        return arr
+
+    flattened_experiences = []
+    for exp in experiences:
+        if isinstance(exp, dict):
+            flattened_exp = {key: flatten(value) for key, value in exp.items()}
+        elif isinstance(exp, (torch.Tensor, np.ndarray)):
+            print(exp.size())
+            flattened_exp = flatten(exp)
+        else:
+            raise TypeError(f"Unsupported experience type: {type(exp)}")
+        
+        flattened_experiences.append(flattened_exp)
+    
+    return tuple(flattened_experiences)

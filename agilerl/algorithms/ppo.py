@@ -15,7 +15,14 @@ from agilerl.typing import ExperiencesType
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first,
+    stack_experiences,
+    get_experiences_samples,
+    flatten_experiences,
+)
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.algorithms.base import RLAlgorithm
 
@@ -491,8 +498,7 @@ class PPO(RLAlgorithm):
             dones,
             values,
             next_state
-        
-        ) = self.stack_experiences(*experiences)
+        ) = stack_experiences(*experiences)
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
@@ -520,23 +526,18 @@ class PPO(RLAlgorithm):
                 advantages[t] = a_t
             returns = advantages + values
 
-        if self.discrete_actions:
-            actions = actions.reshape(-1)
-        else:
-            actions = actions.reshape((-1, self.action_dim))
-
-        log_probs = log_probs.reshape(-1)
-        advantages = advantages.reshape(-1)
-        returns = returns.reshape(-1)
-        values = values.reshape(-1)
-
+        # Flatten experiences from (batch_size, num_envs, ...) to (batch_size*num_envs, ...)
+        # after checking if experiences are vectorized
         experiences = (states, actions, log_probs, advantages, returns, values)
+        if all(exp.ndim > 1 for exp in experiences):
+            experiences = flatten_experiences(*experiences)
+
+        # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
         clipfracs = []
-
         mean_loss = 0
         for _ in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
@@ -549,7 +550,7 @@ class PPO(RLAlgorithm):
                     batch_advantages, 
                     batch_returns, 
                     batch_values
-                 ) = self.get_samples(minibatch_idxs, *experiences)
+                 ) = get_experiences_samples(minibatch_idxs, *experiences)
 
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(

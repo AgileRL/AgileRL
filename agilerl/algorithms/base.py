@@ -1,9 +1,6 @@
-from typing import Optional, Union, Tuple, Iterable, TypeGuard, Any, Dict, List, Set
+from typing import Optional, Union, Tuple, Iterable, TypeGuard, Any, Dict
 import inspect
-import copy
-from numbers import Number
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from gymnasium import spaces
 from accelerate import Accelerator
 import numpy as np
@@ -13,21 +10,14 @@ import torch
 from torch._dynamo import OptimizedModule
 import dill
 
-from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, ArrayOrTensor, MaybeObsList
-from agilerl.modules.base import EvolvableModule
+from agilerl.protocols import EvolvableModule, EvolvableAttributeType, EvolvableAttributeDict
+from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, GymSpaceType
 from agilerl.utils.algo_utils import (
     compile_model,
-    preprocess_observation,
     recursive_check_module_attrs,
-    remove_compile_prefix
+    remove_compile_prefix,
+    preprocess_observation
 )
-
-EvolvableNetworkType = Union[EvolvableModule, Iterable[EvolvableModule]]
-OptimizerType = Union[Optimizer, Iterable[Optimizer]]
-EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
-EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
-EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
-GymSpaceType = Union[spaces.Space, Iterable[spaces.Space]]
     
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
@@ -240,28 +230,23 @@ class EvolvableAlgorithm(ABC):
         else:
             raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
 
-    def evolvable_attributes(self) -> EvolvableAttributeDict:
+    def evolvable_attributes(self, networks_only: bool = False) -> EvolvableAttributeDict:
         """Returns the attributes related to the evolvable networks in the algorithm. Includes 
         attributes that are either evolvable networks or a list of evolvable networks, as well 
         as the optimizers associated with the networks.
+
+        :param networks_only: If True, only include evolvable networks, defaults to False
+        :type networks_only: bool, optionals
         
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
         """
         return {
             attr: getattr(self, attr) for attr in dir(self)
-            if recursive_check_module_attrs(getattr(self, attr))
+            if recursive_check_module_attrs(getattr(self, attr), networks_only=networks_only)
             and not attr.startswith("_") and not attr.endswith("_")
             and not "network" in attr # NOTE: We shouldn't need to do this...
         }
-    
-    def register_optimizer(self, optimizer_name: str, module_names: List[str]) -> None:
-        """
-        Registers an optimizer and the modules it manages.
-        :param optimizer_name: Name of the optimizer attribute (e.g., 'actor_optimizer').
-        :param module_names: List of module attribute names managed by the optimizer (e.g., ['actor']).
-        """
-        self.optimizer_module_mapping[optimizer_name] = module_names
     
     def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
         """
@@ -312,50 +297,120 @@ class EvolvableAlgorithm(ABC):
                 else:
                     setattr(self, attr, self.accelerator.prepare(obj))
     
-    def clone(self, index: Optional[int] = None, wrap: bool = False) -> "EvolvableAlgorithm":
-        """Creates a clone of the algorithm.
-
-        :param index: The index of the clone, defaults to None
-        :type index: Optional[int], optional
-        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
-        :type wrap: bool, optional
-
-        :return: A clone of the algorithm
-        :rtype: EvolvableAlgorithm
-        """
-        # Make copy using input arguments
-        input_args = self.inspect_attributes(input_args_only=True)
-        input_args["wrap"] = wrap
-        clone = type(self)(**input_args)
-
-        # TODO: Copy over evolvable attributes
-        # Here we need to know which evolvable modules belong to which optimizers,
-        # which is hard to determine systematically without user input -> Need to 
-        # think harder about this...
-
-        # Copy non-evolvable attributes back to clone
-        for attribute in self.inspect_attributes().keys():
-            if hasattr(self, attribute) and hasattr(clone, attribute):
-                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(
-                    clone_attr, torch.Tensor
-                ):
-                    if not torch.equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                else:
-                    if attr != clone_attr:
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
+    def models_to_device(self) -> None:
+        """Moves the models in the algorithm to the device."""
+        for name, obj in self.evolvable_attributes(networks_only=True).items():
+            if isinstance(obj, list):
+                setattr(self, name, [m.to(self.device) for m in obj])
             else:
-                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+                setattr(self, name, obj.to(self.device))
+    
+    # def register_optimizer(self, optimizer_name: str, module_names: List[str]) -> None:
+    #     """
+    #     Registers an optimizer and the modules it manages.
+    #     :param optimizer_name: Name of the optimizer attribute (e.g., 'actor_optimizer').
+    #     :param module_names: List of module attribute names managed by the optimizer (e.g., ['actor']).
+    #     """
+    #     self.optimizer_module_mapping[optimizer_name] = module_names
 
-        if index is not None:
-            clone.index = index
+    # @classmethod
+    # def load(cls, path: str, device: str = "cpu", accelerator: Optional[Accelerator] = None):
+    #     """Creates agent with properties and network weights loaded from path.
+
+    #     :param path: Location to load checkpoint from
+    #     :type path: string
+    #     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    #     :type device: str, optional
+    #     :param accelerator: Accelerator for distributed computing, defaults to None
+    #     :type accelerator: accelerate.Accelerator(), optional
+    #     """
+    #     checkpoint: Dict[str, Any] = torch.load(path, map_location=device, pickle_module=dill)
+
+    #     # Assign specified device to underlying model init dicts
+    #     init_dict_keys = [key for key in checkpoint.keys() if key.endswith("_init_dict")]
+    #     n_agents = len(checkpoint["agent_ids"])
+    #     for agent_idx in range(n_agents):
+    #         for key in init_dict_keys:
+    #             checkpoint[key][agent_idx]["device"] = device
         
-        return clone
+    #     # Remove state and init dicts of models and optimizers from checkpoint
+    #     state_dict_keys = [key for key in checkpoint.keys() if key.endswith("_state_dict")]
+    #     model_keys = init_dict_keys + state_dict_keys
+    #     model_cache = {key: checkpoint.pop(key) for key in model_keys}
+
+    #     # Change device and accelerator for the agent
+    #     checkpoint["device"] = device
+    #     checkpoint["accelerator"] = accelerator
+
+    #     # Create agent instance adn initilize networks
+    #     constructor_params = inspect.signature(cls.__init__).parameters.keys()
+    #     class_init_dict = {
+    #         k: v for k, v in checkpoint.items() if k in constructor_params
+    #     }
+
+    #     raise NotImplementedError("Need to implement the rest of the load method.")
+
+    # def load_checkpoint(self, path: str) -> None:
+    #     """Loads saved agent properties and network weights from checkpoint.
+
+    #     :param path: Location to load checkpoint from
+    #     :type path: string
+    #     """
+
+    #     if self.accelerator is not None:
+    #         self.wrap_models()
+    #     else:
+    #         self.models_to_device()
+    #         if self.torch_compiler:
+    #             torch.set_float32_matmul_precision("high")
+    #             self.recompile()
+
+    #     raise NotImplementedError("Need to implement the rest of the load_checkpoint method.")
+    
+    # def clone(self, index: Optional[int] = None, wrap: bool = False) -> "EvolvableAlgorithm":
+    #     """Creates a clone of the algorithm.
+
+    #     :param index: The index of the clone, defaults to None
+    #     :type index: Optional[int], optional
+    #     :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+    #     :type wrap: bool, optional
+
+    #     :return: A clone of the algorithm
+    #     :rtype: EvolvableAlgorithm
+    #     """
+    #     # Make copy using input arguments
+    #     input_args = self.inspect_attributes(input_args_only=True)
+    #     input_args["wrap"] = wrap
+    #     clone = type(self)(**input_args)
+
+    #     # TODO: Copy over evolvable attributes
+    #     # Here we need to know which evolvable modules belong to which optimizers,
+    #     # which is hard to determine systematically without user input -> Need to 
+    #     # think harder about this...
+
+    #     # Copy non-evolvable attributes back to clone
+    #     for attribute in self.inspect_attributes().keys():
+    #         if hasattr(self, attribute) and hasattr(clone, attribute):
+    #             attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+    #             if isinstance(attr, torch.Tensor) or isinstance(
+    #                 clone_attr, torch.Tensor
+    #             ):
+    #                 if not torch.equal(attr, clone_attr):
+    #                     setattr(
+    #                         clone, attribute, copy.deepcopy(getattr(self, attribute))
+    #                     )
+    #             else:
+    #                 if attr != clone_attr:
+    #                     setattr(
+    #                         clone, attribute, copy.deepcopy(getattr(self, attribute))
+    #                     )
+    #         else:
+    #             setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+
+    #     if index is not None:
+    #         clone.index = index
+        
+    #     return clone
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all single-agent algorithms in the AgileRL framework. 
@@ -425,44 +480,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             normalize_images=self.normalize_images
         )
     
-    def stack_experiences(self, *experiences: MaybeObsList, to_torch: bool = True) -> Tuple[ArrayOrTensor, ...]:
-        """Stacks experiences into a single array or tensor.
-
-        :param experiences: Experiences to stack
-        :type experiences: list[numpy.ndarray[float]] or list[dict[str, numpy.ndarray[float]]]
-        :param to_torch: If True, convert the stacked experiences to a torch tensor, defaults to True
-        :type to_torch: bool, optional
-
-        :return: Stacked experiences
-        :rtype: Tuple[ArrayOrTensor, ...]
-        """
-        stacked_experiences = []
-        for exp in experiences:
-            # Some cases where an experience just involves e.g. a single "next_state"
-            if not isinstance(exp, list):
-                stacked_experiences.append(exp)
-            elif isinstance(exp[0], dict):
-                stacked_exp = defaultdict(list)
-                for it in exp:
-                    for key, value in it.items():
-                        stacked_exp[key].append(value)
-
-                stacked_exp = {key: np.array(value) for key, value in stacked_exp.items()}
-                if to_torch:
-                    stacked_exp = {key: torch.from_numpy(value) for key, value in stacked_exp.items()}
-                
-                stacked_experiences.append(stacked_exp)
-            elif isinstance(exp[0], (np.ndarray, Number)):
-                stacked_exp = np.array(exp)
-                if to_torch:
-                    stacked_exp = torch.from_numpy(stacked_exp)
-                
-                stacked_experiences.append(stacked_exp)
-            else:
-                raise TypeError(f"Unsupported experience type: {type(exp[0])}")
-
-        return tuple(stacked_experiences)
-    
     def to_device(self, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
         """Moves experiences to the device.
 
@@ -476,8 +493,9 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         on_device = []
         for exp in experiences:
             if isinstance(exp, dict):
-                for key, value in exp.items():
-                    exp[key] = value.to(device)
+                exp = {key: val.to(device) for key, val in exp.items()}
+            elif isinstance(exp, (list, tuple)):
+                exp = [val.to(device) for val in exp]
             elif isinstance(exp, torch.Tensor):
                 exp = exp.to(device)
             else:
@@ -486,30 +504,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             on_device.append(exp)
         
         return on_device
-    
-    def get_samples(self, minibatch_indices: np.ndarray, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
-        """Samples experiences given minibatch indices.
-
-        :param minibatch_indices: Minibatch indices
-        :type minibatch_indices: numpy.ndarray[int]
-        :param experiences: Experiences to sample from
-        :type experiences: Tuple[torch.Tensor[float], ...]
-
-        :return: Sampled experiences
-        :rtype: Tuple[torch.Tensor[float], ...]
-        """
-        sampled_experiences = []
-        for exp in experiences:
-            if isinstance(exp, dict):
-                sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
-            elif isinstance(exp, torch.Tensor):
-                sampled_exp = exp[minibatch_indices]
-            else:
-                raise TypeError(f"Unsupported experience type: {type(exp)}")
-            
-            sampled_experiences.append(sampled_exp)
-        
-        return tuple(sampled_experiences)
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
@@ -639,16 +633,13 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = spaces.Dict({
             agent_id: space for agent_id, space in zip(agent_ids, action_spaces)
         })
-    
-    def recompile(self) -> None:
-        """Recompiles the modules in the algorithm with the specified torch compiler."""
-        for name, obj in self.evolvable_attributes().items():
-            if is_module_list(obj):
-                compiled_modules = []
-                for module in obj:
-                    compiled_modules.append(compile_model(module, self.torch_compiler))
 
-                setattr(self, name, compiled_modules)
+    def recompile(self) -> None:
+        """Recompiles the evolvable modules in the algorithm with the specified torch compiler."""
+        for name, obj in self.evolvable_attributes(networks_only=True).items():
+            print(name)
+            compiled_modules = [compile_model(module, self.torch_compiler) for module in obj]
+            setattr(self, name, compiled_modules)
 
     def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.
