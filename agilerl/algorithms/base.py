@@ -637,11 +637,10 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
     def recompile(self) -> None:
         """Recompiles the evolvable modules in the algorithm with the specified torch compiler."""
         for name, obj in self.evolvable_attributes(networks_only=True).items():
-            print(name)
             compiled_modules = [compile_model(module, self.torch_compiler) for module in obj]
             setattr(self, name, compiled_modules)
 
-    def preprocess_observation(self, observation: ObservationType) -> TorchObsType:
+    def preprocess_observation(self, observation: ObservationType) -> Dict[str, TorchObsType]:
         """Preprocesses observations for forward pass through neural network.
 
         :param observations: Observations of environment
@@ -650,20 +649,16 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         :return: Preprocessed observations
         :rtype: torch.Tensor[float] or dict[str, torch.Tensor[float]] or Tuple[torch.Tensor[float], ...]
         """
-        preprocessed_obs = preprocess_observation(
-            observation=observation,
-            observation_space=self.observation_space,
-            device=self.device if self.accelerator is None else None,
-            normalize_images=self.normalize_images
-        )
+        preprocessed = {}
+        for agent_id, obs in observation.items():
+            preprocessed[agent_id] = preprocess_observation(
+                observation=obs,
+                observation_space=self.observation_space.get(agent_id),
+                device=self.device if self.accelerator is None else None,
+                normalize_images=self.normalize_images
+            )
 
-        # Need to unsqueeze 2nd dimension in image spaces for multi-agent algorithms
-        # (N, C, H, W) -> (N, C, 1, H, W)
-        for agent_id, obs in preprocessed_obs.items():
-            if len(obs.shape) == 4:
-                preprocessed_obs[agent_id] = obs.unsqueeze(2)
-        
-        return preprocessed_obs
+        return preprocessed
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.

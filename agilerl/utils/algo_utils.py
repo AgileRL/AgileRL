@@ -303,7 +303,6 @@ def get_experiences_samples(minibatch_indices: np.ndarray, *experiences: TorchOb
         if isinstance(exp, dict):
             sampled_exp = {key: value[minibatch_indices] for key, value in exp.items()}
         elif isinstance(exp, torch.Tensor):
-            print(exp.size())
             sampled_exp = exp[minibatch_indices]
         else:
             raise TypeError(f"Unsupported experience type: {type(exp)}")
@@ -379,7 +378,6 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
         if isinstance(exp, dict):
             flattened_exp = {key: flatten(value) for key, value in exp.items()}
         elif isinstance(exp, (torch.Tensor, np.ndarray)):
-            print(exp.size())
             flattened_exp = flatten(exp)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp)}")

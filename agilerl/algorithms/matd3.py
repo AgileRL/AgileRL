@@ -546,7 +546,7 @@ class MATD3(MultiAgentAlgorithm):
 
     def get_action(
             self,
-            states: NumpyObsType,
+            states: Dict[str, NumpyObsType],
             training: bool = True,
             infos: Optional[InfosDict] = None
             ) -> Tuple[ArrayDict, ArrayDict]:
@@ -571,11 +571,13 @@ class MATD3(MultiAgentAlgorithm):
         action_masks, env_defined_actions, agent_masks = self.process_infos(infos)
 
         # Preprocess observations
-        states = list(self.preprocess_observation(states).values())
+        preprocessed_states = list(self.preprocess_observation(states).values())
+        if self.arch == "cnn":
+            preprocessed_states = [state.unsqueeze(2) for state in preprocessed_states]
 
         action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(
-            zip(self.agent_ids, states, self.actors)
+            zip(self.agent_ids, preprocessed_states, self.actors)
         ):
             actor.eval()
             if self.accelerator is not None:
@@ -685,6 +687,13 @@ class MATD3(MultiAgentAlgorithm):
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
 
+        # Need to unsqueeze next states for Conv3d
+        if self.arch == "cnn":
+            next_states = {
+                agent_id: next_state.unsqueeze(2)
+                for agent_id, next_state in next_states.items()
+            }
+
         next_actions = []
         with torch.no_grad():
             for i, agent_id_label in enumerate(self.agent_ids):
@@ -709,10 +718,20 @@ class MATD3(MultiAgentAlgorithm):
                 list(next_states.values()) + next_actions, dim=1
             )
         elif self.arch == "cnn":
-            stacked_states = torch.stack(list(states.values()), dim=2).squeeze()
+            next_states = {
+                agent_id: next_state.squeeze(2) 
+                for agent_id, next_state in next_states.items()
+                }
+
+            stacked_states = torch.stack(list(states.values()), dim=2)
             stacked_actions = torch.cat(list(actions.values()), dim=1)
-            stacked_next_states = torch.stack(list(next_states.values()), dim=2).squeeze()
+            stacked_next_states = torch.stack(list(next_states.values()), dim=2)
             stacked_next_actions = torch.cat(next_actions, dim=1)
+
+            # Need to unsqueeze states for Conv3d
+            states = {
+                agent_id: state.unsqueeze(2) for agent_id, state in states.items()
+            }
 
         loss_dict = {}
         for idx, (
