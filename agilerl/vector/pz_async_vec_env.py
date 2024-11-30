@@ -702,10 +702,19 @@ class Observations:
         self.shared_memory = shared_memory
         self.obs_view = []
         for shm, agent in zip(shared_memory, exp_spec.agents):
+            print(
+                "__init__",
+                "observation width",
+                self.exp_spec.observation_widths[agent],
+                "observation char",
+                self.exp_spec.single_observation_space[agent].dtype.char,
+            )
+            buff = np.frombuffer(
+                shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
+            )
+            print("buffer shape", buff.shape)
             self.obs_view.append(
-                np.frombuffer(
-                    shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
-                ).reshape((num_envs, *exp_spec.observation_shapes[agent]))
+                buff  # .reshape((num_envs, *exp_spec.observation_shapes[agent]))
             )
 
         print("All good here ")
@@ -715,7 +724,9 @@ class Observations:
         Get agent observation given a key (agent_id)
         """
         agent_idx = self.exp_spec.agent_index_map[key]
-        return self.obs_view[agent_idx]
+        return self.obs_view[agent_idx].reshape(
+            (self.num_envs, *self.exp_spec.observation_shapes[key])
+        )
 
     def __str__(self):
         """"""
@@ -723,8 +734,17 @@ class Observations:
         return f"{my_dic}"
 
     def set_env_obs(self, index, observation):
-        for idx, obs in enumerate(observation.values()):
-            np.copyto(self.obs_view[idx][index, :], obs)
+        print("Setting observations", observation)
+        print(self.obs_view[0].shape, self.obs_view[1].shape)
+        for idx, (agent, obs) in enumerate(observation.items()):
+            np.copyto(
+                self.obs_view[idx][
+                    index
+                    * self.exp_spec.observation_widths[agent] : (index + 1)
+                    * self.exp_spec.observation_widths[agent]
+                ],
+                obs.flatten(),
+            )
 
     def __repr__(self):
         return self.__str__()
@@ -772,11 +792,18 @@ class Observations:
         # Recreate the numpy view from the shared buffer
         self.obs_view = []
         for shm, agent in zip(self.shared_memory, self.exp_spec.agents):
+            print(
+                "set state",
+                "observation width",
+                self.exp_spec.observation_widths[agent],
+                "observation char",
+                self.exp_spec.single_observation_space[agent].dtype.char,
+            )
             self.obs_view.append(
                 np.frombuffer(
                     shm.get_obj(),
                     dtype=self.exp_spec.single_observation_space[agent].dtype,
-                ).reshape((self.num_envs, *self.exp_spec.observation_shapes[agent]))
+                )  # .reshape((self.num_envs, *self.exp_spec.observation_shapes[agent]))
             )
 
 
@@ -801,9 +828,12 @@ class SharedMemory:
             #     * num_envs
             # )
             print(
-                "observation character",
+                "observation width",
+                exp_spec.observation_widths[agent],
+                "observation char",
                 exp_spec.single_observation_space[agent].dtype.char,
             )
+
             shared_memory = context.Array(
                 exp_spec.single_observation_space[agent].dtype.char,
                 exp_spec.observation_widths[agent] * num_envs,
