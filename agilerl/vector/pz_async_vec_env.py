@@ -243,7 +243,7 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                 else self.observations
             ),
             infos,
-        )  # self.experience_spec.pack_observation(self.observations), infos
+        )
 
     def step_async(self, actions):
         """
@@ -678,19 +678,6 @@ class PettingZooExperienceSpec:
             case "observation":
                 return -np.ones_like(observations[agent])
 
-    def process_transition(self, transitions, observations, transition_names):
-        transition_list = list(transitions)
-        for transition, name in zip(transition_list, transition_names):
-            transition = {
-                agent: (
-                    transition[agent]
-                    if agent in transition.keys()
-                    else self.get_placeholder_value(agent, name, observations)
-                )
-                for agent in self.agents
-            }
-        return transition_list
-
 
 class Observations:
     """
@@ -711,21 +698,11 @@ class Observations:
         self.shared_memory = shared_memory
         self.obs_view = []
         for shm, agent in zip(shared_memory, exp_spec.agents):
-            # print(
-            #     "__init__",
-            #     "observation width",
-            #     self.exp_spec.observation_widths[agent],
-            #     "observation char",
-            #     self.exp_spec.single_observation_space[agent].dtype.char,
-            # )
-            buff = np.frombuffer(
-                shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
-            )
             self.obs_view.append(
-                buff  # .reshape((num_envs, *exp_spec.observation_shapes[agent]))
+                np.frombuffer(
+                    shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
+                )
             )
-
-        # print("All good here ")
 
     def __getitem__(self, key):
         """
@@ -740,22 +717,6 @@ class Observations:
         """"""
         my_dic = {agent: obs for agent, obs in zip(self.exp_spec.agents, self.obs_view)}
         return f"{my_dic}"
-
-    def set_env_obs(self, index, observation):
-        # print("Setting observations", observation)
-        # print(self.obs_view[0].shape, self.obs_view[1].shape)
-        for agent_idx, (agent, obs) in enumerate(observation.items()):
-            print("observaiotn shape", obs.shape, "index", f"Worker-{agent_idx}")
-            np.copyto(
-                self.obs_view[agent_idx][
-                    index
-                    * self.exp_spec.observation_widths[agent] : (index + 1)
-                    * self.exp_spec.observation_widths[agent]
-                ],
-                np.asarray(
-                    obs, dtype=self.exp_spec.single_observation_space[agent].dtype
-                ).flatten(),
-            )
 
     def __repr__(self):
         return self.__str__()
@@ -790,33 +751,6 @@ class Observations:
         except KeyError:
             return None
 
-    def __getstate__(self):
-        """Called when pickling - tell Python how to serialize this object"""
-        state = self.__dict__.copy()
-        # Don't pickle the numpy array view - will be recreated
-        state["obs_view"] = None
-        return state
-
-    def __setstate__(self, state):
-        """Called when unpickling - tell Python how to deserialize this object"""
-        self.__dict__.update(state)
-        # Recreate the numpy view from the shared buffer
-        self.obs_view = []
-        for shm, agent in zip(self.shared_memory, self.exp_spec.agents):
-            # print(
-            #     "set state",
-            #     "observation width",
-            #     self.exp_spec.observation_widths[agent],
-            #     "observation char",
-            #     self.exp_spec.single_observation_space[agent].dtype.char,
-            # )
-            self.obs_view.append(
-                np.frombuffer(
-                    shm.get_obj(),
-                    dtype=self.exp_spec.single_observation_space[agent].dtype,
-                )  # .reshape((self.num_envs, *self.exp_spec.observation_shapes[agent]))
-            )
-
 
 class SharedMemory:
     """Class to hold the shared memory object that each of the subprocesses will write their observation to.
@@ -840,7 +774,6 @@ class SharedMemory:
             self.shared_memory.append(shared_memory)
 
 
-########
 def get_placeholder_value(agent, transition_name, observation_shapes=None):
     """When an agent is killed, used to obtain a placeholder value to return for associated experience.
 
@@ -864,14 +797,25 @@ def get_placeholder_value(agent, transition_name, observation_shapes=None):
             return -np.ones_like(observation_shapes[agent])
 
 
-def process_transition(transitions, observation, transition_names, agents):
+def process_transition(transitions, observation_shapes, transition_names, agents):
+    """Process transition, adds in placeholder values for killed sub-agents
+
+    :param transitions: Tuple of environment transition
+    :type transitions: Tuple[Any]
+    :param observation_shapes: Observation shapes
+    :type observation_shapes: Dict[str, Tuple[int]]
+    :param transition_names: Names associated to transitions
+    :type transition_names: List[str]
+    :param agents: List of sub-agent names
+    :type agents: List[str]
+    """
     transition_list = list(transitions)
     for transition, name in zip(transition_list, transition_names):
         transition = {
             agent: (
                 transition[agent]
                 if agent in transition.keys()
-                else get_placeholder_value(agent, name, observation)
+                else get_placeholder_value(agent, name, observation_shapes)
             )
             for agent in agents
         }
@@ -879,11 +823,20 @@ def process_transition(transitions, observation, transition_names, agents):
 
 
 def set_env_obs(index, observation, shared_memory, widths, dtypes):
-    # print("Setting observations", observation)
-    # print(self.obs_view[0].shape, self.obs_view[1].shape)
+    """Set the observation for a given environment
+
+    :param index: Environment index
+    :type index: int
+    :param observation: Observation from env.step or env.reset
+    :type observation: Dict[str, np.ndarray]
+    :param shared_memory: Shared memory
+    :type shared_memory: mp.Array
+    :param widths: Flattened observation widths
+    :type widths: Dict[str, int]
+    :param dtypes: Observation dtypes
+    :type dtypes: Dict[str, np.dtype]
+    """
     for agent_idx, (agent, obs) in enumerate(observation.items()):
-        # print("observaiotn shape", obs.shape, "index", f"Worker-{agent_idx}")
-        # print(type(shared_memory[agent_idx]))
         dest = np.frombuffer(shared_memory[agent_idx].get_obj(), dtype=dtypes[agent])
         np.copyto(
             dest[index * widths[agent] : (index + 1) * widths[agent]],
@@ -916,8 +869,14 @@ def _async_worker(
     :type observations: agilerl.vector.pz_async_vec_env.Observations
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
-    :param experience_spec: Experience handler object to handle and format experiences
-    :type experience_spec: PettingZooExperienceSpec,
+    :param observation_shapes: Shapes of observations
+    :type observation_shapes: Dict[str, Tuple[int]]
+    :param observation_widths: Flattened observation widths
+    :type observation_widths: Dict[str, int]
+    :param observation_dtypes: Observation dtypes
+    :type observation_dtypes: Dict[str, np.dtype]
+    :param agents: Sub-agent names
+    :type agents: str
 
     """
     env = env_fn()
@@ -1010,5 +969,4 @@ def _async_worker(
         pipe.send((None, False))
 
     finally:
-        # del observations
         env.close()
