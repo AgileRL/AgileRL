@@ -702,7 +702,7 @@ class Observations:
                 np.frombuffer(
                     shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
                 )
-            )
+
 
     def __getitem__(self, key):
         """
@@ -751,7 +751,6 @@ class Observations:
         except KeyError:
             return None
 
-
 class SharedMemory:
     """Class to hold the shared memory object that each of the subprocesses will write their observation to.
 
@@ -771,7 +770,6 @@ class SharedMemory:
                 exp_spec.single_observation_space[agent].dtype.char,
                 exp_spec.observation_widths[agent] * num_envs,
             )
-            self.shared_memory.append(shared_memory)
 
 
 def get_placeholder_value(agent, transition_name, observation_shapes=None):
