@@ -798,7 +798,8 @@ class SharedMemory:
             #     * num_envs
             # )
             shared_memory = context.Array(
-                "c", exp_spec.observation_widths[agent] * num_envs
+                exp_spec.single_observation_space[agent].dtype.char,
+                exp_spec.observation_widths[agent] * num_envs,
             )
             self.shared_memory.append(shared_memory)
 
