@@ -103,9 +103,12 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
                         CloudpickleWrapper(env_fn),
                         child_pipe,
                         parent_pipe,
-                        self.observations,
+                        self._obs_buffer.shared_memory,
                         self.error_queue,
-                        self.experience_spec,
+                        self.experience_spec.observation_shapes,
+                        self.experience_spec.observation_widths,
+                        self.experience_spec.observation_dtypes,
+                        self.experience_spec.agents,
                     ),
                 )
                 self.parent_pipes.append(parent_pipe)
@@ -610,6 +613,12 @@ class PettingZooExperienceSpec:
                 agent: dummy_env.observation_space(agent)
                 for agent in dummy_env.possible_agents
             }
+
+            self.observation_dtypes = {
+                agent: dummy_env.observation_space(agent).dtype
+                for agent in dummy_env.possible_agents
+            }
+
             self.observation_space = {
                 agent: batch_space(self.single_observation_space[agent], self.num_envs)
                 for agent in dummy_env.possible_agents
@@ -735,9 +744,10 @@ class Observations:
     def set_env_obs(self, index, observation):
         # print("Setting observations", observation)
         # print(self.obs_view[0].shape, self.obs_view[1].shape)
-        for idx, (agent, obs) in enumerate(observation.items()):
+        for agent_idx, (agent, obs) in enumerate(observation.items()):
+            print("observaiotn shape", obs.shape, "index", f"Worker-{agent_idx}")
             np.copyto(
-                self.obs_view[idx][
+                self.obs_view[agent_idx][
                     index
                     * self.exp_spec.observation_widths[agent] : (index + 1)
                     * self.exp_spec.observation_widths[agent]
@@ -823,18 +833,6 @@ class SharedMemory:
     def __init__(self, num_envs, exp_spec, context):
         self.shared_memory = []
         for agent in exp_spec.agents:
-            # total_bytes = (
-            #     np.dtype(exp_spec.single_observation_space[agent].dtype).itemsize
-            #     * exp_spec.observation_widths[agent]
-            #     * num_envs
-            # # )
-            # print(
-            #     "observation width",
-            #     exp_spec.observation_widths[agent],
-            #     "observation char",
-            #     exp_spec.single_observation_space[agent].dtype.char,
-            # )
-
             shared_memory = context.Array(
                 exp_spec.single_observation_space[agent].dtype.char,
                 exp_spec.observation_widths[agent] * num_envs,
@@ -842,14 +840,68 @@ class SharedMemory:
             self.shared_memory.append(shared_memory)
 
 
+########
+def get_placeholder_value(agent, transition_name, observation_shapes=None):
+    """When an agent is killed, used to obtain a placeholder value to return for associated experience.
+
+    :param agent: Agent ID
+    :type agent: str
+    :param transition_name: Name of the transition
+    :type transition_name: str
+    :param observations: Observations numpy array backed by RawArray, defaults to None
+    :type observations: agilerl.vector.pz_async_vec_env.Observations, optional
+    """
+    match transition_name:
+        case "reward":
+            return 0
+        case "truncated":
+            return False
+        case "terminated":
+            return True
+        case "info":
+            return {}
+        case "observation":
+            return -np.ones_like(observation_shapes[agent])
+
+
+def process_transition(transitions, observation, transition_names, agents):
+    transition_list = list(transitions)
+    for transition, name in zip(transition_list, transition_names):
+        transition = {
+            agent: (
+                transition[agent]
+                if agent in transition.keys()
+                else get_placeholder_value(agent, name, observation)
+            )
+            for agent in agents
+        }
+    return transition_list
+
+
+def set_env_obs(index, observation, shared_memory, widths, dtypes):
+    # print("Setting observations", observation)
+    # print(self.obs_view[0].shape, self.obs_view[1].shape)
+    for agent_idx, (agent, obs) in enumerate(observation.items()):
+        # print("observaiotn shape", obs.shape, "index", f"Worker-{agent_idx}")
+        # print(type(shared_memory[agent_idx]))
+        dest = np.frombuffer(shared_memory[agent_idx].get_obj(), dtype=dtypes[agent])
+        np.copyto(
+            dest[index * widths[agent] : (index + 1) * widths[agent]],
+            np.asarray(obs, dtype=dtypes[agent]).flatten(),
+        )
+
+
 def _async_worker(
     index,
     env_fn,
     pipe,
     parent_pipe,
-    observations,
+    shm,
     error_queue,
-    experience_spec,
+    observation_shapes,
+    observation_widths,
+    observation_dtypes,
+    agents,
 ):
     """
     :param index: Subprocess index
@@ -877,16 +929,21 @@ def _async_worker(
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                observation, info = experience_spec.process_transition(
-                    env.reset(**data), observations, ["observation", "info"]
+                observation, info = process_transition(
+                    env.reset(**data),
+                    observation_shapes,
+                    ["observation", "info"],
+                    agents,
                 )
-                observations.set_env_obs(index, observation)
+                set_env_obs(
+                    index, observation, shm, observation_widths, observation_dtypes
+                )
                 autoreset = False
                 pipe.send(((info), True))
             elif command == "step":
                 if autoreset:
-                    observation, info = experience_spec.process_transition(
-                        env.reset(), observations, ["observation", "info"]
+                    observation, info = process_transition(
+                        env.reset(), observation_shapes, ["observation", "info"], agents
                     )
                     reward = {agent: 0 for agent in agents}
                     terminated = {agent: False for agent in agents}
@@ -899,9 +956,9 @@ def _async_worker(
                     transition = env.step(data)
                     observation, reward, terminated, truncated, info = transition
                     observation, reward, terminated, truncated, info = (
-                        experience_spec.process_transition(
+                        process_transition(
                             transition,
-                            observations,
+                            observation_shapes,
                             [
                                 "observation",
                                 "reward",
@@ -909,6 +966,7 @@ def _async_worker(
                                 "truncated",
                                 "info",
                             ],
+                            agents,
                         )
                     )
                 autoreset = all(
@@ -917,7 +975,9 @@ def _async_worker(
                         for term, trunc in zip(terminated.values(), truncated.values())
                     ]
                 )
-                observations.set_env_obs(index, observation)
+                set_env_obs(
+                    index, observation, shm, observation_widths, observation_dtypes
+                )
                 pipe.send(((reward, terminated, truncated, info), True))
 
             elif command == "close":
@@ -950,5 +1010,5 @@ def _async_worker(
         pipe.send((None, False))
 
     finally:
-        del observations
+        # del observations
         env.close()
