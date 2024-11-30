@@ -792,12 +792,14 @@ class SharedMemory:
     def __init__(self, num_envs, exp_spec, context):
         self.shared_memory = []
         for agent in exp_spec.agents:
-            total_bytes = (
-                np.dtype(exp_spec.single_observation_space[agent].dtype).itemsize
-                * exp_spec.observation_widths[agent]
-                * num_envs
+            # total_bytes = (
+            #     np.dtype(exp_spec.single_observation_space[agent].dtype).itemsize
+            #     * exp_spec.observation_widths[agent]
+            #     * num_envs
+            # )
+            shared_memory = context.Array(
+                "c", exp_spec.observation_widths[agent] * num_envs
             )
-            shared_memory = context.Array("c", total_bytes)
             self.shared_memory.append(shared_memory)
 
 
