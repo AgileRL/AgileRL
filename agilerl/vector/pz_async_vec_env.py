@@ -712,7 +712,6 @@ class Observations:
             buff = np.frombuffer(
                 shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
             )
-            print("buffer shape", buff.shape)
             self.obs_view.append(
                 buff  # .reshape((num_envs, *exp_spec.observation_shapes[agent]))
             )
@@ -743,7 +742,9 @@ class Observations:
                     * self.exp_spec.observation_widths[agent] : (index + 1)
                     * self.exp_spec.observation_widths[agent]
                 ],
-                obs.flatten(),
+                np.asarray(
+                    obs, dtype=self.exp_spec.single_observation_space[agent].dtype
+                ).flatten(),
             )
 
     def __repr__(self):
