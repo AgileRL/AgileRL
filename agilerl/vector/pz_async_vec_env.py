@@ -774,7 +774,8 @@ class Observations:
         for shm, agent in zip(self.shared_memory, self.exp_spec.agents):
             self.obs_view.append(
                 np.frombuffer(
-                    shm.get_obj(), dtype=self.exp_spec.single_observation_space[agent]
+                    shm.get_obj(),
+                    dtype=self.exp_spec.single_observation_space[agent].dtype,
                 ).reshape((self.num_envs, *self.exp_spec.observation_shapes[agent]))
             )
 
