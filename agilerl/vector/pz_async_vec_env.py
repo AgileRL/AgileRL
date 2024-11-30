@@ -704,9 +704,11 @@ class Observations:
         for shm, agent in zip(shared_memory, exp_spec.agents):
             self.obs_view.append(
                 np.frombuffer(
-                    shm.get_obj(), dtype=exp_spec.single_observation_space[agent]
+                    shm.get_obj(), dtype=exp_spec.single_observation_space[agent].dtype
                 ).reshape((num_envs, *exp_spec.observation_shapes[agent]))
             )
+
+        print("All good here ")
 
     def __getitem__(self, key):
         """
@@ -797,6 +799,10 @@ class SharedMemory:
             #     * exp_spec.observation_widths[agent]
             #     * num_envs
             # )
+            print(
+                "observation character",
+                exp_spec.single_observation_space[agent].dtype.char,
+            )
             shared_memory = context.Array(
                 exp_spec.single_observation_space[agent].dtype.char,
                 exp_spec.observation_widths[agent] * num_envs,
