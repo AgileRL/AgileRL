@@ -1066,32 +1066,6 @@ def test_observations_image():
         assert isinstance(observations[agent], np.ndarray)
         assert observations[agent].shape == (1, 7, 7, 3)
 
-    # assert observations.get_agent_obs("pursuer_0", flat=True).shape == (
-    #     1,
-    #     experience_spec.observation_widths["pursuer_0"],
-    # )
-    # assert (
-    #     observations.get_agent_obs("pursuer_0", flat=False).shape
-    #     == (1,) + experience_spec.observation_shapes["pursuer_0"]
-    # )
-
-
-# def test_observations_states():
-#     num_envs = 1
-#     env_fn = [lambda: pursuit_v4.parallel_env() for _ in range(num_envs)][0]
-#     experience_spec = PettingZooExperienceSpec(num_envs)
-#     experience_spec.detect_space_info(env_fn())
-#     shared_memory = SharedMemory(num_envs, experience_spec, mp)
-#     observations = Observations(
-#         shared_memory.shared_memory, exp_spec=experience_spec, num_envs=num_envs
-#     )
-#     state = observations.__getstate__()
-#     assert state["obs_view"] is None
-#     observations.__setstate__(state)
-#     assert isinstance(observations.obs_view, list)
-#     for ob in observations.obs_view:
-#         assert isinstance(ob, np.ndarray)
-
 
 # Test for pz_vec_env.py
 def test_vec_env_reset():

@@ -656,28 +656,6 @@ class PettingZooExperienceSpec:
         dummy_env.close()
         del dummy_env
 
-    def get_placeholder_value(self, agent, transition_name, observations=None):
-        """When an agent is killed, used to obtain a placeholder value to return for associated experience.
-
-        :param agent: Agent ID
-        :type agent: str
-        :param transition_name: Name of the transition
-        :type transition_name: str
-        :param observations: Observations numpy array backed by RawArray, defaults to None
-        :type observations: agilerl.vector.pz_async_vec_env.Observations, optional
-        """
-        match transition_name:
-            case "reward":
-                return 0
-            case "truncated":
-                return False
-            case "terminated":
-                return True
-            case "info":
-                return {}
-            case "observation":
-                return -np.ones_like(observations[agent])
-
 
 class Observations:
     """
