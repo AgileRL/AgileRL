@@ -45,7 +45,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         env = ss.resize_v1(env, x_size=84, y_size=84)
         env = ss.frame_stack_v1(env, 4)
 
-    env.reset()
+    env.reset(seed=42)
     # Configure the multi-agent algo input arguments
     try:
         state_dims = [env.single_observation_space(agent).n for agent in env.agents]

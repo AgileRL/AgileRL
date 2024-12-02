@@ -827,7 +827,7 @@ def _async_worker(
     env_fn,
     pipe,
     parent_pipe,
-    shm,
+    shared_memory,
     error_queue,
     observation_shapes,
     observation_widths,
@@ -843,8 +843,8 @@ def _async_worker(
     :type pipe: Connection
     :param parent_pipe: Parent pipe object
     :type parent_pipe: Connection
-    :param observations: Observations class that holds arrays backed by the shared memory.
-    :type observations: agilerl.vector.pz_async_vec_env.Observations
+    :param shared_memory: List of shared memories.
+    :type shared_memory: List[multiprocessing.Array]
     :param error_queue: Queue object for collecting subprocess errors to communicate back to the main process
     :type error_queue: mp.Queue
     :param observation_shapes: Shapes of observations
@@ -858,7 +858,6 @@ def _async_worker(
 
     """
     env = env_fn()
-    agents = env.possible_agents[:]
     autoreset = False
     parent_pipe.close()
 
@@ -873,7 +872,11 @@ def _async_worker(
                     agents,
                 )
                 set_env_obs(
-                    index, observation, shm, observation_widths, observation_dtypes
+                    index,
+                    observation,
+                    shared_memory,
+                    observation_widths,
+                    observation_dtypes,
                 )
                 autoreset = False
                 pipe.send(((info), True))
@@ -913,7 +916,11 @@ def _async_worker(
                     ]
                 )
                 set_env_obs(
-                    index, observation, shm, observation_widths, observation_dtypes
+                    index,
+                    observation,
+                    shared_memory,
+                    observation_widths,
+                    observation_dtypes,
                 )
                 pipe.send(((reward, terminated, truncated, info), True))
 
