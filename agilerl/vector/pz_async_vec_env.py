@@ -69,9 +69,9 @@ class AsyncPettingZooVecEnv(PettingZooVecEnv):
         else:
             self.experience_spec = experience_spec
 
-        ctx = mp.get_context(context)
         self.experience_spec.detect_space_info(dummy_env)
         del dummy_env
+        ctx = mp.get_context(context)
 
         self.action_space = self._get_action_space
         self.observation_space = self._get_observation_space
