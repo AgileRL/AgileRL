@@ -29,6 +29,8 @@ from agilerl.vector.pz_async_vec_env import (
     PettingZooExperienceSpec,
     SharedMemory,
     _async_worker,
+    get_placeholder_value,
+    set_env_obs,
 )
 from agilerl.vector.pz_vec_env import PettingZooVecEnv
 from tests.pz_vector_test_utils import CustomSpace, GenericTestEnv, term_env
@@ -322,7 +324,11 @@ def test_env_order_preserved():
     env.parent_pipes[rand_env].recv()
     for idx, agent in enumerate(env.agents):
         assert not np.array_equal(
-            env.observations.obs_view[idx][rand_env, :],
+            env.observations.obs_view[idx][
+                rand_env
+                * env.experience_spec.observation_widths[agent] : (rand_env + 1)
+                * env.experience_spec.observation_widths[agent]
+            ],
             np.zeros_like(env.experience_spec.observation_shapes[agent]),
         )
     env.close()
@@ -678,7 +684,7 @@ def test_get_placeholder_value(transition_name):
     env_fns = [lambda: simple_speaker_listener_v4.parallel_env() for _ in range(2)]
     env = AsyncPettingZooVecEnv(env_fns)
     if transition_name != "observation":
-        val = env.experience_spec.get_placeholder_value("agent", transition_name)
+        val = get_placeholder_value("agent", transition_name)
         if transition_name == "reward":
             assert val == 0
         if transition_name == "truncated":
@@ -689,10 +695,10 @@ def test_get_placeholder_value(transition_name):
             assert val == {}
     else:
         env.reset()
-        output = env.experience_spec.get_placeholder_value(
+        output = get_placeholder_value(
             agent="speaker_0",
             transition_name=transition_name,
-            observations=env.observations,
+            observation_shapes=env.observations,
         )
         assert isinstance(output, np.ndarray)
     env.close()
@@ -799,9 +805,8 @@ def test_worker_reset():
     env = env_fn()
     env.reset()
     experience_spec = PettingZooExperienceSpec(3)
-    experience_spec.detect_space_info(env_fn())
+    experience_spec.detect_space_info(env)
     shared_memory = SharedMemory(3, experience_spec, mp)
-    observations = Observations(shared_memory.shared_memory, experience_spec, 3)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -811,9 +816,12 @@ def test_worker_reset():
             CloudpickleWrapper(env_fn),
             child_pipe,
             parent_pipe,
-            observations,
+            shared_memory.shared_memory,
             queue,
-            experience_spec,
+            experience_spec.observation_shapes,
+            experience_spec.observation_widths,
+            experience_spec.observation_dtypes,
+            experience_spec.agents,
         ),
     )
     p.start()
@@ -854,9 +862,12 @@ def test_worker_step_simple():
             CloudpickleWrapper(env_fns[0]),
             child_pipe,
             parent_pipe,
-            observations,
+            shared_memory.shared_memory,
             queue,
-            experience_spec,
+            experience_spec.observation_shapes,
+            experience_spec.observation_widths,
+            experience_spec.observation_dtypes,
+            experience_spec.agents,
         ),
     )
     p.start()
@@ -911,7 +922,6 @@ def test_worker_step_autoreset():
     experience_spec = PettingZooExperienceSpec(num_envs)
     experience_spec.detect_space_info(env_fns[0]())
     shared_memory = SharedMemory(num_envs, experience_spec, mp)
-    observations = Observations(shared_memory.shared_memory, experience_spec, num_envs)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -921,9 +931,12 @@ def test_worker_step_autoreset():
             CloudpickleWrapper(env_fns[0]),
             child_pipe,
             parent_pipe,
-            observations,
+            shared_memory.shared_memory,
             queue,
-            experience_spec,
+            experience_spec.observation_shapes,
+            experience_spec.observation_widths,
+            experience_spec.observation_dtypes,
+            experience_spec.agents,
         ),
     )
     p.start()
@@ -958,7 +971,6 @@ def test_worker_runtime_error():
     experience_spec = PettingZooExperienceSpec(num_envs)
     experience_spec.detect_space_info(env_fn())
     shared_memory = SharedMemory(num_envs, experience_spec, mp)
-    observations = Observations(shared_memory.shared_memory, experience_spec, num_envs)
     parent_pipe, child_pipe = mp.Pipe()
     queue = mp.Queue()
     p = Process(
@@ -968,9 +980,12 @@ def test_worker_runtime_error():
             CloudpickleWrapper(env_fn),
             child_pipe,
             parent_pipe,
-            observations,
+            shared_memory.shared_memory,
             queue,
-            experience_spec,
+            experience_spec.observation_shapes,
+            experience_spec.observation_widths,
+            experience_spec.observation_dtypes,
+            experience_spec.agents,
         ),
     )
     p.start()
@@ -1004,10 +1019,16 @@ def test_observations_vector():
     assert (
         observations.__str__()
         == observations.__repr__()
-        == "{'speaker_0': array([[0., 0., 0.]], dtype=float32), 'listener_0': array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]], dtype=float32)}"
-    )
+        == "{'speaker_0': array([0., 0., 0.], dtype=float32), 'listener_0': array([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.], dtype=float32)}"
+    ), observations.__str__()
     ob = {"speaker_0": np.ones((1, 3)), "listener_0": np.ones((1, 11))}
-    observations.set_env_obs(0, ob)
+    set_env_obs(
+        0,
+        ob,
+        shared_memory.shared_memory,
+        experience_spec.observation_widths,
+        experience_spec.observation_dtypes,
+    )
     # assert np.all(observations.get_env_obs(0) == np.ones((1, 14), dtype=np.float32))
     assert "speaker_0" in observations
     assert len(observations) == 2
@@ -1044,32 +1065,6 @@ def test_observations_image():
     for agent in experience_spec.agents:
         assert isinstance(observations[agent], np.ndarray)
         assert observations[agent].shape == (1, 7, 7, 3)
-
-    # assert observations.get_agent_obs("pursuer_0", flat=True).shape == (
-    #     1,
-    #     experience_spec.observation_widths["pursuer_0"],
-    # )
-    # assert (
-    #     observations.get_agent_obs("pursuer_0", flat=False).shape
-    #     == (1,) + experience_spec.observation_shapes["pursuer_0"]
-    # )
-
-
-def test_observations_states():
-    num_envs = 1
-    env_fn = [lambda: pursuit_v4.parallel_env() for _ in range(num_envs)][0]
-    experience_spec = PettingZooExperienceSpec(num_envs)
-    experience_spec.detect_space_info(env_fn())
-    shared_memory = SharedMemory(num_envs, experience_spec, mp)
-    observations = Observations(
-        shared_memory.shared_memory, exp_spec=experience_spec, num_envs=num_envs
-    )
-    state = observations.__getstate__()
-    assert state["obs_view"] is None
-    observations.__setstate__(state)
-    assert isinstance(observations.obs_view, list)
-    for ob in observations.obs_view:
-        assert isinstance(ob, np.ndarray)
 
 
 # Test for pz_vec_env.py
