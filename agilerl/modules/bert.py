@@ -3,7 +3,6 @@ import math
 import warnings
 from collections import OrderedDict
 from typing import List
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -48,6 +47,7 @@ class EvolvableBERT(EvolvableModule):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
+    arch: str = "bert"
 
     def __init__(
         self,
@@ -68,10 +68,10 @@ class EvolvableBERT(EvolvableModule):
         max_encoder_layers: int = 12,
         max_decoder_layers: int = 12,
         device: str = "cpu",
+        arch: str = "bert"
         ) -> None:
         super().__init__()
 
-        self.arch = "bert"
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
         self.end2end = end2end

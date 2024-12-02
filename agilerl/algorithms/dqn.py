@@ -15,6 +15,7 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.utils.evolvable_networks import is_image_space
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,

@@ -51,6 +51,8 @@ class EvolvableMLP(EvolvableModule):
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: Optional[accelerate.Accelerator]
     """
+    arch: str = "mlp"
+
     def __init__(
         self,
         num_inputs: int,
@@ -70,12 +72,10 @@ class EvolvableMLP(EvolvableModule):
         rainbow: bool = False,
         noise_std: float = 0.5,
         device: str = "cpu",
-        gpt_activations: bool = False,
         accelerator: Optional[accelerate.Accelerator] = None,
-        arch: str = "mlp",
-        name: Optional[str] = None
+        arch: str = "mlp"
         ):
-        super().__init__(gpt=gpt_activations)
+        super().__init__()
 
         assert (
             num_inputs > 0
@@ -95,13 +95,10 @@ class EvolvableMLP(EvolvableModule):
             min_mlp_nodes < max_mlp_nodes
         ), "'min_mlp_nodes' must be less than 'max_mlp_nodes."
 
-        self.arch = arch
-
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation
         self.mlp_output_activation = mlp_output_activation
-        self.gpt_activations = gpt_activations
         self.min_hidden_layers = min_hidden_layers
         self.max_hidden_layers = max_hidden_layers
         self.min_mlp_nodes = min_mlp_nodes
@@ -169,7 +166,6 @@ class EvolvableMLP(EvolvableModule):
                 hidden_size=self.hidden_size,
                 output_vanish=self.output_vanish,
                 output_activation=self.mlp_output_activation,
-                gpt_activations=self.gpt_activations,
                 layer_norm=self.layer_norm
             )
             if self.accelerator is None:
@@ -187,7 +183,6 @@ class EvolvableMLP(EvolvableModule):
                 rainbow_feature_net=True,
                 init_layers=self.init_layers,
                 layer_norm=self.layer_norm,
-                gpt_activations=self.gpt_activations,
                 mlp_activation=self.mlp_activation,
                 mlp_output_activation=self.mlp_output_activation,
                 noise_std=self.noise_std,
@@ -202,7 +197,6 @@ class EvolvableMLP(EvolvableModule):
                 noisy=True,
                 init_layers=self.init_layers,
                 layer_norm=self.layer_norm,
-                gpt_activations=self.gpt_activations,
                 mlp_activation=self.mlp_activation,
                 mlp_output_activation=self.mlp_output_activation,
                 noise_std=self.noise_std,
@@ -217,7 +211,6 @@ class EvolvableMLP(EvolvableModule):
                 noisy=True,
                 init_layers=self.init_layers,
                 layer_norm=self.layer_norm,
-                gpt_activations=self.gpt_activations,
                 mlp_activation=self.mlp_activation,
                 mlp_output_activation=self.mlp_output_activation,
                 noise_std=self.noise_std,

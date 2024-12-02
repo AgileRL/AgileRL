@@ -85,12 +85,11 @@ class MakeEvolvable(EvolvableModule):
         init_layers: bool = False,
         support: Optional[torch.Tensor] = None,
         rainbow: bool = False,
-        gpt: bool = False,
         device: str = "cpu",
         accelerator: Optional[Accelerator] = None,
         **kwargs: dict,
     ):
-        super().__init__(gpt)
+        super().__init__()
         assert (
             min_hidden_layers < max_hidden_layers
         ), "'min_hidden_layers' must be less than 'max_hidden_layers."

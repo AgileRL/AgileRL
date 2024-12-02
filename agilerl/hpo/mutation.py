@@ -7,6 +7,7 @@ import torch.nn as nn
 import fastrand
 from torch.optim import Optimizer
 from accelerate import Accelerator
+from torch._dynamo.eval_frame import OptimizedModule
 
 from agilerl.algorithms.base import EvolvableAlgorithm
 from agilerl.modules.mlp import EvolvableMLP
@@ -15,8 +16,10 @@ from agilerl.utils.algo_utils import remove_compile_prefix
 
 NetworkConfig = Dict[str, str]
 NetworkList = List[NetworkConfig]
+MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
 AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
 PopulationType = List[EvolvableAlgorithm]
+ModuleType = Union[OptimizedModule, EvolvableModule]
 
 def get_return_type(method: Callable) -> Any:
     """Get the return type of a method if annotated, otherwise return None.
@@ -302,6 +305,56 @@ class Mutations:
         """
         individual.mut = "None"  # No mutation
         return individual
+    
+    def reinit_module(self, module: EvolvableModule, init_dict: Dict[str, Any]) -> EvolvableModule:
+        """Reinitialize the module with the given initialization dictionary.
+        
+        :param module: The module to reinitialize
+        :type module: EvolvableModule
+        
+        :param init_dict: The initialization dictionary
+        :type init_dict: Dict[str, Any]
+        """
+        if isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
+            module_cls = type(module._orig_mod)
+        else:
+            module_cls = type(module)
+        
+        return module_cls(**init_dict)
+
+    def load_state_dicts(self, modules: List[ModuleType], state_dicts: List[Dict[str, Any]]) -> None:
+        """Load the state dictionary into the module.
+        
+        :param module: The module to load the state dictionary into
+        :type module: ModuleType
+        
+        :param state_dict: The state dictionary to load
+        :type state_dict: Dict[str, Any]
+        """
+        for module, state_dict in zip(modules, state_dicts):
+            if hasattr(module, "torch_compiler") and module.torch_compiler is not None:
+                module.load_state_dict(remove_compile_prefix(state_dict))
+            else:
+                module.load_state_dict(state_dict)
+
+    def compile_modules(self, modules: List[ModuleType], compiler: str) -> List[ModuleType]:
+        """Compile the modules using the given compiler.
+        
+        :param modules: The modules to compile
+        :type modules: List[ModuleType]
+        
+        :param compiler: The compiler to use
+        :type compiler: Optional[str]
+        """        
+        # Compile modules
+        compiled_modules = []
+        for module in modules:
+            if not isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
+                compiled_modules.append(torch.compile(module, mode=compiler))
+            else:
+                compiled_modules.append(module)
+
+        return compiled_modules
 
     def mutation(self, population: PopulationType, pre_training_mut: bool=False) -> PopulationType:
         """Returns mutated population.
@@ -318,7 +371,7 @@ class Mutations:
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
-        mutation_choice = self.rng.choice(
+        mutation_choice: List[MutationMethod] = self.rng.choice(
             mutation_options, len(population), p=mutation_proba
         )
 
@@ -333,94 +386,50 @@ class Mutations:
             individual = mutation(individual)
             if hasattr(individual, "torch_compiler") and individual.torch_compiler:
                 individual.recompile()
+
             if self.multi_agent:
                 offspring_actors: List[EvolvableModule] = getattr(individual, self.algo["actor"]["eval"])
                 # Reinitialise target network with frozen weights due to potential
                 # mutation in architecture of value network
                 ind_targets = [
-                    (
-                        type(offspring_actor._orig_mod)(**offspring_actor.init_dict)
-                        if isinstance(
-                            offspring_actor, torch._dynamo.eval_frame.OptimizedModule
-                        )
-                        else type(offspring_actor)(**offspring_actor.init_dict)
-                    )
+                    self.reinit_module(offspring_actor, offspring_actor.init_dict) 
                     for offspring_actor in offspring_actors
-                ]
-                for ind_target, offspring_actor in zip(ind_targets, offspring_actors):
-                    if (
-                        hasattr(individual, "torch_compiler")
-                        and individual.torch_compiler
-                    ):
-                        ind_target.load_state_dict(
-                            remove_compile_prefix(offspring_actor.state_dict())
-                        )
-                    else:
-                        ind_target.load_state_dict(offspring_actor.state_dict())
+                    ]
 
+                state_dicts = [offspring_actor.state_dict() for offspring_actor in offspring_actors]
+                self.load_state_dicts(ind_targets, state_dicts)
+
+                # Move to device if not using accelerator
                 if self.accelerator is None:
-                    ind_targets = [
-                        ind_target.to(self.device) for ind_target in ind_targets
-                    ]
+                    ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
+
+                # Compile modules if necessary
                 if hasattr(individual, "torch_compiler") and individual.torch_compiler:
-                    ind_targets = [
-                        (
-                            torch.compile(ind_target, mode=individual.torch_compiler)
-                            if not isinstance(
-                                ind_target, torch._dynamo.eval_frame.OptimizedModule
-                            )
-                            else ind_target
-                        )
-                        for ind_target in ind_targets
-                    ]
+                    ind_targets = self.compile_modules(ind_targets, individual.torch_compiler)
+
                 setattr(individual, self.algo["actor"]["target"], ind_targets)
+
                 # If algorithm has critics, reinitialize their respective target networks
                 # too
                 for critics_list in self.algo["critics"]:
                     offspring_critics: List[EvolvableModule] = getattr(individual, critics_list["eval"])
                     ind_targets = [
-                        (
-                            type(offspring_critic._orig_mod)(
-                                **offspring_critic.init_dict
-                            )
-                            if isinstance(
-                                offspring_critic,
-                                torch._dynamo.eval_frame.OptimizedModule,
-                            )
-                            else type(offspring_critic)(**offspring_critic.init_dict)
-                        )
+                        self.reinit_module(offspring_critic, offspring_critic.init_dict)
                         for offspring_critic in offspring_critics
                     ]
-                    for ind_target, offspring_critic in zip(
-                        ind_targets, offspring_critics
-                    ):
-                        if hasattr(individual, "torch_compiler") and individual.torch_compiler:
-                            ind_target.load_state_dict(
-                                remove_compile_prefix(offspring_critic.state_dict())
-                            )
-                        else:
-                            ind_target.load_state_dict(offspring_critic.state_dict())
+                    
+                    state_dicts = [offspring_critic.state_dict() for offspring_critic in offspring_critics]
+                    self.load_state_dicts(ind_targets, state_dicts)
 
                     if self.accelerator is None:
                         ind_targets = [
                             ind_target.to(self.device) for ind_target in ind_targets
                         ]
-                    if (
-                        hasattr(individual, "torch_compiler")
-                        and individual.torch_compiler
-                    ):
-                        ind_targets = [
-                            (
-                                torch.compile(
-                                    ind_target, mode=individual.torch_compiler
-                                )
-                                if not isinstance(
-                                    ind_target, torch._dynamo.eval_frame.OptimizedModule
-                                )
-                                else ind_target
-                            )
-                            for ind_target in ind_targets
-                        ]
+                    
+                    # Compile modules if necessary
+                    if hasattr(individual, "torch_compiler") and individual.torch_compiler:
+                        ind_targets = self.compile_modules(ind_targets, individual.torch_compiler)
+
                     setattr(individual, critics_list["target"], ind_targets)
             else:
                 if "target" in self.algo["actor"].keys():

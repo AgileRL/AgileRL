@@ -82,6 +82,7 @@ class EvolvableCNN(EvolvableModule):
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: Optional[Accelerator]
     """
+    arch: str = "cnn"
 
     def __init__(
         self,
@@ -146,7 +147,6 @@ class EvolvableCNN(EvolvableModule):
         if n_agents is not None:
             assert isinstance(n_agents, int) and n_agents > 0, "'n_agents' must be an integer and greater than 0."
 
-        self.arch = arch
         self.input_shape = input_shape
         self.channel_size = channel_size
         self.kernel_size = kernel_size
@@ -177,7 +177,7 @@ class EvolvableCNN(EvolvableModule):
         self.noise_std = noise_std
         self.output_vanish = output_vanish
         self._net_config = {
-            "arch": self.arch,
+            "arch": arch,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,

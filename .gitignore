@@ -140,3 +140,6 @@ data/wordle.zip
 
 # WandB
 wandb/
+agilerl/networks
+agilerl/configs.py
+demo.ipynb

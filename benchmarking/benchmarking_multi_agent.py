@@ -11,10 +11,10 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
+from agilerl.utils.algo_utils import observation_space_channels_to_first
 from agilerl.utils.utils import (
     create_population,
-    make_multi_agent_vect_envs,
-    observation_space_channels_to_first
+    make_multi_agent_vect_envs
 )
 
 # !Note: If you are running this demo without having installed agilerl,

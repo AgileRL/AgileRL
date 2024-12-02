@@ -11,6 +11,7 @@ import torch.optim as optim
 from gymnasium import spaces
 import gymnasium as gym
 
+from agilerl.typing import ArrayLike, ArrayOrTensor
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
@@ -189,7 +190,6 @@ class DDPG(RLAlgorithm):
                     False
                 ), f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -323,13 +323,16 @@ class DDPG(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
-    def scale_to_action_space(self, action, convert_to_torch=False):
+    def scale_to_action_space(self, action: ArrayLike, convert_to_torch: bool = False) -> ArrayOrTensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
         :type action: numpy.ndarray
         :param convert_to_torch: Flag to convert array to torch, defaults to False
         :type convert_to_torch: bool, optional
+
+        :return: Scaled action
+        :rtype: numpy.ndarray
         """
         if convert_to_torch:
             device = self.device if self.accelerator is None else self.accelerator.device

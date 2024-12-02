@@ -37,11 +37,8 @@ class EvolvableModule(nn.Module, ABC):
     value_net: Optional[nn.Module]
     advantage_net: Optional[nn.Module]
 
-    # TODO: There has to be a more elegant way to differences in GPT activation functions
-    def __init__(self, gpt: bool = False) -> None:
+    def __init__(self) -> None:
         nn.Module.__init__(self)
-
-        self.gpt = gpt
         self._init_mutation_methods()
 
     @property
@@ -158,7 +155,7 @@ class EvolvableModule(nn.Module, ABC):
         type name: str
         return: The activation function.
         """
-        return get_activation(name, self.gpt)
+        return get_activation(name)
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods.

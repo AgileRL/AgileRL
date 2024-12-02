@@ -2,12 +2,13 @@ from typing import Tuple, Optional, Dict, Any
 import inspect
 import math
 from collections import OrderedDict
-
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from accelerate import Accelerator
 
+from agilerl.modules.custom_components import NewGELU
 from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.modules.mlp import EvolvableMLP
 
@@ -43,6 +44,8 @@ class EvolvableGPT(EvolvableModule):
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     """
+    arch: str = "gpt"
+
     def __init__(
         self,
         n_layer: int = 12,
@@ -57,9 +60,9 @@ class EvolvableGPT(EvolvableModule):
         min_layers: int = 8,
         max_layers: int = 16,
         bias: bool = True,
-        device="cpu",
-        arch: str = "gpt",
-        accelerator=None,
+        device: str = "cpu",
+        accelerator: Optional[Accelerator] = None,
+        arch: str = "gpt"
     ):
         assert isinstance(n_layer, int), "Number of layers must be an integer."
         assert n_layer >= 1, "Number of layers must be greater than or equal to one."
@@ -100,9 +103,8 @@ class EvolvableGPT(EvolvableModule):
         ), "Maximum number of layers must be greater than or equal to minimum number of layers."
         assert isinstance(bias, bool), "Bias flag must be boolean value True or False."
 
-        super().__init__(gpt=True)
+        super().__init__()
 
-        self.arch = "gpt"
         self.n_layer = n_layer
         self.vocab_size = vocab_size
         self.n_embd = n_embd
@@ -137,6 +139,21 @@ class EvolvableGPT(EvolvableModule):
 
         # report number of parameters
         # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+
+    def get_activation(self, name: Optional[str] = None) -> nn.Module:
+        """Get the activation function by name. Uses the NewGELU activation function
+        used in OpenAI GPT.
+
+        :param name: The name of the activation function, defaults to None
+        :type name: str, optional
+
+        :return: The activation function
+        :rtype: nn.Module
+        """
+        if name == "GELU":
+            return NewGELU()
+
+        return super().get_activation(name)
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Return the number of parameters in the model.
@@ -870,10 +887,24 @@ class MLP(EvolvableMLP):
             hidden_size=[hidden_size],
             layer_norm=False,
             mlp_output_activation=activation,
-            gpt_activations=True,
             **kwargs,
         )
         self.dropout = nn.Dropout(dropout)
+
+    def get_activation(self, name: Optional[str] = None) -> nn.Module:
+        """Get the activation function by name. Uses the NewGELU activation function
+        used in OpenAI GPT.
+
+        :param name: The name of the activation function, defaults to None
+        :type name: str, optional
+
+        :return: The activation function
+        :rtype: nn.Module
+        """
+        if name == "GELU":
+            return NewGELU()
+
+        return super().get_activation(name)
 
     def forward(self, x):
         """Returns output of neural network.

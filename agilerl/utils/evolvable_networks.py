@@ -9,7 +9,9 @@ from collections import OrderedDict
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
-from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGELU
+from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
+
+TupleorInt = Union[Tuple[int, ...], int]
 
 def unwrap_optimizer(
         optimizer: Union[Optimizer, AcceleratedOptimizer],
@@ -67,13 +69,32 @@ def get_module_dict(module: nn.Module) -> nn.ModuleDict:
             return submodule
     return None
 
+def get_batch_norm_layer(name: str, num_features: int) -> nn.Module:
+    """Return batch normalization layer for corresponding batch normalization name.
+
+    :param name: Batch normalization layer name
+    :type name: str
+    :param layer_size: The layer after which the batch normalization layer will be applied
+    :type layer_size: int
+
+    :return: Batch normalization layer
+    :rtype: nn.Module
+    """
+    batch_norm_layers = {
+        "1d": nn.BatchNorm1d,
+        "2d": nn.BatchNorm2d,
+        "3d": nn.BatchNorm3d,
+    }
+
+    return batch_norm_layers[name](num_features)
+
 def get_conv_layer(
         conv_layer_name: str,
         in_channels: int,
         out_channels: int,
-        kernel_size: Union[Tuple[int, ...], int],
-        stride: Union[Tuple[int, ...], int],
-        padding: Union[Tuple[int, ...], int]
+        kernel_size: TupleorInt,
+        stride: TupleorInt = 1,
+        padding: TupleorInt = 0
     ) -> nn.Module:
         """Return convolutional layer for corresponding convolutional layer name.
 
@@ -93,8 +114,14 @@ def get_conv_layer(
         :return: Convolutional layer
         :rtype: nn.Module
         """
-        convolutional_layers = {"Conv1d": nn.Conv1d, "Conv2d": nn.Conv2d, "Conv3d": nn.Conv3d}
+        convolutional_layers = {
+            "1d": nn.Conv1d,
+            "2d": nn.Conv2d,
+            "3d": nn.Conv3d
+            }
 
+        # remove 'Conv' from the name if it is present
+        conv_layer_name = conv_layer_name.replace("Conv", "")
         return convolutional_layers[conv_layer_name](
             in_channels, out_channels, kernel_size, stride, padding
         )
@@ -120,7 +147,7 @@ def get_normalization(normalization_name: str, layer_size: int) -> nn.Module:
 
     return normalization_functions[normalization_name](layer_size)
 
-def get_activation(activation_name: Optional[str], gpt: bool = False) -> nn.Module:
+def get_activation(activation_name: Optional[str]) -> nn.Module:
     """Returns activation function for corresponding activation name.
 
     :param activation_names: Activation function name
@@ -137,14 +164,14 @@ def get_activation(activation_name: Optional[str], gpt: bool = False) -> nn.Modu
         "Softmax": nn.Softmax,
         "LeakyReLU": nn.LeakyReLU,
         "PReLU": nn.PReLU,
-        "GELU": nn.GELU if not gpt else NewGELU,
+        "GELU": nn.GELU,
         "Identity": nn.Identity,
     }
 
     activation_name = activation_name if activation_name is not None else "Identity"
     return (
         activation_functions[activation_name](dim=-1)
-        if activation_name == "Softmax" and not gpt
+        if activation_name == "Softmax"
         else activation_functions[activation_name]()
     )
 
@@ -302,16 +329,9 @@ def create_conv_block(
     :return: 3D convolutional block.
     :rtype: Dict[str, nn.Module]
     """
-    block_conv_map = {
-        "Conv2d": nn.Conv2d,
-        "Conv3d": nn.Conv3d,
-    }
+    net_dict = OrderedDict()
 
-    block_batch_norm_map = {
-        "Conv2d": nn.BatchNorm2d,
-        "Conv3d": nn.BatchNorm3d,
-    }
-
+    # First layer of the block
     multi = n_agents is not None
     if multi:
         k_size = (
@@ -319,15 +339,14 @@ def create_conv_block(
             if critic
             else (1, kernel_size[0], kernel_size[0])
         )
-    else:
-        k_size = kernel_size
 
-    net_dict = OrderedDict()
-    block_type = "Conv2d" if not multi else "Conv3d"
-    net_dict[f"{name}_conv_layer_0"] = block_conv_map[block_type](
+    block_type = "2d" if not multi else "3d"
+    k_size = k_size if multi else kernel_size[0]
+    net_dict[f"{name}_conv_layer_0"] = get_conv_layer(
+        conv_layer_name=block_type,
         in_channels=in_channels,
         out_channels=channel_size[0],
-        kernel_size=k_size if multi else kernel_size[0],
+        kernel_size=k_size,
         stride=stride_size[0],
     )
     if init_layers:
@@ -335,13 +354,16 @@ def create_conv_block(
             net_dict[f"{name}_conv_layer_0"]
         )
     if layer_norm:
-        net_dict[f"{name}_layer_norm_0"] = block_batch_norm_map[block_type](channel_size[0])
+        net_dict[f"{name}_layer_norm_0"] = get_batch_norm_layer(block_type, channel_size[0])
+
     net_dict[f"{name}_activation_0"] = get_activation(activation_fn)
 
+    # Remaining layers of the block
     if len(channel_size) > 1:
         for l_no in range(1, len(channel_size)):
             k_size = (1, kernel_size[l_no], kernel_size[l_no]) if multi else kernel_size[l_no]
-            net_dict[f"{name}_conv_layer_{str(l_no)}"] = block_conv_map[block_type](
+            net_dict[f"{name}_conv_layer_{str(l_no)}"] = get_conv_layer(
+                conv_layer_name=block_type,
                 in_channels=channel_size[l_no - 1],
                 out_channels=channel_size[l_no],
                 kernel_size=k_size,
@@ -352,7 +374,8 @@ def create_conv_block(
                     net_dict[f"{name}_conv_layer_{str(l_no)}"]
                 )
             if layer_norm:
-                net_dict[f"{name}_layer_norm_{str(l_no)}"] = block_batch_norm_map[block_type](
+                net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_batch_norm_layer(
+                    block_type,
                     channel_size[l_no]
                 )
             net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
@@ -371,7 +394,6 @@ def create_mlp(
     rainbow_feature_net: bool = False,
     init_layers: bool = True,
     layer_norm: bool = False,
-    gpt_activations: bool = False,
     mlp_activation: str = "ReLU",
     mlp_output_activation: Optional[str] = None,
     noise_std: float = 0.1,
@@ -398,8 +420,6 @@ def create_mlp(
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization.
     :type layer_norm: bool, optional
-    :param gpt_activations: Whether to use GPT activations.
-    :type gpt_activations: bool, optional
     :param mlp_activation: Activation function for hidden layers.
     :type mlp_activation: str, optional
     :param mlp_output_activation: Activation function for output layer.
@@ -426,8 +446,7 @@ def create_mlp(
     if layer_norm:
         net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0])
     net_dict[f"{name}_activation_0"] = get_activation(
-        activation_name=mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else mlp_activation,
-        gpt=gpt_activations,
+        activation_name=mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else mlp_activation
     )
 
     if len(hidden_size) > 1:
@@ -445,8 +464,7 @@ def create_mlp(
             if layer_norm:
                 net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(hidden_size[l_no])
             net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
-                mlp_activation if not rainbow_feature_net else mlp_output_activation,
-                gpt=gpt_activations,
+                mlp_activation if not rainbow_feature_net else mlp_output_activation
             )
 
     if not rainbow_feature_net:
@@ -471,8 +489,7 @@ def create_mlp(
         net_dict[f"{name}_linear_layer_output"] = output_layer
         if output_activation is not None:
             net_dict[f"{name}_activation_output"] = get_activation(
-                activation_name=output_activation,
-                gpt=gpt_activations,
+                activation_name=output_activation
             )
 
     net = nn.Sequential(net_dict)

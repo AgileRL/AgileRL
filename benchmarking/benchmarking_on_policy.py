@@ -6,10 +6,10 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_on_policy import train_on_policy
+from agilerl.utils.algo_utils import observation_space_channels_to_first
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
-    observation_space_channels_to_first,
     print_hyperparams
 )
 
