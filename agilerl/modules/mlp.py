@@ -75,7 +75,7 @@ class EvolvableMLP(EvolvableModule):
         accelerator: Optional[accelerate.Accelerator] = None,
         arch: str = "mlp"
         ):
-        super().__init__()
+        super().__init__(device, accelerator)
 
         assert (
             num_inputs > 0
@@ -110,8 +110,6 @@ class EvolvableMLP(EvolvableModule):
         self.num_atoms = num_atoms
         self.support = support
         self.rainbow = rainbow
-        self.device = device
-        self.accelerator = accelerator
         self.noise_std = noise_std
         self._net_config = {
             "arch": self.arch,

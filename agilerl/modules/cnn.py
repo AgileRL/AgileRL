@@ -117,7 +117,7 @@ class EvolvableCNN(EvolvableModule):
         accelerator: Optional[Accelerator] = None,
         arch: str = "cnn"
         ) -> None:
-        super().__init__()
+        super().__init__(device, accelerator)
 
         assert len(kernel_size) == len(
             channel_size
@@ -171,8 +171,6 @@ class EvolvableCNN(EvolvableModule):
         self.rainbow = rainbow
         self.critic = critic
         self.init_layers = init_layers
-        self.device = device
-        self.accelerator = accelerator
         self.n_agents = n_agents
         self.noise_std = noise_std
         self.output_vanish = output_vanish

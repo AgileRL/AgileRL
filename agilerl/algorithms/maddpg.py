@@ -233,7 +233,7 @@ class MADDPG(MultiAgentAlgorithm):
                         EvolvableMLP(
                             num_inputs=state_dim[0],
                             num_outputs=action_dim,
-                            device=self.device,
+                            device='cpu', # Use CPU since we will make deepcopy for target
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -242,7 +242,7 @@ class MADDPG(MultiAgentAlgorithm):
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
                         num_outputs=1,
-                        device=self.device,
+                        device='cpu', # Use CPU since we will make deepcopy for target
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -267,7 +267,7 @@ class MADDPG(MultiAgentAlgorithm):
                             input_shape=state_dim,
                             num_outputs=action_dim,
                             n_agents=self.n_agents,
-                            device=self.device,
+                            device='cpu', # Use CPU since we will make deepcopy for target
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -279,7 +279,7 @@ class MADDPG(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device=self.device,
+                        device='cpu', # Use CPU since we will make deepcopy for target
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -303,18 +303,18 @@ class MADDPG(MultiAgentAlgorithm):
                             observation_space=obs_space,
                             num_outputs=action_dim,
                             n_agents=self.n_agents,
-                            device=self.device,
+                            device='cpu', # Use CPU since we will make deepcopy for target
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
                     )
                 self.critics = [
                     EvolvableMultiInput(
-                        input_shape=state_dim,
+                        observation_space=obs_space,
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device=self.device,
+                        device='cpu', # Use CPU since we will make deepcopy for target
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -351,6 +351,7 @@ class MADDPG(MultiAgentAlgorithm):
             if wrap:
                 self.wrap_models()
         else:
+            self.place_models_on_device(self.device)
             if self.torch_compiler:
                 if (
                     any(

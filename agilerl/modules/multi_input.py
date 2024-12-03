@@ -118,6 +118,8 @@ class EvolvableMultiInput(EvolvableModule):
     value_net: EvolvableModule
     advantage_net: Optional[EvolvableModule]
 
+    arch: str = "composed"
+
     def __init__(
             self,
             observation_space: TupleOrDictSpace,
@@ -153,14 +155,16 @@ class EvolvableMultiInput(EvolvableModule):
             accelerator: Optional[Accelerator] = None,
             arch: str = "composed"
         ):
-        super().__init__()
+        super().__init__(device, accelerator)
 
-        assert isinstance(observation_space, (spaces.Dict, spaces.Tuple)), "Observation space must be a Dict or Tuple space."
+        assert (
+            isinstance(observation_space, (spaces.Dict, spaces.Tuple)),
+            "Observation space must be a Dict or Tuple space."
+        )
 
         if isinstance(observation_space, spaces.Tuple):
             observation_space = tuple_to_dict_space(observation_space)
         
-        self.arch = arch
         self.observation_space = observation_space
         self.vector_space_mlp = vector_space_mlp
         self.channel_size = channel_size
@@ -186,8 +190,6 @@ class EvolvableMultiInput(EvolvableModule):
         self.rainbow = rainbow
         self.critic = critic
         self.init_layers = init_layers
-        self.device = device if accelerator is None else accelerator.device
-        self.accelerator = accelerator
         self.n_agents = n_agents
         self.noise_std = noise_std
         self.output_vanish = output_vanish
@@ -197,7 +199,7 @@ class EvolvableMultiInput(EvolvableModule):
             ]
 
         self._net_config = {
-            "arch": self.arch,
+            "arch": arch,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,

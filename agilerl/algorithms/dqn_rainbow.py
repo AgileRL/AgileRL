@@ -217,7 +217,7 @@ class RainbowDQN(RLAlgorithm):
                     support=self.support,
                     rainbow=True,
                     noise_std=noise_std,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -245,7 +245,7 @@ class RainbowDQN(RLAlgorithm):
                     support=self.support,
                     rainbow=True,
                     noise_std=noise_std,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -277,7 +277,7 @@ class RainbowDQN(RLAlgorithm):
                     support=self.support,
                     rainbow=True,
                     noise_std=noise_std,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )

@@ -4,6 +4,7 @@ from functools import wraps
 from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
+from accelerate import Accelerator
 
 from agilerl.protocols import MutationType, MutationMethod
 from agilerl.modules.custom_components import NoisyLinear
@@ -37,9 +38,12 @@ class EvolvableModule(nn.Module, ABC):
     value_net: Optional[nn.Module]
     advantage_net: Optional[nn.Module]
 
-    def __init__(self) -> None:
+    def __init__(self, device: str, accelerator: Optional[Accelerator] = None) -> None:
         nn.Module.__init__(self)
         self._init_mutation_methods()
+
+        self.device = device
+        self.accelerator = accelerator
 
     @property
     @abstractmethod

@@ -105,6 +105,8 @@ class PPO(RLAlgorithm):
         critic_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
+        compile: bool = True,
+        cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
         super().__init__(
@@ -188,14 +190,13 @@ class PPO(RLAlgorithm):
         self.update_epochs = update_epochs
         self.actor_network = actor_network
         self.critic_network = critic_network
+        self.compile = compile
+        self.cudagraphs = cudagraphs
 
         # For continuous action spaces
         if not self.discrete_actions:
-            self.action_var = torch.full((self.action_dim,), action_std_init**2)
-            if self.accelerator is None:
-                self.action_var = self.action_var.to(self.device)
-            else:
-                self.action_var = self.action_var.to(self.accelerator.device)
+            device = self.device if self.accelerator is None else self.accelerator.device
+            self.action_var = torch.full((self.action_dim,), action_std_init**2, device=device)
 
         if self.actor_network is not None and self.critic_network is not None:
             assert type(actor_network) is type(
@@ -346,9 +347,6 @@ class PPO(RLAlgorithm):
         if self.accelerator is not None:
             if wrap:
                 self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.critic = self.critic.to(self.device)
 
     def scale_to_action_space(self, action, convert_to_torch=False):
         """Scales actions to action space defined by self.min_action and self.max_action.
@@ -591,6 +589,7 @@ class PPO(RLAlgorithm):
                     v_loss_clipped = (v_clipped - batch_returns) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
+
                     entropy_loss = entropy.mean()
                     loss = (
                         pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
@@ -602,6 +601,7 @@ class PPO(RLAlgorithm):
                         self.accelerator.backward(loss)
                     else:
                         loss.backward()
+
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 

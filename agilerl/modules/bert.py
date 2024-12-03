@@ -70,7 +70,7 @@ class EvolvableBERT(EvolvableModule):
         device: str = "cpu",
         arch: str = "bert"
         ) -> None:
-        super().__init__()
+        super().__init__(device, accelerator=None)
 
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
@@ -88,8 +88,6 @@ class EvolvableBERT(EvolvableModule):
         self.norm_first = norm_first
         self.max_encoder_layers = max_encoder_layers
         self.max_decoder_layers = max_decoder_layers
-
-        self.device = device
 
         if self.end2end:
             self.generator = nn.Linear(self.d_model, tgt_vocab_size)

@@ -532,13 +532,13 @@ class Mutations:
                     setattr(
                         individual,
                         self.algo["actor"]["optimizer"],
-                        type(actor_opt)(net_params, lr=individual.lr_actor),
+                        type(actor_opt)(net_params, lr=individual.lr_actor, capturable=individual.cudagraphs),
                     )
                 else:
                     setattr(
                         individual,
                         self.algo["actor"]["optimizer"],
-                        type(actor_opt)(net_params, lr=individual.lr),
+                        type(actor_opt)(net_params, lr=individual.lr, capturable=individual.cudagraphs),
                     )
 
                 # If algorithm has critics, reinitialise their optimizers too
@@ -548,7 +548,7 @@ class Mutations:
                     setattr(
                         individual,
                         critic["optimizer"],
-                        type(critic_opt)(net_params, lr=individual.lr_critic),
+                        type(critic_opt)(net_params, lr=individual.lr_critic, capturable=individual.cudagraphs),
                     )
 
     def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:

@@ -8,6 +8,7 @@ from numpy.typing import ArrayLike
 from torch.optim import Optimizer
 import torch
 from torch._dynamo import OptimizedModule
+from tensordict.nn import CudaGraphModule
 import dill
 
 from agilerl.protocols import EvolvableModule, EvolvableAttributeType, EvolvableAttributeDict
@@ -59,6 +60,22 @@ def assert_supported_space(space: spaces.Space) -> bool:
         isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces
     ):
         raise TypeError(f"Nested {type(space)} spaces are not supported.")
+
+def isroutine(obj: object) -> bool:
+    """Checks if an attribute is a routine, considering also methods wrapped by 
+    CudaGraphModule.
+
+    :param attr: The attribute to check.
+    :type attr: str
+
+    :return: True if the attribute is a routine, False otherwise.
+    :rtype: bool
+    """
+    if isinstance(obj, CudaGraphModule):
+        return True
+
+    return inspect.isroutine(obj)
+
 
 class EvolvableAlgorithm(ABC):
     """Base object for all algorithms in the AgileRL framework. 
@@ -261,7 +278,7 @@ class EvolvableAlgorithm(ABC):
         :rtype: dict[str, Any]
         """
         # Get all attributes of the current object
-        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        attributes = inspect.getmembers(self, lambda a: not isroutine(a))
 
         # Exclude attributes that are EvolvableModule's or Optimizer's (also check for nested 
         # module-related attributes for multi-agent algorithms)

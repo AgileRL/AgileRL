@@ -89,7 +89,7 @@ class MakeEvolvable(EvolvableModule):
         accelerator: Optional[Accelerator] = None,
         **kwargs: dict,
     ):
-        super().__init__()
+        super().__init__(device, accelerator)
         assert (
             min_hidden_layers < max_hidden_layers
         ), "'min_hidden_layers' must be less than 'max_hidden_layers."

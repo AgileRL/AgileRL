@@ -15,6 +15,7 @@ from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules.base import EvolvableModule
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
@@ -235,7 +236,7 @@ class TD3(RLAlgorithm):
                 self.actor = EvolvableMLP(
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -243,14 +244,14 @@ class TD3(RLAlgorithm):
                 self.critic_1 = EvolvableMLP(
                     num_inputs=self.state_dim[0] + self.action_dim,
                     num_outputs=1,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
                 self.critic_2 = EvolvableMLP(
                     num_inputs=self.state_dim[0] + self.action_dim,
                     num_outputs=1,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -274,7 +275,7 @@ class TD3(RLAlgorithm):
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -282,7 +283,7 @@ class TD3(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -290,7 +291,7 @@ class TD3(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -319,7 +320,7 @@ class TD3(RLAlgorithm):
                 self.actor = EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -327,7 +328,7 @@ class TD3(RLAlgorithm):
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -335,7 +336,7 @@ class TD3(RLAlgorithm):
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -612,7 +613,7 @@ class TD3(RLAlgorithm):
         else:
             return None, critic_loss.item()
 
-    def soft_update(self, net, target):
+    def soft_update(self, net: EvolvableModule, target: EvolvableModule) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(

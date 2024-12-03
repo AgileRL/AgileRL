@@ -9,13 +9,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
+from tensordict import TensorDict, from_module
+from tensordict.nn import CudaGraphModule
 
+from agilerl.typing import TorchObsType, ExperiencesType
 from agilerl.algorithms.base import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.utils.evolvable_networks import is_image_space
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
@@ -73,6 +75,8 @@ class DQN(RLAlgorithm):
         actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
+        compile: bool = True,
+        cudagraphs: bool = True,
         wrap: bool = True,
     ):
         super().__init__(
@@ -107,6 +111,8 @@ class DQN(RLAlgorithm):
         self.mut = mut
         self.double = double
         self.actor_network = actor_network
+        self.cudagraphs = cudagraphs
+        self.compile = compile
 
         if self.actor_network is not None:
             self.actor = actor_network
@@ -136,13 +142,17 @@ class DQN(RLAlgorithm):
                 assert (
                     len(self.net_config["hidden_size"]) > 0
                 ), "Net config hidden_size must contain at least one element."
-                self.actor = EvolvableMLP(
+
+                create_actor = lambda: EvolvableMLP(
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
+                self.actor = create_actor()
+                self.actor_detached = create_actor()
+                self.actor_target = create_actor()
 
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
                 for key in [
@@ -160,14 +170,19 @@ class DQN(RLAlgorithm):
                     assert (
                         len(self.net_config[key]) > 0
                     ), f"Net config {key} must contain at least one element."
-
-                self.actor = EvolvableCNN(
+                
+                create_actor = lambda: EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
+
+                self.actor = create_actor()
+                self.actor_detached = create_actor()
+                self.actor_target = create_actor()
+
             elif self.net_config["arch"] == "composed": # Dict observations
                 for key in [
                     "channel_size",
@@ -189,7 +204,7 @@ class DQN(RLAlgorithm):
                     "latent_dim" in self.net_config.keys()
                 ), "Net config must contain latent_dim: int."
 
-                self.actor = EvolvableMultiInput(
+                create_actor = lambda: EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     device=self.device,
@@ -197,67 +212,117 @@ class DQN(RLAlgorithm):
                     **self.net_config,
                 )
 
-        # Create the target network by copying the actor network
-        self.actor_target = copy.deepcopy(self.actor)
-        self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+                self.actor = create_actor()
+                self.actor_detached = create_actor()
+                self.actor_target = create_actor()
+
+
+        # Create detached actor and copy over weights to target
+        self.param_vals: TensorDict = from_module(self.actor).detach()
+        self.param_vals.to_module(self.actor_detached)
+        self.target_params: TensorDict = self.param_vals.clone().lock_()
+        self.target_params.to_module(self.actor_target)
+
+        self.optimizer = optim.Adam(
+            self.actor.parameters(),
+            lr=self.lr,
+            capturable=cudagraphs
+            )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
 
         self.criterion = nn.MSELoss()
 
-    def get_action(self, state, epsilon=0, action_mask=None):
+        if compile:
+            mode = None
+            self.update = torch.compile(self.update, mode=mode)
+            self.get_action = torch.compile(self.get_action, mode=mode, fullgraph=True)
+        
+        if cudagraphs:
+            self.update = CudaGraphModule(self.update)
+            self.get_action = CudaGraphModule(self.get_action)
+
+    def get_action(
+            self,
+            obs: TorchObsType,
+            epsilon: float = 0,
+            action_mask: Optional[torch.Tensor] = None
+            ) -> torch.Tensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
 
-        :param state: State observation, or multiple observations in a batch
-        :type state: numpy.ndarray[float]
+        :param obs: The current observation from the environment
+        :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]
         :param epsilon: Probablilty of taking a random action for exploration, defaults to 0
         :type epsilon: float, optional
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        state = self.preprocess_observation(state)
+        q_values = self.actor_detached(obs)
+        actions = torch.argmax(q_values, dim=-1)
+        actions_random = torch.rand(
+            actions.shape,
+            device=actions.device).mul(self.action_dim).floor().to(torch.long)
 
-        # epsilon-greedy
-        if random.random() < epsilon:
-            if action_mask is None:
-                action = np.random.randint(0, self.action_dim, size=len(state))
-            else:
-                action = np.argmax(
-                    (
-                        np.random.uniform(0, 1, (len(state), self.action_dim))
-                        * action_mask
-                    ),
-                    axis=1,
-                )
+        # actions_random = torch.randint_like(actions, n_act)
+        use_policy = torch.rand(actions.shape, device=actions.device).gt(epsilon)
+        actions = torch.where(use_policy, actions, actions_random)
 
+        # Mask illegal actions
+        if action_mask is not None:
+            pass
+        
+        return actions
+
+    def update(
+            self,
+            obs: TorchObsType,
+            actions: torch.Tensor,
+            rewards: torch.Tensor,
+            next_obs: TorchObsType,
+            dones: torch.Tensor
+            ) -> torch.Tensor:
+        """Updates agent network parameters to learn from experiences.
+
+        :param obs: List of batched states
+        :type obs: list[torch.Tensor[float]]
+        :param actions: List of batched actions
+        :type actions: torch.Tensor[int]
+        :param rewards: List of batched rewards
+        :type rewards: torch.Tensor[float]
+        :param next_obs: List of batched next states
+        :type next_obs: list[torch.Tensor[float]]
+        :param dones: List of batched dones
+        :type dones: torch.Tensor[int]
+        """
+        if self.double:  # Double Q-learning
+            q_idx = self.actor_target(next_obs).argmax(dim=1).unsqueeze(1)
+            q_target = self.actor(next_obs).gather(dim=1, index=q_idx).detach()
         else:
-            self.actor.eval()
-            with torch.no_grad():
-                action_values = self.actor(state).cpu().data.numpy()
-            self.actor.train()
+            q_target = self.actor_target(next_obs).max(axis=1)[0].unsqueeze(1)
 
-            if action_mask is None:
-                action = np.argmax(action_values, axis=-1)
-            else:
-                inv_mask = 1 - action_mask
-                masked_action_values = np.ma.array(action_values, mask=inv_mask)
-                action = np.argmax(masked_action_values, axis=-1)
+        # target, if terminal then y_j = rewards
+        y_j = rewards + self.gamma * q_target * (1 - dones)
+        q_eval = self.actor(obs).gather(1, actions.long())
 
-        return action
+        # loss backprop
+        loss: torch.Tensor = self.criterion(q_eval, y_j)
+        self.optimizer.zero_grad()
+        if self.accelerator is not None:
+            self.accelerator.backward(loss)
+        else:
+            loss.backward()
 
-    def learn(self, experiences):
+        self.optimizer.step()
+        return loss.detach()
+
+    def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -274,39 +339,11 @@ class DQN(RLAlgorithm):
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
 
-        if self.double:  # Double Q-learning
-            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
-            q_target = self.actor(next_states).gather(dim=1, index=q_idx).detach()
-        else:
-            q_target = (
-                self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
-            )
-
-        # target, if terminal then y_j = rewards
-        y_j = rewards + self.gamma * q_target * (1 - dones)
-        q_eval = self.actor(states).gather(1, actions.long())
-
-        # loss backprop
-        loss = self.criterion(q_eval, y_j)
-        self.optimizer.zero_grad()
-        if self.accelerator is not None:
-            self.accelerator.backward(loss)
-        else:
-            loss.backward()
-        self.optimizer.step()
+        loss = self.update(states, actions, rewards, next_states, dones)
 
         # soft update target network
-        self.soft_update()
+        self.target_params.lerp_(self.param_vals, self.tau)
         return loss.item()
-
-    def soft_update(self):
-        """Soft updates target network."""
-        for eval_param, target_param in zip(
-            self.actor.parameters(), self.actor_target.parameters()
-        ):
-            target_param.data.copy_(
-                self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
-            )
 
     def test(self, env, swap_channels=False, max_steps=None, loop=1):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
@@ -333,8 +370,10 @@ class DQN(RLAlgorithm):
                     if swap_channels:
                         state = obs_channels_to_first(state)
                     action_mask = info.get("action_mask", None)
-                    action = self.get_action(state, epsilon=0, action_mask=action_mask)
-                    state, reward, done, trunc, info = env.step(action)
+                    epsilon = torch.tensor(0.0, device=self.device)
+                    state = self.preprocess_observation(state)
+                    action = self.get_action(state, epsilon=epsilon, action_mask=action_mask)
+                    state, reward, done, trunc, info = env.step(action.cpu().numpy())
                     step += 1
                     scores += np.array(reward)
                     for idx, (d, t) in enumerate(zip(done, trunc)):
@@ -359,34 +398,42 @@ class DQN(RLAlgorithm):
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
-        actor_target = self.actor_target.clone()
-        optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        actor_target = copy.deepcopy(self.actor_target)
+        actor_detached = copy.deepcopy(self.actor_detached)
+
+        # Create detached actor and copy over weights to target
+        clone.param_vals = from_module(actor).detach()
+        clone.param_vals.to_module(actor_detached)
+        clone.target_params = clone.param_vals.clone().lock_()
+        clone.target_params.to_module(actor_target)
+
+        self.param_vals: TensorDict = from_module(self.actor).detach()
+        self.param_vals.to_module(self.actor_detached)
+        self.target_params: TensorDict = self.param_vals.clone().lock_()
+        self.target_params.to_module(self.actor_target)
+
+
+        optimizer = optim.Adam(actor.parameters(), lr=clone.lr, capturable=clone.cudagraphs)
         optimizer.load_state_dict(self.optimizer.state_dict())
 
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.optimizer,
-                ) = self.accelerator.prepare(actor, actor_target, optimizer)
-            else:
-                clone.actor, clone.actor_target, clone.optimizer = (
-                    actor,
-                    actor_target,
-                    optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.actor_detached,
+                clone.actor_target,
+                clone.optimizer,
+            ) = self.accelerator.prepare(actor, actor_detached, actor_target, optimizer)
         else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
+            clone.actor = actor
+            clone.actor_detached = actor_detached
+            clone.actor_target = actor_target
             clone.optimizer = optimizer
 
+        TensorType = (torch.Tensor, TensorDict)
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
                 attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(
-                    clone_attr, torch.Tensor
-                ):
+                if isinstance(attr, TensorType) or isinstance(clone_attr, TensorType):
                     if not torch.equal(attr, clone_attr):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
@@ -403,12 +450,6 @@ class DQN(RLAlgorithm):
             clone.index = index
 
         return clone
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(
-                self.actor, self.actor_target, self.optimizer
-            )
 
     def unwrap_models(self):
         if self.accelerator is not None:

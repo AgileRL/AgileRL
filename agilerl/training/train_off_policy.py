@@ -5,6 +5,7 @@ from datetime import datetime
 import numpy as np
 import wandb
 from torch.utils.data import DataLoader
+import torch
 from tqdm import trange
 import gymnasium as gym
 from accelerate import Accelerator
@@ -230,6 +231,7 @@ def train_off_policy(
             pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
+    eps_start = torch.tensor(eps_start, device=pop[0].device)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
@@ -249,18 +251,24 @@ def train_off_policy(
             for idx_step in range(evo_steps // num_envs):
                 if swap_channels:
                     state = obs_channels_to_first(state)
+                
+                if not isinstance(epsilon, torch.Tensor):
+                    epsilon = torch.tensor(epsilon, device=agent.device)
 
                 # Get next action from agent
                 if algo in ["DQN"]:
                     action_mask = info.get("action_mask", None)
-                    action = agent.get_action(state, epsilon, action_mask=action_mask)
+                    torch_state = agent.preprocess_observation(state)
+                    action = agent.get_action(torch_state, epsilon, action_mask=action_mask)
                     # Decay epsilon for exploration
                     epsilon = max(eps_end, epsilon * eps_decay)
-                if algo in ["Rainbow DQN"]:
+                elif algo in ["Rainbow DQN"]:
                     action_mask = info.get("action_mask", None)
                     action = agent.get_action(state, action_mask=action_mask)
                 else:
                     action = agent.get_action(state)
+
+                action = action.cpu().numpy()
 
                 if algo in ["DQN", "Rainbow DQN"]:
                     for a in action:

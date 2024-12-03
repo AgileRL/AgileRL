@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from accelerate import Accelerator
 
+from agilerl.typing import DeviceType
 from agilerl.modules.custom_components import NewGELU
 from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.modules.mlp import EvolvableMLP
@@ -64,6 +65,8 @@ class EvolvableGPT(EvolvableModule):
         accelerator: Optional[Accelerator] = None,
         arch: str = "gpt"
     ):
+        super().__init__(device, accelerator)
+
         assert isinstance(n_layer, int), "Number of layers must be an integer."
         assert n_layer >= 1, "Number of layers must be greater than or equal to one."
         assert isinstance(vocab_size, int), "Vocabulary size must be an integer."
@@ -103,8 +106,6 @@ class EvolvableGPT(EvolvableModule):
         ), "Maximum number of layers must be greater than or equal to minimum number of layers."
         assert isinstance(bias, bool), "Bias flag must be boolean value True or False."
 
-        super().__init__()
-
         self.n_layer = n_layer
         self.vocab_size = vocab_size
         self.n_embd = n_embd
@@ -117,8 +118,6 @@ class EvolvableGPT(EvolvableModule):
         self.min_layers = min_layers
         self.max_layers = max_layers
         self.bias = bias
-        self.device = device
-        self.accelerator = accelerator
 
         self.transformer = self.build_networks()
         self.transformer = self.transformer.to(self.device)
@@ -188,9 +187,9 @@ class EvolvableGPT(EvolvableModule):
         :rtype: nn.ModuleDict
         """
         net_dict = OrderedDict()
-        net_dict["wte"] = nn.Embedding(self.vocab_size, self.n_embd)
-        net_dict["wpe"] = nn.Embedding(self.block_size, self.n_embd)
-        net_dict["drop"] = nn.Dropout(self.dropout)
+        net_dict["wte"] = nn.Embedding(self.vocab_size, self.n_embd, device=self.device)
+        net_dict["wpe"] = nn.Embedding(self.block_size, self.n_embd, device=self.device)
+        net_dict["drop"] = nn.Dropout(self.dropout, inplace=True)
         net_dict["h"] = nn.ModuleList(
             [
                 Block(
@@ -501,8 +500,9 @@ class EvolvableGPT(EvolvableModule):
         )
         print(f"using fused AdamW: {use_fused}")
         extra_args = dict(fused=True) if use_fused else dict()
+        lr = torch.tensor(learning_rate, device=self.device)
         optimizer = torch.optim.AdamW(
-            optim_groups, lr=learning_rate, betas=betas, **extra_args
+            optim_groups, lr=lr, betas=betas, **extra_args
         )
 
         return optimizer
@@ -680,10 +680,10 @@ class LayerNorm(nn.Module):
     :return: The normalized tensor.
     :rtype: torch.Tensor
     """
-    def __init__(self, ndim: int, bias: bool, layer_norm_eps: float = 1e-5):
+    def __init__(self, ndim: int, bias: bool, layer_norm_eps: float = 1e-5, device: DeviceType = "cpu"):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.weight = nn.Parameter(torch.ones(ndim, device=device))
+        self.bias = nn.Parameter(torch.zeros(ndim, device=device)) if bias else None
         self.layer_norm_eps = layer_norm_eps
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -711,13 +711,21 @@ class CausalSelfAttention(nn.Module):
     """
     attention_bias: torch.Tensor
 
-    def __init__(self, n_embd: int, n_head: int, bias: bool, dropout: float, block_size: int):
+    def __init__(
+            self,
+            n_embd: int,
+            n_head: int,
+            bias: bool,
+            dropout: float,
+            block_size: int,
+            device: DeviceType = "cpu"
+            ) -> None:
         super().__init__()
         assert n_embd % n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias, device=device)
         # output projection
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias, device=device)
         # regularization
         self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
@@ -725,6 +733,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = n_embd
         self.dropout = dropout
         self.bias = bias
+        self.device = device
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
         if not self.flash:
@@ -735,7 +744,7 @@ class CausalSelfAttention(nn.Module):
             # input sequence
             self.register_buffer(
                 "attention_bias",
-                torch.tril(torch.ones(block_size, block_size)).view(
+                torch.tril(torch.ones(block_size, block_size, device=device)).view(
                     1, 1, block_size, block_size
                 ),
             )
@@ -841,12 +850,14 @@ class Block(nn.Module):
         hidden_size: int,
         activation: str = "GELU",
         layer_norm_eps: float = 1e-5,
+        device: DeviceType = "cpu"
     ):
         super().__init__()
-        self.ln_1 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
-        self.attn = CausalSelfAttention(n_embd, n_head, bias, dropout, block_size)
-        self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps)
-        self.mlp = MLP(n_embd, dropout, hidden_size, activation)
+        self.device = device
+        self.ln_1 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device)
+        self.attn = CausalSelfAttention(n_embd, n_head, bias, dropout, block_size, device=device)
+        self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device)
+        self.mlp = MLP(n_embd, dropout, hidden_size, activation, device=device)
 
     def forward(
         self,
@@ -912,10 +923,11 @@ class MLP(EvolvableMLP):
         :param x: Neural network input
         :type x: torch.Tensor() or np.array
         """
+        # convert input to tensor if it is not already
         if not isinstance(x, torch.Tensor):
-            x = torch.FloatTensor(np.array(x))
-            if self.accelerator is None:
-                x = x.to(self.device)
+            x = torch.FloatTensor(np.array(x), device=self.device)
+
+        # forward pass through the network
         for value in self.feature_net:
             x = value(x)
         x = self.dropout(x)
@@ -926,9 +938,10 @@ class PositionalEncoding(nn.Module):
     Converts tensor of input indices into corresponding tensor of position embeddings.
     """
 
-    def __init__(self, max_positions: int, emb_size):
+    def __init__(self, max_positions: int, emb_size: int, device: DeviceType = "cpu"):
         super().__init__()
-        self.embedding = nn.Embedding(max_positions, emb_size)
+        self.device = device
+        self.embedding = nn.Embedding(max_positions, emb_size, device=device)
         self.emb_size = emb_size
 
     def forward(self, tokens: torch.Tensor):
@@ -942,9 +955,10 @@ class PositionalEncoding(nn.Module):
 class TokenEmbedding(nn.Module):
     """The token embedding class. Converts tensor of input indices into corresponding tensor of token embeddings."""
 
-    def __init__(self, vocab_size: int, emb_size):
+    def __init__(self, vocab_size: int, emb_size: int, device: DeviceType = "cpu"):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, emb_size)
+        self.device = device
+        self.embedding = nn.Embedding(vocab_size, emb_size, device=device)
         self.emb_size = emb_size
 
     def forward(self, tokens: torch.Tensor):

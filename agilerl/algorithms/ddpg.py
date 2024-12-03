@@ -221,14 +221,14 @@ class DDPG(RLAlgorithm):
                 self.actor = EvolvableMLP(
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic = EvolvableMLP(
                     num_inputs=self.state_dim[0] + self.action_dim,
                     num_outputs=1,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -252,7 +252,7 @@ class DDPG(RLAlgorithm):
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -260,7 +260,7 @@ class DDPG(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -288,7 +288,7 @@ class DDPG(RLAlgorithm):
                 self.actor = EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -296,7 +296,7 @@ class DDPG(RLAlgorithm):
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -316,10 +316,10 @@ class DDPG(RLAlgorithm):
             if wrap:
                 self.wrap_models()
         else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
-            self.critic = self.critic.to(self.device)
-            self.critic_target = self.critic_target.to(self.device)
+            self.actor.to(self.device)
+            self.actor_target.to(self.device)
+            self.critic.to(self.device)
+            self.critic_target.to(self.device)
 
         self.criterion = nn.MSELoss()
 

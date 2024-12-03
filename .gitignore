@@ -140,6 +140,8 @@ data/wordle.zip
 
 # WandB
 wandb/
+
+# Refactoring changes
 agilerl/networks
 agilerl/configs.py
 demo.ipynb

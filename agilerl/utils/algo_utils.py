@@ -1,6 +1,6 @@
+from typing import Union, Dict, Any, Tuple, Optional
 from collections import OrderedDict, defaultdict
 from numbers import Number
-from typing import Union, Dict, Any, Tuple
 import torch
 import numpy as np
 from gymnasium import spaces
@@ -10,6 +10,7 @@ from torch.optim import Optimizer
 from torch.nn import Module
 import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
+from tensordict import TensorDict
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import (
@@ -56,7 +57,7 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     :return: True if the object has any attributes that are EvolvableModule's or Optimizer's, False otherwise.
     :rtype: bool
     """
-    check_types = (OptimizedModule, EvolvableModule)
+    check_types = (OptimizedModule, EvolvableModule, TensorDict)
     if not networks_only:
         check_types += (Optimizer,)
 
@@ -96,7 +97,7 @@ def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
             return key_in_nested_dict(v, target)
     return False
 
-def compile_model(model: Module, mode: Union[str, None] = "default") -> Module:
+def compile_model(model: Module, mode: Optional[str] = "default") -> Module:
     """Compiles torch model if not already compiled
 
     :param model: torch model

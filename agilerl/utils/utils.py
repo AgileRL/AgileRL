@@ -37,7 +37,7 @@ def make_vect_envs(env_name: str, num_envs: int = 1) -> gym.vector.AsyncVectorEn
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
     """
-    return gym.vector.AsyncVectorEnv(
+    return gym.vector.SyncVectorEnv(
         [lambda: gym.make(env_name) for i in range(num_envs)]
     )
 

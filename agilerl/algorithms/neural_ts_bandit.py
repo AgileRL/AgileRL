@@ -215,8 +215,6 @@ class NeuralTS(RLAlgorithm):
         if self.accelerator is not None:
             if wrap:
                 self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
 
         # Initialize network layers
         l_no = 0

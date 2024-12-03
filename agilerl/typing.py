@@ -23,6 +23,7 @@ InfosDict = Dict[str, Dict[str, Any]]
 MaybeObsList = Union[List[ObservationType], ObservationType]
 ExperiencesType = Tuple[ObservationType, ...]
 
+DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 NetworkType = Union[Module, List[Module], Tuple[Module, ...]]
 PopulationType = List[EvolvableAlgorithm]

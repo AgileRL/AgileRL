@@ -138,7 +138,7 @@ class CQN(RLAlgorithm):
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
                     hidden_size=self.net_config["hidden_size"],
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
@@ -165,7 +165,7 @@ class CQN(RLAlgorithm):
                     kernel_size=self.net_config["kernel_size"],
                     stride_size=self.net_config["stride_size"],
                     hidden_size=self.net_config["hidden_size"],
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "composed":  # Composed network
@@ -198,7 +198,7 @@ class CQN(RLAlgorithm):
                     hidden_size=self.net_config["hidden_size"],
                     normalize=self.net_config["normalize"],
                     latent_dim=self.net_config["latent_dim"],
-                    device=self.device,
+                    device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                 )
 
@@ -385,22 +385,15 @@ class CQN(RLAlgorithm):
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.optimizer,
-                ) = self.accelerator.prepare(actor, actor_target, optimizer)
-            else:
-                clone.actor, clone.actor_target, clone.optimizer = (
-                    actor,
-                    actor_target,
-                    optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.actor_target,
+                clone.optimizer,
+            ) = self.accelerator.prepare(actor, actor_target, optimizer)
         else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
+            clone.actor = actor
+            clone.actor_target = actor_target
             clone.optimizer = optimizer
 
         for attribute in self.inspect_attributes().keys():
