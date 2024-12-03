@@ -1,11 +1,10 @@
 from typing import List, Tuple, Optional, Any, Dict
-import os
+import time
 import warnings
+import wandb
 from datetime import datetime
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
-import torch
 from tqdm import trange
 import gymnasium as gym
 from accelerate import Accelerator
@@ -13,7 +12,7 @@ from accelerate import Accelerator
 from agilerl.components.replay_buffer import PrioritizedReplayBuffer, MultiStepReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.algo_utils import obs_channels_to_first
@@ -231,11 +230,11 @@ def train_off_policy(
             pop = mutation.mutation(pop, pre_training_mut=True)
 
     # RL training loop
-    eps_start = torch.tensor(eps_start, device=pop[0].device)
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
         pop_episode_scores = []
+        pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
@@ -248,18 +247,15 @@ def train_off_policy(
             if algo in ["DQN"]:
                 epsilon = eps_start
 
+            start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 if swap_channels:
                     state = obs_channels_to_first(state)
-                
-                if not isinstance(epsilon, torch.Tensor):
-                    epsilon = torch.tensor(epsilon, device=agent.device)
 
                 # Get next action from agent
                 if algo in ["DQN"]:
                     action_mask = info.get("action_mask", None)
-                    torch_state = agent.preprocess_observation(state)
-                    action = agent.get_action(torch_state, epsilon, action_mask=action_mask)
+                    action = agent.get_action(state, epsilon, action_mask=action_mask)
                     # Decay epsilon for exploration
                     epsilon = max(eps_end, epsilon * eps_decay)
                 elif algo in ["Rainbow DQN"]:
@@ -267,8 +263,6 @@ def train_off_policy(
                     action = agent.get_action(state, action_mask=action_mask)
                 else:
                     action = agent.get_action(state)
-
-                action = action.cpu().numpy()
 
                 if algo in ["DQN", "Rainbow DQN"]:
                     for a in action:
@@ -339,7 +333,7 @@ def train_off_policy(
                             done,
                             is_vectorised=is_vectorised,
                         )
-
+                
                 if per:
                     fraction = min(
                         ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps), 1.0
@@ -421,6 +415,8 @@ def train_off_policy(
                 state = next_state
 
             agent.steps[-1] += steps
+            fps = steps / (time.time() - start_time)
+            pop_fps.append(fps)
             pbar.update(evo_steps // len(pop))
 
             pop_episode_scores.append(completed_episode_scores)
@@ -463,6 +459,7 @@ def train_off_policy(
                     if accelerator is not None and accelerator.is_main_process
                     else total_steps
                 ),
+                "fps": np.mean(pop_fps),
                 "train/mean_score": np.mean(
                     [
                         mean_score

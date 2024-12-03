@@ -13,7 +13,7 @@ from accelerate import Accelerator
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.algo_utils import obs_channels_to_first

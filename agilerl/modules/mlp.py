@@ -376,13 +376,3 @@ class EvolvableMLP(EvolvableModule):
             new_advantage_net,
         )
 
-    def clone(self) -> "EvolvableMLP":
-        """Returns clone of neural net with identical parameters.
-        
-        :return: Clone of neural network
-        :rtype: EvolvableMLP
-        """
-        clone = EvolvableMLP(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
-        return clone
-

@@ -1,6 +1,7 @@
-from typing import Optional, Union, Tuple, Iterable, TypeGuard, Any, Dict
+from typing import Optional, Union, Tuple, Iterable, Type, Any, Dict, TypeVar
 import inspect
-from abc import ABC, abstractmethod
+from abc import ABC, ABCMeta, abstractmethod
+import functools
 from gymnasium import spaces
 from accelerate import Accelerator
 import numpy as np
@@ -8,76 +9,47 @@ from numpy.typing import ArrayLike
 from torch.optim import Optimizer
 import torch
 from torch._dynamo import OptimizedModule
-from tensordict.nn import CudaGraphModule
 import dill
 
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import Registry, NetworkGroup, OptimizerConfig
 from agilerl.protocols import EvolvableModule, EvolvableAttributeType, EvolvableAttributeDict
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, GymSpaceType
 from agilerl.utils.algo_utils import (
     compile_model,
     recursive_check_module_attrs,
     remove_compile_prefix,
+    assert_supported_space,
+    is_module_list,
+    isroutine,
+    is_optimizer_list,
     preprocess_observation
 )
-    
-def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
-    """Type guard to check if an object is a list of EvolvableModule's.
-    
-    :param obj: The object to check.
-    :type obj: EvolvableAttributeType.
-    
-    :return: True if the object is a list of EvolvableModule's, False otherwise.
-    :rtype: bool.
-    """
-    return all(isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj)
 
-def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimizer]]:
-    """Type guard to check if an object is a list of Optimizer's.
-    
-    :param obj: The object to check.
-    :type obj: EvolvableAttributeType.
-    
-    :return: True if the object is a list of Optimizer's, False otherwise.
-    :rtype: bool.
-    """
-    return all(isinstance(inner_obj, Optimizer) for inner_obj in obj)
+__all__ = [
+    "EvolvableAlgorithm",
+    "RLAlgorithm",
+    "MultiAgentAlgorithm"
+    ]
 
-def assert_supported_space(space: spaces.Space) -> bool:
-    """Checks if the space is supported by the AgileRL framework.
-    
-    :param space: The space to check.
-    :type space: spaces.Space.
-    
-    :return: True if the space is supported, False otherwise.
-    :rtype: bool.
-    """
-    # Nested Dict or Tuple spaces are not supported
-    if isinstance(space, spaces.Dict) and any(
-        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces.values()
-    ):
-        raise TypeError(f"Nested {type(space)} spaces are not supported.")
-    elif isinstance(space, spaces.Tuple) and any(
-        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces
-    ):
-        raise TypeError(f"Nested {type(space)} spaces are not supported.")
+SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
+T = TypeVar("T", bound=type)
 
-def isroutine(obj: object) -> bool:
-    """Checks if an attribute is a routine, considering also methods wrapped by 
-    CudaGraphModule.
+class _RegisterEvolvableMeta(type):
+    def __call__(cls, *args, **kwargs):
+        # Create the instance
+        instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
 
-    :param attr: The attribute to check.
-    :type attr: str
+        # Call the base class post_init_hook after all initialization
+        if isinstance(instance, cls) and hasattr(instance, "_register_networks"):
+            instance._register_networks()
 
-    :return: True if the attribute is a routine, False otherwise.
-    :rtype: bool
-    """
-    if isinstance(obj, CudaGraphModule):
-        return True
+        return instance
 
-    return inspect.isroutine(obj)
+class RegisterEvolvableMeta(_RegisterEvolvableMeta, ABCMeta):
+    ...
 
-
-class EvolvableAlgorithm(ABC):
+class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
     """Base object for all algorithms in the AgileRL framework. 
     
     :param index: The index of the individual.
@@ -112,12 +84,13 @@ class EvolvableAlgorithm(ABC):
         self.learn_step = learn_step
         self.algo = name if name is not None else self.__class__.__name__
 
+        self.eval_network = None
         self._mut = None
         self._index = index
         self.scores = []
         self.fitness = []
         self.steps = [0]
-        self.optimizer_module_mapping = {}
+        self.registry = Registry()
 
     @property
     def index(self) -> int:
@@ -246,8 +219,44 @@ class EvolvableAlgorithm(ABC):
             return action_space.shape[0]
         else:
             raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
+    
+    def _register_networks(self) -> None:
+        """Registers the networks in the algorithm with the module registry."""
+        if not self.registry.groups:
+            raise ValueError(
+                "No network groups have been registered with the algorithm's __init__ method. "
+                "Please register NetworkGroup objects specifying all of the evaluation and "
+                "shared/target networks through the `register_network_group()` method."
+            )
 
-    def evolvable_attributes(self, networks_only: bool = False) -> EvolvableAttributeDict:
+        # Extract mapping from optimizer names to network attribute names
+        for attr, obj in self.evolvable_attributes(exclude_td=True).items():
+            if isinstance(obj, OptimizerWrapper):
+                config = OptimizerConfig(
+                    optimizer_cls=obj.optimizer.__class__,
+                    name=attr,
+                    networks=obj.network_names
+                    )
+                self.registry.register_optimizer(config)
+
+        # Check that all the inspected evolvable attributes can be found in the registry
+        all_registered = self.registry.all_registered()
+        for attr in self.evolvable_attributes(exclude_td=True):
+            if attr not in all_registered:
+                raise ValueError(
+                    f"Evolvable attribute '{attr}' is not found in the registry. "
+                    "Please check that the defined NetworkGroup objects contain "
+                    "all of the EvolvableModule and Optimizer objects in the algorithm."
+                )
+    def register_network_group(self, group: NetworkGroup) -> None:
+        """Sets the evaluation network for the algorithm.
+
+        :param name: The name of the evaluation network.
+        :type name: str
+        """
+        self.registry.register_group(group)
+
+    def evolvable_attributes(self, networks_only: bool = False, exclude_td: bool = False) -> EvolvableAttributeDict:
         """Returns the attributes related to the evolvable networks in the algorithm. Includes 
         attributes that are either evolvable networks or a list of evolvable networks, as well 
         as the optimizers associated with the networks.
@@ -260,11 +269,11 @@ class EvolvableAlgorithm(ABC):
         """
         return {
             attr: getattr(self, attr) for attr in dir(self)
-            if recursive_check_module_attrs(getattr(self, attr), networks_only=networks_only)
+            if recursive_check_module_attrs(getattr(self, attr), networks_only, exclude_td)
             and not attr.startswith("_") and not attr.endswith("_")
             and not "network" in attr # NOTE: We shouldn't need to do this...
         }
-    
+
     def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
         """
         Inspect and retrieve the attributes of the current object, excluding attributes related to the 
@@ -307,7 +316,7 @@ class EvolvableAlgorithm(ABC):
     def wrap_models(self) -> None:
         """Wraps the models in the algorithm with the accelerator."""
         if self.accelerator is not None:
-            for attr in self.evolvable_attributes():
+            for attr in self.evolvable_attributes(exclude_td=True):
                 obj = getattr(self, attr)
                 if isinstance(obj, list):
                     setattr(self, attr, [self.accelerator.prepare(m) for m in obj])
@@ -321,14 +330,6 @@ class EvolvableAlgorithm(ABC):
                 setattr(self, name, [m.to(self.device) for m in obj])
             else:
                 setattr(self, name, obj.to(self.device))
-    
-    # def register_optimizer(self, optimizer_name: str, module_names: List[str]) -> None:
-    #     """
-    #     Registers an optimizer and the modules it manages.
-    #     :param optimizer_name: Name of the optimizer attribute (e.g., 'actor_optimizer').
-    #     :param module_names: List of module attribute names managed by the optimizer (e.g., ['actor']).
-    #     """
-    #     self.optimizer_module_mapping[optimizer_name] = module_names
 
     # @classmethod
     # def load(cls, path: str, device: str = "cpu", accelerator: Optional[Accelerator] = None):
@@ -538,8 +539,8 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         for attr in self.evolvable_attributes():
             obj: EvolvableAttributeType = getattr(self, attr)
             if isinstance(obj, (OptimizedModule, EvolvableModule)):
-                    network_info[f"{attr}_init_dict"] = obj.init_dict
-                    network_info[f"{attr}_state_dict"] = remove_compile_prefix(obj.state_dict())
+                network_info[f"{attr}_init_dict"] = obj.init_dict
+                network_info[f"{attr}_state_dict"] = remove_compile_prefix(obj.state_dict())
             elif isinstance(obj, Optimizer):
                 network_info[f"{attr}_state_dict"] = obj.state_dict()
             else:

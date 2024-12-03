@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
@@ -291,8 +291,7 @@ class RainbowDQN(RLAlgorithm):
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        if self.accelerator is not None:
-            if wrap:
+        if self.accelerator is not None and wrap:
                 self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)

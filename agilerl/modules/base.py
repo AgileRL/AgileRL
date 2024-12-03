@@ -192,5 +192,9 @@ class EvolvableModule(nn.Module, ABC):
     def clone(self) -> "EvolvableModule":
         """Returns clone of neural net with identical parameters."""
         clone = self.__class__(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
+
+        # Load state dict if the network has been trained
+        if self.state_dict():
+            clone.load_state_dict(self.state_dict())
+
         return clone

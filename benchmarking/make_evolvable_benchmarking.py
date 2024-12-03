@@ -14,7 +14,7 @@ from benchmarking.networks import (
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
-from agilerl.algorithms.base import RLAlgorithm, MultiAgentAlgorithm
+from agilerl.algorithms.core.base import RLAlgorithm, MultiAgentAlgorithm
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations

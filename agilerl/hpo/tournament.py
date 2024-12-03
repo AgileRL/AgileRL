@@ -1,7 +1,7 @@
 from typing import List, Tuple
 import numpy as np
 
-from agilerl.algorithms.base import EvolvableAlgorithm
+from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 PopulationType = List[EvolvableAlgorithm]
 

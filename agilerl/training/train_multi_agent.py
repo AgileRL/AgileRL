@@ -14,7 +14,7 @@ import gymnasium as gym
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.algorithms.base import MultiAgentAlgorithm
+from agilerl.algorithms.core.base import MultiAgentAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.utils import (

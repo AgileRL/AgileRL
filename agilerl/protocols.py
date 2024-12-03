@@ -19,6 +19,10 @@ class MutationMethod(Protocol):
 
 @runtime_checkable
 class EvolvableModule(Protocol):
+    init_dict: Dict[str, Any]
+
+    def state_dict(self) -> Dict[str, Any]:
+        ...
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         ...
     def get_mutation_probs(self, new_layer_prob: float) -> List[float]:

@@ -1,17 +1,21 @@
-from typing import Union, Dict, Any, Tuple, Optional
+from typing import Union, Dict, Any, Tuple, Optional, TypeGuard, Iterable
 from collections import OrderedDict, defaultdict
 from numbers import Number
-import torch
+import inspect
 import numpy as np
 from gymnasium import spaces
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from tensordict import TensorDict
+from tensordict.nn import CudaGraphModule
+import torch
 from torch.optim import Optimizer
 from torch.nn import Module
 import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
-from tensordict import TensorDict
 
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.protocols import EvolvableAttributeType
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import (
     NumpyObsType,
@@ -21,6 +25,63 @@ from agilerl.typing import (
     MaybeObsList,
     ArrayOrTensor
 )
+
+def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
+    """Type guard to check if an object is a list of EvolvableModule's.
+    
+    :param obj: The object to check.
+    :type obj: EvolvableAttributeType.
+    
+    :return: True if the object is a list of EvolvableModule's, False otherwise.
+    :rtype: bool.
+    """
+    return all(isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj)
+
+def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimizer]]:
+    """Type guard to check if an object is a list of Optimizer's.
+    
+    :param obj: The object to check.
+    :type obj: EvolvableAttributeType.
+    
+    :return: True if the object is a list of Optimizer's, False otherwise.
+    :rtype: bool.
+    """
+    return all(isinstance(inner_obj, Optimizer) for inner_obj in obj)
+
+def assert_supported_space(space: spaces.Space) -> bool:
+    """Checks if the space is supported by the AgileRL framework.
+    
+    :param space: The space to check.
+    :type space: spaces.Space.
+    
+    :return: True if the space is supported, False otherwise.
+    :rtype: bool.
+    """
+    # Nested Dict or Tuple spaces are not supported
+    if isinstance(space, spaces.Dict) and any(
+        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces.values()
+    ):
+        raise TypeError(f"Nested {type(space)} spaces are not supported.")
+    elif isinstance(space, spaces.Tuple) and any(
+        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces
+    ):
+        raise TypeError(f"Nested {type(space)} spaces are not supported.")
+
+def isroutine(obj: object) -> bool:
+    """Checks if an attribute is a routine, considering also methods wrapped by 
+    CudaGraphModule.
+
+    :param attr: The attribute to check.
+    :type attr: str
+
+    :return: True if the attribute is a routine, False otherwise.
+    :rtype: bool
+    """
+    if isinstance(obj, CudaGraphModule):
+        return True
+
+    return inspect.isroutine(obj)
+
 
 def unwrap_optimizer(
         optimizer: OptimizerType,
@@ -49,20 +110,29 @@ def unwrap_optimizer(
     else:
         return optimizer
     
-def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
+def recursive_check_module_attrs(obj: Any, networks_only: bool = False, exclude_td: bool = False) -> bool:
     """Recursively check if the object has any attributes that are EvolvableModule's or Optimizer's.
 
     :param obj: The object to check for EvolvableModule's or Optimizer's.
     :type obj: Any
     :return: True if the object has any attributes that are EvolvableModule's or Optimizer's, False otherwise.
     :rtype: bool
+    :param networks_only: If True, only check for EvolvableModule's, defaults to False
+    :type networks_only: bool, optional
+    :param exclude_td: If True, exclude TensorDict attributes from check, defaults to False
+    :type exclude_td: bool, optional
     """
-    check_types = (OptimizedModule, EvolvableModule, TensorDict)
+    check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
-        check_types += (Optimizer,)
+        check_types += (OptimizerWrapper,)
+    
+    if not exclude_td:
+        check_types += (TensorDict,)
 
     if isinstance(obj, check_types):
         return True
+    elif isinstance(obj, Optimizer):
+        raise TypeError("Optimizer objects should be wrapped in OptimizerWrapper.")
     if isinstance(obj, dict):
         return any(recursive_check_module_attrs(v, networks_only=networks_only) for v in obj.values())
     if isinstance(obj, list):

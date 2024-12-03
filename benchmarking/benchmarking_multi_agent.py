@@ -5,7 +5,7 @@ import torch
 import yaml
 from accelerate import Accelerator
 
-from agilerl.algorithms.base import MultiAgentAlgorithm
+from agilerl.algorithms.core.base import MultiAgentAlgorithm
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection

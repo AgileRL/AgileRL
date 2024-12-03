@@ -10,7 +10,7 @@ import torch.nn.init as init
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput

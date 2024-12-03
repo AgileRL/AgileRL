@@ -15,6 +15,8 @@ from agilerl.typing import ExperiencesType
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.algorithms.core import RLAlgorithm
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
@@ -24,8 +26,6 @@ from agilerl.utils.algo_utils import (
     flatten_experiences,
     is_vectorized_experiences,
 )
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.algorithms.base import RLAlgorithm
 
 class PPO(RLAlgorithm):
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2

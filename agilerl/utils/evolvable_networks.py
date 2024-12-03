@@ -442,6 +442,8 @@ def create_mlp(
     :rtype: nn.Sequential
     """
     net_dict = OrderedDict()
+
+    # Initialize the first block
     if noisy:
         net_dict[f"{name}_linear_layer_0"] = NoisyLinear(
             input_size, hidden_size[0], std_init=noise_std, device=device
@@ -460,6 +462,7 @@ def create_mlp(
 
     if len(hidden_size) > 1:
         for l_no in range(1, len(hidden_size)):
+            # Add linear layer
             if noisy:
                 net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
                     hidden_size[l_no - 1], hidden_size[l_no], noise_std, device=device
@@ -468,10 +471,13 @@ def create_mlp(
                 net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
                     hidden_size[l_no - 1], hidden_size[l_no], device=device
                 )
+            # Initialize layer weights
             if init_layers:
                 net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(net_dict[f"{name}_linear_layer_{str(l_no)}"])
+            # Add layer normalization
             if layer_norm:
                 net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(hidden_size[l_no], device=device)
+            # Add activation function
             net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
                 mlp_activation if not rainbow_feature_net else mlp_output_activation
             )

@@ -8,7 +8,7 @@ import numpy as np
 import wandb
 from tqdm import trange
 
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 from agilerl.utils.algo_utils import obs_channels_to_first

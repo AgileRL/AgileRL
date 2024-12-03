@@ -1,7 +1,7 @@
 import torch
 import yaml
 
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP

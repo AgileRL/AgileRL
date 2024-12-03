@@ -10,7 +10,7 @@ import torch.optim as optim
 from gymnasium import spaces
 
 from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict
-from agilerl.algorithms.base import MultiAgentAlgorithm
+from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput

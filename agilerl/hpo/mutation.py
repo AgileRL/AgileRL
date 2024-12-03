@@ -8,8 +8,9 @@ import fastrand
 from torch.optim import Optimizer
 from accelerate import Accelerator
 from torch._dynamo.eval_frame import OptimizedModule
+from tensordict import from_module, TensorDict
 
-from agilerl.algorithms.base import EvolvableAlgorithm
+from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import remove_compile_prefix
@@ -438,15 +439,13 @@ class Mutations:
                     # Reinitialise target network with frozen weights due to potential
                     # mutation in architecture of value network
                     ind_target = type(offspring_actor)(**offspring_actor.init_dict)
-                    ind_target.load_state_dict(offspring_actor.state_dict())
-                    if self.accelerator is not None:
-                        setattr(individual, self.algo["actor"]["target"], ind_target)
-                    else:
-                        setattr(
-                            individual,
-                            self.algo["actor"]["target"],
-                            ind_target.to(self.device),
-                        )
+                    ind_detached = type(offspring_actor)(**offspring_actor.init_dict)
+
+                    # Set target network back to individual
+                    setattr(individual, self.algo["actor"]["target"], ind_target)
+                    setattr(individual, self.algo["actor"]["detached"], ind_detached)
+
+                    individual.reset_module_params()
 
                     # If algorithm has critics, reinitialize their respective target networks too
                     for critic in self.algo["critics"]:
@@ -460,7 +459,9 @@ class Mutations:
                             setattr(
                                 individual, critic["target"], ind_target.to(self.device)
                             )
+
             mutated_population.append(individual)
+
         return mutated_population
 
     def reinit_opt(self, individual: EvolvableAlgorithm) -> None:
@@ -532,13 +533,13 @@ class Mutations:
                     setattr(
                         individual,
                         self.algo["actor"]["optimizer"],
-                        type(actor_opt)(net_params, lr=individual.lr_actor, capturable=individual.cudagraphs),
+                        type(actor_opt)(net_params, lr=individual.lr_actor),
                     )
                 else:
                     setattr(
                         individual,
                         self.algo["actor"]["optimizer"],
-                        type(actor_opt)(net_params, lr=individual.lr, capturable=individual.cudagraphs),
+                        type(actor_opt)(net_params, lr=individual.lr, capturable=individual.capturable),
                     )
 
                 # If algorithm has critics, reinitialise their optimizers too
@@ -548,7 +549,7 @@ class Mutations:
                     setattr(
                         individual,
                         critic["optimizer"],
-                        type(critic_opt)(net_params, lr=individual.lr_critic, capturable=individual.cudagraphs),
+                        type(critic_opt)(net_params, lr=individual.lr_critic),
                     )
 
     def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
@@ -655,14 +656,9 @@ class Mutations:
             offspring_actor = self._permutate_activation(
                 offspring_actor
             )  # Mutate activation function
-            if self.accelerator is not None:
-                setattr(individual, self.algo["actor"]["eval"], offspring_actor)
-            else:
-                setattr(
-                    individual,
-                    self.algo["actor"]["eval"],
-                    offspring_actor.to(self.device),
-                )
+
+            # Set mutated network back to individual
+            setattr(individual, self.algo["actor"]["eval"], offspring_actor)
 
             # If algorithm has critics, mutate their activations too
             for critic in self.algo["critics"]:
@@ -715,9 +711,6 @@ class Mutations:
         new_network = type(network)(**net_dict)
         new_network.load_state_dict(network.state_dict())
         network = new_network
-
-        if self.accelerator is None:
-            network = network.to(self.device)
 
         return network
 
@@ -1083,6 +1076,7 @@ class Mutations:
                 "actor": {
                     "eval": "actor",
                     "target": "actor_target",
+                    "detached": "actor_detached",
                     "optimizer": "optimizer",
                 },
                 "critics": [],

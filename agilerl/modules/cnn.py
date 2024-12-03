@@ -691,7 +691,7 @@ class EvolvableCNN(EvolvableModule):
         :return: Clone of neural network
         :rtype: EvolvableCNN
         """
-        clone = super().clone()
+        clone: EvolvableCNN = super().clone()
         clone.rainbow = self.rainbow
         clone.critic = self.critic
         return clone

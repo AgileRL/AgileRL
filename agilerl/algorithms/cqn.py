@@ -13,7 +13,7 @@ from gymnasium import spaces
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.algorithms.base import RLAlgorithm
+from agilerl.algorithms.core import RLAlgorithm
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
