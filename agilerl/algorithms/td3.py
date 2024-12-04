@@ -12,6 +12,8 @@ from gymnasium import spaces
 
 from agilerl.typing import NumpyObsType, ExperiencesType
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
@@ -348,21 +350,32 @@ class TD3(RLAlgorithm):
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target_1.load_state_dict(self.critic_1.state_dict())
         self.critic_target_2.load_state_dict(self.critic_2.state_dict())
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
-        self.critic_1_optimizer = optim.Adam(
-            self.critic_1.parameters(), lr=self.lr_critic
+
+        # Optimizers
+        self.actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr_actor}
         )
-        self.critic_2_optimizer = optim.Adam(
-            self.critic_2.parameters(), lr=self.lr_critic
+
+        self.critic_1_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critic_1,
+            optimizer_kwargs={"lr": self.lr_critic}
+        )
+
+        self.critic_2_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critic_2,
+            optimizer_kwargs={"lr": self.lr_critic}
         )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
         else:
             self.actor = self.actor.to(self.device)
             self.actor_target = self.actor_target.to(self.device)
@@ -372,6 +385,27 @@ class TD3(RLAlgorithm):
             self.critic_target_2 = self.critic_target_2.to(self.device)
 
         self.criterion = nn.MSELoss()
+
+        # Register network groups for mutations
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                shared=self.actor_target,
+                policy=True
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critic_1,
+                shared=self.critic_target_1
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critic_2,
+                shared=self.critic_target_2
+            )
+        )
 
     def scale_to_action_space(self, action: np.ndarray, convert_to_torch: bool = False) -> np.ndarray:
         """Scales actions to action space defined by self.min_action and self.max_action.

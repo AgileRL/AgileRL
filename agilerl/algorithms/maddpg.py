@@ -12,6 +12,8 @@ from gymnasium import spaces
 
 from agilerl.typing import NumpyObsType, ArrayDict, InfosDict, TensorDict, ExperiencesType
 from agilerl.algorithms.core import MultiAgentAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
@@ -339,17 +341,22 @@ class MADDPG(MultiAgentAlgorithm):
         for critic, critic_target in zip(self.critics, self.critic_targets):
             critic_target.load_state_dict(critic.state_dict())
 
-        self.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
-        ]
-        self.critic_optimizers = [
-            optim.Adam(critic.parameters(), lr=self.lr_critic)
-            for critic in self.critics
-        ]
+        actor_opt_kwargs = {"lr": self.lr_actor}
+        self.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actors,
+            optimizer_kwargs=actor_opt_kwargs
+        )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
+        critic_opt_kwargs = {"lr": self.lr_critic}
+        self.critic_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critics,
+            optimizer_kwargs=critic_opt_kwargs
+        )
+
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
         else:
             self.place_models_on_device(self.device)
             if self.torch_compiler:
@@ -368,6 +375,21 @@ class MADDPG(MultiAgentAlgorithm):
                 self.recompile()
 
         self.criterion = nn.MSELoss()
+
+        # Register network groups for mutations
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actors,
+                shared=self.actor_targets,
+                policy=True,
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critics,
+                shared=self.critic_targets
+            )
+        )
 
     def scale_to_action_space(self, action, idx):
         """Scales actions to action space defined by self.min_action and self.max_action.

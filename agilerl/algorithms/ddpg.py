@@ -12,10 +12,12 @@ from gymnasium import spaces
 import gymnasium as gym
 
 from agilerl.typing import ArrayLike, ArrayOrTensor
-from agilerl.algorithms.core import RLAlgorithm
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
@@ -305,23 +307,49 @@ class DDPG(RLAlgorithm):
         self.critic_target = copy.deepcopy(self.critic)
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr_critic)
+
+        # Optimizers
+        actor_kwargs = {"lr": lr_actor}
+        self.actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs=actor_kwargs
+        )
+        critic_kwargs = {"lr": lr_critic}
+        self.critic_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critic,
+            optimizer_kwargs=critic_kwargs
+        )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
         else:
-            self.actor.to(self.device)
-            self.actor_target.to(self.device)
-            self.critic.to(self.device)
-            self.critic_target.to(self.device)
+            self.actor = self.actor.to(self.device)
+            self.actor_target = self.actor_target.to(self.device)
+            self.critic = self.critic.to(self.device)
+            self.critic_target = self.critic_target.to(self.device)
 
         self.criterion = nn.MSELoss()
+
+        # Register network groups for actors and critics
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                shared=self.actor_target,
+                policy=True
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critic,
+                shared=self.critic_target
+            )
+        )
 
     def scale_to_action_space(self, action: ArrayLike, convert_to_torch: bool = False) -> ArrayOrTensor:
         """Scales actions to action space defined by self.min_action and self.max_action.

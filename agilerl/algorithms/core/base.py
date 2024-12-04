@@ -1,4 +1,4 @@
-from typing import Optional, Union, Tuple, Iterable, Type, Any, Dict, TypeVar
+from typing import Optional, Union, Tuple, Iterable, Callable, Any, Dict, TypeVar
 import inspect
 from abc import ABC, ABCMeta, abstractmethod
 import functools
@@ -232,22 +232,34 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         # Extract mapping from optimizer names to network attribute names
         for attr, obj in self.evolvable_attributes(exclude_td=True).items():
             if isinstance(obj, OptimizerWrapper):
+                # Set up config from OptimizerWrapper
                 config = OptimizerConfig(
-                    optimizer_cls=obj.optimizer.__class__,
                     name=attr,
-                    networks=obj.network_names
+                    networks=obj.network_names,
+                    optimizer_cls=obj.optimizer_cls,
+                    optimizer_kwargs=obj.optimizer_kwargs
                     )
                 self.registry.register_optimizer(config)
 
         # Check that all the inspected evolvable attributes can be found in the registry
         all_registered = self.registry.all_registered()
-        for attr in self.evolvable_attributes(exclude_td=True):
-            if attr not in all_registered:
-                raise ValueError(
-                    f"Evolvable attribute '{attr}' is not found in the registry. "
-                    "Please check that the defined NetworkGroup objects contain "
-                    "all of the EvolvableModule and Optimizer objects in the algorithm."
-                )
+        not_found = [attr for attr in self.evolvable_attributes(exclude_td=True) if attr not in all_registered]
+        if not_found:
+            raise ValueError(
+                f"The following evolvable attributes could not be found in the registry: {not_found}. "
+                "Please check that the defined NetworkGroup objects contain all of the EvolvableModule's "
+                "in the algorithm."
+            )
+
+        # Check that one of the network groups relates to a policy
+        if not any(group.policy for group in self.registry.groups):
+            raise ValueError(
+                "No network group has been registered as a policy (e.g. the network used to "
+                "select actions) in the registry. Please register a NetworkGroup object "
+                "specifying the policy network."
+            )
+
+
     def register_network_group(self, group: NetworkGroup) -> None:
         """Sets the evaluation network for the algorithm.
 
@@ -255,6 +267,15 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         :type name: str
         """
         self.registry.register_group(group)
+    
+    def register_mutation_hook(self, hook: Callable) -> None:
+        """Registers a hook to be executed after a mutation is performed on 
+        the algorithm.
+        
+        :param hook: The hook to be executed after mutation.
+        :type hook: Callable
+        """
+        self.registry.register_hook(hook)
 
     def evolvable_attributes(self, networks_only: bool = False, exclude_td: bool = False) -> EvolvableAttributeDict:
         """Returns the attributes related to the evolvable networks in the algorithm. Includes 
@@ -541,7 +562,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             if isinstance(obj, (OptimizedModule, EvolvableModule)):
                 network_info[f"{attr}_init_dict"] = obj.init_dict
                 network_info[f"{attr}_state_dict"] = remove_compile_prefix(obj.state_dict())
-            elif isinstance(obj, Optimizer):
+            elif isinstance(obj, OptimizerWrapper):
                 network_info[f"{attr}_state_dict"] = obj.state_dict()
             else:
                 raise TypeError(

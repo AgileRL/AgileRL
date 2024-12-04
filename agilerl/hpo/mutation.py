@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, Dict, Callable, Any, Tuple
+from typing import List, Optional, Union, Dict, Callable, Any, Tuple, Type
 import inspect
 import copy
 import numpy as np
@@ -8,9 +8,12 @@ import fastrand
 from torch.optim import Optimizer
 from accelerate import Accelerator
 from torch._dynamo.eval_frame import OptimizedModule
-from tensordict import from_module, TensorDict
+from numpy.random import Generator
 
+from agilerl.algorithms.neural_ts_bandit import NeuralTS
+from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.core import EvolvableAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import remove_compile_prefix
@@ -21,6 +24,8 @@ MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
 AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
 PopulationType = List[EvolvableAlgorithm]
 ModuleType = Union[OptimizedModule, EvolvableModule]
+OffspringType = Union[List[EvolvableModule], EvolvableModule]
+BanditAlgorithm = Union[NeuralUCB, NeuralTS]
 
 def get_return_type(method: Callable) -> Any:
     """Get the return type of a method if annotated, otherwise return None.
@@ -58,6 +63,83 @@ def set_global_seed(seed: Optional[int]) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     fastrand.pcg32_seed(seed)
+
+
+def get_architecture_mut_method(
+        eval: OffspringType,
+        new_layer_prob: float,
+        rng: Generator
+        ) -> Tuple[str, Type]:
+    """Get the mutation method and its return type of the individual.
+    
+    :param individual: The individual to inspect
+    :type individual: EvolvableAlgorithm
+    :param new_layer_prob: Relative probability of new layer mutation (type of architecture mutation)
+    :type new_layer_prob: float
+    :param rng: Random number generator
+    :type rng: Generator
+    :return: The mutation methods name and its return type
+    :rtype: Tuple[str, Type]
+    """ 
+    # All of the offsprings should be the same EvolvableModule type, so we can 
+    # just sample the mutation method from the first offspring
+    if isinstance(eval, list):
+        eval = eval[0]
+
+    mutation_methods = list(eval.get_mutation_methods().keys())
+    mutation_probs = eval.get_mutation_probs(new_layer_prob) 
+    mutation_method = rng.choice(mutation_methods, size=1, p=mutation_probs)[0]
+    mut_return_type = get_return_type(getattr(eval, mutation_method))
+
+    return mutation_method, mut_return_type
+
+def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Dict[str, OffspringType]:
+    """Get the offsprings of all of the evaluation modules in the individual.
+    
+    :param individual: The individual to inspect
+    :type individual: EvolvableAlgorithm
+    
+    :return: The offspring evaluation modules
+    :rtype: Dict[str, OffspringType]
+    """
+    registry = individual.registry
+
+    offspring_modules = {}
+    for group in registry.groups:
+        eval_module: OffspringType = getattr(individual, group.eval)
+        if isinstance(eval_module, list):
+            offspring_modules[group.eval] = [mod.clone() for mod in eval_module]
+        else:
+            offspring_modules[group.eval] = eval_module.clone()
+    
+    return offspring_modules
+
+def get_exp_layer(offspring: EvolvableModule, arch: str) -> nn.Module:
+    """Get the output layer of different types of offsprings for bandit algorithms. 
+    Returns None if algorithm is not a bandit algorithm.
+    
+    :param offspring: The offspring to inspect
+    :type offspring: EvolvableModule
+    :param algo_cls: The algorithm class
+    :type algo_cls: Type
+    :param arch: The network architecture type
+    :type arch: str
+    
+    :return: The output layer of the offspring
+    :rtype: nn.Module
+    """
+    if arch == "mlp":
+        if isinstance(offspring, EvolvableMLP):
+            exp_layer = offspring.feature_net.mlp_linear_layer_output
+        else:
+            exp_layer = (
+                offspring.feature_net.feature_linear_layer_output
+            )
+    else:
+        exp_layer = offspring.value_net.value_linear_layer_output
+
+    return exp_layer
+
 
 class Mutations:
     """The Mutations class for evolutionary hyperparameter optimization.
@@ -252,18 +334,6 @@ class Mutations:
 
         self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(pretraining=True)
         self.mut_options, self.mut_proba = self.get_mutations_options()
-
-        if algo in ["MADDPG", "MATD3"]:
-            self.multi_agent = True
-        else:
-            self.multi_agent = False
-
-        # Set algorithm dictionary with agent network names for mutation
-        # Use custom agent dict, or pre-configured agent from API
-        if isinstance(algo, dict):
-            self.algo = algo
-        else:
-            self.algo = self.get_algo_nets(algo)
     
     def get_mutations_options(self, pretraining: bool = False) -> Tuple[List[Callable], List[float]]:
         """Get the mutation options and probabilities for the given mutation 
@@ -306,6 +376,17 @@ class Mutations:
         """
         individual.mut = "None"  # No mutation
         return individual
+
+    def to_device(self, offsprings: OffspringType) -> OffspringType:
+        """Move offspring to device.
+        
+        :param offsprings: The offspring to move to device
+        :type offsprings: OffspringType
+        """
+        if isinstance(offsprings, list):
+            return [offspring.to(self.device) for offspring in offsprings]
+        else:
+            return offsprings.to(self.device)
     
     def reinit_module(self, module: EvolvableModule, init_dict: Dict[str, Any]) -> EvolvableModule:
         """Reinitialize the module with the given initialization dictionary.
@@ -323,6 +404,34 @@ class Mutations:
         
         return module_cls(**init_dict)
 
+    def reinit_from_mutated(self, offspring: OffspringType) -> OffspringType:
+        """Reinitialize the mutated offspring with their state dictionary.
+        
+        :param offspring: The offspring to reinitialize
+        :type offspring: OffspringType
+        
+        :return: The reinitialized offspring
+        :rtype: OffspringType
+        """
+        if isinstance(offspring, list):
+            ind_shared = [
+                self.reinit_module(offspring, offspring.init_dict) 
+                for offspring in offspring
+                ]
+
+            # Load eval state dicts into shared networks                        
+            state_dicts = [offspring.state_dict() for offspring in offspring]
+            self.load_state_dicts(ind_shared, state_dicts)
+        else:
+            ind_shared = self.reinit_module(
+                offspring,
+                offspring.init_dict
+                )
+            ind_shared.load_state_dict(offspring.state_dict())
+        
+        return ind_shared
+        
+
     def load_state_dicts(self, modules: List[ModuleType], state_dicts: List[Dict[str, Any]]) -> None:
         """Load the state dictionary into the module.
         
@@ -338,7 +447,7 @@ class Mutations:
             else:
                 module.load_state_dict(state_dict)
 
-    def compile_modules(self, modules: List[ModuleType], compiler: str) -> List[ModuleType]:
+    def compile_modules(self, modules: OffspringType, compiler: str) -> OffspringType:
         """Compile the modules using the given compiler.
         
         :param modules: The modules to compile
@@ -346,7 +455,11 @@ class Mutations:
         
         :param compiler: The compiler to use
         :type compiler: Optional[str]
-        """        
+        """
+        single_offspring = not isinstance(modules, list)
+        if single_offspring:
+            modules = [modules]
+
         # Compile modules
         compiled_modules = []
         for module in modules:
@@ -355,7 +468,7 @@ class Mutations:
             else:
                 compiled_modules.append(module)
 
-        return compiled_modules
+        return compiled_modules if not single_offspring else compiled_modules[0]
 
     def mutation(self, population: PopulationType, pre_training_mut: bool=False) -> PopulationType:
         """Returns mutated population.
@@ -383,174 +496,72 @@ class Mutations:
 
         mutated_population = []
         for mutation, individual in zip(mutation_choice, population):
+            registry = individual.registry
+
             # Call mutation function for each individual
             individual = mutation(individual)
+
+            # Recompile modules if applicable
             if hasattr(individual, "torch_compiler") and individual.torch_compiler:
                 individual.recompile()
+            
+            # Reinitiliaze shared networks to mutated evaluation networks
+            for net_group in registry.groups:
+                if net_group.shared is not None:
+                    for shared_name in net_group.shared:
+                        eval_offspring: OffspringType = getattr(individual, net_group.eval)
 
-            if self.multi_agent:
-                offspring_actors: List[EvolvableModule] = getattr(individual, self.algo["actor"]["eval"])
-                # Reinitialise target network with frozen weights due to potential
-                # mutation in architecture of value network
-                ind_targets = [
-                    self.reinit_module(offspring_actor, offspring_actor.init_dict) 
-                    for offspring_actor in offspring_actors
-                    ]
+                        # Reinitialize shared with frozen weights due to 
+                        # potential mutation in architecture
+                        ind_shared = self.reinit_from_mutated(eval_offspring)
 
-                state_dicts = [offspring_actor.state_dict() for offspring_actor in offspring_actors]
-                self.load_state_dicts(ind_targets, state_dicts)
-
-                # Move to device if not using accelerator
-                if self.accelerator is None:
-                    ind_targets = [ind_target.to(self.device) for ind_target in ind_targets]
-
-                # Compile modules if necessary
-                if hasattr(individual, "torch_compiler") and individual.torch_compiler:
-                    ind_targets = self.compile_modules(ind_targets, individual.torch_compiler)
-
-                setattr(individual, self.algo["actor"]["target"], ind_targets)
-
-                # If algorithm has critics, reinitialize their respective target networks
-                # too
-                for critics_list in self.algo["critics"]:
-                    offspring_critics: List[EvolvableModule] = getattr(individual, critics_list["eval"])
-                    ind_targets = [
-                        self.reinit_module(offspring_critic, offspring_critic.init_dict)
-                        for offspring_critic in offspring_critics
-                    ]
+                        if self.accelerator is None:
+                            ind_shared = self.to_device(ind_shared)
                     
-                    state_dicts = [offspring_critic.state_dict() for offspring_critic in offspring_critics]
-                    self.load_state_dicts(ind_targets, state_dicts)
-
-                    if self.accelerator is None:
-                        ind_targets = [
-                            ind_target.to(self.device) for ind_target in ind_targets
-                        ]
-                    
-                    # Compile modules if necessary
-                    if hasattr(individual, "torch_compiler") and individual.torch_compiler:
-                        ind_targets = self.compile_modules(ind_targets, individual.torch_compiler)
-
-                    setattr(individual, critics_list["target"], ind_targets)
-            else:
-                if "target" in self.algo["actor"].keys():
-                    offspring_actor: EvolvableModule = getattr(individual, self.algo["actor"]["eval"])
-
-                    # Reinitialise target network with frozen weights due to potential
-                    # mutation in architecture of value network
-                    ind_target = type(offspring_actor)(**offspring_actor.init_dict)
-                    ind_detached = type(offspring_actor)(**offspring_actor.init_dict)
-
-                    # Set target network back to individual
-                    setattr(individual, self.algo["actor"]["target"], ind_target)
-                    setattr(individual, self.algo["actor"]["detached"], ind_detached)
-
-                    individual.reset_module_params()
-
-                    # If algorithm has critics, reinitialize their respective target networks too
-                    for critic in self.algo["critics"]:
-                        offspring_critic: EvolvableModule = getattr(individual, critic["eval"])
-                        ind_target = type(offspring_critic)(**offspring_critic.init_dict)
-                        ind_target.load_state_dict(offspring_critic.state_dict())
-
-                        if self.accelerator is not None:
-                            setattr(individual, critic["target"], ind_target)
-                        else:
-                            setattr(
-                                individual, critic["target"], ind_target.to(self.device)
-                            )
+                        # Compile modules if necessary
+                        if hasattr(individual, "torch_compiler") and individual.torch_compiler:
+                            ind_shared = self.compile_modules(ind_shared, individual.torch_compiler)
+                        
+                        setattr(individual, shared_name, ind_shared)
+            
+            # Call hooks specified by user
+            if registry.hooks:
+                for hook in registry.hooks:
+                    hook()
 
             mutated_population.append(individual)
 
         return mutated_population
 
     def reinit_opt(self, individual: EvolvableAlgorithm) -> None:
-        if self.multi_agent:
-            # Reinitialise optimizer
-            actor_opts: List[Optimizer] = getattr(individual, self.algo["actor"]["optimizer"])
+        """Reinitialize the optimizers of an individual.
+        
+        :param individual: The individual to reinitialize the optimizers for
+        :type individual: EvolvableAlgorithm
+        """
+        optimizer_configs = individual.registry.optimizers
+        for opt_config in optimizer_configs:
+            opt: OptimizerWrapper = getattr(individual, opt_config.name)
+            optimizer = opt.optimizer
 
-            net_params = [
-                actor.parameters()
-                for actor in getattr(individual, self.algo["actor"]["eval"])
-            ]
+            # Multiple optimizers in a single attribute (i.e. multi-agent)
+            # or one module optimized by a single optimizer
+            if isinstance(optimizer, list) or len(opt.network_names) == 1:
+                opt_nets = getattr(individual, opt.network_names[0])
 
-            offspring_actor_opts = [
-                type(actor_opt)(net_param, lr=individual.lr_actor)
-                for actor_opt, net_param in zip(actor_opts, net_params)
-            ]
-
-            setattr(
-                individual,
-                self.algo["actor"]["optimizer"],
-                offspring_actor_opts,
+            # Multiple modules optimized by a single optimizer (e.g. PPO)
+            else:
+                opt_nets = [getattr(individual, net) for net in opt.network_names]
+            
+            # Reinitialize optimizer with mutated nets
+            offspring_opt = OptimizerWrapper(
+                optimizer_cls=opt.optimizer_cls,
+                networks=opt_nets,
+                optimizer_kwargs=opt.optimizer_kwargs,
+                network_names=opt.network_names,
             )
 
-            for critic_list in self.algo["critics"]:
-                critic_opts = getattr(individual, critic_list["optimizer"])
-
-                net_params = [
-                    critic.parameters()
-                    for critic in getattr(individual, critic_list["eval"])
-                ]
-
-                offspring_critic_opts = [
-                    type(critic_opt)(net_param, lr=individual.lr_critic)
-                    for critic_opt, net_param in zip(critic_opts, net_params)
-                ]
-
-                setattr(
-                    individual,
-                    critic_list["optimizer"],
-                    offspring_critic_opts,
-                )
-        else:
-            if individual.algo in ["PPO"]:
-                # Reinitialise optimizer
-                opt = getattr(individual, self.algo["actor"]["optimizer"])
-                actor_net_params = getattr(
-                    individual, self.algo["actor"]["eval"]
-                ).parameters()
-                critic_net_params = getattr(
-                    individual, self.algo["critics"][0]["eval"]
-                ).parameters()
-                opt_args = [
-                    {"params": actor_net_params, "lr": individual.lr},
-                    {"params": critic_net_params, "lr": individual.lr},
-                ]
-                setattr(
-                    individual,
-                    self.algo["actor"]["optimizer"],
-                    type(opt)(opt_args),
-                )
-
-            else:
-                # Reinitialise optimizer
-                actor_opt = getattr(individual, self.algo["actor"]["optimizer"])
-                net_params = getattr(
-                    individual, self.algo["actor"]["eval"]
-                ).parameters()
-                if individual.algo in ["DDPG", "TD3"]:
-                    setattr(
-                        individual,
-                        self.algo["actor"]["optimizer"],
-                        type(actor_opt)(net_params, lr=individual.lr_actor),
-                    )
-                else:
-                    setattr(
-                        individual,
-                        self.algo["actor"]["optimizer"],
-                        type(actor_opt)(net_params, lr=individual.lr, capturable=individual.capturable),
-                    )
-
-                # If algorithm has critics, reinitialise their optimizers too
-                for critic in self.algo["critics"]:
-                    critic_opt = getattr(individual, critic["optimizer"])
-                    net_params = getattr(individual, critic["eval"]).parameters()
-                    setattr(
-                        individual,
-                        critic["optimizer"],
-                        type(critic_opt)(net_params, lr=individual.lr_critic),
-                    )
+            setattr(individual, opt_config.name, offspring_opt)
 
     def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with RL hyperparameter mutation.
@@ -616,75 +627,40 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
         """
-        if individual.algo in ["PPO", "DDPG", "TD3"]:  # Needs to stay constant
+        # Needs to stay constant for policy gradient methods
+        # TODO: Could set up an algorithm registry to make algo checks more robust
+        if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
             individual.mut = "None"
             return individual
-
-        if self.multi_agent:
-            if individual.algo == "MADDPG" or individual.algo == "MATD3":
-                individual.mut = "None"
-                return individual
+        
+        # Mutate network activation layer
+        registry = individual.registry
+        for network_group in registry.groups:
+            eval_module: OffspringType = getattr(individual, network_group.eval)
+            if isinstance(eval_module, list):
+                eval_module = [self._permutate_activation(mod) for mod in eval_module]
             else:
-                offspring_actors = getattr(individual, self.algo["actor"]["eval"])
-                offspring_actors = [
-                    self._permutate_activation(offspring_actor)
-                    for offspring_actor in offspring_actors
-                ]
-                if self.accelerator is None:
-                    offspring_actors = [
-                        offspring_actor.to(self.device)
-                        for offspring_actor in offspring_actors
-                    ]
-                setattr(individual, self.algo["actor"]["eval"], offspring_actors)
+                eval_module = self._permutate_activation(eval_module)
+            
+            if self.accelerator is None:
+                eval_module = self.to_device(eval_module)
 
-                # If algorithm has critics, mutate their activations too
-                for critics in self.algo["critics"]:
-                    offspring_critics = getattr(individual, critics["eval"])
-                    offspring_critics = [
-                        self._permutate_activation(offspring_critic)
-                        for offspring_critic in offspring_critics
-                    ]
-                    if self.accelerator is None:
-                        offspring_critics = [
-                            offspring_critic.to(self.device)
-                            for offspring_critic in offspring_critics
-                        ]
-                    setattr(individual, critics["eval"], offspring_critics)
-        else:
-            # Mutate network activation layer
-            offspring_actor = getattr(individual, self.algo["actor"]["eval"])
-            offspring_actor = self._permutate_activation(
-                offspring_actor
-            )  # Mutate activation function
-
-            # Set mutated network back to individual
-            setattr(individual, self.algo["actor"]["eval"], offspring_actor)
-
-            # If algorithm has critics, mutate their activations too
-            for critic in self.algo["critics"]:
-                offspring_critic = getattr(individual, critic["eval"])
-                offspring_critic = self._permutate_activation(offspring_critic)
-                if self.accelerator is not None:
-                    setattr(individual, critic["eval"], offspring_critic)
-                else:
-                    setattr(
-                        individual, critic["eval"], offspring_critic.to(self.device)
-                    )
-
-            if individual.algo in ["NeuralUCB", "NeuralTS"]:
+            if isinstance(individual, (NeuralTS, NeuralUCB)):
                 if self.arch == "mlp":
-                    if isinstance(individual.actor, EvolvableMLP):
+                    if isinstance(eval_module, EvolvableMLP):
                         individual.exp_layer = (
-                            individual.actor.feature_net.mlp_linear_layer_output
+                            eval_module.feature_net.mlp_linear_layer_output
                         )
                     else:
                         individual.exp_layer = (
-                            individual.actor.feature_net.feature_linear_layer_output
+                            eval_module.feature_net.feature_linear_layer_output
                         )
                 else:
                     individual.exp_layer = (
-                        individual.actor.value_net.value_linear_layer_output
+                        eval_module.value_net.value_linear_layer_output
                     )
+
+            setattr(individual, network_group.eval, eval_module)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "act"
@@ -720,32 +696,21 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
         """
-        # Mutate network parameters
-        if self.multi_agent:
-            offspring_actors = getattr(individual, self.algo["actor"]["eval"])
-            offspring_actors = [
-                self.classic_parameter_mutation(offspring_actor)
-                for offspring_actor in offspring_actors
-            ]
-            if self.accelerator is None:
-                offspring_actors = [
-                    offspring_actor.to(self.device)
-                    for offspring_actor in offspring_actors
-                ]
-            setattr(individual, self.algo["actor"]["eval"], offspring_actors)
+        registry = individual.registry
+
+        # We only apply parameter mutations to the evaluation policy network 
+        # (i.e. the network used to select actions)
+        offspring_policy: OffspringType = getattr(individual, registry.policy)
+        if isinstance(offspring_policy, list):
+            offspring_policy = [self.classic_parameter_mutation(mod) for mod in offspring_policy]
         else:
-            offspring_actor = getattr(individual, self.algo["actor"]["eval"])
-            offspring_actor = self.classic_parameter_mutation(
-                offspring_actor
-            )  # Network parameter mutation function
-            if self.accelerator is not None:
-                setattr(individual, self.algo["actor"]["eval"], offspring_actor)
-            else:
-                setattr(
-                    individual,
-                    self.algo["actor"]["eval"],
-                    offspring_actor.to(self.device),
-                )
+            offspring_policy = self.classic_parameter_mutation(offspring_policy)
+        
+        if self.accelerator is None:
+            offspring_policy = self.to_device(offspring_policy)
+        
+        setattr(individual, registry.policy, offspring_policy)
+
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "param"
         return individual
@@ -826,146 +791,57 @@ class Mutations:
         return network
 
     def architecture_mutate(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
-        """Returns individual from population with network architecture mutation.
+        """Returns individual from population with network architecture mutation, which 
+        adds either layers or nodes to different types of network architectures.
 
         :param individual: Individual agent from population
         :type individual: object
         """
-        # Mutate network architecture by adding layers or nodes
-        if self.multi_agent:
-            # Extract actors and critics from individual
-            actors: List[EvolvableModule] = getattr(individual, self.algo["actor"]["eval"])
-            nested_critics: List[List[EvolvableModule]] = [getattr(individual, critics["eval"]) for critics in self.algo["critics"]]
-            offspring_actors = [actor.clone()for actor in actors]
-            offspring_critics_list = [[critic.clone() for critic in critics] for critics in nested_critics]
+        algo_cls = individual.__class__
+        offspring_evals = get_offspring_eval_modules(individual)
 
-            # Actors and critics must use same EvolvableModule, so use first actor 
-            # to determine available mutations
-            mutation_methods = list(offspring_actors[0].get_mutation_methods().keys())
-            mutation_probs = offspring_actors[0].get_mutation_probs(self.new_layer_prob) 
-            mutation_method = self.rng.choice(mutation_methods, size=1, p=mutation_probs)[0]
-            mut_return_type = get_return_type(getattr(offspring_actors[0], mutation_method))
-
-            if self.arch == "cnn":
-                for offspring_actor in offspring_actors:
-                    actor_mutation = getattr(offspring_actor, mutation_method)
-                    actor_mutation()
-                for offspring_critics in offspring_critics_list:
-                    for offspring_critic in offspring_critics:
-                        critic_mutation = getattr(offspring_critic, mutation_method)
-                        critic_mutation()
-            else:  # mlp, gpt, or bert
-                if mut_return_type == dict:
-                    if len(offspring_critics_list) == 1: # Functionality to account for MATD3
-                        for offspring_actor, offspring_critic in zip(
-                            offspring_actors, offspring_critics_list[0]
-                        ):
-                            actor_mutation = getattr(offspring_actor, mutation_method)
-                            node_dict = actor_mutation()
-                            critic_mutation = getattr(offspring_critic, mutation_method)
-                            critic_mutation(**node_dict)
-                    else:
-                        for (
-                            offspring_actor,
-                            offspring_critic_1,
-                            offspring_critic_2,
-                        ) in zip(offspring_actors, *offspring_critics_list):
-                            actor_mutation = getattr(offspring_actor, mutation_method)
-                            node_dict = actor_mutation()
-                            critic_mutation_1 = getattr(offspring_critic_1, mutation_method)
-                            critic_mutation_2 = getattr(offspring_critic_2, mutation_method)
-                            critic_mutation_1(**node_dict)
-                            critic_mutation_2(**node_dict)
+        # get the offsprings from one of the groups to sample mutation method
+        sample_eval = list(offspring_evals.values())[0]
+        mut_method, ret_type = get_architecture_mut_method(sample_eval)
+        for name, offsprings in offspring_evals.items():
+            # Apply mutation method differently for CNN and other arch types
+            # NOTE: Need to check the reason for this
+            if self.arch == "cnn" or ret_type != dict:
+                if isinstance(offsprings, list):
+                    for offspring in offsprings:
+                        getattr(offspring, mut_method)()
                 else:
-                    for offspring_actor in offspring_actors:
-                        actor_mutation = getattr(offspring_actor, mutation_method)
-                        actor_mutation()
-                    for offspring_critics in offspring_critics_list:
-                        for offspring_critic in offspring_critics:
-                            critic_mutation = getattr(offspring_critic, mutation_method)
-                            critic_mutation()
-
-            if self.accelerator is None:
-                offspring_actors = [
-                    offspring_actor.to(self.device)
-                    for offspring_actor in offspring_actors
-                ]
-
-            setattr(individual, self.algo["actor"]["eval"], offspring_actors)
-
-            for offspring_critics, critics in zip(
-                offspring_critics_list, self.algo["critics"]
-            ):
-                if self.accelerator is None:
-                    offspring_critics = [
-                        offspring_critic.to(self.device)
-                        for offspring_critic in offspring_critics
-                    ]
-                setattr(individual, critics["eval"], offspring_critics)
-
-        else:
-            if individual.algo in ["NeuralUCB", "NeuralTS"]:
-                old_actor: EvolvableModule = getattr(individual, self.algo["actor"]["eval"]).clone()
-                if self.arch == "mlp":
-                    if isinstance(old_actor, EvolvableMLP):
-                        old_exp_layer = old_actor.feature_net.mlp_linear_layer_output
-                    else:
-                        old_exp_layer = (
-                            old_actor.feature_net.feature_linear_layer_output
-                        )
-                else:
-                    old_exp_layer = old_actor.value_net.value_linear_layer_output
-
-            
-            offspring_actor: EvolvableModule = getattr(individual, self.algo["actor"]["eval"]).clone()
-            offspring_critics: List[EvolvableModule] = [
-                getattr(individual, critic["eval"]).clone()
-                for critic in self.algo["critics"]
-            ]
-
-            mutation_methods = list(offspring_actor.get_mutation_methods().keys())
-            mutation_probs = offspring_actor.get_mutation_probs(self.new_layer_prob)
-            mutation_method = self.rng.choice(mutation_methods, size=1, p=mutation_probs)[0]
-            mut_return_type = get_return_type(getattr(offspring_actor, mutation_method))
-
-            if self.arch == "cnn":
-                actor_mutation = getattr(offspring_actor, mutation_method)
-                actor_mutation()
-                for offspring_critic in offspring_critics:
-                    critic_mutation = getattr(offspring_critic, mutation_method)
-                    critic_mutation()
-            else:  # mlp, gpt, bert
-                if mut_return_type == dict:
-                    actor_mutation = getattr(offspring_actor, mutation_method)
-                    node_dict = actor_mutation()
-                    for offspring_critic in offspring_critics:
-                        critic_mutation = getattr(offspring_critic, mutation_method)
-                        critic_mutation(**node_dict)
-                else:
-                    actor_mutation = getattr(offspring_actor, mutation_method)
-                    actor_mutation()
-                    for offspring_critic in offspring_critics:
-                        critic_mutation = getattr(offspring_critic, mutation_method)
-                        critic_mutation()
-
-            if self.accelerator is not None:
-                setattr(individual, self.algo["actor"]["eval"], offspring_actor)
+                    getattr(offsprings, mut_method)()
             else:
-                setattr(
-                    individual,
-                    self.algo["actor"]["eval"],
-                    offspring_actor.to(self.device),
-                )
-            for offspring_critic, critic in zip(offspring_critics, self.algo["critics"]):
-                if self.accelerator is not None:
-                    setattr(individual, critic["eval"], offspring_critic)
+                # NOTE: We want to randomly sample a mutation initiallly and then
+                # apply the same mutation to the rest of the offsprings
+                mut_dict = None 
+                if isinstance(offsprings, list):
+                    for offspring in offsprings:
+                        if mut_dict is None:
+                            mut_dict = getattr(offspring, mut_method)()
+                        else:
+                            getattr(offspring, mut_method)(**mut_dict)
                 else:
-                    setattr(
-                        individual, critic["eval"], offspring_critic.to(self.device)
-                    )
+                    if mut_dict is None:
+                        mut_dict = getattr(offsprings, mut_method)()
+                    else:
+                        getattr(offsprings, mut_method)(**mut_dict)
 
-            if individual.algo in ["NeuralUCB", "NeuralTS"]:
-                self._reinit_bandit_grads(individual, offspring_actor, old_exp_layer)
+            # Move to device if not using accelerator and set 
+            # mutated network back to individual
+            if self.accelerator is None:
+                if isinstance(offsprings, list):
+                    setattr(individual, name, [offspring.to(self.device) for offspring in offsprings])
+                else:
+                    setattr(individual, name, offsprings.to(self.device))
+            else:
+                setattr(individual, name, offsprings)
+
+            # Reinitialize bandit gradients after architecture mutation
+            if algo_cls in [NeuralTS, NeuralUCB]:
+                old_exp_layer = get_exp_layer(offspring, self.arch)
+                self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "arch"
@@ -973,7 +849,7 @@ class Mutations:
 
     def _reinit_bandit_grads(
             self,
-            individual: EvolvableAlgorithm,
+            individual: BanditAlgorithm,
             offspring_actor: EvolvableModule,
             old_exp_layer: nn.Module) -> None:
         """Reinitialise bandit gradients after architecture mutation.
@@ -987,11 +863,11 @@ class Mutations:
         """
         if self.arch == "mlp":
             if isinstance(offspring_actor, EvolvableMLP):
-                exp_layer = offspring_actor.feature_net.mlp_linear_layer_output
+                exp_layer: nn.Module = offspring_actor.feature_net.mlp_linear_layer_output
             else:
-                exp_layer = offspring_actor.feature_net.feature_linear_layer_output
+                exp_layer: nn.Module = offspring_actor.feature_net.feature_linear_layer_output
         else:
-            exp_layer = offspring_actor.value_net.value_linear_layer_output
+            exp_layer: nn.Module = offspring_actor.value_net.value_linear_layer_output
 
         individual.numel = sum(
             w.numel() for w in exp_layer.parameters() if w.requires_grad
@@ -1033,7 +909,7 @@ class Mutations:
                     to_add += list(range(i, i + new_size))
                 i += new_size
 
-        # Adjust indixes to add after deletion
+        # Adjust indices to add after deletion
         to_remove = np.array(to_remove)
         to_add = np.array(to_add)
         to_add -= np.sum(to_add[:, np.newaxis] > to_remove, axis=1)
@@ -1059,136 +935,3 @@ class Mutations:
             if individual.accelerator is None
             else individual.accelerator.device
         )
-
-    # TODO: There will be no need for this after refactoring algorithms
-    def get_algo_nets(self, algo: str) -> AlgoConfig:
-        """Returns dictionary with agent network names.
-
-        :param algo: RL algorithm
-        :type algo: str
-
-        :return: Dictionary with agent network names
-        :rtype: AlgoConfig
-        """
-        # Function to return dictionary with names of agent networks to allow mutation
-        if algo == "DQN":
-            nets = {
-                "actor": {
-                    "eval": "actor",
-                    "target": "actor_target",
-                    "detached": "actor_detached",
-                    "optimizer": "optimizer",
-                },
-                "critics": [],
-            }
-        elif algo == "Rainbow DQN":
-            nets = {
-                "actor": {
-                    "eval": "actor",
-                    "target": "actor_target",
-                    "optimizer": "optimizer",
-                },
-                "critics": [],
-            }
-        elif algo == "DDPG":
-            nets = {
-                "actor": {
-                    "eval": "actor",
-                    "target": "actor_target",
-                    "optimizer": "actor_optimizer",
-                },
-                "critics": [
-                    {
-                        "eval": "critic",
-                        "target": "critic_target",
-                        "optimizer": "critic_optimizer",
-                    }
-                ],
-            }
-        elif algo == "PPO":
-            nets = {
-                "actor": {"eval": "actor", "optimizer": "optimizer"},
-                "critics": [{"eval": "critic"}],
-            }
-        elif algo == "CQN":
-            nets = {
-                "actor": {
-                    "eval": "actor",
-                    "target": "actor_target",
-                    "optimizer": "optimizer",
-                },
-                "critics": [],
-            }
-        elif algo == "ILQL":
-            nets = {
-                "actor": {
-                    "eval": "actor",
-                    "target": "actor_target",
-                    "optimizer": "optimizer",
-                },
-                "critics": [],
-            }
-        elif algo == "TD3":
-            nets = {
-                "actor": {
-                    "eval": "actor",
-                    "target": "actor_target",
-                    "optimizer": "actor_optimizer",
-                },
-                "critics": [
-                    {
-                        "eval": "critic_1",
-                        "target": "critic_target_1",
-                        "optimizer": "critic_1_optimizer",
-                    },
-                    {
-                        "eval": "critic_2",
-                        "target": "critic_target_2",
-                        "optimizer": "critic_2_optimizer",
-                    },
-                ],
-            }
-
-        elif algo == "MADDPG":
-            nets = {
-                "actor": {
-                    "eval": "actors",
-                    "target": "actor_targets",
-                    "optimizer": "actor_optimizers",
-                },
-                "critics": [
-                    {
-                        "eval": "critics",
-                        "target": "critic_targets",
-                        "optimizer": "critic_optimizers",
-                    }
-                ],
-            }
-
-        elif algo == "MATD3":
-            nets = {
-                "actor": {
-                    "eval": "actors",
-                    "target": "actor_targets",
-                    "optimizer": "actor_optimizers",
-                },
-                "critics": [
-                    {
-                        "eval": "critics_1",
-                        "target": "critic_targets_1",
-                        "optimizer": "critic_1_optimizers",
-                    },
-                    {
-                        "eval": "critics_2",
-                        "target": "critic_targets_2",
-                        "optimizer": "critic_2_optimizers",
-                    },
-                ],
-            }
-        elif algo in ["NeuralUCB", "NeuralTS"]:
-            nets = {
-                "actor": {"eval": "actor", "optimizer": "optimizer"},
-                "critics": [],
-            }
-
-        return nets

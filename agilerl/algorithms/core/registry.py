@@ -1,6 +1,9 @@
-from typing import Optional, List, Dict, Union, Type
+from typing import Optional, List, Dict, Union, Type, Any, Callable
+import inspect
 from dataclasses import dataclass, field
 from torch.optim import Optimizer
+
+from agilerl.protocols import EvolvableModule, EvolvableAlgorithm
 
 @dataclass
 class NetworkConfig:
@@ -35,10 +38,15 @@ class OptimizerConfig:
     :type name: str
     :param networks: The list of network attribute names that the optimizer will update.
     :type networks: List[str]
+    :param optimizer_cls: The optimizer class to be used.
+    :type optimizer_cls: Type[Optimizer]
+    :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
+    :type optimizer_kwargs: Dict[str, Any]
     """
-    optimizer_cls: Type[Optimizer]
     name: str
-    networks: List[str] = field(default_factory=list)
+    networks: Union[str, List[str]]
+    optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
+    optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
 
 
 @dataclass
@@ -51,11 +59,51 @@ class NetworkGroup:
     :type eval: str
     :param shared: The list of shared networks.
     :type shared: str, List[str]
+    :param policy: Whether the network is a policy (e.g. the network used to get the actions 
+    of the agent). There must be one network group in an algorithm which sets this to True.
+    Default is False.
     """
-    eval: str
-    shared: Optional[Union[str, List[str]]] = field(default=None)
+    eval: EvolvableModule
+    shared: Optional[Union[EvolvableModule, List[EvolvableModule]]] = field(default=None)
+    policy: bool = field(default=False)
 
-def make_network_group(eval: str, shared: Optional[Union[str, List[str]]]) -> NetworkGroup:
+    def __post_init__(self):
+        # Identify the names of the attributes where the networks are stored
+        container = self._infer_parent_container()
+        self.eval = self._infer_attribute_names(container, [self.eval])[0]
+        if self.shared is not None:
+            shared = self.shared if isinstance(self.shared, list) else [self.shared]
+            self.shared = self._infer_attribute_names(container, shared)
+
+    def _infer_parent_container(self) -> EvolvableAlgorithm:
+        """
+        Infer the parent container dynamically using the stack frame.
+
+        :return: The parent container object
+        """
+        # NOTE: Here the assumption is that NetworkGroup is used inside the __init__ 
+        # method of the implemented algorithm, such that we can access the defined locals
+        # and extract the corresponding attribute names to the passed networks.
+        current_frame = inspect.currentframe()
+        return current_frame.f_back.f_back.f_back.f_locals['self']
+
+    def _infer_attribute_names(self, container: object, objects: List[object]) -> List[str]:
+        """
+        Infer attribute names of the networks being optimized.
+
+        :return: List of attribute names for the networks
+        """
+        return [
+            attr_name for attr_name, attr_value in vars(container).items()
+            if any(id(attr_value) == id(net) for net in objects)
+        ]
+
+
+def make_network_group(
+        eval: str,
+        shared: Optional[Union[str, List[str]]],
+        policy: bool = False
+        ) -> NetworkGroup:
     """Make a network group from a given eval network and, optionally, some network/s that 
     share parameters with the eval network.
 
@@ -63,12 +111,15 @@ def make_network_group(eval: str, shared: Optional[Union[str, List[str]]]) -> Ne
     :type eval: str
     :param shared: The list of shared networks.
     :type shared: str, List[str]
+    :param policy: Whether the network is a policy (e.g. the network used to get the actions
+    of the agent). There must be one network group in an algorithm which sets this to True.
+    Default is False.
+    :type policy: bool
 
     :return: NetworkGroup object with the passed configuration.
     :rtype: NetworkGroup
     """
-    return NetworkGroup(eval=eval, shared=shared)
-
+    return NetworkGroup(eval=eval, shared=shared, policy=policy)
 
 @dataclass
 class Registry:
@@ -79,6 +130,7 @@ class Registry:
     def __post_init__(self):
         self.groups: List[NetworkGroup] = []
         self.optimizers: List[OptimizerConfig] = []
+        self.hooks: List[Callable] = []
 
     def __repr__(self) -> str:
         groups_str = "\n".join(
@@ -103,6 +155,18 @@ class Registry:
         :rtype: Dict[str, List[str]]
         """
         return {config.name: config.networks for config in self.optimizers}
+
+    @property
+    def policy(self) -> Optional[str]:
+        """Get the name of the policy network in the registry.
+        
+        :return: The name of the policy network in the registry.
+        :rtype: Optional[str]
+        """
+        for group in self.groups:
+            if group.policy:
+                return group.eval
+        return None
     
     def all_registered(self) -> List[str]:
         """Returns all of the members in the registry."""
@@ -113,6 +177,31 @@ class Registry:
         )
         all_registered.update(opt.name for opt in self.optimizers)
         return all_registered
+
+    def networks(self) -> List[NetworkConfig]:
+        """Get a list of network configurations in the registry.
+        
+        :return: A list of network configurations in the registry.
+        :rtype: List[NetworkConfig]
+        """
+        # Match with optimizers (only eval networks can have optimizers by definition)
+        optimizer_eval = {}
+        for opt_name, nets in self.optimizer_networks.items():
+            for net in nets:
+                optimizer_eval[net] = opt_name
+        
+        # Fetch evaluation and shared networks
+        eval_networks = [
+            NetworkConfig(name=group.eval, eval=True, optimizer=optimizer_eval.get(group.eval)) 
+            for group in self.groups
+            ]
+        shared_networks = [
+            NetworkConfig(name=shared, eval=False) for group in self.groups 
+            if group.shared is not None 
+            for shared in (group.shared if isinstance(group.shared, list) else [group.shared])
+        ]
+
+        return eval_networks + shared_networks
 
     def register_group(self, group: NetworkGroup) -> None:
         """Register a network configuration in the registry.
@@ -129,3 +218,11 @@ class Registry:
         :type config: OptimizerConfig
         """
         self.optimizers.append(optimizer)
+    
+    def register_hook(self, hook: Callable) -> None:
+        """Register a hook in the registry.
+        
+        :param hook: The hook to be registered.
+        :type hook: Callable
+        """
+        self.hooks.append(hook)

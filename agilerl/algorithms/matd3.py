@@ -11,6 +11,8 @@ from gymnasium import spaces
 
 from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict
 from agilerl.algorithms.core import MultiAgentAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
@@ -388,21 +390,27 @@ class MATD3(MultiAgentAlgorithm):
             critic_target_1.load_state_dict(critic_1.state_dict())
             critic_target_2.load_state_dict(critic_2.state_dict())
 
-        self.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
-        ]
-        self.critic_1_optimizers = [
-            optim.Adam(critic.parameters(), lr=self.lr_critic)
-            for critic in self.critics_1
-        ]
-        self.critic_2_optimizers = [
-            optim.Adam(critic.parameters(), lr=self.lr_critic)
-            for critic in self.critics_2
-        ]
+        # Optimizers
+        self.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actors,
+            optimizer_kwargs={"lr": lr_actor}
+        )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
+        self.critic_1_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critics_1,
+            optimizer_kwargs={"lr": lr_critic}
+        )
+
+        self.critic_2_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critics_2,
+            optimizer_kwargs={"lr": lr_critic}
+        )
+
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
         else:
             self.place_models_on_device(self.device)
             if self.torch_compiler:
@@ -421,6 +429,27 @@ class MATD3(MultiAgentAlgorithm):
                 self.recompile()
 
         self.criterion = nn.MSELoss()
+
+        # Register network groups for mutations
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actors,
+                shared=self.actor_targets,
+                policy=True,
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critics_1,
+                shared=self.critic_targets_1,
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critics_2,
+                shared=self.critic_targets_2,
+            )
+        )
 
     def scale_to_action_space(self, action: np.ndarray, idx: int) -> torch.Tensor:
         """Scales actions to action space defined by self.min_action and self.max_action.

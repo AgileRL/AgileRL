@@ -132,7 +132,7 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False, exclude_
     if isinstance(obj, check_types):
         return True
     elif isinstance(obj, Optimizer):
-        raise TypeError("Optimizer objects should be wrapped in OptimizerWrapper.")
+        raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.")
     if isinstance(obj, dict):
         return any(recursive_check_module_attrs(v, networks_only=networks_only) for v in obj.values())
     if isinstance(obj, list):

@@ -11,6 +11,8 @@ import torch.optim as optim
 from gymnasium import spaces
 
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
@@ -208,15 +210,18 @@ class NeuralUCB(RLAlgorithm):
         if self.actor.arch == "cnn":
             layers += [module for module in self.actor.value_net.children()]
 
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr}
+        )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
 
         # Initialize network layers
         l_no = 0
@@ -250,6 +255,15 @@ class NeuralUCB(RLAlgorithm):
         )
 
         self.criterion = nn.MSELoss()
+
+        # Register network groups for mutations
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                shared=None,
+                policy=True
+            )
+        )
 
     def _init_weights_gaussian(self, m, mean, std):
         if isinstance(m, nn.Linear):

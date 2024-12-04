@@ -11,6 +11,8 @@ from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
@@ -285,7 +287,14 @@ class RainbowDQN(RLAlgorithm):
         # Create the target network by copying the actor network
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        # Optimizer
+        opt_kwargs = {"lr": self.lr}
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs=opt_kwargs
+        )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
@@ -300,6 +309,15 @@ class RainbowDQN(RLAlgorithm):
         # Put the nets into training mode
         self.actor.train()
         self.actor_target.train()
+
+        # Register network groups for mutations
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                shared=self.actor_target,
+                policy=True
+            )
+        )
 
     def get_action(self, state, action_mask=None, training=True):
         """Returns the next action to take in the environment.

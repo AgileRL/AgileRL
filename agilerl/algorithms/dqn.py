@@ -1,10 +1,9 @@
 from typing import Optional, Dict, Any
 import copy
 import inspect
-import random
-
 import dill
 import numpy as np
+from numpy.typing import ArrayLike
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -219,10 +218,6 @@ class DQN(RLAlgorithm):
                 self.actor_detached = create_actor()
                 self.actor_target = create_actor()
         
-        # Register network group
-        network_group = NetworkGroup(eval="actor", shared=["actor_target", "actor_detached"])
-        self.register_network_group(network_group)
-
         # Create detached actor and copy over weights to target
         self.reset_module_params()
 
@@ -230,8 +225,7 @@ class DQN(RLAlgorithm):
         optimizer_kwargs = {"lr": self.lr, "capturable": self.capturable}
         self.optimizer = OptimizerWrapper(
             optim.Adam,
-            networks=[self.actor],
-            network_attr_names=["actor"],
+            networks=self.actor,
             optimizer_kwargs=optimizer_kwargs
         )
 
@@ -254,6 +248,16 @@ class DQN(RLAlgorithm):
         if cudagraphs:
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
+        
+        # Register DQN network groups and mutation hook
+        network_group = NetworkGroup(
+            eval=self.actor,
+            shared=[self.actor_target, self.actor_detached],
+            policy=True
+            )
+
+        self.register_network_group(network_group)
+        self.register_mutation_hook(self.reset_module_params)
     
     def reset_module_params(self) -> None:
         """Resets module parameters for the detached and target networks."""
@@ -262,7 +266,12 @@ class DQN(RLAlgorithm):
         self.target_params: TensorDict = self.param_vals.clone().lock_()
         self.target_params.to_module(self.actor_target)
 
-    def get_action(self, obs: NumpyObsType, epsilon: float = 0.0, action_mask: Optional[np.ndarray] = None) -> np.ndarray:
+    def get_action(
+            self,
+            obs: NumpyObsType,
+            epsilon: float = 0.0,
+            action_mask: Optional[ArrayLike] = None
+            ) -> ArrayLike:
         """Returns the next action to take in the environment.
 
         :param obs: The current observation from the environment

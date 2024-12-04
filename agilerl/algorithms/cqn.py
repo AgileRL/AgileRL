@@ -4,6 +4,7 @@ import inspect
 import random
 import dill
 import numpy as np
+from numpy.typing import ArrayLike
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,6 +15,8 @@ from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
@@ -102,9 +105,9 @@ class CQN(RLAlgorithm):
         self.lr = lr
         self.gamma = gamma
         self.tau = tau
+        self.mut = mut
         self.double = double
         self.actor_network = actor_network
-        self.mut = mut
 
         if self.actor_network is not None:
             self.actor = actor_network
@@ -201,10 +204,17 @@ class CQN(RLAlgorithm):
                     device='cpu', # Use CPU since we will make deepcopy for target
                     accelerator=self.accelerator,
                 )
-
+        
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_target.load_state_dict(self.actor.state_dict())
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        # Initialize optimizer
+        kwargs = {"lr": self.lr}
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs=kwargs
+            )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
@@ -219,12 +229,21 @@ class CQN(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
+        # Register policy with algorithm
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                shared=self.actor_target,
+                policy=True
+            )
+        )
+
     def get_action(
             self,
-            state: np.ndarray,
+            obs: NumpyObsType,
             epsilon: float = 0,
-            action_mask: Optional[np.ndarray] = None
-            ) -> np.ndarray:
+            action_mask: Optional[ArrayLike] = None
+            ) -> ArrayLike:
         """Returns the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -239,7 +258,7 @@ class CQN(RLAlgorithm):
         :return: Action to take in the environment
         :rtype: numpy.ndarray[int]
         """
-        state = self.preprocess_observation(state)
+        state = self.preprocess_observation(obs)
 
         # epsilon-greedy
         if random.random() < epsilon:

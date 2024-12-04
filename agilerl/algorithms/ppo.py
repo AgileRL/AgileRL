@@ -17,6 +17,8 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
@@ -337,16 +339,27 @@ class PPO(RLAlgorithm):
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        self.optimizer = optim.Adam(
-            [
-                {"params": self.actor.parameters(), "lr": self.lr},
-                {"params": self.critic.parameters(), "lr": self.lr},
-            ]
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=[self.actor, self.critic],
+            optimizer_args={"lr": self.lr}
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
+
+        # Register network groups for mutations
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                policy=True
+            )
+        )
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.critic
+            )
+        )
 
     def scale_to_action_space(self, action, convert_to_torch=False):
         """Scales actions to action space defined by self.min_action and self.max_action.
