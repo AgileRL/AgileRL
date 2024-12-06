@@ -66,11 +66,6 @@ class PettingZooVecEnv:
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
-                print(
-                    "is scalar",
-                    actions[possible_agent][env_idx],
-                    np.isscalar(actions[possible_agent][env_idx]),
-                )
                 action = (
                     int(actions[possible_agent][env_idx])
                     if np.isscalar(actions[possible_agent][env_idx])
