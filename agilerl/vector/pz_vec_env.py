@@ -64,7 +64,12 @@ class PettingZooVecEnv:
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
-                passed_actions_list[env_idx].append(actions[possible_agent][env_idx])
+                action = (
+                    actions[possible_agent][env_idx].item()
+                    if actions[possible_agent][env_idx].isscalar()
+                    else actions[possible_agent][env_idx]
+                )
+                passed_actions_list[env_idx].append(action)
         assert (
             len(passed_actions_list) == self.num_envs
         ), "Number of actions passed to the step function must be equal to the number of vectorized environments"
