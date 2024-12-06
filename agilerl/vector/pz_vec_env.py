@@ -1,5 +1,7 @@
 from typing import Any
 
+import numpy as np
+
 
 class PettingZooVecEnv:
     """An abstract asynchronous, vectorized environment
@@ -66,7 +68,7 @@ class PettingZooVecEnv:
             for possible_agent in self.agents:
                 action = (
                     actions[possible_agent][env_idx].item()
-                    if actions[possible_agent][env_idx].isscalar()
+                    if np.isscalar(actions[possible_agent][env_idx])
                     else actions[possible_agent][env_idx]
                 )
                 passed_actions_list[env_idx].append(action)
