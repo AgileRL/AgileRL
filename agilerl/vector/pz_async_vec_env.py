@@ -890,7 +890,11 @@ def _async_worker(
                     truncated = {agent: False for agent in agents}
                 else:
                     data = {
-                        possible_agent: np.array(data[idx]).squeeze()
+                        possible_agent: (
+                            np.array(data[idx]).squeeze()
+                            if not isinstance(data[idx], int)
+                            else data[idx]
+                        )
                         for idx, possible_agent in enumerate(agents)
                     }
                     transition = env.step(data)

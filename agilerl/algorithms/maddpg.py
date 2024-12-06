@@ -594,10 +594,16 @@ class MADDPG:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
-                if len(discrete_action_dict[agent].shape) == 1:
-                    discrete_action_dict[agent] = discrete_action_dict[agent][
-                        :, np.newaxis
-                    ]
+                if len(discrete_action_dict[agent].shape) == 1 and env_defined_actions:
+                    env_defined_actions = {
+                        agent: action.squeeze(1) if len(action.shape) > 1 else action
+                        for agent, action in env_defined_actions.items()
+                    }
+                    agent_masks = {
+                        agent: mask.squeeze(1) if len(mask.shape) > 1 else mask
+                        for agent, mask in agent_masks.items()
+                    }
+
         else:
             discrete_action_dict = None
 

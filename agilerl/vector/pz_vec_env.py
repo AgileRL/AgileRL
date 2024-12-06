@@ -1,5 +1,7 @@
 from typing import Any
 
+import numpy as np
+
 
 class PettingZooVecEnv:
     """An abstract asynchronous, vectorized environment
@@ -64,7 +66,12 @@ class PettingZooVecEnv:
         passed_actions_list = [[] for _ in list(actions.values())[0]]
         for env_idx, _ in enumerate(list(actions.values())[0]):
             for possible_agent in self.agents:
-                passed_actions_list[env_idx].append(actions[possible_agent][env_idx])
+                action = (
+                    int(actions[possible_agent][env_idx])
+                    if np.isscalar(actions[possible_agent][env_idx])
+                    else actions[possible_agent][env_idx]
+                )
+                passed_actions_list[env_idx].append(action)
         assert (
             len(passed_actions_list) == self.num_envs
         ), "Number of actions passed to the step function must be equal to the number of vectorized environments"
