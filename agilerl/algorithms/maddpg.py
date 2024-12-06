@@ -611,7 +611,6 @@ class MADDPG:
         if env_defined_actions is not None:
             for agent in self.agent_ids:
                 if self.discrete_actions:
-                    print(discrete_action_dict, env_defined_actions, agent_masks)
                     discrete_action_dict[agent][agent_masks[agent]] = (
                         env_defined_actions[agent][agent_masks[agent]]
                     )
