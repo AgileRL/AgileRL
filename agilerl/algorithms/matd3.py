@@ -21,6 +21,7 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     unwrap_optimizer,
+    make_safe_deepcopies
 )
 
 class MATD3(MultiAgentAlgorithm):
@@ -108,8 +109,8 @@ class MATD3(MultiAgentAlgorithm):
         tau: float = 0.01,
         normalize_images: bool = True,
         mut: Optional[str] = None,
-        actor_networks: Optional[List[nn.Module]] = None,
-        critic_networks: Optional[List[List[nn.Module]]] = None,
+        actor_networks: Optional[List[EvolvableModule]] = None,
+        critic_networks: Optional[List[List[EvolvableModule]]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -188,10 +189,7 @@ class MATD3(MultiAgentAlgorithm):
         self.dt = dt
         self.sqdt = dt ** (0.5)
 
-        self.actor_networks = actor_networks
-        self.critic_networks = critic_networks
-
-        if self.actor_networks is not None and self.critic_networks is not None:
+        if actor_networks is not None and critic_networks is not None:
             assert (
                 len({type(net) for net in actor_networks}) == 1
             ), "'actor_networks' must all be the same type"
@@ -204,8 +202,7 @@ class MATD3(MultiAgentAlgorithm):
             assert isinstance(
                 actor_networks[0], type(critic_networks[0][0])
             ), "actor and critic networks must be the same type"
-            self.actors = actor_networks
-            self.critics_1, self.critics_2 = critic_networks
+
             if (
                 isinstance(self.actors[0], (EvolvableMLP, EvolvableCNN))
                 and isinstance(self.critics_1[0], (EvolvableMLP, EvolvableCNN))
@@ -223,6 +220,8 @@ class MATD3(MultiAgentAlgorithm):
                     False
                 ), "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
                                 type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actors, self.critics_1, self.critics_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
         else:
             # model
             critic_net_config = copy.deepcopy(self.net_config)

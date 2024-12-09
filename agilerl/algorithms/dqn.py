@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import copy
 import inspect
 import dill
@@ -18,11 +18,13 @@ from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules.base import EvolvableModule
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
-    obs_channels_to_first
+    obs_channels_to_first,
+    make_safe_deepcopies
 )
 
 class DQN(RLAlgorithm):
@@ -73,11 +75,10 @@ class DQN(RLAlgorithm):
         tau: float = 1e-3,
         mut: Optional[str] = None,
         double: bool = False,
-        actor_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
-        compile: bool = True,
-        cudagraphs: bool = True,
+        cudagraphs: bool = False,
         wrap: bool = True,
     ):
         super().__init__(
@@ -111,23 +112,23 @@ class DQN(RLAlgorithm):
         self.tau = tau
         self.mut = mut
         self.double = double
-        self.actor_network = actor_network
         self.cudagraphs = cudagraphs
-        self.compile = compile
         self.capturable = cudagraphs
 
-        if self.actor_network is not None:
-            self.actor = actor_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = self.actor.net_config
-                self.actor_network = None
-            elif isinstance(self.actor, MakeEvolvable):
+        if actor_network is not None:
+            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)):
+                self.net_config = actor_network.net_config
+            elif isinstance(actor_network, MakeEvolvable):
                 self.net_config = None
-                self.actor_network = actor_network
             else:
                 assert (
                     False
-                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+                ), (f"'actor_network' argument is of type {type(actor_network)}, but "
+                     "must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable")
+            
+            # Need to make deepcopies 
+            self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
+            self.actor_detached = make_safe_deepcopies(actor_network) if cudagraphs else None
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -153,8 +154,8 @@ class DQN(RLAlgorithm):
                     **self.net_config,
                 )
                 self.actor = create_actor()
-                self.actor_detached = create_actor()
                 self.actor_target = create_actor()
+                self.actor_detached = create_actor() if cudagraphs else None
 
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
                 for key in [
@@ -182,8 +183,8 @@ class DQN(RLAlgorithm):
                 )
 
                 self.actor = create_actor()
-                self.actor_detached = create_actor()
                 self.actor_target = create_actor()
+                self.actor_detached = create_actor() if cudagraphs else None
 
             elif self.net_config["arch"] == "composed": # Dict observations
                 for key in [
@@ -215,18 +216,17 @@ class DQN(RLAlgorithm):
                 )
 
                 self.actor = create_actor()
-                self.actor_detached = create_actor()
                 self.actor_target = create_actor()
+                self.actor_detached = create_actor() if cudagraphs else None
         
-        # Create detached actor and copy over weights to target
-        self.reset_module_params()
+        # Copy over actor weights to target
+        self.init_hook()
 
         # Initialize optimizer with OptimizerWrapper
-        optimizer_kwargs = {"lr": self.lr, "capturable": self.capturable}
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
-            optimizer_kwargs=optimizer_kwargs
+            optimizer_kwargs={"lr": self.lr, "capturable": self.capturable}
         )
 
         # TODO: Ideally refactor to remove this
@@ -239,30 +239,37 @@ class DQN(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
         
-        # torch.compile and cuda graph optimizations
-        if compile:
-            mode = None
-            self.update = torch.compile(self.update, mode=mode)
-            self._get_action = torch.compile(self._get_action, mode=mode, fullgraph=True)
-        
-        if cudagraphs:
+        if self.cudagraphs:
+            # torch.compile and cuda graph optimizations
+            self.update = torch.compile(self.update, mode=None)
+            self._get_action = torch.compile(self._get_action, mode=None, fullgraph=True)
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
         
         # Register DQN network groups and mutation hook
-        network_group = NetworkGroup(
-            eval=self.actor,
-            shared=[self.actor_target, self.actor_detached],
-            policy=True
-            )
+        shared_networks = [self.actor_target]
+        if self.actor_detached is not None:
+            shared_networks += [self.actor_detached]
 
-        self.register_network_group(network_group)
-        self.register_mutation_hook(self.reset_module_params)
+        self.register_network_group(
+            NetworkGroup(
+                eval=self.actor,
+                shared=shared_networks,
+                policy=True
+            )
+        )
+        self.register_init_hook(self.init_hook)
     
-    def reset_module_params(self) -> None:
+    def init_hook(self) -> None:
         """Resets module parameters for the detached and target networks."""
         self.param_vals: TensorDict = from_module(self.actor).detach()
-        self.param_vals.to_module(self.actor_detached)
+
+        if self.actor_detached is not None:
+            self.param_vals.to_module(self.actor_detached)
+
+        # NOTE: This removes the target params from the computation graph which 
+        # reduces memory overhead and speeds up training, however these won't 
+        # appear in the module's parameters
         self.target_params: TensorDict = self.param_vals.clone().lock_()
         self.target_params.to_module(self.actor_target)
 
@@ -309,7 +316,11 @@ class DQN(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        q_values = self.actor_detached(obs)
+        if not self.cudagraphs:
+            with torch.no_grad():
+                q_values = self.actor(obs)
+        else:
+            q_values = self.actor_detached(obs)
 
         # Masked random actions
         masked_random_values = torch.rand_like(q_values) * action_mask
@@ -348,17 +359,18 @@ class DQN(RLAlgorithm):
         :param dones: List of batched dones
         :type dones: torch.Tensor[int]
         """
-        if self.double:  # Double Q-learning
-            q_idx = self.actor_target(next_obs).argmax(dim=1).unsqueeze(1)
-            q_target = self.actor(next_obs).gather(dim=1, index=q_idx).detach()
-        else:
-            q_target = self.actor_target(next_obs).max(axis=1)[0].unsqueeze(1)
+        with torch.no_grad():
+            if self.double:  # Double Q-learning
+                q_idx = self.actor_target(next_obs).argmax(dim=1).unsqueeze(1)
+                q_target = self.actor(next_obs).gather(dim=1, index=q_idx).detach()
+            else:
+                q_target = self.actor_target(next_obs).max(axis=1)[0].unsqueeze(1)
 
-        # target, if terminal then y_j = rewards
-        y_j = rewards + self.gamma * q_target * (1 - dones)
+            # target, if terminal then y_j = rewards
+            y_j = rewards + self.gamma * q_target * (1 - dones)
+
+        # Compute Q-values for actions taken and loss
         q_eval = self.actor(obs).gather(1, actions.long())
-
-        # loss backprop
         loss: torch.Tensor = self.criterion(q_eval, y_j)
 
         # zero gradients, perform a backward pass, and update the weights
@@ -379,10 +391,8 @@ class DQN(RLAlgorithm):
         """
         states, actions, rewards, next_states, dones = experiences
         if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
             actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)
-            next_states = next_states.to(self.accelerator.device)
             dones = dones.to(self.accelerator.device)
 
         states = self.preprocess_observation(states)
@@ -391,8 +401,12 @@ class DQN(RLAlgorithm):
         loss = self.update(states, actions, rewards, next_states, dones)
 
         # soft update target network
-        self.target_params.lerp_(self.param_vals, self.tau)
+        self.soft_update()
         return loss.item()
+    
+    def soft_update(self) -> None:
+        "Soft updates target network."
+        self.target_params.lerp_(self.param_vals, self.tau)
 
     def test(
             self,
@@ -453,25 +467,32 @@ class DQN(RLAlgorithm):
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
-        actor_detached = self.actor_detached.clone()
 
-        optimizer = optim.Adam(actor.parameters(), lr=clone.lr, capturable=clone.cudagraphs)
+        if self.actor_detached is not None:
+            actor_detached = self.actor_detached.clone()
+        else:
+            actor_detached = None
+
+        optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=actor,
+            optimizer_kwargs={"lr": self.lr, "capturable": self.cudagraphs},
+            network_names=self.optimizer.network_names,
+        )
         optimizer.load_state_dict(self.optimizer.state_dict())
 
         if self.accelerator is not None and wrap:
             (
                 clone.actor,
-                clone.actor_target,
                 clone.optimizer,
-            ) = self.accelerator.prepare(actor, actor_detached, actor_target, optimizer)
+            ) = self.accelerator.prepare(actor, optimizer.optimizer)
         else:
             clone.actor = actor
-            clone.actor_detached = actor_detached
-            clone.actor_target = actor_target
             clone.optimizer = optimizer
+    
+        clone.actor_detached = actor_detached
+        clone.actor_target = actor_target
         
-        clone.reset_module_params()
-
         TensorType = (torch.Tensor, TensorDict)
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
@@ -531,10 +552,14 @@ class DQN(RLAlgorithm):
         self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
 
         self.lr = checkpoint["lr"]
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr, "capturable": self.cudagraphs}
+        )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.init_hook()
 
         for attribute in checkpoint.keys():
             if attribute not in network_info:
@@ -564,9 +589,6 @@ class DQN(RLAlgorithm):
         actor_state_dict = chkpt_attribute_to_device(
             checkpoint.pop("actor_state_dict"), device
         )
-        actor_target_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_target_state_dict"), device
-        )
         optimizer_state_dict = chkpt_attribute_to_device(
             checkpoint.pop("optimizer_state_dict"), device
         )
@@ -581,28 +603,35 @@ class DQN(RLAlgorithm):
         }
 
         if checkpoint["net_config"] is not None:
-            agent = cls(**class_init_dict)
-            agent.arch = checkpoint["net_config"]["arch"]
-            if agent.arch == "mlp":
-                agent.actor = EvolvableMLP(**actor_init_dict)
-                agent.actor_target = EvolvableMLP(**actor_target_init_dict)
-            elif agent.arch == "cnn":
-                agent.actor = EvolvableCNN(**actor_init_dict)
-                agent.actor_target = EvolvableCNN(**actor_target_init_dict)
+            self = cls(**class_init_dict)
+            self.arch = checkpoint["net_config"]["arch"]
+            if self.arch == "mlp":
+                self.actor = EvolvableMLP(**actor_init_dict)
+                self.actor_target = EvolvableMLP(**actor_target_init_dict)
+                self.actor_detached = EvolvableMLP(**actor_init_dict)
+            elif self.arch == "cnn":
+                self.actor = EvolvableCNN(**actor_init_dict)
+                self.actor_target = EvolvableCNN(**actor_target_init_dict)
+                self.actor_detached = EvolvableCNN(**actor_init_dict)
         else:
             class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
-            agent = cls(**class_init_dict)
-            agent.actor_target = MakeEvolvable(**actor_target_init_dict)
+            self = cls(**class_init_dict)
+            self.actor_target = MakeEvolvable(**actor_target_init_dict)
+            self.actor_detached = MakeEvolvable(**actor_init_dict)
 
-        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
-        agent.actor.load_state_dict(actor_state_dict)
-        agent.actor_target.load_state_dict(actor_target_state_dict)
-        agent.optimizer.load_state_dict(optimizer_state_dict)
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr, "capturable": self.cudagraphs}
+        )
+        self.actor.load_state_dict(actor_state_dict)
+        self.optimizer.load_state_dict(optimizer_state_dict)
+        self.init_hook()
 
         if accelerator is not None:
-            agent.wrap_models()
+            self.wrap_models()
 
-        for attribute in agent.inspect_attributes().keys():
-            setattr(agent, attribute, checkpoint[attribute])
+        for attribute in self.inspect_attributes().keys():
+            setattr(self, attribute, checkpoint[attribute])
 
-        return agent
+        return self

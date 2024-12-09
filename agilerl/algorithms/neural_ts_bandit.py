@@ -16,8 +16,14 @@ from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.modules.base import EvolvableModule
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first,
+    make_safe_deepcopies
+)
 
 class NeuralTS(RLAlgorithm):
     """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827    
@@ -68,7 +74,7 @@ class NeuralTS(RLAlgorithm):
         normalize_images: bool = True,
         learn_step: int = 2,
         mut: Optional[str] = None,
-        actor_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -110,20 +116,18 @@ class NeuralTS(RLAlgorithm):
         self.lr = lr
         self.mut = mut
         self.regret = [0]
-        self.actor_network = actor_network
 
-        if self.actor_network is not None:
-            self.actor = actor_network
+        if actor_network is not None:
             if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
                 self.net_config = self.actor.net_config
-                self.actor_network = None
             elif isinstance(self.actor, MakeEvolvable):
                 self.net_config = None
-                self.actor_network = actor_network
             else:
                 assert (
                     False
                 ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actor = make_safe_deepcopies(actor_network)
 
         else:
             # model

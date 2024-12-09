@@ -1,18 +1,17 @@
 from typing import Optional, Union, Tuple, Iterable, Callable, Any, Dict, TypeVar
 import inspect
 from abc import ABC, ABCMeta, abstractmethod
-import functools
 from gymnasium import spaces
 from accelerate import Accelerator
 import numpy as np
+from tensordict import TensorDict
 from numpy.typing import ArrayLike
-from torch.optim import Optimizer
 import torch
 from torch._dynamo import OptimizedModule
 import dill
 
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import Registry, NetworkGroup, OptimizerConfig
+from agilerl.algorithms.core.registry import MutationRegistry, NetworkGroup, OptimizerConfig
 from agilerl.protocols import EvolvableModule, EvolvableAttributeType, EvolvableAttributeDict
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, GymSpaceType
 from agilerl.utils.algo_utils import (
@@ -26,16 +25,13 @@ from agilerl.utils.algo_utils import (
     preprocess_observation
 )
 
-__all__ = [
-    "EvolvableAlgorithm",
-    "RLAlgorithm",
-    "MultiAgentAlgorithm"
-    ]
+__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
-T = TypeVar("T", bound=type)
 
-class _RegisterEvolvableMeta(type):
+class _RegistryMeta(type):
+    """Metaclass to wrap registry information after algorithm is done 
+    intiializing with specified network groups and optimizers."""
     def __call__(cls, *args, **kwargs):
         # Create the instance
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
@@ -46,10 +42,10 @@ class _RegisterEvolvableMeta(type):
 
         return instance
 
-class RegisterEvolvableMeta(_RegisterEvolvableMeta, ABCMeta):
+class RegistryMeta(_RegistryMeta, ABCMeta):
     ...
 
-class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
+class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     """Base object for all algorithms in the AgileRL framework. 
     
     :param index: The index of the individual.
@@ -72,15 +68,18 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
             name: Optional[str] = None,
             ) -> None:
 
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(device, (str, torch.device)), "Device must be a string."
-        assert isinstance(accelerator, (type(None), Accelerator)), "Accelerator must be an instance of Accelerator."
         assert isinstance(name, (type(None), str)), "Name must be a string."
+        assert (
+            isinstance(accelerator, (type(None), Accelerator)), 
+            "Accelerator must be an instance of Accelerator."
+        )
 
         self.accelerator = accelerator
-        self.device = device
+        self.device = device if self.accelerator is None else self.accelerator.device
         self.learn_step = learn_step
         self.algo = name if name is not None else self.__class__.__name__
 
@@ -90,7 +89,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         self.scores = []
         self.fitness = []
         self.steps = [0]
-        self.registry = Registry()
+        self.registry = MutationRegistry()
 
     @property
     def index(self) -> int:
@@ -101,7 +100,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
     def index(self, value: int) -> None:
         """Sets the index of the algorithm."""
         self._index = value
-    
+
     @property
     def mut(self) -> Any:
         """Returns the mutation object of the algorithm."""
@@ -111,7 +110,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
     def mut(self, value: Optional[str]) -> None:
         """Sets the mutation object of the algorithm."""
         self._mut = value
-
+    
     # TODO: Can this be generalised to all algorithms?
     @abstractmethod
     def unwrap_models(self):
@@ -230,7 +229,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
             )
 
         # Extract mapping from optimizer names to network attribute names
-        for attr, obj in self.evolvable_attributes(exclude_td=True).items():
+        for attr, obj in self.evolvable_attributes().items():
             if isinstance(obj, OptimizerWrapper):
                 # Set up config from OptimizerWrapper
                 config = OptimizerConfig(
@@ -243,7 +242,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
 
         # Check that all the inspected evolvable attributes can be found in the registry
         all_registered = self.registry.all_registered()
-        not_found = [attr for attr in self.evolvable_attributes(exclude_td=True) if attr not in all_registered]
+        not_found = [attr for attr in self.evolvable_attributes() if attr not in all_registered]
         if not_found:
             raise ValueError(
                 f"The following evolvable attributes could not be found in the registry: {not_found}. "
@@ -268,7 +267,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         """
         self.registry.register_group(group)
     
-    def register_mutation_hook(self, hook: Callable) -> None:
+    def register_init_hook(self, hook: Callable) -> None:
         """Registers a hook to be executed after a mutation is performed on 
         the algorithm.
         
@@ -276,8 +275,13 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         :type hook: Callable
         """
         self.registry.register_hook(hook)
+    
+    def init_hook(self) -> None:
+        """Executes the hooks registered with the algorithm."""
+        for hook in self.registry.hooks:
+            getattr(self, hook)()
 
-    def evolvable_attributes(self, networks_only: bool = False, exclude_td: bool = False) -> EvolvableAttributeDict:
+    def evolvable_attributes(self, networks_only: bool = False) -> EvolvableAttributeDict:
         """Returns the attributes related to the evolvable networks in the algorithm. Includes 
         attributes that are either evolvable networks or a list of evolvable networks, as well 
         as the optimizers associated with the networks.
@@ -288,12 +292,21 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
         """
-        return {
-            attr: getattr(self, attr) for attr in dir(self)
-            if recursive_check_module_attrs(getattr(self, attr), networks_only, exclude_td)
-            and not attr.startswith("_") and not attr.endswith("_")
-            and not "network" in attr # NOTE: We shouldn't need to do this...
-        }
+        def is_evolvable(attr: str, obj: Any):
+            return (
+                recursive_check_module_attrs(obj, networks_only)
+                and not attr.startswith("_") and not attr.endswith("_")
+                and not "network" in attr # NOTE: We shouldn't need to do this...
+            )
+        
+        # Inspect evolvable given specs
+        evolvable_attrs = {}
+        for attr in dir(self):
+            obj = getattr(self, attr)
+            if is_evolvable(attr, obj):
+                evolvable_attrs[attr] = obj
+
+        return evolvable_attrs
 
     def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
         """
@@ -313,6 +326,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
         # Exclude attributes that are EvolvableModule's or Optimizer's (also check for nested 
         # module-related attributes for multi-agent algorithms)
         exclude = list(self.evolvable_attributes().keys())
+        exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
 
         # Exclude private and built-in attributes
         attributes = [
@@ -333,16 +347,32 @@ class EvolvableAlgorithm(ABC, metaclass=RegisterEvolvableMeta):
             attributes = {k: v for k, v in attributes if k not in exclude}
 
         return attributes
+    
+    def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableModule:
+        """Wraps the model with the accelerator."""
+        if isinstance(attr, OptimizerWrapper):
+            if isinstance(attr.optimizer, list):
+                wrapped_opt = [self.accelerator.prepare(opt) for opt in attr.optimizer]
+            else:
+                wrapped_opt = self.accelerator.prepare(attr.optimizer)
+
+            attr.optimizer = wrapped_opt
+            return attr
+        
+        # Only wrap the model if its part of the computation graph
+        return self.accelerator.prepare(attr) if attr.state_dict() else attr
 
     def wrap_models(self) -> None:
         """Wraps the models in the algorithm with the accelerator."""
-        if self.accelerator is not None:
-            for attr in self.evolvable_attributes(exclude_td=True):
-                obj = getattr(self, attr)
-                if isinstance(obj, list):
-                    setattr(self, attr, [self.accelerator.prepare(m) for m in obj])
-                else:
-                    setattr(self, attr, self.accelerator.prepare(obj))
+        if self.accelerator is None:
+            raise AttributeError("No accelerator has been set for the algorithm.")
+
+        for attr in self.evolvable_attributes():
+            obj = getattr(self, attr)
+            if isinstance(obj, list):
+                setattr(self, attr, [self._wrap_attr(m) for m in obj])
+            else:
+                setattr(self, attr, self._wrap_attr(obj))
     
     def models_to_device(self) -> None:
         """Moves the models in the algorithm to the device."""
@@ -515,7 +545,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         return preprocess_observation(
             observation=observation,
             observation_space=self.observation_space,
-            device=self.device if self.accelerator is None else self.accelerator.device,
+            device=self.device,
             normalize_images=self.normalize_images
         )
     
@@ -693,7 +723,7 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             preprocessed[agent_id] = preprocess_observation(
                 observation=obs,
                 observation_space=self.observation_space.get(agent_id),
-                device=self.device if self.accelerator is None else None,
+                device=self.device,
                 normalize_images=self.normalize_images
             )
 
@@ -714,15 +744,17 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         network_info = {}
         for attr in self.evolvable_attributes():
             obj: EvolvableAttributeType = getattr(self, attr)
-            if is_module_list(obj):
+            if isinstance(obj, OptimizerWrapper):
+                network_info[f"{attr}_state_dict"] = [opt.state_dict() for opt in obj.optimizer]
+            elif is_module_list(obj):
                 network_info[f"{attr}_init_dict"] = [net.init_dict for net in obj]
                 network_info[f"{attr}_state_dict"] = [
                     remove_compile_prefix(net.state_dict()) for net in obj
                 ]
-            elif is_optimizer_list(obj):
-                network_info[f"{attr}_state_dict"] = [opt.state_dict() for opt in obj]
             else:
-                raise TypeError(f"Attribute {attr} should be a list of either EvolvableModule's or Optimizer's.")
+                raise TypeError(
+                    f"Attribute {attr} should be a list of either EvolvableModule's or Optimizer's."
+                    )
 
         attribute_dict.update(network_info)
         attribute_dict.pop("accelerator", None)

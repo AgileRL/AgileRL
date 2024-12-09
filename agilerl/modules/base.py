@@ -42,7 +42,7 @@ class EvolvableModule(nn.Module, ABC):
         nn.Module.__init__(self)
         self._init_mutation_methods()
 
-        self.device = device
+        self.device = device if accelerator is None else accelerator.device
         self.accelerator = accelerator
 
     @property

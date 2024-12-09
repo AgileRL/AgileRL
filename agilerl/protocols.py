@@ -1,11 +1,17 @@
-from typing import Any, Dict, List, Optional, Tuple, Protocol, Union, Iterable, runtime_checkable
+from typing import (
+    Any, Dict, List, 
+    Optional, Tuple, Protocol, Union, Iterable, Generator,
+    runtime_checkable
+)
 from enum import Enum
 from numpy.typing import ArrayLike
 from accelerate import Accelerator
 import torch
+import torch.nn as nn
 from torch.optim.optimizer import Optimizer
 
 NumpyObsType = Union[ArrayLike, Dict[str, ArrayLike], Tuple[ArrayLike, ...]]
+DeviceType = Union[str, torch.device]
 
 class MutationType(Enum):
     LAYER = "layer"
@@ -18,9 +24,17 @@ class MutationMethod(Protocol):
         ...
 
 @runtime_checkable
+class OptimizerWrapper(Protocol):
+    optimizer: Union[Optimizer, Iterable[Optimizer]]
+    
+    
+@runtime_checkable
 class EvolvableModule(Protocol):
     init_dict: Dict[str, Any]
-
+    def parameters(self) -> Generator:
+        ...
+    def to(self, device: DeviceType) -> None:
+        ...
     def state_dict(self) -> Dict[str, Any]:
         ...
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
@@ -31,7 +45,7 @@ class EvolvableModule(Protocol):
         ...
 
 EvolvableNetworkType = Union[EvolvableModule, Iterable[EvolvableModule]]
-OptimizerType = Union[Optimizer, Iterable[Optimizer]]
+OptimizerType = Union[Optimizer, Iterable[Optimizer], OptimizerWrapper]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
@@ -50,6 +64,10 @@ class EvolvableAlgorithm(Protocol):
 
     def unwrap_models(self) -> None:
         ...
+    def wrap_models(self) -> None:
+        ...
+    def load(cls, path: str) -> "EvolvableAlgorithm":
+        ...
     def load_checkpoint(self, path: str, device: str, accelerator: Optional[Accelerator]) -> None:
         ...
     def save_checkpoint(self, path: str) -> None:
@@ -60,9 +78,9 @@ class EvolvableAlgorithm(Protocol):
         ...
     def test(self, *args, **kwargs) -> ArrayLike:
         ...
-    def load(cls, path: str) -> "EvolvableAlgorithm":
-        ...
     def evolvable_attributes(self, networks_only: bool = False) -> EvolvableAttributeDict:
         ...
     def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
+        ...
+    def clone(self, index: Optional[int], wrap: bool) -> "EvolvableAlgorithm":
         ...

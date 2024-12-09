@@ -17,9 +17,14 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.typing import NumpyObsType, TorchObsType, ObservationType
+from agilerl.typing import NumpyObsType
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first,
+    make_safe_deepcopies
+)
 
 class CQN(RLAlgorithm):
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
@@ -107,20 +112,19 @@ class CQN(RLAlgorithm):
         self.tau = tau
         self.mut = mut
         self.double = double
-        self.actor_network = actor_network
 
-        if self.actor_network is not None:
-            self.actor = actor_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = self.actor.net_config
-                self.actor_network = None
-            elif isinstance(self.actor, MakeEvolvable):
+        if actor_network is not None:
+            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN, EvolvableMultiInput)):
+                self.net_config = actor_network.net_config
+            elif isinstance(actor_network, MakeEvolvable):
                 self.net_config = None
-                self.actor_network = actor_network
             else:
                 assert (
                     False
-                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+                ), (f"'actor_network' argument is of type {type(actor_network)}, but "
+                     "must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable")
+
+            self.actor = make_safe_deepcopies(actor_network)
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -141,7 +145,7 @@ class CQN(RLAlgorithm):
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
                     hidden_size=self.net_config["hidden_size"],
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
@@ -168,7 +172,7 @@ class CQN(RLAlgorithm):
                     kernel_size=self.net_config["kernel_size"],
                     stride_size=self.net_config["stride_size"],
                     hidden_size=self.net_config["hidden_size"],
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                 )
             elif self.net_config["arch"] == "composed":  # Composed network
@@ -201,7 +205,7 @@ class CQN(RLAlgorithm):
                     hidden_size=self.net_config["hidden_size"],
                     normalize=self.net_config["normalize"],
                     latent_dim=self.net_config["latent_dim"],
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                 )
         
@@ -209,27 +213,22 @@ class CQN(RLAlgorithm):
         self.actor_target.load_state_dict(self.actor.state_dict())
 
         # Initialize optimizer
-        kwargs = {"lr": self.lr}
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
-            optimizer_kwargs=kwargs
+            optimizer_kwargs={"lr": self.lr}
             )
 
         self.arch = (
             self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
-        if self.accelerator is not None:
-            if wrap:
-                self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
+        if self.accelerator is not None and wrap:
+            self.wrap_models()
 
         self.criterion = nn.MSELoss()
 
-        # Register policy with algorithm
+        # Register policy for mutations
         self.register_network_group(
             NetworkGroup(
                 eval=self.actor,
@@ -299,10 +298,8 @@ class CQN(RLAlgorithm):
         """
         states, actions, rewards, next_states, dones = experiences
         if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
             actions = actions.to(self.accelerator.device)
             rewards = rewards.to(self.accelerator.device)
-            next_states = next_states.to(self.accelerator.device)
             dones = dones.to(self.accelerator.device)
 
         states = self.preprocess_observation(states)
@@ -403,7 +400,12 @@ class CQN(RLAlgorithm):
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
-        optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=actor,
+            network_names=clone.optimizer.network_names,
+            optimizer_kwargs={"lr": self.lr},
+        )
         if self.accelerator is not None and wrap:
             (
                 clone.actor,
@@ -476,7 +478,12 @@ class CQN(RLAlgorithm):
         self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
 
         self.lr = checkpoint["lr"]
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            network_names=self.optimizer.network_names,
+            optimizer_kwargs={"lr": self.lr},
+        )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -535,10 +542,17 @@ class CQN(RLAlgorithm):
                 agent.actor = EvolvableCNN(**actor_init_dict)
                 agent.actor_target = EvolvableCNN(**actor_target_init_dict)
         else:
+            actor_network = MakeEvolvable(**actor_init_dict)
+            class_init_dict["actor_network"] = actor_network
             agent = cls(**class_init_dict)
             agent.actor_target = MakeEvolvable(**actor_target_init_dict)
 
-        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actor,
+            network_names=agent.optimizer.network_names,
+            optimizer_kwargs={"lr": agent.lr},
+        )
         agent.actor.load_state_dict(actor_state_dict)
         agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.optimizer.load_state_dict(optimizer_state_dict)

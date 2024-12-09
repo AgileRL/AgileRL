@@ -22,7 +22,8 @@ from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
-    obs_channels_to_first
+    obs_channels_to_first,
+    make_safe_deepcopies
 )
 
 class TD3(RLAlgorithm):
@@ -101,8 +102,8 @@ class TD3(RLAlgorithm):
         normalize_images: bool = True,
         mut: Optional[str] = None,
         policy_freq: int = 2,
-        actor_network: Optional[nn.Module] = None,
-        critic_networks: Optional[list[nn.Module]] = None,
+        actor_network: Optional[EvolvableModule] = None,
+        critic_networks: Optional[list[EvolvableModule]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -174,11 +175,9 @@ class TD3(RLAlgorithm):
         self.current_noise = np.zeros((vect_noise_dim, self.action_dim))
         self.theta = theta
         self.dt = dt
-        self.actor_network = actor_network
-        self.critic_networks = critic_networks
         self.learn_counter = 0
 
-        if self.actor_network is not None and self.critic_networks is not None:
+        if actor_network is not None and critic_networks is not None:
             assert isinstance(
                 critic_networks, (list, tuple)
             ), "Critic network must be a list or tuple"
@@ -186,8 +185,7 @@ class TD3(RLAlgorithm):
             assert isinstance(critic_networks[0], type(actor_network)) and isinstance(
                 critic_networks[1], type(actor_network)
             ), "'actor_network' and 'critic_networks' must be the same type."
-            self.actor = actor_network
-            self.critic_1, self.critic_2 = critic_networks
+
             if (
                 isinstance(self.actor, (EvolvableMLP, EvolvableCNN))
                 and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN))
@@ -205,6 +203,8 @@ class TD3(RLAlgorithm):
                     False
                 ), f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_networks[0])}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
 
         else:
             # model

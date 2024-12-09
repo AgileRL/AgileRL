@@ -123,6 +123,7 @@ def create_population(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 double=INIT_HP["DOUBLE"],
+                cudagraphs=INIT_HP['CUDAGRAPHS'],
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,

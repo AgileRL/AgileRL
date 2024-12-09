@@ -16,13 +16,14 @@ from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
-    obs_channels_to_first
+    obs_channels_to_first,
+    make_safe_deepcopies
 )
-
 class RainbowDQN(RLAlgorithm):
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
 
@@ -93,7 +94,7 @@ class RainbowDQN(RLAlgorithm):
         mut: Optional[str] = None,
         normalize_images: bool = True,
         combined_reward: bool = False,
-        actor_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -161,7 +162,6 @@ class RainbowDQN(RLAlgorithm):
         self.v_max = v_max
         self.n_step = n_step
         self.mut = mut
-        self.actor_network = actor_network
         self.combined_reward = combined_reward
         self.noise_std = noise_std
 
@@ -172,23 +172,23 @@ class RainbowDQN(RLAlgorithm):
         else:
             self.support = self.support.to(self.accelerator.device)
 
-        if self.actor_network is not None:
-            self.actor = actor_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = self.actor.net_config
-                self.actor_network = None
-            elif isinstance(self.actor, MakeEvolvable):
+        if actor_network is not None:
+            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)):
+                self.net_config = actor_network.net_config
+            elif isinstance(actor_network, MakeEvolvable):
                 self.net_config = None
-                self.actor.rainbow = True
-                self.actor_network = actor_network
-                self.actor.support = self.support
-                self.actor.num_atoms = self.num_atoms
-                self.actor = MakeEvolvable(**self.actor.init_dict)
-                self.actor.load_state_dict(self.actor.state_dict())
+                actor_network.rainbow = True
+                actor_network = actor_network
+                actor_network.support = self.support
+                actor_network.num_atoms = self.num_atoms
+                actor_network = MakeEvolvable(**actor_network.init_dict)
+                actor_network.load_state_dict(actor_network.state_dict())
             else:
                 assert (
                     False
                 ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actor = make_safe_deepcopies(actor_network)
 
         else:
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -301,10 +301,7 @@ class RainbowDQN(RLAlgorithm):
         )
 
         if self.accelerator is not None and wrap:
-                self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
+            self.wrap_models()
 
         # Put the nets into training mode
         self.actor.train()
@@ -617,7 +614,12 @@ class RainbowDQN(RLAlgorithm):
 
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
-        optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=actor,
+            optimizer_kwargs={"lr": self.lr},
+            network_names=self.optimizer.network_names
+        )
         optimizer.load_state_dict(self.optimizer.state_dict())
 
         if self.accelerator is not None:
@@ -634,8 +636,8 @@ class RainbowDQN(RLAlgorithm):
                     optimizer,
                 )
         else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
+            clone.actor = actor
+            clone.actor_target = actor_target
             clone.optimizer = optimizer
 
         for attribute in self.inspect_attributes().keys():
@@ -660,12 +662,6 @@ class RainbowDQN(RLAlgorithm):
             clone.index = index
 
         return clone
-
-    def wrap_models(self):
-        if self.accelerator is not None:
-            self.actor, self.actor_target, self.optimizer = self.accelerator.prepare(
-                self.actor, self.actor_target, self.optimizer
-            )
 
     def unwrap_models(self):
         if self.accelerator is not None:
@@ -702,7 +698,12 @@ class RainbowDQN(RLAlgorithm):
         self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
 
         self.lr = checkpoint["lr"]
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr},
+            network_names=self.optimizer.network_names
+        )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -765,7 +766,12 @@ class RainbowDQN(RLAlgorithm):
             agent = cls(**class_init_dict)
             agent.actor_target = MakeEvolvable(**actor_target_init_dict)
 
-        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actor,
+            optimizer_kwargs={"lr": agent.lr},
+            network_names=agent.optimizer.network_names
+        )
         agent.actor.load_state_dict(actor_state_dict)
         agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.optimizer.load_state_dict(optimizer_state_dict)

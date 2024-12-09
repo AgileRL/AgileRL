@@ -517,17 +517,15 @@ class Mutations:
 
                         if self.accelerator is None:
                             ind_shared = self.to_device(ind_shared)
-                    
+
                         # Compile modules if necessary
                         if hasattr(individual, "torch_compiler") and individual.torch_compiler:
                             ind_shared = self.compile_modules(ind_shared, individual.torch_compiler)
                         
                         setattr(individual, shared_name, ind_shared)
-            
+
             # Call hooks specified by user
-            if registry.hooks:
-                for hook in registry.hooks:
-                    hook()
+            individual.init_hook()
 
             mutated_population.append(individual)
 
@@ -555,7 +553,7 @@ class Mutations:
             
             # Reinitialize optimizer with mutated nets
             offspring_opt = OptimizerWrapper(
-                optimizer_cls=opt.optimizer_cls,
+                optimizer_cls=opt_config.get_optimizer_cls(),
                 networks=opt_nets,
                 optimizer_kwargs=opt.optimizer_kwargs,
                 network_names=opt.network_names,
@@ -802,7 +800,7 @@ class Mutations:
 
         # get the offsprings from one of the groups to sample mutation method
         sample_eval = list(offspring_evals.values())[0]
-        mut_method, ret_type = get_architecture_mut_method(sample_eval)
+        mut_method, ret_type = get_architecture_mut_method(sample_eval, self.new_layer_prob, self.rng)
         for name, offsprings in offspring_evals.items():
             # Apply mutation method differently for CNN and other arch types
             # NOTE: Need to check the reason for this

@@ -2,6 +2,7 @@ from typing import Optional, List, Dict, Union, Type, Any, Callable
 import inspect
 from dataclasses import dataclass, field
 from torch.optim import Optimizer
+import torch
 
 from agilerl.protocols import EvolvableModule, EvolvableAlgorithm
 
@@ -48,6 +49,36 @@ class OptimizerConfig:
     optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
     optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
 
+    def __post_init__(self):
+        # Save optimizer_cls as string for serialization
+        if isinstance(self.optimizer_cls, list):
+            self.optimizer_cls = [cls.__name__ for cls in self.optimizer_cls]
+        else:
+            self.optimizer_cls = self.optimizer_cls.__name__
+
+    def get_optimizer_cls(self) -> Union[Optimizer, List[Optimizer]]:
+        """Get the optimizer object/s from the stored configuration.
+        
+        :return: The optimizer object/s from the stored configuration.
+        :rtype: Union[Optimizer, List[Optimizer]]
+        """
+        name_to_cls = {
+            "Adam": torch.optim.Adam,
+            "AdamW": torch.optim.AdamW,
+            "SGD": torch.optim.SGD,
+            "RMSprop": torch.optim.RMSprop,
+            "Adadelta": torch.optim.Adadelta,
+            "Adagrad": torch.optim.Adagrad,
+            "Adamax": torch.optim.Adamax,
+            "ASGD": torch.optim.ASGD,
+            "LBFGS": torch.optim.LBFGS,
+            "Rprop": torch.optim.Rprop
+        }
+        if isinstance(self.optimizer_cls, list):
+            return [name_to_cls[cls_name] for cls_name in self.optimizer_cls]
+        
+        return name_to_cls[self.optimizer_cls]
+
 
 @dataclass
 class NetworkGroup:
@@ -66,14 +97,37 @@ class NetworkGroup:
     eval: EvolvableModule
     shared: Optional[Union[EvolvableModule, List[EvolvableModule]]] = field(default=None)
     policy: bool = field(default=False)
+    multiagent: bool = field(default=False)
 
     def __post_init__(self):
+        if self.multiagent:
+            assert (
+                isinstance(self.eval, list) and isinstance(self.eval[0], EvolvableModule),
+                "Multiagent algorithms should specify a list of EvolvableModule objects "
+                "for the evaluation argument in the network group."
+            )
+            if self.shared is not None:
+                assert (
+                    isinstance(self.shared, list),
+                    "Multiagent algorithms should specify a list of EvolvableModule objects "
+                    "for the shared argument in the network group."
+                )
+
         # Identify the names of the attributes where the networks are stored
         container = self._infer_parent_container()
-        self.eval = self._infer_attribute_names(container, [self.eval])[0]
+        eval = self.eval if isinstance(self.eval, list) else [self.eval]
+        self.eval = self._infer_attribute_names(container, eval)[0]
         if self.shared is not None:
             shared = self.shared if isinstance(self.shared, list) else [self.shared]
-            self.shared = self._infer_attribute_names(container, shared)
+
+            if self.multiagent and isinstance(self.shared[0], list):
+                self.shared = [self._infer_attribute_names(container, shared) for shared in shared]
+            else:
+                assert (
+                    isinstance(self.shared[0], EvolvableModule),
+                    "Expected a list of EvolvableModule objects for the shared argument in the network group."
+                )
+                self.shared = self._infer_attribute_names(container, shared)
 
     def _infer_parent_container(self) -> EvolvableAlgorithm:
         """
@@ -93,11 +147,16 @@ class NetworkGroup:
 
         :return: List of attribute names for the networks
         """
+        def _match_condition(attr_value: Any) -> bool:
+            if not self.multiagent:
+                return any(id(attr_value) == id(net) for net in objects)
+            return id(attr_value) == id(objects)
+    
         return [
             attr_name for attr_name, attr_value in vars(container).items()
-            if any(id(attr_value) == id(net) for net in objects)
+            if _match_condition(attr_value)
         ]
-
+    
 
 def make_network_group(
         eval: str,
@@ -122,7 +181,7 @@ def make_network_group(
     return NetworkGroup(eval=eval, shared=shared, policy=policy)
 
 @dataclass
-class Registry:
+class MutationRegistry:
     """Registry for storing the evolvable modules and optimizers of an `EvolvableAlgorithm`
     in a structured way to be interpreted by a `Mutations` object when performing evolutionary 
     hyperparameter optimization."""
@@ -141,7 +200,7 @@ class Registry:
             )
         optimizers_str = "\n".join(
             [
-                f"{opt.optimizer_cls.__name__}: '{opt.name}', Networks: {opt.networks}" 
+                f"{opt.optimizer_cls}: '{opt.name}', Networks: {opt.networks}" 
                 for opt in self.optimizers
             ]
             )
@@ -220,9 +279,10 @@ class Registry:
         self.optimizers.append(optimizer)
     
     def register_hook(self, hook: Callable) -> None:
-        """Register a hook in the registry.
+        """Register a hook in the registry as its name.
         
         :param hook: The hook to be registered.
         :type hook: Callable
         """
-        self.hooks.append(hook)
+        self.hooks.append(hook.__name__)
+

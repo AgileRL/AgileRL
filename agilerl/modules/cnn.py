@@ -271,6 +271,7 @@ class EvolvableCNN(EvolvableModule):
             layer_norm=self.layer_norm,
             activation_fn=self.cnn_activation,
             n_agents=self.n_agents,
+            device=self.device
         )
 
         # If the CNN is a critic or feature extractor, add a linear layer to flatten the output
@@ -281,17 +282,17 @@ class EvolvableCNN(EvolvableModule):
             net_dict[f"{name}_flatten"] = nn.Flatten()
             if self.n_agents is not None:
                 sample_input = (
-                    torch.zeros(1, *self.input_shape)
+                    torch.zeros(1, *self.input_shape, device=self.device)
                     .unsqueeze(2)
                     .repeat(1, 1, self.n_agents, 1, 1)
                 )
             else:
-                sample_input = torch.zeros((1, *self.input_shape))
+                sample_input = torch.zeros((1, *self.input_shape), device=self.device)
 
             with torch.no_grad():
                 flattened_size = nn.Sequential(net_dict)(sample_input).shape[1]
 
-            net_dict[f"{name}_linear_output"] = nn.Linear(flattened_size, features_dim)
+            net_dict[f"{name}_linear_output"] = nn.Linear(flattened_size, features_dim, device=self.device)
             net_dict[f"{name}_output_activation"] = get_activation(
                 self.cnn_activation
             )
@@ -317,7 +318,7 @@ class EvolvableCNN(EvolvableModule):
             if self.n_agents is not None:
                 if self.critic:
                     critic_input = (
-                        torch.zeros(1, *self.input_shape)
+                        torch.zeros(1, *self.input_shape, device=self.device)
                         .unsqueeze(2)
                         .repeat(1, 1, self.n_agents, 1, 1)
                     )
@@ -325,11 +326,11 @@ class EvolvableCNN(EvolvableModule):
                     input_size = cnn_output.view(1, -1).size(1)
                 else:
                     cnn_output = feature_net(
-                        torch.zeros(1, *self.input_shape).unsqueeze(2)
+                        torch.zeros(1, *self.input_shape, device=self.device).unsqueeze(2)
                     )
                     input_size = cnn_output.view(1, -1).size(1)
             else:
-                sample = torch.zeros((1, *self.input_shape))
+                sample = torch.zeros((1, *self.input_shape), device=self.device)
                 cnn_output = feature_net(sample)
                 input_size = cnn_output.view(1, -1).size(1)
 
@@ -345,6 +346,7 @@ class EvolvableCNN(EvolvableModule):
                 name="value",
                 output_activation=None,
                 noisy=True,
+                device=self.device
             )
             advantage_net = create_mlp(
                 input_size,
@@ -354,16 +356,11 @@ class EvolvableCNN(EvolvableModule):
                 name="advantage",
                 output_activation=None,
                 noisy=True,
+                device=self.device
             )
             if self.accelerator is not None:
                 feature_net, value_net, advantage_net = self.accelerator.prepare(
                     feature_net, value_net, advantage_net
-                )
-            else:
-                feature_net, value_net, advantage_net = (
-                    feature_net.to(self.device),
-                    value_net.to(self.device),
-                    advantage_net.to(self.device),
                 )
         else:
             if self.critic:
@@ -374,6 +371,7 @@ class EvolvableCNN(EvolvableModule):
                     name="value",
                     output_vanish=self.output_vanish,
                     output_activation=self.mlp_output_activation,
+                    device=self.device
                 )
             elif self.latent_dim is not None: # If a feature extractor, last hidden layer is the output layer
                 value_net = create_mlp(
@@ -383,6 +381,7 @@ class EvolvableCNN(EvolvableModule):
                     name="feature_head",
                     output_vanish=self.output_vanish,
                     output_activation=self.mlp_output_activation,
+                    device=self.device
                 )
             else:
                 value_net = create_mlp(
@@ -392,11 +391,9 @@ class EvolvableCNN(EvolvableModule):
                     name="value",
                     output_vanish=self.output_vanish,
                     output_activation=self.mlp_output_activation,
+                    device=self.device
                 )
             advantage_net = None
-            if self.accelerator is None:
-                feature_net = feature_net.to(self.device)
-                value_net = value_net.to(self.device)
 
         self.cnn_output_size = cnn_output.shape
 

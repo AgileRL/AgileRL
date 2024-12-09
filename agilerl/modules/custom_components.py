@@ -57,15 +57,15 @@ class NoisyLinear(nn.Module):
         self.std_init = std_init
         self.device = device
 
-        self.weight_mu = nn.Parameter(torch.FloatTensor(out_features, in_features, device=device))
-        self.weight_sigma = nn.Parameter(torch.FloatTensor(out_features, in_features, device=device))
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features, device=device))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features, device=device))
         self.register_buffer(
-            "weight_epsilon", torch.FloatTensor(out_features, in_features, device=device)
+            "weight_epsilon", torch.empty(out_features, in_features, device=device)
         )
 
-        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features, device=device))
-        self.bias_sigma = nn.Parameter(torch.FloatTensor(out_features, device=device))
-        self.register_buffer("bias_epsilon", torch.FloatTensor(out_features, device=device))
+        self.bias_mu = nn.Parameter(torch.empty(out_features, device=device))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features, device=device))
+        self.register_buffer("bias_epsilon", torch.empty(out_features, device=device))
 
         self.reset_parameters()
         self.reset_noise()

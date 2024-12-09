@@ -16,6 +16,7 @@ from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.modules.base import EvolvableModule
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -27,6 +28,7 @@ from agilerl.utils.algo_utils import (
     get_experiences_samples,
     flatten_experiences,
     is_vectorized_experiences,
+    make_safe_deepcopies
 )
 
 class PPO(RLAlgorithm):
@@ -103,8 +105,8 @@ class PPO(RLAlgorithm):
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_network: Optional[nn.Module] = None,
-        critic_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
+        critic_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         compile: bool = True,
@@ -190,8 +192,6 @@ class PPO(RLAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
         self.update_epochs = update_epochs
-        self.actor_network = actor_network
-        self.critic_network = critic_network
         self.compile = compile
         self.cudagraphs = cudagraphs
 
@@ -200,12 +200,11 @@ class PPO(RLAlgorithm):
             device = self.device if self.accelerator is None else self.accelerator.device
             self.action_var = torch.full((self.action_dim,), action_std_init**2, device=device)
 
-        if self.actor_network is not None and self.critic_network is not None:
+        if actor_network is not None and critic_network is not None:
             assert type(actor_network) is type(
                 critic_network
             ), "'actor_network' and 'critic_network' must be the same type."
-            self.actor = actor_network
-            self.critic = critic_network
+
             if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(
                 self.critic, (EvolvableMLP, EvolvableCNN)
             ):
@@ -219,6 +218,8 @@ class PPO(RLAlgorithm):
                     False
                 ), f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
 
         else:
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."

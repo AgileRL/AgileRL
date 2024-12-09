@@ -18,11 +18,12 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.base import EvolvableModule
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
     key_in_nested_dict,
     unwrap_optimizer,
+    make_safe_deepcopies
 )
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 class MADDPG(MultiAgentAlgorithm):
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
@@ -104,8 +105,8 @@ class MADDPG(MultiAgentAlgorithm):
         tau: float = 0.01,
         mut: Optional[str] = None,
         normalize_images: bool = True,
-        actor_networks: Optional[List[nn.Module]] = None,
-        critic_networks: Optional[List[nn.Module]] = None,
+        actor_networks: Optional[List[EvolvableModule]] = None,
+        critic_networks: Optional[List[EvolvableModule]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -159,14 +160,14 @@ class MADDPG(MultiAgentAlgorithm):
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.sample_gaussian = [
-            torch.zeros(*(vect_noise_dim, self.action_dims[idx])).to(device)
+            torch.zeros(*(vect_noise_dim, self.action_dims[idx]), device=self.device)
             for idx in range(self.n_agents)
         ]
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, list)
             else [
-                expl_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
+                expl_noise * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
                 for action_dim in self.action_dims
             ]
         )
@@ -174,21 +175,19 @@ class MADDPG(MultiAgentAlgorithm):
             mean_noise
             if isinstance(mean_noise, list)
             else [
-                mean_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
+                mean_noise * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
                 for action_dim in self.action_dims
             ]
         )
         self.current_noise = [
-            torch.zeros(*(vect_noise_dim, action_dim)).to(device)
+            torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
             for action_dim in self.action_dims
         ]
         self.theta = theta
         self.dt = dt
         self.sqdt = dt ** (0.5)
 
-        self.actor_networks = actor_networks
-        self.critic_networks = critic_networks
-        if self.actor_networks is not None and self.critic_networks is not None:
+        if actor_networks is not None and critic_networks is not None:
             assert (
                 len({type(net) for net in actor_networks}) == 1
             ), "'actor_networks' must all be the same type"
@@ -198,14 +197,13 @@ class MADDPG(MultiAgentAlgorithm):
             assert isinstance(
                 actor_networks[0], type(critic_networks[0])
             ), "actor and critic networks must be the same type"
-            self.actors = actor_networks
-            self.critics = critic_networks
-            if isinstance(self.actors[0], (EvolvableMLP, EvolvableCNN)) and isinstance(
-                self.critics[0], (EvolvableMLP, EvolvableCNN)
+
+            if isinstance(actor_networks[0], (EvolvableMLP, EvolvableCNN)) and isinstance(
+                critic_networks[0], (EvolvableMLP, EvolvableCNN)
             ):
-                self.net_config = self.actors[0].net_config
-            elif isinstance(self.actors[0], MakeEvolvable) and isinstance(
-                self.critics[0], MakeEvolvable
+                self.net_config = actor_networks[0].net_config
+            elif isinstance(actor_networks[0], MakeEvolvable) and isinstance(
+                critic_networks[0], MakeEvolvable
             ):
                 self.net_config = None
             else:
@@ -213,6 +211,8 @@ class MADDPG(MultiAgentAlgorithm):
                     False
                 ), "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
                                 type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actors, self.critics = make_safe_deepcopies(actor_networks, critic_networks)
         else:
             # model
             self.actors = []
@@ -235,7 +235,7 @@ class MADDPG(MultiAgentAlgorithm):
                         EvolvableMLP(
                             num_inputs=state_dim[0],
                             num_outputs=action_dim,
-                            device='cpu', # Use CPU since we will make deepcopy for target
+                            device=self.device,
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -244,7 +244,7 @@ class MADDPG(MultiAgentAlgorithm):
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
                         num_outputs=1,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -269,7 +269,7 @@ class MADDPG(MultiAgentAlgorithm):
                             input_shape=state_dim,
                             num_outputs=action_dim,
                             n_agents=self.n_agents,
-                            device='cpu', # Use CPU since we will make deepcopy for target
+                            device=self.device,
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -281,7 +281,7 @@ class MADDPG(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -305,7 +305,7 @@ class MADDPG(MultiAgentAlgorithm):
                             observation_space=obs_space,
                             num_outputs=action_dim,
                             n_agents=self.n_agents,
-                            device='cpu', # Use CPU since we will make deepcopy for target
+                            device=self.device,
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -316,14 +316,13 @@ class MADDPG(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
                     for obs_space in self.observation_spaces
                 ]
     
-
         # Assign architecture
         self.arch = (
             self.net_config["arch"]
@@ -341,18 +340,18 @@ class MADDPG(MultiAgentAlgorithm):
         for critic, critic_target in zip(self.critics, self.critic_targets):
             critic_target.load_state_dict(critic.state_dict())
 
-        actor_opt_kwargs = {"lr": self.lr_actor}
+        # Optimizers
         self.actor_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.actors,
-            optimizer_kwargs=actor_opt_kwargs
+            optimizer_kwargs={"lr": self.lr_actor},
+            multiagent=True
         )
-
-        critic_opt_kwargs = {"lr": self.lr_critic}
         self.critic_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics,
-            optimizer_kwargs=critic_opt_kwargs
+            optimizer_kwargs={"lr": self.lr_critic},
+            multiagent=True
         )
 
         if self.accelerator is not None and wrap:
@@ -382,12 +381,14 @@ class MADDPG(MultiAgentAlgorithm):
                 eval=self.actors,
                 shared=self.actor_targets,
                 policy=True,
+                multiagent=True
             )
         )
         self.register_network_group(
             NetworkGroup(
                 eval=self.critics,
-                shared=self.critic_targets
+                shared=self.critic_targets,
+                multiagent=True
             )
         )
 
@@ -634,6 +635,10 @@ class MADDPG(MultiAgentAlgorithm):
         :rtype: Dict[str, torch.Tensor]
         """
         states, actions, rewards, next_states, dones = experiences
+
+        actions = {agent_id: agent_actions.to(self.device) for agent_id, agent_actions in actions.items()}
+        rewards = {agent_id: agent_rewards.to(self.device) for agent_id, agent_rewards in rewards.items()}
+        dones = {agent_id: agent_dones.to(self.device) for agent_id, agent_dones in dones.items()}
 
         # Preprocess observations
         states = self.preprocess_observation(states)
@@ -1011,13 +1016,20 @@ class MADDPG(MultiAgentAlgorithm):
         clone.critic_targets = [
             critic_target.clone() for critic_target in self.critic_targets
         ]
-        clone.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in clone.actors
-        ]
-        clone.critic_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic)
-            for critic in clone.critics
-        ]
+        clone.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=clone.actors,
+            optimizer_kwargs={"lr": clone.lr_actor},
+            network_names=clone.actor_optimizers.network_names,
+            multiagent=True
+        )
+        clone.critic_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=clone.critics,
+            optimizer_kwargs={"lr": clone.lr_critic},
+            network_names=clone.critic_optimizers.network_names,
+            multiagent=True
+        )
 
         # Load optimizer state dicts to clone
         for (
@@ -1035,9 +1047,8 @@ class MADDPG(MultiAgentAlgorithm):
             clone_critic_optimizer.load_state_dict(critic_optimizer.state_dict())
 
         # Compile and accelerator wrap
-        if clone.accelerator is not None:
-            if wrap:
-                clone.wrap_models()
+        if clone.accelerator is not None and wrap:
+            clone.wrap_models()
 
         # move to device
         else:
@@ -1103,11 +1114,11 @@ class MADDPG(MultiAgentAlgorithm):
                 self.accelerator.unwrap_model(critic_target)
                 for critic_target in self.critic_targets
             ]
-            self.actor_optimizers = [
+            self.actor_optimizers.optimizer = [
                 unwrap_optimizer(actor_optimizer, actor, self.lr_actor)
                 for actor_optimizer, actor, in zip(self.actor_optimizers, self.actors)
             ]
-            self.critic_optimizers = [
+            self.critic_optimizers.optimizer = [
                 unwrap_optimizer(critic_optimizer, critic, self.lr_critic)
                 for critic_optimizer, critic in zip(
                     self.critic_optimizers, self.critics
@@ -1165,13 +1176,20 @@ class MADDPG(MultiAgentAlgorithm):
 
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
-        self.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
-        ]
-        self.critic_optimizers = [
-            optim.Adam(critic.parameters(), lr=self.lr_critic)
-            for critic in self.critics
-        ]
+        self.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actors,
+            optimizer_kwargs={"lr": self.lr_actor},
+            network_names=self.actor_optimizers.network_names,
+            multiagent=True
+        )
+        self.critic_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critics,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_optimizers.network_names,
+            multiagent=True
+        )
         actor_list = []
         critic_list = []
         actor_target_list = []
@@ -1217,8 +1235,8 @@ class MADDPG(MultiAgentAlgorithm):
         self.actor_targets = actor_target_list
         self.critics = critic_list
         self.critic_targets = critic_target_list
-        self.actor_optimizers = actor_optimizer_list
-        self.critic_optimizers = critic_optimizer_list
+        self.actor_optimizers.optimizer = actor_optimizer_list
+        self.critic_optimizers.optimizer = critic_optimizer_list
 
         for attribute in checkpoint.keys():
             if attribute not in network_info:
@@ -1333,14 +1351,20 @@ class MADDPG(MultiAgentAlgorithm):
                 for idx, _ in enumerate(checkpoint["agent_ids"])
             ]
 
-        agent.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=agent.lr_actor) for actor in agent.actors
-        ]
-        agent.critic_optimizers = [
-            optim.Adam(critic.parameters(), lr=agent.lr_critic)
-            for critic in agent.critics
-        ]
-
+        agent.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actors,
+            optimizer_kwargs={"lr": agent.lr_actor},
+            network_names=agent.actor_optimizers.network_names,
+            multiagent=True
+        )
+        agent.critic_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.critics,
+            optimizer_kwargs={"lr": agent.lr_critic},
+            network_names=agent.critic_optimizers.network_names,
+            multiagent=True
+        )
         actor_list = []
         critic_list = []
         actor_target_list = []
@@ -1381,8 +1405,8 @@ class MADDPG(MultiAgentAlgorithm):
         agent.actor_targets = actor_target_list
         agent.critics = critic_list
         agent.critic_targets = critic_target_list
-        agent.actor_optimizers = actor_optimizer_list
-        agent.critic_optimizers = critic_optimizer_list
+        agent.actor_optimizers.optimizer = actor_optimizer_list
+        agent.critic_optimizers.optimizer = critic_optimizer_list
 
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])

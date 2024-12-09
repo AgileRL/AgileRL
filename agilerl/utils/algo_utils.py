@@ -1,8 +1,9 @@
-from typing import Union, Dict, Any, Tuple, Optional, TypeGuard, Iterable
+from typing import Union, Dict, Any, Tuple, Optional, TypeGuard, Iterable, List
 from collections import OrderedDict, defaultdict
 from numbers import Number
 import inspect
 import numpy as np
+import copy
 from gymnasium import spaces
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
@@ -25,6 +26,26 @@ from agilerl.typing import (
     MaybeObsList,
     ArrayOrTensor
 )
+
+def make_safe_deepcopies(*args: Union[EvolvableModule, List[EvolvableModule]]) -> List[EvolvableModule]:
+    """Makes deep copies of EvolvableModule's and their attributes.
+    
+    :param args: EvolvableModule's or lists of EvolvableModule's to copy.
+    :type args: Union[EvolvableModule, List[EvolvableModule]].
+    
+    :return: Deep copies of the EvolvableModule's and their attributes.
+    :rtype: List[EvolvableModule].
+    """
+    copies = []
+    for arg in args:
+        if isinstance(arg, list):
+            arg_copy = [copy.deepcopy(inner_arg.cpu()).to(inner_arg.device) for inner_arg in arg]
+        else:
+            arg_copy = copy.deepcopy(arg.cpu()).to(arg.device)
+        
+        copies.append(arg_copy)
+    
+    return copies[0] if len(copies) == 1 else copies
 
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
@@ -110,7 +131,7 @@ def unwrap_optimizer(
     else:
         return optimizer
     
-def recursive_check_module_attrs(obj: Any, networks_only: bool = False, exclude_td: bool = False) -> bool:
+def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     """Recursively check if the object has any attributes that are EvolvableModule's or Optimizer's.
 
     :param obj: The object to check for EvolvableModule's or Optimizer's.
@@ -119,15 +140,10 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False, exclude_
     :rtype: bool
     :param networks_only: If True, only check for EvolvableModule's, defaults to False
     :type networks_only: bool, optional
-    :param exclude_td: If True, exclude TensorDict attributes from check, defaults to False
-    :type exclude_td: bool, optional
     """
     check_types = (OptimizedModule, EvolvableModule)
     if not networks_only:
         check_types += (OptimizerWrapper,)
-    
-    if not exclude_td:
-        check_types += (TensorDict,)
 
     if isinstance(obj, check_types):
         return True

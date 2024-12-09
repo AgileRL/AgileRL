@@ -28,33 +28,34 @@ class OptimizerWrapper:
             optimizer_cls: _Optimizer,
             networks: _Module,
             optimizer_kwargs: Dict[str, Any],
-            network_names: Optional[List[str]] = None
+            network_names: Optional[List[str]] = None,
+            multiagent: bool = False
             ) -> None:
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs
+        self.multiagent = multiagent
 
         if isinstance(networks, nn.Module):
             self.networks = [networks]
-        
-        self.parent_container = self._infer_parent_container()
+        else:
+            self.networks = networks
 
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.
         if network_names is not None:
             self.network_names = network_names
         else:
-            self.network_names = self._infer_network_attr_names()
+            parent_container = self._infer_parent_container()
+            self.network_names = self._infer_network_attr_names(parent_container)
 
         assert self.network_names, "No networks found in the parent container."
 
         # Initialize the optimizer/s
+        # NOTE: For multi-agent algorithms, we want to have a different optimizer for each of the 
+        # networks.
         multiple_attrs = len(self.network_names) > 1
         multiple_networks = len(self.networks) > 1
-
-        # NOTE: For multi-agent algorithms, we expect multiple EvolvableModules to be stored 
-        # in a single attribute, where we want to initialize a separate optimizer for each
-        # network.
-        if multiple_networks and not multiple_attrs:
+        if multiagent:
             self.optimizer = []
             for i, net in enumerate(self.networks):
                 optimizer = optimizer_cls[i] if isinstance(optimizer_cls, list) else optimizer_cls
@@ -92,6 +93,9 @@ class OptimizerWrapper:
             return self.optimizer[index]
         except TypeError:
             raise TypeError(f"Can't access item of a single {type(self.optimizer)} object.")
+    
+    def __iter__(self):
+        return iter(self.optimizer)
 
     def __getattribute__(self, name: str):
         try:
@@ -111,13 +115,18 @@ class OptimizerWrapper:
         current_frame = inspect.currentframe()
         return current_frame.f_back.f_back.f_locals['self']
 
-    def _infer_network_attr_names(self) -> List[str]:
+    def _infer_network_attr_names(self, container: Any) -> List[str]:
         """
         Infer attribute names of the networks being optimized.
 
         :return: List of attribute names for the networks
         """
+        def _match_condition(attr_value: Any) -> bool:
+            if not self.multiagent:
+                return any(id(attr_value) == id(net) for net in self.networks)
+            return id(attr_value) == id(self.networks)
+    
         return [
-            attr_name for attr_name, attr_value in vars(self.parent_container).items()
-            if any(id(attr_value) == id(net) for net in self.networks)
+            attr_name for attr_name, attr_value in vars(container).items()
+            if _match_condition(attr_value)
         ]

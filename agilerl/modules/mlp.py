@@ -164,10 +164,9 @@ class EvolvableMLP(EvolvableModule):
                 hidden_size=self.hidden_size,
                 output_vanish=self.output_vanish,
                 output_activation=self.mlp_output_activation,
-                layer_norm=self.layer_norm
+                layer_norm=self.layer_norm,
+                device=self.device
             )
-            if self.accelerator is None:
-                feature_net = feature_net.to(self.device)
 
         value_net, advantage_net = None, None
 
@@ -184,7 +183,8 @@ class EvolvableMLP(EvolvableModule):
                 mlp_activation=self.mlp_activation,
                 mlp_output_activation=self.mlp_output_activation,
                 noise_std=self.noise_std,
-                rainbow=True
+                rainbow=True,
+                device=self.device
             )
             value_net = create_mlp(
                 input_size=self.hidden_size[0],
@@ -198,7 +198,8 @@ class EvolvableMLP(EvolvableModule):
                 mlp_activation=self.mlp_activation,
                 mlp_output_activation=self.mlp_output_activation,
                 noise_std=self.noise_std,
-                rainbow=True
+                rainbow=True,
+                device=self.device
             )
             advantage_net = create_mlp(
                 input_size=self.hidden_size[0],
@@ -212,14 +213,9 @@ class EvolvableMLP(EvolvableModule):
                 mlp_activation=self.mlp_activation,
                 mlp_output_activation=self.mlp_output_activation,
                 noise_std=self.noise_std,
-                rainbow=True
+                rainbow=True,
+                device=self.device
             )
-            if self.accelerator is None:
-                value_net, advantage_net, feature_net = (
-                    value_net.to(self.device),
-                    advantage_net.to(self.device),
-                    feature_net.to(self.device),
-                )
 
         return feature_net, value_net, advantage_net
 

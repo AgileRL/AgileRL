@@ -18,8 +18,13 @@ from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.utils.algo_utils import chkpt_attribute_to_device, unwrap_optimizer, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.utils.algo_utils import (
+    chkpt_attribute_to_device,
+    unwrap_optimizer,
+    obs_channels_to_first,
+    make_safe_deepcopies
+)
 
 class DDPG(RLAlgorithm):
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
@@ -166,32 +171,27 @@ class DDPG(RLAlgorithm):
         self.theta = theta
         self.dt = dt
         self.learn_counter = 0
-        self.actor_network = None
-        self.critic_network = None
 
         if actor_network is not None and critic_network is not None:
             assert type(actor_network) is type(
                 critic_network
             ), "'actor_network' and 'critic_network' must be the same type."
-            self.actor = actor_network
-            self.critic = critic_network
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(
-                self.critic, (EvolvableMLP, EvolvableCNN)
+
+            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)) and isinstance(
+                critic_network, (EvolvableMLP, EvolvableCNN)
             ):
-                self.net_config = self.actor.net_config
-                self.actor_network = None
-                self.critic_network = None
-            elif isinstance(self.actor, MakeEvolvable) and isinstance(
-                self.critic, MakeEvolvable
+                self.net_config = actor_network.net_config
+            elif isinstance(actor_network, MakeEvolvable) and isinstance(
+                critic_network, MakeEvolvable
             ):
                 self.net_config = None
-                self.actor_network = actor_network
-                self.critic_network = critic_network
             else:
                 assert (
                     False
                 ), f"'actor_network' argument is of type {type(actor_network)} and 'critic_network' of type {type(critic_network)}, \
                                 both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            
+            self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
         else:
             # model
             assert isinstance(self.net_config, dict), "Net config must be a dictionary."
@@ -223,14 +223,14 @@ class DDPG(RLAlgorithm):
                 self.actor = EvolvableMLP(
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.critic = EvolvableMLP(
                     num_inputs=self.state_dim[0] + self.action_dim,
                     num_outputs=1,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -254,7 +254,7 @@ class DDPG(RLAlgorithm):
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -262,7 +262,7 @@ class DDPG(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -290,7 +290,7 @@ class DDPG(RLAlgorithm):
                 self.actor = EvolvableMultiInput(
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -298,7 +298,7 @@ class DDPG(RLAlgorithm):
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -309,17 +309,15 @@ class DDPG(RLAlgorithm):
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         # Optimizers
-        actor_kwargs = {"lr": lr_actor}
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
-            optimizer_kwargs=actor_kwargs
+            optimizer_kwargs={"lr": lr_actor}
         )
-        critic_kwargs = {"lr": lr_critic}
         self.critic_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic,
-            optimizer_kwargs=critic_kwargs
+            optimizer_kwargs={"lr": lr_critic}
         )
 
         self.arch = (
@@ -328,11 +326,6 @@ class DDPG(RLAlgorithm):
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
-            self.critic = self.critic.to(self.device)
-            self.critic_target = self.critic_target.to(self.device)
 
         self.criterion = nn.MSELoss()
 
@@ -631,8 +624,18 @@ class DDPG(RLAlgorithm):
         actor_target = self.actor_target.clone()
         critic = self.critic.clone()
         critic_target = self.critic_target.clone()
-        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr_actor)
-        critic_optimizer = optim.Adam(critic.parameters(), lr=clone.lr_critic)
+        actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=actor,
+            network_names=self.actor_optimizer.network_names,
+            optimizer_kwargs={"lr": self.lr_actor}
+        )
+        critic_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=critic,
+            network_names=self.critic_optimizer.network_names,
+            optimizer_kwargs={"lr": self.lr_critic}
+        )
         actor_optimizer.load_state_dict(self.actor_optimizer.state_dict())
         critic_optimizer.load_state_dict(self.critic_optimizer.state_dict())
 
@@ -670,10 +673,10 @@ class DDPG(RLAlgorithm):
                     critic_optimizer,
                 )
         else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
-            clone.critic = critic.to(self.device)
-            clone.critic_target = critic_target.to(self.device)
+            clone.actor = actor
+            clone.actor_target = actor_target
+            clone.critic = critic
+            clone.critic_target = critic_target
             clone.actor_optimizer = actor_optimizer
             clone.critic_optimizer = critic_optimizer
 
@@ -758,8 +761,18 @@ class DDPG(RLAlgorithm):
 
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.lr_critic)
+        self.actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            network_names=self.actor_optimizer.network_names,
+            optimizer_kwargs={"lr": self.lr_actor}
+        )
+        self.critic_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critic,
+            network_names=self.critic_optimizer.network_names,
+            optimizer_kwargs={"lr": self.lr_critic}
+        )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
         self.critic.load_state_dict(checkpoint["critic_state_dict"])
@@ -848,13 +861,21 @@ class DDPG(RLAlgorithm):
             agent.actor_target = MakeEvolvable(**actor_target_init_dict)
             agent.critic_target = MakeEvolvable(**critic_target_init_dict)
 
-        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr_actor)
+        agent.actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actor,
+            network_names=agent.actor_optimizer.network_names,
+            optimizer_kwargs={"lr": agent.lr_actor}
+        )
         agent.actor.load_state_dict(actor_state_dict)
         agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.actor_optimizer.load_state_dict(actor_optimizer_state_dict)
 
-        agent.critic_optimizer = optim.Adam(
-            agent.critic.parameters(), lr=agent.lr_critic
+        agent.critic_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.critic,
+            network_names=agent.critic_optimizer.network_names,
+            optimizer_kwargs={"lr": agent.lr_critic}
         )
         agent.critic.load_state_dict(critic_state_dict)
         agent.critic_target.load_state_dict(critic_target_state_dict)
