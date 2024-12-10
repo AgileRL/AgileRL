@@ -1657,6 +1657,7 @@ def test_wandb_init_log(env, population_off_policy, tournament, mutations, memor
         mock_wandb_log.assert_called_with(
             {
                 "global_step": ANY,
+                "fps": ANY,
                 "train/mean_score": ANY,
                 "eval/mean_fitness": ANY,
                 "eval/best_fitness": ANY,
@@ -1737,6 +1738,7 @@ def test_wandb_init_log_distributed(
         mock_wandb_log.assert_called_with(
             {
                 "global_step": ANY,
+                "fps": ANY,
                 "train/mean_score": ANY,
                 "eval/mean_fitness": ANY,
                 "eval/best_fitness": ANY,

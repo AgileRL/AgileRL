@@ -120,11 +120,11 @@ class NetworkGroup:
         if self.shared is not None:
             shared = self.shared if isinstance(self.shared, list) else [self.shared]
 
-            if self.multiagent and isinstance(self.shared[0], list):
+            if self.multiagent and isinstance(shared[0], list):
                 self.shared = [self._infer_attribute_names(container, shared) for shared in shared]
             else:
                 assert (
-                    isinstance(self.shared[0], EvolvableModule),
+                    isinstance(shared[0], EvolvableModule),
                     "Expected a list of EvolvableModule objects for the shared argument in the network group."
                 )
                 self.shared = self._infer_attribute_names(container, shared)

@@ -313,8 +313,6 @@ def test_initialize_matd3_with_net_config(
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
-    assert matd3.actor_networks is None
-    assert matd3.critic_networks is None
     if net_config["arch"] == "mlp":
         evo_type = EvolvableMLP
         assert matd3.arch == "mlp"
@@ -1866,7 +1864,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     assert clone_agent.agent_ids == matd3.agent_ids
     assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
     assert np.all(np.stack(clone_agent.min_action) == np.stack(matd3.min_action))
-    assert np.array_equal(clone_agent.expl_noise, matd3.expl_noise)
+    assert all(torch.equal(clone_expl_noise, expl_noise) for clone_expl_noise, expl_noise in zip(clone_agent.expl_noise, matd3.expl_noise))
     assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
     assert clone_agent.net_config == matd3.net_config
@@ -1905,9 +1903,6 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
         assert str(clone_critic_target_2.state_dict()) == str(
             critic_target_2.state_dict()
         )
-
-    assert clone_agent.actor_networks == matd3.actor_networks
-    assert clone_agent.critic_networks == matd3.critic_networks
 
 
 @pytest.mark.parametrize("compile_mode", [None, "default"])
@@ -1966,7 +1961,7 @@ def test_clone_after_learning(compile_mode):
     assert clone_agent.agent_ids == matd3.agent_ids
     assert np.all(np.stack(clone_agent.max_action) == np.stack(matd3.max_action))
     assert np.all(np.stack(clone_agent.min_action) == np.stack(matd3.min_action))
-    assert np.array_equal(clone_agent.expl_noise, matd3.expl_noise)
+    assert all(torch.equal(clone_expl_noise, expl_noise) for clone_expl_noise, expl_noise in zip(clone_agent.expl_noise, matd3.expl_noise))
     assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
     assert clone_agent.net_config == matd3.net_config
@@ -2006,9 +2001,6 @@ def test_clone_after_learning(compile_mode):
         assert str(clone_critic_target_2.state_dict()) == str(
             critic_target_2.state_dict()
         )
-
-    assert clone_agent.actor_networks == matd3.actor_networks
-    assert clone_agent.critic_networks == matd3.critic_networks
 
     for clone_actor_opt, actor_opt in zip(
         clone_agent.actor_optimizers, matd3.actor_optimizers

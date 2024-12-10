@@ -615,6 +615,11 @@ class DDPG(RLAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_network'] = self.actor
+            input_args['critic_network'] = self.critic
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -639,39 +644,22 @@ class DDPG(RLAlgorithm):
         actor_optimizer.load_state_dict(self.actor_optimizer.state_dict())
         critic_optimizer.load_state_dict(self.critic_optimizer.state_dict())
 
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.critic,
-                    clone.critic_target,
-                    clone.actor_optimizer,
-                    clone.critic_optimizer,
-                ) = self.accelerator.prepare(
-                    actor,
-                    actor_target,
-                    critic,
-                    critic_target,
-                    actor_optimizer,
-                    critic_optimizer,
-                )
-            else:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.critic,
-                    clone.critic_target,
-                    clone.actor_optimizer,
-                    clone.critic_optimizer,
-                ) = (
-                    actor,
-                    actor_target,
-                    critic,
-                    critic_target,
-                    actor_optimizer,
-                    critic_optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.actor_target,
+                clone.critic,
+                clone.critic_target,
+                clone.actor_optimizer,
+                clone.critic_optimizer,
+            ) = self.accelerator.prepare(
+                actor,
+                actor_target,
+                critic,
+                critic_target,
+                actor_optimizer,
+                critic_optimizer,
+            )
         else:
             clone.actor = actor
             clone.actor_target = actor_target

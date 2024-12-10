@@ -6,6 +6,7 @@ import torch
 from accelerate import Accelerator
 from gymnasium import spaces
 
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.hpo.mutation import Mutations
 from agilerl.modules.bert import EvolvableBERT
 from agilerl.utils.utils import create_population
@@ -23,6 +24,7 @@ SHARED_INIT_HP = {
     "POPULATION_SIZE": 4,
     "DOUBLE": True,
     "BATCH_SIZE": 128,
+    "CUDAGRAPHS": False,
     "LR": 1e-3,
     "LR_ACTOR": 1e-4,
     "LR_CRITIC": 1e-3,
@@ -193,103 +195,6 @@ def test_constructor_initializes_attributes():
     assert mutations.max_lr == max_lr
     assert mutations.min_learn_step == min_learn_step
     assert mutations.max_learn_step == max_learn_step
-    assert mutations.multi_agent is False
-    assert mutations.algo == algo
-
-
-# The constructor initializes all the attributes of the Mutations class correctly for multi-agent.
-def test_constructor_initializes_attributes_multi_agent():
-    algo = "MATD3"
-    algo_dict = {
-        "actor": {
-            "eval": "actors",
-            "target": "actor_targets",
-            "optimizer": "actor_optimizers",
-        },
-        "critics": [
-            {
-                "eval": "critics_1",
-                "target": "critic_targets_1",
-                "optimizer": "critic_1_optimizers",
-            },
-            {
-                "eval": "critics_2",
-                "target": "critic_targets_2",
-                "optimizer": "critic_2_optimizers",
-            },
-        ],
-    }
-    no_mutation = 0.1
-    architecture = 0.2
-    new_layer_prob = 0.3
-    parameters = 0.4
-    activation = 0.5
-    rl_hp = 0.6
-    rl_hp_selection = ["batch_size", "lr", "learn_step"]
-    mutation_sd = 0.7
-    activation_selection = ["ReLU", "Sigmoid"]
-    min_lr = 0.0001
-    max_lr = 0.01
-    min_learn_step = 1
-    max_learn_step = 120
-    min_batch_size = 8
-    max_batch_size = 1024
-    agent_ids = [1, 2, 3]
-    arch = "mlp"
-    mutate_elite = True
-    rand_seed = 12345
-    device = "cpu"
-    accelerator = None
-
-    mutations = Mutations(
-        algo,
-        no_mutation,
-        architecture,
-        new_layer_prob,
-        parameters,
-        activation,
-        rl_hp,
-        rl_hp_selection,
-        mutation_sd,
-        activation_selection,
-        min_lr,
-        max_lr,
-        min_learn_step,
-        max_learn_step,
-        min_batch_size,
-        max_batch_size,
-        agent_ids,
-        arch,
-        mutate_elite,
-        rand_seed,
-        device,
-        accelerator,
-    )
-
-    assert mutations.rng is not None
-    assert mutations.arch == arch
-    assert mutations.no_mut == no_mutation
-    assert mutations.architecture_mut == architecture
-    assert mutations.new_layer_prob == new_layer_prob
-    assert mutations.parameters_mut == parameters
-    assert mutations.activation_mut == activation
-    assert mutations.rl_hp_mut == rl_hp
-    assert mutations.rl_hp_selection == rl_hp_selection
-    assert mutations.mutation_sd == mutation_sd
-    assert mutations.activation_selection == activation_selection
-    assert mutations.mutate_elite == mutate_elite
-    assert mutations.device == device
-    assert mutations.accelerator == accelerator
-    assert mutations.agent_ids == agent_ids
-    assert mutations.min_batch_size == min_batch_size
-    assert mutations.max_batch_size == max_batch_size
-    assert mutations.min_lr == min_lr
-    assert mutations.max_lr == max_lr
-    assert mutations.min_learn_step == min_learn_step
-    assert mutations.max_learn_step == max_learn_step
-    assert mutations.multi_agent is True
-    assert mutations.algo == algo_dict
-
 
 # Can regularize weight
 def test_returns_regularize_weight():
@@ -3232,22 +3137,25 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     mutations.rng = DummyRNG()
 
     for individual in population:
-        if distributed:
-            adam_actor = individual.actor_optimizer.optimizer
-            adam_critic = individual.critic_optimizer.optimizer
-        else:
-            adam_actor = individual.actor_optimizer
-            adam_critic = individual.critic_optimizer
+
 
         individual.actor = EvolvableBERT([12], [12])
         individual.actor_target = copy.deepcopy(individual.actor)
         individual.critic = EvolvableBERT([12], [12])
         individual.critic_target = copy.deepcopy(individual.critic)
-        individual.actor_optimizer = type(adam_actor)(
-            individual.actor.parameters(), lr=individual.lr_actor
+
+        individual.actor_optimizer = OptimizerWrapper(
+            torch.optim.Adam,
+            individual.actor,
+            optimizer_kwargs={"lr": individual.lr_actor},
+            network_names=individual.actor_optimizer.network_names
         )
-        individual.critic_optimizer = type(adam_critic)(
-            individual.critic.parameters(), lr=individual.lr_critic
+
+        individual.critic_optimizer = OptimizerWrapper(
+            torch.optim.Adam,
+            individual.critic,
+            optimizer_kwargs={"lr": individual.lr_critic},
+            network_names=individual.critic_optimizer.network_names
         )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -4422,32 +4330,50 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         if algo == "MADDPG":
             individual.critics = [EvolvableBERT([12], [12])]
             individual.critic_targets = copy.deepcopy(individual.critics)
-            individual.actor_optimizers = [
-                type(adam_actor)(actor.parameters(), lr=individual.lr_actor)
-                for adam_actor, actor in zip(adam_actors, individual.actors)
-            ]
-            individual.critic_optimizers = [
-                type(adam_critic)(critic.parameters(), lr=individual.lr_critic)
-                for adam_critic, critic in zip(adam_critics, individual.critics)
-            ]
+
+
+            individual.actor_optimizers = OptimizerWrapper(
+                torch.optim.Adam,
+                individual.actors,
+                optimizer_kwargs={"lr": individual.lr_actor},
+                network_names=individual.actor_optimizers.network_names,
+                multiagent=True
+            )
+            individual.critic_optimizers = OptimizerWrapper(
+                torch.optim.Adam,
+                individual.critics,
+                optimizer_kwargs={"lr": individual.lr_critic},
+                network_names=individual.critic_optimizers.network_names,
+                multiagent=True
+            )
 
         else:
             individual.critics_1 = [EvolvableBERT([12], [12])]
             individual.critic_targets_1 = copy.deepcopy(individual.critics_1)
             individual.critics_2 = [EvolvableBERT([12], [12])]
             individual.critic_targets_2 = copy.deepcopy(individual.critics_2)
-            individual.actor_optimizers = [
-                type(adam_actor)(actor.parameters(), lr=individual.lr_actor)
-                for adam_actor, actor in zip(adam_actors, individual.actors)
-            ]
-            individual.critic_1_optimizers = [
-                type(adam_critic_1)(critic_1.parameters(), lr=individual.lr_critic)
-                for adam_critic_1, critic_1 in zip(adam_critics_1, individual.critics_1)
-            ]
-            individual.critic_2_optimizers = [
-                type(adam_critic_2)(critic_2.parameters(), lr=individual.lr_critic)
-                for adam_critic_2, critic_2 in zip(adam_critics_2, individual.critics_2)
-            ]
+            individual.actor_optimizers = OptimizerWrapper(
+                torch.optim.Adam,
+                individual.actors,
+                optimizer_kwargs={"lr": individual.lr_actor},
+                network_names=individual.actor_optimizers.network_names,
+                multiagent=True
+            )
+            individual.critic_1_optimizers = OptimizerWrapper(
+                torch.optim.Adam,
+                individual.critics_1,
+                optimizer_kwargs={"lr": individual.lr_critic},
+                network_names=individual.critic_1_optimizers.network_names,
+                multiagent=True
+            )
+
+            individual.critic_2_optimizers = OptimizerWrapper(
+                torch.optim.Adam,
+                individual.critics_2,
+                optimizer_kwargs={"lr": individual.lr_critic},
+                network_names=individual.critic_2_optimizers.network_names,
+                multiagent=True
+            )
 
     new_population = [agent.clone(wrap=False) for agent in population]
     mutated_population = [
@@ -4565,7 +4491,8 @@ def test_reinit_opt(algo, init_pop):
     new_population = [agent.clone() for agent in population]
     mutations.reinit_opt(new_population[0])
 
-    new_opt = getattr(new_population[0], mutations.algo["actor"]["optimizer"])
-    old_opt = getattr(population[0], mutations.algo["actor"]["optimizer"])
+    opt_attr = new_population[0].registry.optimizers[0].name
+    new_opt = getattr(new_population[0], opt_attr)
+    old_opt = getattr(population[0], opt_attr)
 
     assert str(new_opt.state_dict()) == str(old_opt.state_dict())

@@ -396,6 +396,10 @@ class CQN(RLAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_network'] = self.actor
+
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()

@@ -187,22 +187,22 @@ class TD3(RLAlgorithm):
             ), "'actor_network' and 'critic_networks' must be the same type."
 
             if (
-                isinstance(self.actor, (EvolvableMLP, EvolvableCNN))
-                and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN))
-                and isinstance(self.critic_1, (EvolvableMLP, EvolvableCNN))
+                isinstance(actor_network, (EvolvableMLP, EvolvableCNN))
+                and isinstance(critic_networks[0], (EvolvableMLP, EvolvableCNN))
+                and isinstance(critic_networks[0], (EvolvableMLP, EvolvableCNN))
             ):
-                self.net_config = self.actor.net_config
+                self.net_config = actor_network.net_config
             elif (
-                isinstance(self.actor, MakeEvolvable)
-                and isinstance(self.critic_1, MakeEvolvable)
-                and isinstance(self.critic_1, MakeEvolvable)
+                isinstance(actor_network, MakeEvolvable)
+                and isinstance(critic_networks[0], MakeEvolvable)
+                and isinstance(critic_networks[0], MakeEvolvable)
             ):
                 self.net_config = None
             else:
                 assert (
                     False
-                ), f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_networks[0])}, \
-                                both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+                ), f"'actor_network' argument is of type {type(actor_network)} and critic networks are of type {type(critic_networks[0])}, " \
+                    "both must be the same type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
             
             self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
 
@@ -376,13 +376,6 @@ class TD3(RLAlgorithm):
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
-        else:
-            self.actor = self.actor.to(self.device)
-            self.actor_target = self.actor_target.to(self.device)
-            self.critic_1 = self.critic_1.to(self.device)
-            self.critic_target_1 = self.critic_target_1.to(self.device)
-            self.critic_2 = self.critic_2.to(self.device)
-            self.critic_target_2 = self.critic_target_2.to(self.device)
 
         self.criterion = nn.MSELoss()
 
@@ -556,12 +549,10 @@ class TD3(RLAlgorithm):
         :type policy_noise: float, optional
         """
         states, actions, rewards, next_states, dones = experiences
-        if self.accelerator is not None:
-            states = states.to(self.accelerator.device)
-            actions = actions.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            next_states = next_states.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
+
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
 
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
@@ -701,10 +692,16 @@ class TD3(RLAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_network'] = self.actor
+            input_args['critic_networks'] = [self.critic_1, self.critic_2]
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
+
         actor = self.actor.clone()
         actor_target = self.actor_target.clone()
         critic_1 = self.critic_1.clone()
@@ -712,66 +709,58 @@ class TD3(RLAlgorithm):
         critic_2 = self.critic_2.clone()
         critic_target_2 = self.critic_target_2.clone()
 
-        actor_optimizer = optim.Adam(actor.parameters(), lr=clone.lr_actor)
-        critic_1_optimizer = optim.Adam(critic_1.parameters(), lr=clone.lr_critic)
-        critic_2_optimizer = optim.Adam(critic_2.parameters(), lr=clone.lr_critic)
+        actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=actor,
+            optimizer_kwargs={"lr": self.lr_actor},
+            network_names=self.actor_optimizer.network_names
+        )
+        critic_1_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=critic_1,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_1_optimizer.network_names
+        )
+        critic_2_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=critic_2,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_2_optimizer.network_names
+        )
 
         actor_optimizer.load_state_dict(self.actor_optimizer.state_dict())
         critic_1_optimizer.load_state_dict(self.critic_1_optimizer.state_dict())
         critic_2_optimizer.load_state_dict(self.critic_2_optimizer.state_dict())
 
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.critic_1,
-                    clone.critic_target_1,
-                    clone.critic_2,
-                    clone.critic_target_2,
-                    clone.actor_optimizer,
-                    clone.critic_1_optimizer,
-                    clone.critic_2_optimizer,
-                ) = self.accelerator.prepare(
-                    actor,
-                    actor_target,
-                    critic_1,
-                    critic_target_1,
-                    critic_2,
-                    critic_target_2,
-                    actor_optimizer,
-                    critic_1_optimizer,
-                    critic_2_optimizer,
-                )
-            else:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.critic_1,
-                    clone.critic_target_1,
-                    clone.critic_2,
-                    clone.critic_target_2,
-                    clone.actor_optimizer,
-                    clone.critic_1_optimizer,
-                    clone.critic_1_optimizer,
-                ) = (
-                    actor,
-                    actor_target,
-                    critic_1,
-                    critic_target_1,
-                    critic_2,
-                    critic_target_2,
-                    actor_optimizer,
-                    critic_1_optimizer,
-                    critic_2_optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.actor_target,
+                clone.critic_1,
+                clone.critic_target_1,
+                clone.critic_2,
+                clone.critic_target_2,
+                clone.actor_optimizer,
+                clone.critic_1_optimizer,
+                clone.critic_2_optimizer,
+            ) = self.accelerator.prepare(
+                actor,
+                actor_target,
+                critic_1,
+                critic_target_1,
+                critic_2,
+                critic_target_2,
+                actor_optimizer,
+                critic_1_optimizer,
+                critic_2_optimizer,
+            )
         else:
-            clone.actor = actor.to(self.device)
-            clone.actor_target = actor_target.to(self.device)
-            clone.critic_1 = critic_1.to(self.device)
-            clone.critic_target_1 = critic_target_1.to(self.device)
-            clone.critic_2 = critic_2.to(self.device)
-            clone.critic_target_2 = critic_target_2.to(self.device)
+            clone.actor = actor
+            clone.actor_target = actor_target
+            clone.critic_1 = critic_1
+            clone.critic_target_1 = critic_target_1
+            clone.critic_2 = critic_2
+            clone.critic_target_2 = critic_target_2
             clone.actor_optimizer = actor_optimizer
             clone.critic_1_optimizer = critic_1_optimizer
             clone.critic_2_optimizer = critic_2_optimizer
@@ -869,12 +858,23 @@ class TD3(RLAlgorithm):
 
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.lr_actor)
-        self.critic_1_optimizer = optim.Adam(
-            self.critic_1.parameters(), lr=self.lr_critic
+        self.actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr_actor},
+            network_names=self.actor_optimizer.network_names
         )
-        self.critic_2_optimizer = optim.Adam(
-            self.critic_2.parameters(), lr=self.lr_critic
+        self.critic_1_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critic_1,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_1_optimizer.network_names
+        )
+        self.critic_2_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critic_2,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_2_optimizer.network_names
         )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.actor_target.load_state_dict(checkpoint["actor_target_state_dict"])
@@ -995,20 +995,31 @@ class TD3(RLAlgorithm):
             agent.critic_target_1 = MakeEvolvable(**critic_target_1_init_dict)
             agent.critic_target_2 = MakeEvolvable(**critic_target_2_init_dict)
 
-        agent.actor_optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr_actor)
+        agent.actor_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actor,
+            optimizer_kwargs={"lr": agent.lr_actor},
+            network_names=agent.actor_optimizer.network_names
+        )
         agent.actor.load_state_dict(actor_state_dict)
         agent.actor_target.load_state_dict(actor_target_state_dict)
         agent.actor_optimizer.load_state_dict(actor_optimizer_state_dict)
 
-        agent.critic_1_optimizer = optim.Adam(
-            agent.critic_1.parameters(), lr=agent.lr_critic
+        agent.critic_1_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.critic_1,
+            optimizer_kwargs={"lr": agent.lr_critic},
+            network_names=agent.critic_1_optimizer.network_names
         )
         agent.critic_1.load_state_dict(critic_1_state_dict)
         agent.critic_target_1.load_state_dict(critic_target_1_state_dict)
         agent.critic_1_optimizer.load_state_dict(critic_1_optimizer_state_dict)
 
-        agent.critic_2_optimizer = optim.Adam(
-            agent.critic_2.parameters(), lr=agent.lr_critic
+        agent.critic_2_optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.critic_2,
+            optimizer_kwargs={"lr": agent.lr_critic},
+            network_names=agent.critic_2_optimizer.network_names
         )
         agent.critic_2.load_state_dict(critic_2_state_dict)
         agent.critic_target_2.load_state_dict(critic_target_2_state_dict)

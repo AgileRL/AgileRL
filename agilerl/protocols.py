@@ -1,6 +1,6 @@
 from typing import (
     Any, Dict, List, 
-    Optional, Tuple, Protocol, Union, Iterable, Generator,
+    Optional, Tuple, Protocol, Union, Iterable, Generator, Type,
     runtime_checkable
 )
 from enum import Enum
@@ -26,6 +26,9 @@ class MutationMethod(Protocol):
 @runtime_checkable
 class OptimizerWrapper(Protocol):
     optimizer: Union[Optimizer, Iterable[Optimizer]]
+    optimizer_cls: Union[Type[Optimizer], Iterable[Type[Optimizer]]]
+    optimizer_kwargs: Dict[str, Any]
+    multiagent: bool
     
     
 @runtime_checkable
@@ -49,6 +52,7 @@ OptimizerType = Union[Optimizer, Iterable[Optimizer], OptimizerWrapper]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
+
 
 @runtime_checkable
 class EvolvableAlgorithm(Protocol):

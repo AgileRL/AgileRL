@@ -154,16 +154,15 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert td3.actor_network is None
     assert isinstance(td3.actor, EvolvableMLP)
     assert isinstance(td3.actor_target, EvolvableMLP)
-    assert isinstance(td3.actor_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1, EvolvableMLP)
     assert isinstance(td3.critic_target_1, EvolvableMLP)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2, EvolvableMLP)
     assert isinstance(td3.critic_target_2, EvolvableMLP)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert td3.arch == "mlp"
     assert isinstance(td3.criterion, nn.MSELoss)
 
@@ -225,7 +224,6 @@ def test_initialize_td3_with_cnn_accelerator():
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert td3.actor_network is None
     assert isinstance(td3.actor, EvolvableCNN)
     assert isinstance(td3.actor_target, EvolvableCNN)
     assert isinstance(td3.critic_1, EvolvableCNN)
@@ -233,9 +231,9 @@ def test_initialize_td3_with_cnn_accelerator():
     assert isinstance(td3.critic_2, EvolvableCNN)
     assert isinstance(td3.critic_target_2, EvolvableCNN)
     assert td3.arch == "cnn"
-    assert isinstance(td3.actor_optimizer, AcceleratedOptimizer)
-    assert isinstance(td3.critic_1_optimizer, AcceleratedOptimizer)
-    assert isinstance(td3.critic_2_optimizer, AcceleratedOptimizer)
+    assert isinstance(td3.actor_optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(td3.critic_1_optimizer.optimizer, AcceleratedOptimizer)
+    assert isinstance(td3.critic_2_optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -297,12 +295,9 @@ def test_initialize_td3_with_actor_network(
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert td3.actor_network == actor_network
-    assert td3.actor == actor_network
-    assert td3.critic_networks == [critic_1_network, critic_2_network]
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 
@@ -362,11 +357,9 @@ def test_initialize_td3_with_actor_network_no_critics(
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert td3.actor != actor_network
-    assert td3.critic_networks is None
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -422,12 +415,9 @@ def test_initialize_td3_with_actor_network_cnn(
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert td3.actor_network == actor_network
-    assert td3.actor == actor_network
-    assert td3.critic_networks == [critic_1_network, critic_2_network]
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 
@@ -772,8 +762,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.action_space == td3.action_space
     assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.net_config == td3.net_config
-    assert clone_agent.actor_network == td3.actor_network
-    assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -818,8 +806,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.action_space == td3.action_space
     assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.net_config == td3.net_config
-    assert clone_agent.actor_network == td3.actor_network
-    assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -864,8 +850,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.action_space == td3.action_space
     assert np.all(clone_agent.max_action == td3.max_action)
     assert clone_agent.net_config == td3.net_config
-    assert clone_agent.actor_network == td3.actor_network
-    assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -930,8 +914,6 @@ def test_clone_after_learning():
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
     assert clone_agent.net_config == td3.net_config
-    assert clone_agent.actor_network == td3.actor_network
-    assert clone_agent.critic_networks == td3.critic_networks
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -1329,12 +1311,9 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert td3.actor_network == actor_network
-    assert td3.actor == actor_network
-    assert td3.critic_networks == critic_networks
-    assert isinstance(td3.actor_optimizer, optim.Adam)
-    assert isinstance(td3.critic_1_optimizer, optim.Adam)
-    assert isinstance(td3.critic_2_optimizer, optim.Adam)
+    assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
+    assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
     assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 

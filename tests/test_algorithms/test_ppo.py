@@ -174,8 +174,6 @@ def test_initializes_with_default_values():
     assert ppo.max_grad_norm == 0.5
     assert ppo.target_kl is None
     assert ppo.update_epochs == 4
-    assert ppo.actor_network is None
-    assert ppo.critic_network is None
     assert ppo.device == "cpu"
     assert ppo.accelerator is None
     assert ppo.index == 0
@@ -184,7 +182,7 @@ def test_initializes_with_default_values():
     assert ppo.steps == [0]
     assert isinstance(ppo.actor, EvolvableMLP)
     assert isinstance(ppo.critic, EvolvableMLP)
-    assert isinstance(ppo.optimizer, optim.Adam)
+    assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.arch == "mlp"
 
 
@@ -256,12 +254,10 @@ def test_initialize_ppo_with_cnn_accelerator():
     assert ppo.max_grad_norm == max_grad_norm
     assert ppo.target_kl == target_kl
     assert ppo.update_epochs == update_epochs
-    assert ppo.actor_network == actor_network
-    assert ppo.critic_network == critic_network
     assert isinstance(ppo.actor, EvolvableCNN)
     assert isinstance(ppo.critic, EvolvableCNN)
     assert ppo.arch == "cnn"
-    assert isinstance(ppo.optimizer, AcceleratedOptimizer)
+    assert isinstance(ppo.optimizer.optimizer, AcceleratedOptimizer)
 
 # Can initialize ppo with an actor network
 @pytest.mark.parametrize(
@@ -308,11 +304,7 @@ def test_initialize_ppo_with_actor_network(
     assert ppo.scores == []
     assert ppo.fitness == []
     assert ppo.steps == [0]
-    assert ppo.actor_network == actor_network
-    assert ppo.actor == actor_network
-    assert ppo.critic_network == critic_network
-    assert ppo.critic == critic_network
-    assert isinstance(ppo.optimizer, optim.Adam)
+    assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.arch == actor_network.arch
 
 
@@ -389,11 +381,7 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
     assert ppo.scores == []
     assert ppo.fitness == []
     assert ppo.steps == [0]
-    assert ppo.actor_network == actor_network
-    assert ppo.actor == actor_network
-    assert ppo.critic_network == critic_network
-    assert ppo.critic == critic_network
-    assert isinstance(ppo.optimizer, optim.Adam)
+    assert isinstance(ppo.optimizer.optimizer, optim.Adam)
     assert ppo.arch == actor_network.arch
 
 
@@ -749,8 +737,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
     assert clone_agent.net_config == ppo.net_config
-    assert clone_agent.actor_network == ppo.actor_network
-    assert clone_agent.critic_network == ppo.critic_network
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -781,8 +767,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
     assert clone_agent.net_config == ppo.net_config
-    assert clone_agent.actor_network == ppo.actor_network
-    assert clone_agent.critic_network == ppo.critic_network
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -816,8 +800,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
     assert clone_agent.net_config == ppo.net_config
-    assert clone_agent.actor_network == ppo.actor_network
-    assert clone_agent.critic_network == ppo.critic_network
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -870,8 +852,6 @@ def test_clone_after_learning():
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
     assert clone_agent.net_config == ppo.net_config
-    assert clone_agent.actor_network == ppo.actor_network
-    assert clone_agent.critic_network == ppo.critic_network
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma

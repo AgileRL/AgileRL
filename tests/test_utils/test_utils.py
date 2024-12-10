@@ -30,6 +30,7 @@ SHARED_INIT_HP = {
     "POPULATION_SIZE": 4,
     "DOUBLE": True,
     "BATCH_SIZE": 128,
+    "CUDAGRAPHS": False,
     "LR": 1e-3,
     "LR_ACTOR": 1e-4,
     "LR_CRITIC": 1e-3,

@@ -119,11 +119,12 @@ class NeuralUCB(RLAlgorithm):
         self.lr = lr
         self.mut = mut
         self.regret = [0]
+        self.actor_network = None
 
         if actor_network is not None:
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = self.actor.net_config
-            elif isinstance(self.actor, MakeEvolvable):
+            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)):
+                self.net_config = actor_network.net_config
+            elif isinstance(actor_network, MakeEvolvable):
                 self.net_config = None
             else:
                 assert (
@@ -403,24 +404,27 @@ class NeuralUCB(RLAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_network'] = self.actor
+
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
-        optimizer = optim.Adam(actor.parameters(), lr=clone.lr)
+        optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=actor,
+            optimizer_kwargs={"lr": self.lr},
+            network_names=self.optimizer.network_names
+        )
         optimizer.load_state_dict(self.optimizer.state_dict())
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.optimizer,
-                ) = self.accelerator.prepare(actor, optimizer)
-            else:
-                clone.actor, clone.optimizer = (
-                    actor,
-                    optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.optimizer,
+            ) = self.accelerator.prepare(actor, optimizer)
         else:
-            clone.actor = actor.to(self.device)
+            clone.actor = actor
             clone.optimizer = optimizer
 
         for attribute in self.inspect_attributes().keys():
@@ -499,7 +503,12 @@ class NeuralUCB(RLAlgorithm):
         self.actor = network_class(**checkpoint["actor_init_dict"])
 
         self.lr = checkpoint["lr"]
-        self.optimizer = optim.Adam(self.actor.parameters(), lr=self.lr)
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actor,
+            optimizer_kwargs={"lr": self.lr},
+            network_names=self.optimizer.network_names
+        )
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -569,7 +578,12 @@ class NeuralUCB(RLAlgorithm):
             class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
             agent = cls(**class_init_dict)
 
-        agent.optimizer = optim.Adam(agent.actor.parameters(), lr=agent.lr)
+        agent.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actor,
+            optimizer_kwargs={"lr": agent.lr},
+            network_names=agent.optimizer.network_names
+        )
         agent.actor.load_state_dict(actor_state_dict)
         agent.optimizer.load_state_dict(optimizer_state_dict)
 

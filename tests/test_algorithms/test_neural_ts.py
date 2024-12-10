@@ -106,9 +106,8 @@ def test_initialize_bandit_with_minimum_parameters():
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network is None
     assert isinstance(bandit.actor, EvolvableMLP)
-    assert isinstance(bandit.optimizer, optim.Adam)
+    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert bandit.arch == "mlp"
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -168,10 +167,9 @@ def test_initialize_bandit_with_cnn_accelerator():
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network is None
     assert isinstance(bandit.actor, EvolvableCNN)
     assert bandit.arch == "cnn"
-    assert isinstance(bandit.optimizer, AcceleratedOptimizer)
+    assert isinstance(bandit.optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
@@ -208,9 +206,7 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network == actor_network
-    assert bandit.actor == actor_network
-    assert isinstance(bandit.optimizer, optim.Adam)
+    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert bandit.arch == actor_network.arch
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -239,9 +235,7 @@ def test_initialize_bandit_with_evo_nets():  #
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network is None
-    assert bandit.actor == actor_network
-    assert isinstance(bandit.optimizer, optim.Adam)
+    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert bandit.arch == actor_network.arch
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -487,7 +481,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -512,7 +505,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -533,7 +525,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -546,6 +537,38 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
+
+@pytest.mark.parametrize(
+    "observation_space, actor_network, input_tensor",
+    [
+        (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
+        (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
+    ]
+)
+def test_clone_with_make_evo(observation_space, actor_network, input_tensor, request):
+    action_space = spaces.Discrete(2)
+    actor_network = request.getfixturevalue(actor_network)
+    actor_network = MakeEvolvable(actor_network, input_tensor)
+
+    bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
+    clone_agent = bandit.clone()
+
+    assert clone_agent.observation_space == bandit.observation_space
+    assert clone_agent.action_space == bandit.action_space
+    assert clone_agent.net_config == bandit.net_config
+    assert clone_agent.batch_size == bandit.batch_size
+    assert clone_agent.lr == bandit.lr
+    assert clone_agent.learn_step == bandit.learn_step
+    assert clone_agent.gamma == bandit.gamma
+    assert clone_agent.mut == bandit.mut
+    assert clone_agent.device == bandit.device
+    assert clone_agent.accelerator == bandit.accelerator
+    assert str(clone_agent.actor.state_dict()) == str(bandit.actor.state_dict())
+    assert str(clone_agent.optimizer.state_dict()) == str(bandit.optimizer.state_dict())
+    assert clone_agent.fitness == bandit.fitness
+    assert clone_agent.steps == bandit.steps
+    assert clone_agent.scores == bandit.scores
+
 
 
 def test_clone_new_index():
@@ -572,7 +595,6 @@ def test_clone_after_learning():
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step

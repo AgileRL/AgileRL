@@ -488,7 +488,7 @@ def test_policy_on_policy_with_probe_env_cnn():
 def test_policy_on_policy_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsDictEnv()
-    learn_steps = 100
+    learn_steps = 1000
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,

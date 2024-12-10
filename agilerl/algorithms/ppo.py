@@ -205,12 +205,12 @@ class PPO(RLAlgorithm):
                 critic_network
             ), "'actor_network' and 'critic_network' must be the same type."
 
-            if isinstance(self.actor, (EvolvableMLP, EvolvableCNN)) and isinstance(
-                self.critic, (EvolvableMLP, EvolvableCNN)
+            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)) and isinstance(
+                critic_network, (EvolvableMLP, EvolvableCNN)
             ):
-                self.net_config = self.actor.net_config
-            elif isinstance(self.actor, MakeEvolvable) and isinstance(
-                self.critic, MakeEvolvable
+                self.net_config = actor_network.net_config
+            elif isinstance(actor_network, MakeEvolvable) and isinstance(
+                critic_network, MakeEvolvable
             ):
                 self.net_config = None
             else:
@@ -343,7 +343,7 @@ class PPO(RLAlgorithm):
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=[self.actor, self.critic],
-            optimizer_args={"lr": self.lr}
+            optimizer_kwargs={"lr": self.lr}
         )
 
         if self.accelerator is not None and wrap:
@@ -683,40 +683,35 @@ class PPO(RLAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_network'] = self.actor
+            input_args['critic_network'] = self.critic
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
             self.unwrap_models()
         actor = self.actor.clone()
         critic = self.critic.clone()
-        optimizer = optim.Adam(
-            [
-                {"params": actor.parameters(), "lr": self.lr},
-                {"params": critic.parameters(), "lr": self.lr},
-            ]
+        optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=[actor, critic],
+            optimizer_kwargs={"lr": self.lr},
+            network_names=self.optimizer.network_names
         )
+
         optimizer.load_state_dict(self.optimizer.state_dict())
 
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.critic,
-                    clone.optimizer,
-                ) = self.accelerator.prepare(actor, critic, optimizer)
-            else:
-                (
-                    clone.actor,
-                    clone.critic,
-                    clone.optimizer,
-                ) = (
-                    actor,
-                    critic,
-                    optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.critic,
+                clone.optimizer,
+            ) = self.accelerator.prepare(actor, critic, optimizer)
         else:
-            clone.actor = actor.to(self.device)
-            clone.critic = critic.to(self.device)
+            clone.actor = actor
+            clone.critic = critic
             clone.optimizer = optimizer
 
         for attribute in self.inspect_attributes().keys():
@@ -784,12 +779,13 @@ class PPO(RLAlgorithm):
         self.actor = network_class(**checkpoint["actor_init_dict"])
         self.critic = network_class(**checkpoint["critic_init_dict"])
         self.lr = checkpoint["lr"]
-        self.optimizer = optim.Adam(
-            [
-                {"params": self.actor.parameters(), "lr": self.lr},
-                {"params": self.critic.parameters(), "lr": self.lr},
-            ]
+        self.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=[self.actor, self.critic],
+            optimizer_kwargs={"lr": self.lr},
+            network_names=self.optimizer.network_names
         )
+
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.critic.load_state_dict(checkpoint["critic_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -854,12 +850,13 @@ class PPO(RLAlgorithm):
 
         agent.actor.load_state_dict(actor_state_dict)
         agent.critic.load_state_dict(critic_state_dict)
-        agent.optimizer = optim.Adam(
-            [
-                {"params": agent.actor.parameters(), "lr": agent.lr},
-                {"params": agent.critic.parameters(), "lr": agent.lr},
-            ]
+        agent.optimizer = OptimizerWrapper(
+            optim.Adam,
+            networks=[agent.actor, agent.critic],
+            optimizer_kwargs={"lr": agent.lr},
+            network_names=agent.optimizer.network_names
         )
+
         agent.optimizer.load_state_dict(optimizer_state_dict)
 
         if accelerator is not None:

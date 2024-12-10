@@ -162,14 +162,14 @@ class MATD3(MultiAgentAlgorithm):
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.sample_gaussian = [
-            torch.zeros(*(vect_noise_dim, self.action_dims[idx])).to(device)
+            torch.zeros(*(vect_noise_dim, self.action_dims[idx]), device=self.device)
             for idx in range(self.n_agents)
         ]
         self.expl_noise = (
             expl_noise
             if isinstance(expl_noise, list)
             else [
-                expl_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
+                expl_noise * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
                 for action_dim in self.action_dims
             ]
         )
@@ -177,12 +177,12 @@ class MATD3(MultiAgentAlgorithm):
             mean_noise
             if isinstance(mean_noise, list)
             else [
-                mean_noise * torch.ones(*(vect_noise_dim, action_dim)).to(device)
+                mean_noise * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
                 for action_dim in self.action_dims
             ]
         )
         self.current_noise = [
-            torch.zeros(*(vect_noise_dim, action_dim)).to(device)
+            torch.zeros(*(vect_noise_dim, action_dim), device=self.device)
             for action_dim in self.action_dims
         ]
         self.theta = theta
@@ -204,15 +204,15 @@ class MATD3(MultiAgentAlgorithm):
             ), "actor and critic networks must be the same type"
 
             if (
-                isinstance(self.actors[0], (EvolvableMLP, EvolvableCNN))
-                and isinstance(self.critics_1[0], (EvolvableMLP, EvolvableCNN))
-                and isinstance(self.critics_1[1], (EvolvableMLP, EvolvableCNN))
+                isinstance(actor_networks[0], (EvolvableMLP, EvolvableCNN))
+                and isinstance(critic_networks[0][0], (EvolvableMLP, EvolvableCNN))
+                and isinstance(critic_networks[1][0], (EvolvableMLP, EvolvableCNN))
             ):
-                self.net_config = self.actors[0].net_config
+                self.net_config = actor_networks[0].net_config
             elif (
-                isinstance(self.actors[0], MakeEvolvable)
-                and isinstance(self.critics_1[0], MakeEvolvable)
-                and isinstance(self.critics_2[0], MakeEvolvable)
+                isinstance(actor_networks[0], MakeEvolvable)
+                and isinstance(critic_networks[0][0], MakeEvolvable)
+                and isinstance(critic_networks[1][0], MakeEvolvable)
             ):
                 self.net_config = None
             else:
@@ -245,7 +245,7 @@ class MATD3(MultiAgentAlgorithm):
                         EvolvableMLP(
                             num_inputs=state_dim[0],
                             num_outputs=action_dim,
-                            device='cpu', # Use CPU since we will make deepcopy for target
+                            device=self.device,
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -255,7 +255,7 @@ class MATD3(MultiAgentAlgorithm):
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
                         num_outputs=1,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -265,7 +265,7 @@ class MATD3(MultiAgentAlgorithm):
                     EvolvableMLP(
                         num_inputs=self.total_state_dims + self.total_actions,
                         num_outputs=1,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -289,7 +289,7 @@ class MATD3(MultiAgentAlgorithm):
                             input_shape=state_dim,
                             num_outputs=action_dim,
                             n_agents=self.n_agents,
-                            device='cpu', # Use CPU since we will make deepcopy for target
+                            device=self.device,
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -301,7 +301,7 @@ class MATD3(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -313,7 +313,7 @@ class MATD3(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -337,7 +337,7 @@ class MATD3(MultiAgentAlgorithm):
                             observation_space=obs_space,
                             num_outputs=action_dim,
                             n_agents=self.n_agents,
-                            device='cpu', # Use CPU since we will make deepcopy for target
+                            device=self.device,
                             accelerator=self.accelerator,
                             **self.net_config,
                         )
@@ -349,7 +349,7 @@ class MATD3(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -361,7 +361,7 @@ class MATD3(MultiAgentAlgorithm):
                         num_outputs=self.total_actions,
                         critic=True,
                         n_agents=self.n_agents,
-                        device='cpu', # Use CPU since we will make deepcopy for target
+                        device=self.device,
                         accelerator=self.accelerator,
                         **critic_net_config,
                     )
@@ -393,19 +393,22 @@ class MATD3(MultiAgentAlgorithm):
         self.actor_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.actors,
-            optimizer_kwargs={"lr": lr_actor}
+            optimizer_kwargs={"lr": lr_actor},
+            multiagent=True,
         )
 
         self.critic_1_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_1,
-            optimizer_kwargs={"lr": lr_critic}
+            optimizer_kwargs={"lr": lr_critic},
+            multiagent=True,
         )
 
         self.critic_2_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_2,
-            optimizer_kwargs={"lr": lr_critic}
+            optimizer_kwargs={"lr": lr_critic},
+            multiagent=True,
         )
 
         if self.accelerator is not None and wrap:
@@ -435,18 +438,21 @@ class MATD3(MultiAgentAlgorithm):
                 eval=self.actors,
                 shared=self.actor_targets,
                 policy=True,
+                multiagent=True
             )
         )
         self.register_network_group(
             NetworkGroup(
                 eval=self.critics_1,
                 shared=self.critic_targets_1,
+                multiagent=True
             )
         )
         self.register_network_group(
             NetworkGroup(
                 eval=self.critics_2,
                 shared=self.critic_targets_2,
+                multiagent=True
             )
         )
 
@@ -710,6 +716,10 @@ class MATD3(MultiAgentAlgorithm):
         :rtype: Dict[str, float]
         """
         states, actions, rewards, next_states, dones = experiences
+
+        actions = {agent_id: agent_actions.to(self.device) for agent_id, agent_actions in actions.items()}
+        rewards = {agent_id: agent_rewards.to(self.device) for agent_id, agent_rewards in rewards.items()}
+        dones = {agent_id: agent_dones.to(self.device) for agent_id, agent_dones in dones.items()}
 
         # Preprocess observations
         states = self.preprocess_observation(states)
@@ -1132,6 +1142,11 @@ class MATD3(MultiAgentAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_networks'] = self.actors
+            input_args['critic_networks'] = [self.critics_1, self.critics_2]
+
         clone = type(self)(**input_args)
 
         if self.accelerator is not None:
@@ -1150,17 +1165,27 @@ class MATD3(MultiAgentAlgorithm):
         clone.critic_targets_2 = [
             critic_target.clone() for critic_target in self.critic_targets_2
         ]
-        clone.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=clone.lr_actor) for actor in clone.actors
-        ]
-        clone.critic_1_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic)
-            for critic in clone.critics_1
-        ]
-        clone.critic_2_optimizers = [
-            optim.Adam(critic.parameters(), lr=clone.lr_critic)
-            for critic in clone.critics_2
-        ]
+        clone.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=clone.actors,
+            optimizer_kwargs={"lr": clone.lr_actor},
+            network_names=clone.actor_optimizers.network_names,
+            multiagent=True
+        )
+        clone.critic_1_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=clone.critics_1,
+            optimizer_kwargs={"lr": clone.lr_critic},
+            network_names=clone.critic_1_optimizers.network_names,
+            multiagent=True
+        )
+        clone.critic_2_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=clone.critics_2,
+            optimizer_kwargs={"lr": clone.lr_critic},
+            network_names=clone.critic_2_optimizers.network_names,
+            multiagent=True
+        )
 
         # Load optimizer state dicts to clone
         for (
@@ -1183,9 +1208,8 @@ class MATD3(MultiAgentAlgorithm):
             clone_critic_2_optimizer.load_state_dict(critic_2_optimizer.state_dict())
 
         # Compile and accelerator wrap
-        if clone.accelerator is not None:
-            if wrap:
-                clone.wrap_models()
+        if clone.accelerator is not None and wrap:
+            clone.wrap_models()
 
         # move to device
         else:
@@ -1262,17 +1286,17 @@ class MATD3(MultiAgentAlgorithm):
                 self.accelerator.unwrap_model(critic_target)
                 for critic_target in self.critic_targets_2
             ]
-            self.actor_optimizers = [
+            self.actor_optimizers.optimizer = [
                 unwrap_optimizer(actor_optimizer, actor, self.lr_actor)
                 for actor_optimizer, actor in zip(self.actor_optimizers, self.actors)
             ]
-            self.critic_1_optimizers = [
+            self.critic_1_optimizers.optimizer = [
                 unwrap_optimizer(critic_optimizer, critic_1, self.lr_critic)
                 for critic_optimizer, critic_1 in zip(
                     self.critic_1_optimizers, self.critics_1
                 )
             ]
-            self.critic_2_optimizers = [
+            self.critic_2_optimizers.optimizer = [
                 unwrap_optimizer(critic_optimizer, critic_2, self.lr_critic)
                 for critic_optimizer, critic_2 in zip(
                     self.critic_2_optimizers, self.critics_2
@@ -1343,17 +1367,27 @@ class MATD3(MultiAgentAlgorithm):
 
         self.lr_actor = checkpoint["lr_actor"]
         self.lr_critic = checkpoint["lr_critic"]
-        self.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=self.lr_actor) for actor in self.actors
-        ]
-        self.critic_1_optimizers = [
-            optim.Adam(critic_1.parameters(), lr=self.lr_critic)
-            for critic_1 in self.critics_1
-        ]
-        self.critic_2_optimizers = [
-            optim.Adam(critic_2.parameters(), lr=self.lr_critic)
-            for critic_2 in self.critics_2
-        ]
+        self.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.actors,
+            optimizer_kwargs={"lr": self.lr_actor},
+            network_names=self.actor_optimizers.network_names,
+            multiagent=True
+        )
+        self.critic_1_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critics_1,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_1_optimizers.network_names,
+            multiagent=True
+        )
+        self.critic_2_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=self.critics_2,
+            optimizer_kwargs={"lr": self.lr_critic},
+            network_names=self.critic_2_optimizers.network_names,
+            multiagent=True
+        )
         actor_list = []
         critic_1_list = []
         critic_2_list = []
@@ -1422,9 +1456,9 @@ class MATD3(MultiAgentAlgorithm):
         self.critic_targets_1 = critic_target_1_list
         self.critics_2 = critic_2_list
         self.critic_targets_2 = critic_target_2_list
-        self.actor_optimizers = actor_optimizer_list
-        self.critic_1_optimizers = critic_1_optimizer_list
-        self.critic_2_optimizers = critic_2_optimizer_list
+        self.actor_optimizers.optimizer = actor_optimizer_list
+        self.critic_1_optimizers.optimizer = critic_1_optimizer_list
+        self.critic_2_optimizers.optimizer = critic_2_optimizer_list
 
         for attribute in checkpoint.keys():
             if attribute not in network_info:
@@ -1580,17 +1614,27 @@ class MATD3(MultiAgentAlgorithm):
                 for idx, _ in enumerate(checkpoint["agent_ids"])
             ]
 
-        agent.actor_optimizers = [
-            optim.Adam(actor.parameters(), lr=agent.lr_actor) for actor in agent.actors
-        ]
-        agent.critic_1_optimizers = [
-            optim.Adam(critic_1.parameters(), lr=agent.lr_critic)
-            for critic_1 in agent.critics_1
-        ]
-        agent.critic_2_optimizers = [
-            optim.Adam(critic_2.parameters(), lr=agent.lr_critic)
-            for critic_2 in agent.critics_2
-        ]
+        agent.actor_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.actors,
+            optimizer_kwargs={"lr": agent.lr_actor},
+            network_names=agent.actor_optimizers.network_names,
+            multiagent=True
+        )
+        agent.critic_1_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.critics_1,
+            optimizer_kwargs={"lr": agent.lr_critic},
+            network_names=agent.critic_1_optimizers.network_names,
+            multiagent=True
+        )
+        agent.critic_2_optimizers = OptimizerWrapper(
+            optim.Adam,
+            networks=agent.critics_2,
+            optimizer_kwargs={"lr": agent.lr_critic},
+            network_names=agent.critic_2_optimizers.network_names,
+            multiagent=True
+        )
         actor_list = []
         critic_1_list = []
         critic_2_list = []
@@ -1649,9 +1693,9 @@ class MATD3(MultiAgentAlgorithm):
         agent.critic_targets_1 = critic_target_1_list
         agent.critics_2 = critic_2_list
         agent.critic_targets_2 = critic_target_2_list
-        agent.actor_optimizers = actor_optimizer_list
-        agent.critic_1_optimizers = critic_1_optimizer_list
-        agent.critic_2_optimizers = critic_2_optimizer_list
+        agent.actor_optimizers.optimizer = actor_optimizer_list
+        agent.critic_1_optimizers.optimizer = critic_1_optimizer_list
+        agent.critic_2_optimizers.optimizer = critic_2_optimizer_list
 
         for attribute in agent.inspect_attributes().keys():
             setattr(agent, attribute, checkpoint[attribute])

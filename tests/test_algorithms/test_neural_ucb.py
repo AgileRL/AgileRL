@@ -106,9 +106,8 @@ def test_initialize_bandit_with_minimum_parameters():
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network is None
     assert isinstance(bandit.actor, EvolvableMLP)
-    assert isinstance(bandit.optimizer, optim.Adam)
+    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert bandit.arch == "mlp"
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -168,10 +167,9 @@ def test_initialize_bandit_with_cnn_accelerator():
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network is None
     assert isinstance(bandit.actor, EvolvableCNN)
     assert bandit.arch == "cnn"
-    assert isinstance(bandit.optimizer, AcceleratedOptimizer)
+    assert isinstance(bandit.optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
@@ -208,9 +206,7 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network == actor_network
-    assert bandit.actor == actor_network
-    assert isinstance(bandit.optimizer, optim.Adam)
+    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert bandit.arch == actor_network.arch
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -254,9 +250,7 @@ def test_initialize_bandit_with_evo_nets():  #
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert bandit.actor_network is None
-    assert bandit.actor == actor_network
-    assert isinstance(bandit.optimizer, optim.Adam)
+    assert isinstance(bandit.optimizer.optimizer, optim.Adam)
     assert bandit.arch == actor_network.arch
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -503,7 +497,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -528,7 +521,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -549,7 +541,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -588,7 +579,6 @@ def test_clone_after_learning():
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -621,7 +611,6 @@ def test_clone_with_make_evo(observation_space, actor_network, input_tensor, req
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
     assert clone_agent.net_config == bandit.net_config
-    assert clone_agent.actor_network == bandit.actor_network
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step

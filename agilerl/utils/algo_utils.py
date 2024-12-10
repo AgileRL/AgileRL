@@ -7,7 +7,6 @@ import copy
 from gymnasium import spaces
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
-from tensordict import TensorDict
 from tensordict.nn import CudaGraphModule
 import torch
 from torch.optim import Optimizer
@@ -15,8 +14,7 @@ from torch.nn import Module
 import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.protocols import EvolvableAttributeType
+from agilerl.protocols import EvolvableAttributeType, OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.typing import (
     NumpyObsType,

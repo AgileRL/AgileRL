@@ -838,7 +838,7 @@ class Mutations:
 
             # Reinitialize bandit gradients after architecture mutation
             if algo_cls in [NeuralTS, NeuralUCB]:
-                old_exp_layer = get_exp_layer(offspring, self.arch)
+                old_exp_layer = get_exp_layer(offsprings, self.arch)
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         self.reinit_opt(individual)  # Reinitialise optimizer

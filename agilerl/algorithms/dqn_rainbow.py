@@ -610,6 +610,10 @@ class RainbowDQN(RLAlgorithm):
         """
         input_args = self.inspect_attributes(input_args_only=True)
         input_args["wrap"] = wrap
+
+        if input_args.get("net_config") is None:
+            input_args['actor_network'] = self.actor
+
         clone = type(self)(**input_args)
 
         actor = self.actor.clone()
@@ -622,19 +626,12 @@ class RainbowDQN(RLAlgorithm):
         )
         optimizer.load_state_dict(self.optimizer.state_dict())
 
-        if self.accelerator is not None:
-            if wrap:
-                (
-                    clone.actor,
-                    clone.actor_target,
-                    clone.optimizer,
-                ) = self.accelerator.prepare(actor, actor_target, optimizer)
-            else:
-                clone.actor, clone.actor_target, clone.optimizer = (
-                    actor,
-                    actor_target,
-                    optimizer,
-                )
+        if self.accelerator is not None and wrap:
+            (
+                clone.actor,
+                clone.actor_target,
+                clone.optimizer,
+            ) = self.accelerator.prepare(actor, actor_target, optimizer)
         else:
             clone.actor = actor
             clone.actor_target = actor_target
