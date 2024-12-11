@@ -3,12 +3,10 @@ import copy
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from gymnasium import spaces
-from accelerate import Accelerator
 
 from agilerl.typing import ArrayOrTensor
-from agilerl.utils.evolvable_networks import is_image_space
+from agilerl.utils.evolvable_networks import is_image_space, get_activation
 from agilerl.modules.base import EvolvableModule, register_mutation_fn, MutationType
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
@@ -57,12 +55,8 @@ class EvolvableMultiInput(EvolvableModule):
     :type stride_size: List[int]
     :param hidden_size: List of hidden sizes for the MLP layers.
     :type hidden_size: List[int]
-    :param latent_dim: Dimensionality of the latent space.
-    :type latent_dim: int
-    :param num_outputs: Number of actions in the action space.
+    :param num_outputs: Dimension of the output tensor.
     :type num_outputs: int
-    :param num_atoms: Number of atoms in the distributional critic. Default is 51.
-    :type num_atoms: int, optional
     :param vector_space_mlp: Whether to use an MLP for the vector spaces. This is done by concatenating the 
         flattened observations and passing them through an `EvolvableMLP`. Default is False, whereby the 
         observations are concatenated directly to the feature encodings before the final MLP.
@@ -91,19 +85,10 @@ class EvolvableMultiInput(EvolvableModule):
     :type max_channel_size: int, optional
     :param n_agents: Number of agents. Default is None.
     :type n_agents: Optional[int], optional
-    :param multi: Whether the network is multi-agent or not. Default is False.
-    :type multi: bool, optional
     :param layer_norm: Whether to use layer normalization. Default is False.
     :type layer_norm: bool, optional
-    :param support: Support for the distributional critic. Default is None.
-    :type support: Optional[torch.Tensor], optional
-    :param rainbow: Whether the network is a rainbow network or not. Default is False.
-    :type rainbow: bool, optional
     :param noise_std: Standard deviation of the noise. Default is 0.5.
     :type noise_std: float, optional
-    :param critic: Whether the network is a critic or not. If it is, the output of the final MLP
-        is a single value, otherwise it is a vector of probabilities over the passed action space.
-        Default is False.
     :type critic: bool, optional
     :param init_layers: Whether to initialize the layers. Default is True.
     :type init_layers: bool, optional
@@ -111,12 +96,8 @@ class EvolvableMultiInput(EvolvableModule):
     :type output_vanish: bool, optional
     :param device: Device to use for the network. Default is "cpu".
     :type device: str, optional
-    :param accelerator: Accelerator to use for the network. Default is None.
-    :type accelerator: Optional[Accelerator], optional
     """
-    feature_net: nn.ModuleDict
-    value_net: EvolvableModule
-    advantage_net: Optional[EvolvableModule]
+    feature_net: Dict[str, SupportedEvolvableTypes]
 
     arch: str = "composed"
 
@@ -129,7 +110,6 @@ class EvolvableMultiInput(EvolvableModule):
             hidden_size: List[int],
             num_outputs: int,
             latent_dim: int = 16,
-            num_atoms: int = 51,
             vector_space_mlp: bool = False,
             init_dicts: Dict[str, Dict[str, Any]] = {},
             mlp_output_activation: Optional[str] = None,
@@ -143,19 +123,15 @@ class EvolvableMultiInput(EvolvableModule):
             max_cnn_hidden_layers: int = 6,
             min_channel_size: int = 32,
             max_channel_size: int = 256,
-            n_agents: Optional[int] = None,
             layer_norm: bool = False,
-            support: Optional[torch.Tensor] = None,
-            rainbow: bool = False,
+            noisy: bool = False,
             noise_std: float = 0.5,
-            critic: bool = False,
             init_layers: bool = True,
             output_vanish: bool = False,
             device: str = "cpu",
-            accelerator: Optional[Accelerator] = None,
-            arch: str = "composed"
+            name: str = "multi_input"
         ):
-        super().__init__(device, accelerator)
+        super().__init__(device)
 
         assert (
             isinstance(observation_space, (spaces.Dict, spaces.Tuple)),
@@ -170,10 +146,8 @@ class EvolvableMultiInput(EvolvableModule):
         self.channel_size = channel_size
         self.kernel_size = kernel_size
         self.stride_size = stride_size
-        self.latent_dim = latent_dim
         self.hidden_size = hidden_size
         self.num_outputs = num_outputs
-        self.num_atoms = num_atoms
         self.mlp_activation = mlp_activation
         self.mlp_output_activation = mlp_output_activation
         self.cnn_activation = cnn_activation
@@ -186,11 +160,10 @@ class EvolvableMultiInput(EvolvableModule):
         self.min_channel_size = min_channel_size
         self.max_channel_size = max_channel_size
         self.layer_norm = layer_norm
-        self.support = support
-        self.rainbow = rainbow
-        self.critic = critic
         self.init_layers = init_layers
-        self.n_agents = n_agents
+        self.latent_dim = latent_dim
+        self.name = name
+        self.noisy = noisy
         self.noise_std = noise_std
         self.output_vanish = output_vanish
         self.init_dicts = init_dicts
@@ -199,7 +172,8 @@ class EvolvableMultiInput(EvolvableModule):
             ]
 
         self._net_config = {
-            "arch": arch,
+            "arch": self.arch,
+            "name": self.name,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
@@ -217,7 +191,23 @@ class EvolvableMultiInput(EvolvableModule):
             "max_mlp_nodes": self.max_mlp_nodes,
         }
 
-        self.feature_net, self.value_net, self.advantage_net = self.build_networks()
+        self.feature_net = self.build_feature_extractor()
+    
+        # Collect all vector space shapes for concatenation
+        vector_input_dim = sum([spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces])
+
+        # Calculate total feature dimension for final MLP
+        image_features_dim = sum([self.latent_dim for subspace in self.observation_space.spaces.values() if is_image_space(subspace)])
+        vector_features_dim = self.latent_dim if self.vector_space_mlp else vector_input_dim
+        features_dim = image_features_dim + vector_features_dim
+
+        # Final dense layer to convert feature encodings to desired num_outputs
+        self.final_dense = nn.Linear(features_dim, num_outputs)
+        self.output_activation = get_activation(mlp_output_activation)
+
+        # If we dont define an EvolvableMLP for vector spaces, we should signal this for Mutations
+        if not vector_space_mlp:
+            self.filter_mutation_methods("mlp")
     
     @property
     def net_config(self) -> Dict[str, Any]:
@@ -229,81 +219,22 @@ class EvolvableMultiInput(EvolvableModule):
         return self._net_config
 
     @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Returns model information in dictionary.
+    def base_init_dict(self) -> Dict[str, Any]:
+        """Returns dictionary of base information.
         
-        :return: Model information
+        :return: Base information
         :rtype: Dict[str, Any]
         """
         return {
-            "observation_space": self.observation_space,
-            "num_outputs": self.num_outputs,
-            "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
-            "stride_size": self.stride_size,
-            "hidden_size": self.hidden_size,
-            "latent_dim": self.latent_dim,
-            "num_atoms": self.num_atoms,
-            "vector_space_mlp": self.vector_space_mlp,
-            "init_dicts": self.init_dicts,
-            "mlp_output_activation": self.mlp_output_activation,
-            "mlp_activation": self.mlp_activation,
-            "cnn_activation": self.cnn_activation,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-            "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
-            "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
-            "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,
-            "n_agents": self.n_agents,
+            "num_outputs": self.latent_dim,
             "layer_norm": self.layer_norm,
-            "support": self.support,
-            "rainbow": self.rainbow,
-            "critic": self.critic,
-            "init_layers": self.init_layers,
             "output_vanish": self.output_vanish,
-            "device": self.device,
-            "accelerator": self.accelerator,
-            "arch": self.arch
-        }
-    
-    @property
-    def cnn_init_dict(self) -> Dict[str, Any]:
-        """Returns dictionary of CNN information.
-        
-        :return: CNN information
-        :rtype: Dict[str, Any]
-        """
-        return {
-            "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
-            "stride_size": self.stride_size,
-            "hidden_size": self.hidden_size,
-            "num_outputs": self.num_outputs,
-            "latent_dim": self.latent_dim,
-            "mlp_activation": self.mlp_activation,
-            "mlp_output_activation": self.mlp_output_activation,
-            "cnn_activation": self.cnn_activation,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-            "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
-            "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
-            "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,
-            "n_agents": self.n_agents,
-            "layer_norm": self.layer_norm,
-            "support": self.support,
+            "init_layers": self.init_layers,
             "noise_std": self.noise_std,
-            "init_layers": self.init_layers,
-            "output_vanish": self.output_vanish,
-            "device": self.device,
-            "accelerator": self.accelerator
+            "noisy": self.noisy,
+            "device": self.device
         }
-    
+
     @property
     def mlp_init_dict(self) -> Dict[str, Any]:
         """Returns dictionary of MLP information.
@@ -311,39 +242,76 @@ class EvolvableMultiInput(EvolvableModule):
         :return: MLP information
         :rtype: Dict[str, Any]
         """
-        return {
+        base = self.base_init_dict.copy()
+        extra_kwargs = {
             "hidden_size": self.hidden_size,
-            "mlp_activation": self.mlp_activation,
-            "mlp_output_activation": self.mlp_output_activation,
+            "activation": self.mlp_activation,
+            "output_activation": self.mlp_activation,
             "min_hidden_layers": self.min_hidden_layers,
             "max_hidden_layers": self.max_hidden_layers,
             "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-            "layer_norm": self.layer_norm,
-            "output_vanish": self.output_vanish,
-            "init_layers": self.init_layers,
-            "support": self.support,
-            "noise_std": self.noise_std,
-            "device": self.device,
-            "accelerator": self.accelerator
+            "max_mlp_nodes": self.max_mlp_nodes
         }
+        base.update(extra_kwargs)
+        return base
 
     @property
-    def evolvable_modules(self) -> Dict[str, EvolvableModule]:
-        """Returns dictionary of evolvable modules.
+    def cnn_init_dict(self) -> Dict[str, Any]:
+        """Returns dictionary of CNN information.
         
-        :return: Dictionary of evolvable modules
-        :rtype: Dict[str, EvolvableModule]
+        :return: CNN information
+        :rtype: Dict[str, Any]
         """
-        module_dict = {}
-        for key in self.feature_net.keys():
-            module_dict[key] = self.feature_net[key]
+        base = self.base_init_dict.copy()
+        extra_kwargs = {
+            "channel_size": self.channel_size,
+            "kernel_size": self.kernel_size,
+            "stride_size": self.stride_size,
+            "activation": self.cnn_activation,
+            "output_activation": self.cnn_activation,
+            "min_hidden_layers": self.min_cnn_hidden_layers,
+            "max_hidden_layers": self.max_cnn_hidden_layers,
+            "min_channel_size": self.min_channel_size,
+            "max_channel_size": self.max_channel_size,
+        }
+        base.update(extra_kwargs)
+        return base
 
-        module_dict["value"] = self.value_net
-        if self.advantage_net is not None:
-            module_dict["advantage"] = self.advantage_net
+    @property
+    def init_dict(self) -> Dict[str, Any]:
+        """Returns model information in dictionary.
         
-        return module_dict
+        :return: Model information
+        :rtype: Dict[str, Any]
+        """
+        kwargs = self.base_init_dict.copy()
+        kwargs['num_outputs'] = self.num_outputs
+        extra_kwargs = {
+            "observation_space": self.observation_space,
+            "latent_dim": self.latent_dim,
+            "vector_space_mlp": self.vector_space_mlp,
+            "init_dicts": self.init_dicts,
+            # CNN kwargs
+            "channel_size": self.channel_size,
+            "kernel_size": self.kernel_size,
+            "stride_size": self.stride_size,
+            "cnn_activation": self.cnn_activation,
+            "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
+            "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
+            "min_channel_size": self.min_channel_size,
+            "max_channel_size": self.max_channel_size,
+            # MLP kwargs
+            "hidden_size": self.hidden_size,
+            "mlp_activation": self.mlp_activation,
+            "mlp_output_activation": self.mlp_activation,
+            "min_hidden_layers": self.min_hidden_layers,
+            "max_hidden_layers": self.max_hidden_layers,
+            "min_mlp_nodes": self.min_mlp_nodes,
+            "max_mlp_nodes": self.max_mlp_nodes
+        }
+        kwargs.update(extra_kwargs)
+        return kwargs
+
     
     def get_init_dict(self, key: str, default: Literal['cnn', 'mlp']) -> Dict[str, Any]:
         """Returns the initialization dictionary for the specified key.
@@ -372,23 +340,19 @@ class EvolvableMultiInput(EvolvableModule):
         """
         if key in self.feature_net.keys():
             module = self.feature_net[key]
-        elif key == "value":
-            module = self.value_net
-        elif key == "advantage":
-            module = self.advantage_net
         else:
             raise ValueError(f"Invalid key {key} provided.")
 
         init_dict = module.init_dict.copy()
+        del init_dict["num_outputs"]
         if isinstance(module, EvolvableCNN):
             del init_dict["input_shape"]
         elif isinstance(module, EvolvableMLP):
             del init_dict["num_inputs"]
-            del init_dict["num_outputs"]
         
         return init_dict
     
-    def build_networks(self) -> Tuple[Dict[str, SupportedEvolvableTypes], EvolvableMLP, Optional[EvolvableMLP]]:
+    def build_feature_extractor(self) -> Dict[str, SupportedEvolvableTypes]:
         """Creates the feature extractor and final MLP networks.
         
         Returns:
@@ -411,64 +375,10 @@ class EvolvableMultiInput(EvolvableModule):
         if self.vector_space_mlp:
             feature_net['vector_mlp'] = EvolvableMLP(
                 num_inputs=vector_input_dim,
-                num_outputs=self.latent_dim,
                 **copy.deepcopy(self.get_init_dict("vector_mlp", default='mlp'))
             )
         
-        # Calculate total feature dimension for final MLP
-        image_features_dim = sum([self.latent_dim for key, space in self.observation_space.spaces.items() if is_image_space(space)])
-        vector_features_dim = self.latent_dim if self.vector_space_mlp else vector_input_dim
-        features_dim = image_features_dim + vector_features_dim
-
-        if self.critic:
-            features_dim += self.num_outputs
-
-        if self.rainbow:
-            value_net = EvolvableMLP(
-                num_inputs=features_dim,
-                num_outputs=self.num_atoms,
-                # name="value_net", # TODO: Ideally we are able to give it a name without changing `self.arch`
-                **copy.deepcopy(self.get_init_dict("head", default='mlp'))
-            )
-            advantage_net = EvolvableMLP(
-                num_inputs=features_dim,
-                num_outputs=self.num_outputs * self.num_atoms,
-                # name="advantage_net", # TODO: Ideally we are able to give it a name without changing `self.arch`
-                **copy.deepcopy(self.get_init_dict("advantage", default='mlp'))
-            )
-
-            if self.accelerator is not None:
-                feature_net, value_net, advantage_net = self.accelerator.prepare(
-                    feature_net, value_net, advantage_net
-                )
-            else:
-                feature_net, value_net, advantage_net = (
-                    feature_net.to(self.device),
-                    value_net.to(self.device),
-                    advantage_net.to(self.device),
-                )
-        else:
-            if self.critic:
-                value_net = EvolvableMLP(
-                    num_inputs=features_dim,
-                    num_outputs=1,
-                    # name="value_net",
-                    **copy.deepcopy(self.get_init_dict("head", default='mlp'))
-                )
-            else:
-                value_net = EvolvableMLP(
-                    num_inputs=features_dim,
-                    num_outputs=self.num_outputs,
-                    # name="action_net",
-                    **copy.deepcopy(self.get_init_dict("head", default='mlp'))
-                )
-            
-            advantage_net = None
-            if self.accelerator is None:
-                feature_net = feature_net.to(self.device)
-                value_net = value_net.to(self.device)
-
-        return feature_net, value_net, advantage_net
+        return feature_net
 
     def forward(self, x: TupleOrDictObservation, xc: Optional[ArrayOrTensor] = None, q: bool = True) -> torch.Tensor:
         """Forward pass of the composed network. Extracts features from each observation key and concatenates
@@ -513,32 +423,9 @@ class EvolvableMultiInput(EvolvableModule):
         else:
             vector_features = vector_inputs
 
-        # Concatenate all features
+        # Concatenate all features and pass through final MLP
         features = torch.cat([image_features, vector_features], dim=1)
-
-        if self.critic:
-            features = torch.cat([features, xc], dim=1)
-        
-        value: torch.Tensor = self.value_net(features)
-
-        batch_size = x[list(x.keys())[0]].shape[0]
-        if self.rainbow:
-            advantage: torch.Tensor = self.advantage_net(features)
-            advantage = advantage.view(batch_size, self.num_outputs, self.num_atoms)
-            value = value.view(batch_size, 1, self.num_atoms)
-
-            x: torch.Tensor = value + advantage - advantage.mean(1, keepdim=True)
-            x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                -1, self.num_outputs, self.num_atoms
-            )
-            x = x.clamp(min=1e-3)
-
-            if q:
-                x = torch.sum(x * self.support, dim=2)
-        else:
-            x = value
-
-        return x
+        return self.output_activation(self.final_dense(features))
 
     def choose_random_module(self, mtype: Optional[Literal["cnn", "mlp"]] = None) -> Tuple[str, SupportedEvolvableTypes]:
         """Randomly selects a module from the feature extractors or the final MLP.
@@ -548,17 +435,17 @@ class EvolvableMultiInput(EvolvableModule):
         """
         if mtype is not None:
             modules = {}
-            for key, module in self.evolvable_modules.items():
+            for key, module in self.feature_net.items():
                 if isinstance(module, EvolvableCNN) and mtype == "cnn":
                     modules[key] = module
                 elif isinstance(module, EvolvableMLP) and mtype == "mlp":
                     modules[key] = module
         else:
-            modules = self.evolvable_modules
+            modules = self.feature_net
 
         key = list(modules.keys())[torch.randint(len(modules.keys()), (1,)).item()]
 
-        return key, self.evolvable_modules[key]
+        return key, self.feature_net[key]
 
     @register_mutation_fn(MutationType.LAYER)
     def add_mlp_layer(self, key: Optional[str] = None) -> Dict[str, str]:
@@ -569,11 +456,11 @@ class EvolvableMultiInput(EvolvableModule):
         rtype: Dict[str, str]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
-            key, module = self.choose_random_module()
+            key, module = self.choose_random_module("mlp")
 
-        module.add_mlp_layer()
+        module.add_layer()
         self.init_dicts[key] = self.extract_init_dict(key)
         return {"key": key}
 
@@ -586,11 +473,11 @@ class EvolvableMultiInput(EvolvableModule):
         rtype: Dict[str, str]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
-            key, module = self.choose_random_module()
+            key, module = self.choose_random_module("mlp")
             
-        module.remove_mlp_layer()
+        module.remove_layer()
         self.init_dicts[key] = self.extract_init_dict(key)
         return {"key": key}
 
@@ -613,11 +500,11 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: dict
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
-            key, module = self.choose_random_module()
+            key, module = self.choose_random_module("mlp")
 
-        mut_dict = module.add_mlp_node(hidden_layer, numb_new_nodes)
+        mut_dict = module.add_node(hidden_layer, numb_new_nodes)
         self.init_dicts[key] = self.extract_init_dict(key)
         mut_dict["key"] = key
         return mut_dict
@@ -641,11 +528,11 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: Dict[str, Optional[Union[str, int]]]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
-            key, module = self.choose_random_module()
+            key, module = self.choose_random_module("mlp")
 
-        mut_dict = module.remove_mlp_node(hidden_layer, numb_new_nodes)
+        mut_dict = module.remove_node(hidden_layer, numb_new_nodes)
         self.init_dicts[key] = self.extract_init_dict(key)
         mut_dict["key"] = key
         return mut_dict
@@ -659,11 +546,11 @@ class EvolvableMultiInput(EvolvableModule):
         rtype: Dict[str, str]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
             key, module = self.choose_random_module("cnn")
 
-        module.add_cnn_layer()
+        module.add_layer()
         self.init_dicts[key] = self.extract_init_dict(key)
         return {"key": key}
     
@@ -676,11 +563,11 @@ class EvolvableMultiInput(EvolvableModule):
         rtype: Dict[str, str]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
             key, module = self.choose_random_module("cnn")
 
-        module.remove_cnn_layer()
+        module.remove_layer()
         self.init_dicts[key] = self.extract_init_dict(key)
         return {"key": key}
     
@@ -693,11 +580,11 @@ class EvolvableMultiInput(EvolvableModule):
         rtype: Dict[str, str]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
             key, module = self.choose_random_module("cnn")
 
-        module.change_cnn_kernel()
+        module.change_kernel()
         self.init_dicts[key] = self.extract_init_dict(key)
         return {"key": key}
     
@@ -718,11 +605,11 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: Dict[str, Union[str, int]]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
             key, module = self.choose_random_module("cnn")
 
-        mut_dict = module.add_cnn_channel(hidden_layer, numb_new_channels)
+        mut_dict = module.add_channel(hidden_layer, numb_new_channels)
         self.init_dicts[key] = self.extract_init_dict(key)
         mut_dict["key"] = key
         return mut_dict
@@ -744,22 +631,12 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: Dict[str, Optional[Union[str, int]]]
         """
         if key is not None:
-            module = self.evolvable_modules[key]
+            module = self.feature_net[key]
         else:
             key, module = self.choose_random_module("cnn")
 
-        mut_dict = module.remove_cnn_channel(hidden_layer, numb_new_channels)
+        mut_dict = module.remove_channel(hidden_layer, numb_new_channels)
         self.init_dicts[key] = self.extract_init_dict(key)
         mut_dict["key"] = key
         return mut_dict
-    
-    def clone(self) -> "EvolvableMultiInput":
-        """Returns clone of neural net with identical parameters.
-        
-        :return: Clone of neural network
-        :rtype: EvolvableMultiInput
-        """
-        clone = EvolvableMultiInput(**copy.deepcopy(self.init_dict))
-        clone.load_state_dict(self.state_dict())
-        return clone
 

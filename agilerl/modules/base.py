@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Callable, Optional, runtime_checkable
+from typing import Any, Dict, List, Callable, Optional
 import copy
 from functools import wraps
 from abc import ABC, abstractmethod
@@ -34,16 +34,13 @@ class EvolvableModule(nn.Module, ABC):
     """Base class for evolvable neural networks. Provides methods that allow for 
     seamless network mutations."""
 
-    feature_net: nn.Module
-    value_net: Optional[nn.Module]
-    advantage_net: Optional[nn.Module]
+    model: nn.Module
 
-    def __init__(self, device: str, accelerator: Optional[Accelerator] = None) -> None:
+    def __init__(self, device: str) -> None:
         nn.Module.__init__(self)
         self._init_mutation_methods()
 
-        self.device = device if accelerator is None else accelerator.device
-        self.accelerator = accelerator
+        self.device = device
 
     @property
     @abstractmethod
@@ -56,12 +53,6 @@ class EvolvableModule(nn.Module, ABC):
     
     def __call__(self, *args, **kwargs) -> torch.Tensor:
         return self.forward(*args, **kwargs)
-    
-    # TODO: Will remove the need for this in the future by creating a `networks` module
-    @abstractmethod
-    def build_networks(self) -> None:
-        """Build the neural network architecture."""
-        raise NotImplementedError("Build method must be implemented in order to construct the neural network.")
 
     @staticmethod
     def preserve_parameters(old_net: nn.Module, new_net: nn.Module) -> nn.Module:
@@ -151,15 +142,6 @@ class EvolvableModule(nn.Module, ABC):
             list(self._layer_mutation_methods.values()) +  
             list(self._node_mutation_methods.values())
         )
-    
-    def get_activation(self, name: Optional[str] = None) -> nn.Module:
-        """Get the activation function by name.
-
-        param name: The name of the activation function.
-        type name: str
-        return: The activation function.
-        """
-        return get_activation(name)
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods.
@@ -168,6 +150,22 @@ class EvolvableModule(nn.Module, ABC):
         """
         return {method.__name__: method for method in self._mutation_methods}
     
+    def filter_mutation_methods(self, remove: str) -> None:
+        """Filter out mutation methods that contain the specified string in their name.
+        
+        param remove: The string to remove.
+        type remove: str
+        """
+        self._layer_mutation_methods = {
+            name: method for name, method in self._layer_mutation_methods.values() if remove not in name
+        }
+        self._node_mutation_methods = {
+            name: method for name, method in self._node_mutation_methods.values() if remove not in name
+        }
+        self._mutation_methods = [
+            method for method in self._mutation_methods if remove not in method.__name__
+        ]
+
     def get_mutation_probs(self, new_layer_prob: float) -> List[float]:
         """Get the mutation probabilities for each mutation method.
         

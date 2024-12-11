@@ -898,24 +898,11 @@ class MLP(EvolvableMLP):
             hidden_size=[hidden_size],
             layer_norm=False,
             mlp_output_activation=activation,
+            new_gelu=True
             **kwargs,
         )
         self.dropout = nn.Dropout(dropout)
 
-    def get_activation(self, name: Optional[str] = None) -> nn.Module:
-        """Get the activation function by name. Uses the NewGELU activation function
-        used in OpenAI GPT.
-
-        :param name: The name of the activation function, defaults to None
-        :type name: str, optional
-
-        :return: The activation function
-        :rtype: nn.Module
-        """
-        if name == "GELU":
-            return NewGELU()
-
-        return super().get_activation(name)
 
     def forward(self, x):
         """Returns output of neural network.
@@ -928,7 +915,7 @@ class MLP(EvolvableMLP):
             x = torch.FloatTensor(np.array(x), device=self.device)
 
         # forward pass through the network
-        for value in self.feature_net:
+        for value in self.model:
             x = value(x)
         x = self.dropout(x)
         return x

@@ -1,5 +1,5 @@
 # This file contains utility functions for tuning
-from typing import Tuple, Union, List, Dict, Optional, Iterable
+from typing import Tuple, Union, List, Dict, Optional, Iterable, Literal
 import math
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
 from agilerl.typing import DeviceType
-from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
+from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGELU
 
 TupleorInt = Union[Tuple[int, ...], int]
 
@@ -90,7 +90,7 @@ def get_batch_norm_layer(name: str, num_features: int, device: DeviceType = "cpu
     return batch_norm_layers[name](num_features, device=device)
 
 def get_conv_layer(
-        conv_layer_name: str,
+        conv_layer_name: Literal["Conv1d", "Conv2d", "Conv3d"],
         in_channels: int,
         out_channels: int,
         kernel_size: TupleorInt,
@@ -116,6 +116,11 @@ def get_conv_layer(
         :return: Convolutional layer
         :rtype: nn.Module
         """
+        if conv_layer_name not in ["Conv1d", "Conv2d", "Conv3d"]:
+            raise ValueError(
+                f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv1d', 'Conv2d', 'Conv3d'."
+                )
+
         convolutional_layers = {
             "1d": nn.Conv1d,
             "2d": nn.Conv2d,
@@ -149,7 +154,7 @@ def get_normalization(normalization_name: str, layer_size: int, device: DeviceTy
 
     return normalization_functions[normalization_name](layer_size, device=device)
 
-def get_activation(activation_name: Optional[str]) -> nn.Module:
+def get_activation(activation_name: Optional[str], new_gelu: bool = False) -> nn.Module:
     """Returns activation function for corresponding activation name.
 
     :param activation_names: Activation function name
@@ -166,7 +171,7 @@ def get_activation(activation_name: Optional[str]) -> nn.Module:
         "Softmax": nn.Softmax,
         "LeakyReLU": nn.LeakyReLU,
         "PReLU": nn.PReLU,
-        "GELU": nn.GELU,
+        "GELU": nn.GELU if not new_gelu else NewGELU,
         "Identity": nn.Identity,
     }
 
@@ -290,17 +295,16 @@ def is_image_space(space: spaces.Space) -> bool:
     """
     return isinstance(space, spaces.Box) and len(space.shape) == 3
 
-def create_conv_block(
+def create_cnn(
+        block_type: Literal["Conv2d", "Conv3d"],
         in_channels: int,
         channel_size: List[int],
-        kernel_size: List[int],
-        stride_size: List[int],
+        kernel_size: List[TupleorInt],
+        stride_size: List[TupleorInt],
         name: str,
-        critic: bool = False,
         init_layers: bool = True,
         layer_norm: bool = False,
         activation_fn: str = "ReLU",
-        n_agents: Optional[int] = None,
         device: DeviceType = "cpu"
         ) -> Dict[str, nn.Module]:
     """
@@ -333,78 +337,47 @@ def create_conv_block(
     :rtype: Dict[str, nn.Module]
     """
     net_dict = OrderedDict()
-
-    # First layer of the block
-    multi = n_agents is not None
-    if multi:
-        k_size = (
-            (n_agents, kernel_size[0], kernel_size[0])
-            if critic
-            else (1, kernel_size[0], kernel_size[0])
+    channel_size = [in_channels] + channel_size
+    for l_no in range(1, len(channel_size)):
+        net_dict[f"{name}_conv_layer_{str(l_no)}"] = get_conv_layer(
+            conv_layer_name=block_type,
+            in_channels=channel_size[l_no - 1],
+            out_channels=channel_size[l_no],
+            kernel_size=kernel_size[l_no - 1],
+            stride=stride_size[l_no - 1],
+            device=device
         )
-
-    block_type = "2d" if not multi else "3d"
-    k_size = k_size if multi else kernel_size[0]
-    net_dict[f"{name}_conv_layer_0"] = get_conv_layer(
-        conv_layer_name=block_type,
-        in_channels=in_channels,
-        out_channels=channel_size[0],
-        kernel_size=k_size,
-        stride=stride_size[0],
-        device=device
-    )
-    if init_layers:
-        net_dict[f"{name}_conv_layer_0"] = layer_init(
-            net_dict[f"{name}_conv_layer_0"]
-        )
-    if layer_norm:
-        net_dict[f"{name}_layer_norm_0"] = get_batch_norm_layer(block_type, channel_size[0], device=device)
-
-    net_dict[f"{name}_activation_0"] = get_activation(activation_fn)
-
-    # Remaining layers of the block
-    if len(channel_size) > 1:
-        for l_no in range(1, len(channel_size)):
-            k_size = (1, kernel_size[l_no], kernel_size[l_no]) if multi else kernel_size[l_no]
-            net_dict[f"{name}_conv_layer_{str(l_no)}"] = get_conv_layer(
-                conv_layer_name=block_type,
-                in_channels=channel_size[l_no - 1],
-                out_channels=channel_size[l_no],
-                kernel_size=k_size,
-                stride=stride_size[l_no],
+        if init_layers:
+            net_dict[f"{name}_conv_layer_{str(l_no)}"] = layer_init(
+                net_dict[f"{name}_conv_layer_{str(l_no)}"]
+            )
+        if layer_norm:
+            net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_batch_norm_layer(
+                block_type,
+                num_features=channel_size[l_no],
                 device=device
             )
-            if init_layers:
-                net_dict[f"{name}_conv_layer_{str(l_no)}"] = layer_init(
-                    net_dict[f"{name}_conv_layer_{str(l_no)}"]
-                )
-            if layer_norm:
-                net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_batch_norm_layer(
-                    block_type,
-                    channel_size[l_no],
-                    device=device
-                )
-            net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
-                activation_fn
-            )
-    
+        net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
+            activation_fn
+        )
+
     return net_dict
+
+MlpLayer = Union[nn.Linear, NoisyLinear, nn.LayerNorm]
 
 def create_mlp(
     input_size: int,
     output_size: int,
     hidden_size: List[int],
     output_vanish: bool,
-    output_activation: Optional[str],
+    output_activation: Optional[str] = None,
     noisy: bool = False,
-    rainbow_feature_net: bool = False,
     init_layers: bool = True,
     layer_norm: bool = False,
-    mlp_activation: str = "ReLU",
-    mlp_output_activation: Optional[str] = None,
+    activation: str = "ReLU",
     noise_std: float = 0.1,
-    rainbow: bool = False,
     device: DeviceType = "cpu",
+    new_gelu: bool = False,
     name: str = "mlp",
     ) -> nn.Sequential:
     """Creates and returns multi-layer perceptron.
@@ -421,92 +394,67 @@ def create_mlp(
     :type output_activation: Optional[str]
     :param noisy: Whether to use noisy layers.
     :type noisy: bool, optional
-    :param rainbow_feature_net: Whether to use a rainbow feature network.
-    :type rainbow_feature_net: bool, optional
     :param init_layers: Whether to initialize the layers.
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization.
     :type layer_norm: bool, optional
-    :param mlp_activation: Activation function for hidden layers.
-    :type mlp_activation: str, optional
-    :param mlp_output_activation: Activation function for output layer.
-    :type mlp_output_activation: Optional[str], optional
+    :param activation: Activation function for hidden layers.
+    :type activation: str, optional
     :param noise_std: Standard deviation of noise for noisy layers.
     :type noise_std: float, optional
-    :param rainbow: Whether to use a rainbow network.
-    :type rainbow: bool, optional
     :param name: Name of the network.
     :type name: str, default "mlp"
     
     :return: Multi-layer perceptron.
     :rtype: nn.Sequential
     """
-    net_dict = OrderedDict()
-
-    # Initialize the first block
-    if noisy:
-        net_dict[f"{name}_linear_layer_0"] = NoisyLinear(
-            input_size, hidden_size[0], std_init=noise_std, device=device
+    net_dict: Dict[str, MlpLayer] = OrderedDict()
+    hidden_size = [input_size] + hidden_size
+    for l_no in range(1, len(hidden_size)):
+        if noisy: # Add linear layer
+            net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
+                hidden_size[l_no - 1], hidden_size[l_no], noise_std, device=device
             )
+        else:
+            net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
+                hidden_size[l_no - 1], hidden_size[l_no], device=device
+            )
+
+        if init_layers: # Initialize layer weights
+            net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(
+                net_dict[f"{name}_linear_layer_{str(l_no)}"]
+                )
+
+        if layer_norm: # Add layer normalization
+            net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(
+                hidden_size[l_no], device=device
+                )
+
+        # Add activation function
+        net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(activation, new_gelu)
+
+    # Output layer
+    if noisy:
+        output_layer = NoisyLinear(hidden_size[-1], output_size, noise_std, device=device)
     else:
-        net_dict[f"{name}_linear_layer_0"] = nn.Linear(input_size, hidden_size[0], device=device)
+        output_layer = nn.Linear(hidden_size[-1], output_size, device=device)
 
     if init_layers:
-        net_dict[f"{name}_linear_layer_0"] = layer_init(net_dict[f"{name}_linear_layer_0"])
+        output_layer = layer_init(output_layer)
 
-    if layer_norm:
-        net_dict[f"{name}_layer_norm_0"] = nn.LayerNorm(hidden_size[0], device=device)
-    net_dict[f"{name}_activation_0"] = get_activation(
-        activation_name=mlp_output_activation if (len(hidden_size) == 1 and rainbow_feature_net) else mlp_activation
-    )
-
-    if len(hidden_size) > 1:
-        for l_no in range(1, len(hidden_size)):
-            # Add linear layer
-            if noisy:
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
-                    hidden_size[l_no - 1], hidden_size[l_no], noise_std, device=device
-                )
-            else:
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = nn.Linear(
-                    hidden_size[l_no - 1], hidden_size[l_no], device=device
-                )
-            # Initialize layer weights
-            if init_layers:
-                net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(net_dict[f"{name}_linear_layer_{str(l_no)}"])
-            # Add layer normalization
-            if layer_norm:
-                net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(hidden_size[l_no], device=device)
-            # Add activation function
-            net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
-                mlp_activation if not rainbow_feature_net else mlp_output_activation
-            )
-
-    if not rainbow_feature_net:
+    if output_vanish:
         if noisy:
-            output_layer = NoisyLinear(hidden_size[-1], output_size, noise_std, device=device)
+            output_layer.weight_mu.data.mul_(0.1)
+            output_layer.bias_mu.data.mul_(0.1)
+            output_layer.weight_sigma.data.mul_(0.1)
+            output_layer.bias_sigma.data.mul_(0.1)
         else:
-            output_layer = nn.Linear(hidden_size[-1], output_size, device=device)
+            output_layer.weight.data.mul_(0.1)
+            output_layer.bias.data.mul_(0.1)
 
-        if init_layers:
-            output_layer = layer_init(output_layer)
-
-        if output_vanish:
-            if rainbow:
-                output_layer.weight_mu.data.mul_(0.1)
-                output_layer.bias_mu.data.mul_(0.1)
-                output_layer.weight_sigma.data.mul_(0.1)
-                output_layer.bias_sigma.data.mul_(0.1)
-            else:
-                output_layer.weight.data.mul_(0.1)
-                output_layer.bias.data.mul_(0.1)
-
-        net_dict[f"{name}_linear_layer_output"] = output_layer
-        if output_activation is not None:
-            net_dict[f"{name}_activation_output"] = get_activation(
-                activation_name=output_activation
-            )
-
-    net = nn.Sequential(net_dict)
-    return net
+    net_dict[f"{name}_linear_layer_output"] = output_layer
+    net_dict[f"{name}_activation_output"] = get_activation(
+        activation_name=output_activation, new_gelu=new_gelu
+    )
+    return nn.Sequential(net_dict)
 

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
+import torch._dynamo
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
@@ -26,6 +27,8 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
     make_safe_deepcopies
 )
+
+torch._dynamo.config.suppress_errors = True
 
 class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
@@ -150,7 +153,6 @@ class DQN(RLAlgorithm):
                     num_inputs=self.state_dim[0],
                     num_outputs=self.action_dim,
                     device=self.device,
-                    accelerator=self.accelerator,
                     **self.net_config,
                 )
                 self.actor = create_actor()
@@ -178,7 +180,6 @@ class DQN(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     device=self.device,
-                    accelerator=self.accelerator,
                     **self.net_config,
                 )
 
@@ -211,7 +212,6 @@ class DQN(RLAlgorithm):
                     observation_space=self.observation_space,
                     num_outputs=self.action_dim,
                     device=self.device,
-                    accelerator=self.accelerator,
                     **self.net_config,
                 )
 
@@ -297,13 +297,15 @@ class DQN(RLAlgorithm):
         else:
             action_mask = torch.ones((torch_obs.shape[0], self.action_dim), device=device)
 
+        torch._dynamo.explain(lambda: self._get_action(obs, epsilon, action_mask))
+    
         return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 
     def _get_action(
             self,
             obs: TorchObsType,
-            epsilon: Optional[torch.Tensor] = None,
-            action_mask: Optional[torch.Tensor] = None
+            epsilon: torch.Tensor,
+            action_mask: torch.Tensor
             ) -> torch.Tensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
