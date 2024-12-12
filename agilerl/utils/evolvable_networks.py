@@ -301,7 +301,7 @@ def create_cnn(
         channel_size: List[int],
         kernel_size: List[TupleorInt],
         stride_size: List[TupleorInt],
-        name: str,
+        name: str = "cnn",
         init_layers: bool = True,
         layer_norm: bool = False,
         activation_fn: str = "ReLU",
@@ -310,6 +310,8 @@ def create_cnn(
     """
     Build a convolutional block.
 
+    :param block_type: Type of convolutional block.
+    :type block_type: Literal["Conv2d", "Conv3d"]
     :param in_channels: Number of input channels.
     :type in_channels: int
     :param channel_size: List of channel sizes for each layer.
@@ -320,20 +322,16 @@ def create_cnn(
     :type stride_size: List[int]
     :param name: Name of the block.
     :type name: str
-    :param critic: Whether the block is for a critic network. Defaults to False.
-    :type critic: bool, optional
     :param init_layers: Whether to initialize the layers. Defaults to True.
     :type init_layers: bool, optional
     :param layer_norm: Whether to use layer normalization. Defaults to False.
     :type layer_norm: bool, optional
     :param activation_fn: Activation function to use. Defaults to "ReLU".
     :type activation_fn: str, optional
-    :param block_type: Type of convolutional block. Defaults to "Conv2d".
-    :type block_type: Literal["Conv1d", "Conv2d", "Conv3d"], optional
-    :param n_agents: Number of agents. Defaults to None.
-    :type n_agents: int, optional
+    :param device: Device to use. Defaults to "cpu".
+    :type device: DeviceType, optional
     
-    :return: 3D convolutional block.
+    :return: Convolutional block.
     :rtype: Dict[str, nn.Module]
     """
     net_dict = OrderedDict()

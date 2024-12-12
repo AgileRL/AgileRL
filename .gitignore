@@ -142,6 +142,4 @@ data/wordle.zip
 wandb/
 
 # Refactoring changes
-agilerl/networks
-agilerl/configs.py
 demo.ipynb

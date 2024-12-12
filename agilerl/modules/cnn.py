@@ -1,14 +1,127 @@
-from typing import List, Optional, Tuple, Literal, Dict, Any
+from typing import List, Optional, Tuple, Literal, Union, Dict, Any
+from dataclasses import dataclass, field
 import numpy as np
 import torch
 import torch.nn as nn
 
+from agilerl.typing import KernelSizeType
 from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import (
     get_activation,
     calc_max_kernel_sizes,
     create_cnn
 )
+
+BlockType = Literal["Conv2d", "Conv3d"]
+
+def _assert_correct_kernel_sizes(sizes: List[Tuple[int, ...]], block_type: BlockType) -> None:
+    """Check that kernel sizes correspond to either 2d or 3d convolutions. We enforce 
+    CNN kernels to have the same value for width and height.
+    
+    :param sizes: Kernel sizes.
+    :type sizes:  Union[int, Tuple[int, ...]]
+    """
+    for k_size in sizes:
+        if len(k_size) == 2 and block_type == "Conv2d":
+            wh_unique = set(k_size)
+        elif len(k_size) == 3 and block_type == "Conv3d":
+            wh_unique = set(k_size[-2:])
+        else:
+            msg = (
+                "2 (width x height)" 
+                if block_type == "Conv2d" 
+                else "3 (depth x width x height)"
+            )
+            raise ValueError(
+                f"Found CNN kernel with length {len(k_size)}. These should ", \
+                f"have a length of {msg} for {block_type}."
+                )
+
+        assert (
+            len(wh_unique) == 1, 
+            "AgileRL currently doesnt support having different ", \
+            f"values for width and height in a single CNN kernel: {wh_unique}"
+        )
+
+@dataclass
+class MutableKernelSizes:
+    sizes: List[KernelSizeType]
+    cnn_block_type: Literal["Conv2d", "Conv3d"]
+
+    def __post_init__(self) -> None:
+        tuple_sizes = False
+        if isinstance(self.sizes[0], (tuple, list)):
+            tuple_sizes = True
+            _assert_correct_kernel_sizes(self.sizes, self.cnn_block_type)
+
+        self.tuple_sizes = tuple_sizes
+
+    @property
+    def int_sizes(self) -> List[int]:
+        if self.tuple_sizes:
+            return [k_size[-1] for k_size in self.sizes]
+        return self.sizes
+    
+    def add_layer(self, other: int) -> None:
+        if self.tuple_sizes:
+            if self.cnn_block_type == "Conv2d":
+                other = (other, other)
+            else:
+                # NOTE: Do we always want to use a depth of one when adding a layer
+                # in multi-agent settings?
+                other = (1, other, other)
+
+        self.sizes += [other]
+    
+    def remove_layer(self) -> None:
+        self.sizes = self.sizes[:-1]
+    
+    def calc_max_kernel_sizes(
+            self,
+            channel_size: List[int],
+            stride_size: List[int],
+            input_shape: List[int]
+            ) -> List[int]:
+        """Calculate the maximum kernel sizes for each convolutional layer.
+
+        :param channel_size: Number of channels in each convolutional layer.
+        :type channel_size: List[int]
+        :param stride_size: Stride size of each convolutional layer.
+        :type stride_size: List[int]
+        :param input_shape: Input shape.
+        :type input_shape: List[int]
+
+        :return: Maximum kernel sizes for each convolutional layer.
+        :rtype: List[int]
+        """
+        kernel_size = self.int_sizes if self.tuple_sizes else self.sizes
+        return calc_max_kernel_sizes(channel_size, kernel_size, stride_size, input_shape)
+    
+    def change_kernel_size(
+            self,
+            hidden_layer: int,
+            channel_size: List[int],
+            stride_size: List[int], 
+            input_shape: Tuple[int]
+            ) -> None:
+        """Randomly alters convolution kernel of random CNN layer.
+
+        :param hidden_layer: Depth of hidden layer to change kernel size of.
+        :type hidden_layer: int
+        """
+        max_kernels = self.calc_max_kernel_sizes(
+            channel_size, stride_size, input_shape
+        )
+        new_kernel_size = np.random.randint(1, max_kernels[hidden_layer] + 1)
+        if self.tuple_sizes:
+            if self.cnn_block_type == "Conv2d":
+                self.sizes[hidden_layer] = (new_kernel_size, new_kernel_size)
+            else:
+                depth = self.sizes[hidden_layer][0]
+                self.sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
+        else:
+            self.sizes[hidden_layer] = np.random.randint(1, max_kernels[hidden_layer] + 1)
+
 
 class EvolvableCNN(EvolvableModule):
     """The Evolvable Convolutional Neural Network class. It supports the evolution of the CNN architecture
@@ -17,14 +130,14 @@ class EvolvableCNN(EvolvableModule):
 
     :param input_shape: Input shape
     :type input_shape: list[int]
+    :param num_outputs: Action dimension
+    :type num_outputs: int
     :param channel_size: CNN channel size
     :type channel_size: list[int]
     :param kernel_size: Convolution kernel size
-    :type kernel_size: list[int]
+    :type kernel_size: list[int], list[tuple[int, ...]]
     :param stride_size: Convolution stride size
     :type stride_size: list[int]
-    :param num_outputs: Action dimension
-    :type num_outputs: int
     :param output_activation: MLP output activation layer, defaults to None
     :type output_activation: str, optional
     :param activation: CNN activation layer, defaults to 'relu'
@@ -39,12 +152,8 @@ class EvolvableCNN(EvolvableModule):
     :type max_channel_size: int, optional
     :param layer_norm: Normalization between layers, defaults to False
     :type layer_norm: bool, optional
-    :param noise_std: Noise standard deviation, defaults to 0.5
-    :type noise_std: float, optional
     :param init_layers: Initialise network layers, defaults to True
     :type init_layers: bool, optional
-    :param output_vanish: Vanish output by multiplying by 0.1, defaults to False
-    :type output_vanish: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
@@ -53,10 +162,10 @@ class EvolvableCNN(EvolvableModule):
     def __init__(
         self,
         input_shape: List[int],
-        channel_size: List[int],
-        kernel_size: List[int],
-        stride_size: List[int],
         num_outputs: int,
+        channel_size: List[int],
+        kernel_size: List[KernelSizeType],
+        stride_size: List[int],
         sample_input: Optional[torch.Tensor] = None,
         block_type: Literal["Conv2d", "Conv3d"] = "Conv2d",
         activation: str = "ReLU",
@@ -66,11 +175,9 @@ class EvolvableCNN(EvolvableModule):
         min_channel_size: int = 32,
         max_channel_size: int = 256,
         layer_norm: bool = False,
-        noise_std: float = 0.5,
         init_layers: bool = True,
-        output_vanish: bool = False,
         device: str = "cpu",
-        arch: str = "cnn"
+        name: str = "cnn"
         ) -> None:
         super().__init__(device)
 
@@ -92,11 +199,15 @@ class EvolvableCNN(EvolvableModule):
         ), "'min_channel_size' must be less than 'max_channel_size'."
 
         if block_type == "Conv3d":
-            assert sample_input is not None, "Sample input must be provided for 3D convolutional networks."
+            assert (
+                sample_input is not None, 
+                "Sample input must be provided for 3D convolutional networks."
+            )
 
         self.input_shape = input_shape
         self.channel_size = channel_size
-        self.kernel_size = kernel_size
+        self.raw_kernel_size = kernel_size
+        self.kernel_size = MutableKernelSizes(kernel_size, block_type)
         self.stride_size = stride_size
         self.block_type = block_type
         self.num_outputs = num_outputs
@@ -108,13 +219,12 @@ class EvolvableCNN(EvolvableModule):
         self.max_channel_size = max_channel_size
         self.layer_norm = layer_norm
         self.init_layers = init_layers
-        self.noise_std = noise_std
         self.sample_input = sample_input
-        self.output_vanish = output_vanish
+        self.name = name
         self._net_config = {
-            "arch": arch,
+            "name": self.name,
             "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
+            "kernel_size": self.raw_kernel_size,
             "stride_size": self.stride_size,
             "activation": self.activation,
             "block_type": self.block_type,
@@ -125,10 +235,17 @@ class EvolvableCNN(EvolvableModule):
             "max_channel_size": self.max_channel_size,
         }
 
-        sample_input = (
-            torch.zeros(1, *input_shape, device=device) 
-            if sample_input is None else sample_input
-        )
+        if block_type == "Conv2d":
+            sample_input = (
+                torch.zeros(1, *input_shape, device=device) 
+                if sample_input is None else sample_input
+            )
+        else:
+            assert (
+                sample_input is not None,
+                "Sample input must be provided for 3D convolutional networks."
+            )
+
         self.model = self.create_cnn(
             in_channels=input_shape[0],
             channel_size=channel_size,
@@ -148,7 +265,7 @@ class EvolvableCNN(EvolvableModule):
         init_dict = {
             "input_shape": self.input_shape,
             "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
+            "kernel_size": self.raw_kernel_size,
             "stride_size": self.stride_size,
             "num_outputs": self.num_outputs,
             "activation": self.activation,
@@ -159,8 +276,6 @@ class EvolvableCNN(EvolvableModule):
             "min_channel_size": self.min_channel_size,
             "max_channel_size": self.max_channel_size,
             "layer_norm": self.layer_norm,
-            "noise_std": self.noise_std,
-            "output_vanish": self.output_vanish,
             "device": self.device,
         }
         return init_dict
@@ -169,7 +284,7 @@ class EvolvableCNN(EvolvableModule):
         self,
         in_channels: int,
         channel_size: List[int],
-        kernel_size: List[int],
+        kernel_size: List[KernelSizeType],
         stride_size: List[int],
         sample_input: torch.Tensor,
         name: str
@@ -214,7 +329,9 @@ class EvolvableCNN(EvolvableModule):
             cnn_output = nn.Sequential(net_dict)(sample_input)
             flattened_size = cnn_output.shape[1]
 
-        net_dict[f"{name}_linear_output"] = nn.Linear(flattened_size, self.num_outputs, device=self.device)
+        net_dict[f"{name}_linear_output"] = nn.Linear(
+            flattened_size, self.num_outputs, device=self.device
+            )
         net_dict[f"{name}_output_activation"] = get_activation(
             self.output_activation
         )
@@ -241,8 +358,8 @@ class EvolvableCNN(EvolvableModule):
     @register_mutation_fn(MutationType.LAYER)
     def add_layer(self) -> None:
         """Adds a hidden layer to convolutional neural network."""
-        max_kernels = calc_max_kernel_sizes(
-            self.channel_size, self.kernel_size, self.stride_size, self.input_shape
+        max_kernels = self.kernel_size.calc_max_kernel_sizes(
+            self.channel_size, self.stride_size, self.input_shape
         )
         if (
             len(self.channel_size) < self.max_hidden_layers
@@ -251,7 +368,7 @@ class EvolvableCNN(EvolvableModule):
         ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
             k_size = np.random.randint(2, max_kernels[-1] + 1)
-            self.kernel_size += [k_size]
+            self.kernel_size.add_layer(k_size)
             self.stride_size = self.stride_size + [
                 np.random.randint(1, self.stride_size[-1] + 1)
             ]
@@ -262,9 +379,9 @@ class EvolvableCNN(EvolvableModule):
     @register_mutation_fn(MutationType.LAYER)
     def remove_layer(self) -> None:
         """Removes a hidden layer from convolutional neural network."""
-        if len(self.channel_size) > self.min_cnn_hidden_layers:
+        if len(self.channel_size) > self.min_hidden_layers:
             self.channel_size = self.channel_size[:-1]
-            self.kernel_size = self.kernel_size[:-1]
+            self.kernel_size.remove_layer()
             self.stride_size = self.stride_size[:-1]
             self.recreate_nets(shrink_params=True)
         else:
@@ -273,12 +390,11 @@ class EvolvableCNN(EvolvableModule):
     @register_mutation_fn(MutationType.NODE)
     def change_kernel(self) -> None:
         """Randomly alters convolution kernel of random CNN layer."""
-        max_kernels = calc_max_kernel_sizes(
-            self.channel_size, self.kernel_size, self.stride_size, self.input_shape
-        )
         if len(self.channel_size) > 1:
             hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
-            self.kernel_size[hidden_layer] = np.random.randint(1, max_kernels[hidden_layer] + 1)
+            self.kernel_size.change_kernel_size(
+                hidden_layer, self.channel_size, self.stride_size, self.input_shape
+                )
             self.recreate_nets()
         else:
             self.add_layer()
@@ -359,7 +475,7 @@ class EvolvableCNN(EvolvableModule):
         model = self.create_cnn(
             in_channels=self.input_shape[0],
             channel_size=self.channel_size,
-            kernel_size=self.kernel_size,
+            kernel_size=self.kernel_size.sizes,
             stride_size=self.stride_size,
             sample_input=sample_input,
             name="feature"

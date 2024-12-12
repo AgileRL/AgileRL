@@ -15,6 +15,7 @@ TensorTuple = Tuple[torch.Tensor, ...]
 ArrayDict = Dict[str, ArrayOrTensor]
 ArrayTuple = Tuple[ArrayLike, ...]
 NetConfigType = Dict[str, Any]
+KernelSizeType = Union[int, Tuple[int, ...]]
 GymSpaceType = Union[spaces.Space, List[spaces.Space]]
 GymEnvType = Union[str, gym.Env, gym.vector.VectorEnv]
 

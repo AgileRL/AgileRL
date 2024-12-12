@@ -107,10 +107,10 @@ class EvolvableMultiInput(EvolvableModule):
             channel_size: List[int],
             kernel_size: List[int],
             stride_size: List[int],
-            hidden_size: List[int],
             num_outputs: int,
             latent_dim: int = 16,
             vector_space_mlp: bool = False,
+            hidden_size: Optional[List[int]] = None,
             init_dicts: Dict[str, Dict[str, Any]] = {},
             mlp_output_activation: Optional[str] = None,
             mlp_activation: str = "ReLU",
@@ -147,9 +147,9 @@ class EvolvableMultiInput(EvolvableModule):
         self.kernel_size = kernel_size
         self.stride_size = stride_size
         self.hidden_size = hidden_size
+        self.name = name
         self.num_outputs = num_outputs
         self.mlp_activation = mlp_activation
-        self.mlp_output_activation = mlp_output_activation
         self.cnn_activation = cnn_activation
         self.min_hidden_layers = min_hidden_layers
         self.max_hidden_layers = max_hidden_layers
@@ -162,17 +162,15 @@ class EvolvableMultiInput(EvolvableModule):
         self.layer_norm = layer_norm
         self.init_layers = init_layers
         self.latent_dim = latent_dim
-        self.name = name
         self.noisy = noisy
         self.noise_std = noise_std
-        self.output_vanish = output_vanish
         self.init_dicts = init_dicts
         self.vector_spaces = [
-            key for key, space in observation_space.spaces.items() if not is_image_space(space)
+            key for key, space in observation_space.spaces.items() 
+            if not is_image_space(space)
             ]
 
         self._net_config = {
-            "arch": self.arch,
             "name": self.name,
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
@@ -180,7 +178,6 @@ class EvolvableMultiInput(EvolvableModule):
             "cnn_activation": self.cnn_activation,
             "hidden_size": self.hidden_size,
             "mlp_activation": self.mlp_activation,
-            "mlp_output_activation": self.mlp_output_activation,
             "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
             "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
             "min_channel_size": self.min_channel_size,
@@ -194,10 +191,14 @@ class EvolvableMultiInput(EvolvableModule):
         self.feature_net = self.build_feature_extractor()
     
         # Collect all vector space shapes for concatenation
-        vector_input_dim = sum([spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces])
+        vector_input_dim = sum(
+            [spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces]
+            )
 
         # Calculate total feature dimension for final MLP
-        image_features_dim = sum([self.latent_dim for subspace in self.observation_space.spaces.values() if is_image_space(subspace)])
+        image_features_dim = sum(
+            [self.latent_dim for subspace in self.observation_space.spaces.values() if is_image_space(subspace)]
+            )
         vector_features_dim = self.latent_dim if self.vector_space_mlp else vector_input_dim
         features_dim = image_features_dim + vector_features_dim
 
@@ -228,7 +229,6 @@ class EvolvableMultiInput(EvolvableModule):
         return {
             "num_outputs": self.latent_dim,
             "layer_norm": self.layer_norm,
-            "output_vanish": self.output_vanish,
             "init_layers": self.init_layers,
             "noise_std": self.noise_std,
             "noisy": self.noisy,
@@ -303,7 +303,6 @@ class EvolvableMultiInput(EvolvableModule):
             # MLP kwargs
             "hidden_size": self.hidden_size,
             "mlp_activation": self.mlp_activation,
-            "mlp_output_activation": self.mlp_activation,
             "min_hidden_layers": self.min_hidden_layers,
             "max_hidden_layers": self.max_hidden_layers,
             "min_mlp_nodes": self.min_mlp_nodes,
@@ -369,10 +368,16 @@ class EvolvableMultiInput(EvolvableModule):
                 )
 
         # Collect all vector space shapes for concatenation
-        vector_input_dim = sum([spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces])
+        vector_input_dim = sum(
+            [spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces]
+            )
 
         # Optional MLP for all concatenated vector inputs
         if self.vector_space_mlp:
+            assert (
+                self.hidden_size is not None,
+                "Hidden size must be specified for vector space MLP."
+            )
             feature_net['vector_mlp'] = EvolvableMLP(
                 num_inputs=vector_input_dim,
                 **copy.deepcopy(self.get_init_dict("vector_mlp", default='mlp'))
@@ -399,10 +404,13 @@ class EvolvableMultiInput(EvolvableModule):
 
         # Convert observations to tensors
         for key, obs in x.items():
-            x[key] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+            if not isinstance(obs, torch.Tensor):
+                x[key] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         
         # Extract features from image spaces
-        image_features = [self.feature_net[key](x[key]) for key in x.keys() if key in self.feature_net.keys()]
+        image_features = [
+            self.feature_net[key](x[key]) for key in x.keys() if key in self.feature_net.keys()
+            ]
         image_features = torch.cat(image_features, dim=1)
 
         # Extract raw features from vector spaces
@@ -427,7 +435,10 @@ class EvolvableMultiInput(EvolvableModule):
         features = torch.cat([image_features, vector_features], dim=1)
         return self.output_activation(self.final_dense(features))
 
-    def choose_random_module(self, mtype: Optional[Literal["cnn", "mlp"]] = None) -> Tuple[str, SupportedEvolvableTypes]:
+    def choose_random_module(
+            self,
+            mtype: Optional[Literal["cnn", "mlp"]] = None
+            ) -> Tuple[str, SupportedEvolvableTypes]:
         """Randomly selects a module from the feature extractors or the final MLP.
         
         return: Tuple containing the key and the selected module.

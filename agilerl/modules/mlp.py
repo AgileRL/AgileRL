@@ -96,7 +96,7 @@ class EvolvableMLP(EvolvableModule):
         self.noisy = noisy
         self.noise_std = noise_std
         self._net_config = {
-            "arch": self.arch,
+            "name": self.name,
             "hidden_size": self.hidden_size,
             "activation": self.activation,
             "output_activation": self.output_activation,
@@ -246,11 +246,11 @@ class EvolvableMLP(EvolvableModule):
             output_size=self.num_outputs,
             hidden_size=self.hidden_size,
             output_vanish=self.output_vanish,
-            output_activation=self.mlp_output_activation,
+            output_activation=self.output_activation,
             noisy=self.noisy,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,
-            activation=self.mlp_activation,
+            activation=self.activation,
             noise_std=self.noise_std,
             new_gelu=self.new_gelu,
             device=self.device,
