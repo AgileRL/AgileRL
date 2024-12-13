@@ -800,7 +800,9 @@ class Mutations:
 
         # get the offsprings from one of the groups to sample mutation method
         sample_eval = list(offspring_evals.values())[0]
-        mut_method, ret_type = get_architecture_mut_method(sample_eval, self.new_layer_prob, self.rng)
+        mut_method, ret_type = get_architecture_mut_method(
+            sample_eval, self.new_layer_prob, self.rng
+            )
         for name, offsprings in offspring_evals.items():
             # Apply mutation method differently for CNN and other arch types
             # NOTE: Need to check the reason for this

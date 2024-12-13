@@ -104,15 +104,17 @@ class EvolvableMultiInput(EvolvableModule):
     def __init__(
             self,
             observation_space: TupleOrDictSpace,
+            num_outputs: int,
             channel_size: List[int],
             kernel_size: List[int],
             stride_size: List[int],
-            num_outputs: int,
             latent_dim: int = 16,
+            cnn_block_type: Literal["Conv2d", "Conv3d"] = "Conv2d",
+            sample_input: Optional[torch.Tensor] = None,
             vector_space_mlp: bool = False,
             hidden_size: Optional[List[int]] = None,
             init_dicts: Dict[str, Dict[str, Any]] = {},
-            mlp_output_activation: Optional[str] = None,
+            output_activation: Optional[str] = None,
             mlp_activation: str = "ReLU",
             cnn_activation: str = "ReLU",
             min_hidden_layers: int = 1,
@@ -127,7 +129,6 @@ class EvolvableMultiInput(EvolvableModule):
             noisy: bool = False,
             noise_std: float = 0.5,
             init_layers: bool = True,
-            output_vanish: bool = False,
             device: str = "cpu",
             name: str = "multi_input"
         ):
@@ -140,15 +141,21 @@ class EvolvableMultiInput(EvolvableModule):
 
         if isinstance(observation_space, spaces.Tuple):
             observation_space = tuple_to_dict_space(observation_space)
+
+        if vector_space_mlp:
+            assert hidden_size is not None, "Hidden size must be specified for vector space MLP."
         
         self.observation_space = observation_space
+        self.num_outputs = num_outputs
+        self.name = name
         self.vector_space_mlp = vector_space_mlp
         self.channel_size = channel_size
         self.kernel_size = kernel_size
         self.stride_size = stride_size
         self.hidden_size = hidden_size
-        self.name = name
-        self.num_outputs = num_outputs
+        self.sample_input = sample_input
+        self.cnn_block_type = cnn_block_type
+        self.output_activation = output_activation
         self.mlp_activation = mlp_activation
         self.cnn_activation = cnn_activation
         self.min_hidden_layers = min_hidden_layers
@@ -170,23 +177,11 @@ class EvolvableMultiInput(EvolvableModule):
             if not is_image_space(space)
             ]
 
-        self._net_config = {
-            "name": self.name,
-            "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
-            "stride_size": self.stride_size,
-            "cnn_activation": self.cnn_activation,
-            "hidden_size": self.hidden_size,
-            "mlp_activation": self.mlp_activation,
-            "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
-            "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
-            "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-        }
+        self._net_config = self.init_dict.copy()
+        self._net_config.pop("observation_space")
+        self._net_config.pop("num_outputs")
+        self._net_config.pop("device")
+        self._net_config.pop("name")
 
         self.feature_net = self.build_feature_extractor()
     
@@ -204,7 +199,7 @@ class EvolvableMultiInput(EvolvableModule):
 
         # Final dense layer to convert feature encodings to desired num_outputs
         self.final_dense = nn.Linear(features_dim, num_outputs)
-        self.output_activation = get_activation(mlp_output_activation)
+        self.output = get_activation(output_activation)
 
         # If we dont define an EvolvableMLP for vector spaces, we should signal this for Mutations
         if not vector_space_mlp:
@@ -230,8 +225,6 @@ class EvolvableMultiInput(EvolvableModule):
             "num_outputs": self.latent_dim,
             "layer_norm": self.layer_norm,
             "init_layers": self.init_layers,
-            "noise_std": self.noise_std,
-            "noisy": self.noisy,
             "device": self.device
         }
 
@@ -250,7 +243,9 @@ class EvolvableMultiInput(EvolvableModule):
             "min_hidden_layers": self.min_hidden_layers,
             "max_hidden_layers": self.max_hidden_layers,
             "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes
+            "max_mlp_nodes": self.max_mlp_nodes,
+            "noisy": self.noisy,
+            "noise_std": self.noise_std
         }
         base.update(extra_kwargs)
         return base
@@ -268,6 +263,8 @@ class EvolvableMultiInput(EvolvableModule):
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
             "activation": self.cnn_activation,
+            "sample_input": self.sample_input,
+            "block_type": self.cnn_block_type,
             "output_activation": self.cnn_activation,
             "min_hidden_layers": self.min_cnn_hidden_layers,
             "max_hidden_layers": self.max_cnn_hidden_layers,
@@ -285,17 +282,21 @@ class EvolvableMultiInput(EvolvableModule):
         :rtype: Dict[str, Any]
         """
         kwargs = self.base_init_dict.copy()
-        kwargs['num_outputs'] = self.num_outputs
         extra_kwargs = {
             "observation_space": self.observation_space,
+            "num_outputs": self.num_outputs,
             "latent_dim": self.latent_dim,
             "vector_space_mlp": self.vector_space_mlp,
             "init_dicts": self.init_dicts,
+            "output_activation": self.output_activation,
+            "name": self.name,
             # CNN kwargs
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
             "cnn_activation": self.cnn_activation,
+            "sample_input": self.sample_input,
+            "cnn_block_type": self.cnn_block_type,
             "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
             "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
             "min_channel_size": self.min_channel_size,
@@ -433,7 +434,7 @@ class EvolvableMultiInput(EvolvableModule):
 
         # Concatenate all features and pass through final MLP
         features = torch.cat([image_features, vector_features], dim=1)
-        return self.output_activation(self.final_dense(features))
+        return self.output(self.final_dense(features))
 
     def choose_random_module(
             self,

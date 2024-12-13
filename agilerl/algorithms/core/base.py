@@ -21,7 +21,6 @@ from agilerl.utils.algo_utils import (
     assert_supported_space,
     is_module_list,
     isroutine,
-    is_optimizer_list,
     preprocess_observation
 )
 
@@ -296,7 +295,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return (
                 recursive_check_module_attrs(obj, networks_only)
                 and not attr.startswith("_") and not attr.endswith("_")
-                and not "network" in attr # NOTE: We shouldn't need to do this...
             )
         
         # Inspect evolvable given specs

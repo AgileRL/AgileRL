@@ -4,7 +4,6 @@ from functools import wraps
 from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
-from accelerate import Accelerator
 
 from agilerl.protocols import MutationType, MutationMethod
 from agilerl.modules.custom_components import NoisyLinear
@@ -45,11 +44,13 @@ class EvolvableModule(nn.Module, ABC):
     @property
     @abstractmethod
     def init_dict(self) -> Dict[str, Any]:
-        raise NotImplementedError("init_dict property must be implemented in order to store the configuration of the neural network.")
+        raise NotImplementedError(
+            "init_dict property must be implemented in order to store the configuration of the evolvable module."
+            )
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("forward method must be implemented in order to use the neural network.")
+        raise NotImplementedError("forward method must be implemented in order to use the evolvable module.")
     
     def __call__(self, *args, **kwargs) -> torch.Tensor:
         return self.forward(*args, **kwargs)
@@ -157,10 +158,10 @@ class EvolvableModule(nn.Module, ABC):
         type remove: str
         """
         self._layer_mutation_methods = {
-            name: method for name, method in self._layer_mutation_methods.values() if remove not in name
+            name: method for name, method in self._layer_mutation_methods.items() if remove not in name
         }
         self._node_mutation_methods = {
-            name: method for name, method in self._node_mutation_methods.values() if remove not in name
+            name: method for name, method in self._node_mutation_methods.items() if remove not in name
         }
         self._mutation_methods = [
             method for method in self._mutation_methods if remove not in method.__name__

@@ -8,6 +8,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from agilerl.protocols import EvolvableAlgorithm
+from agilerl.configs import MlpNetConfig, CnnNetConfig
 
 ArrayOrTensor = Union[ArrayLike, torch.Tensor]
 TensorDict = Dict[str, torch.Tensor]
@@ -30,3 +31,4 @@ DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 NetworkType = Union[Module, List[Module], Tuple[Module, ...]]
 PopulationType = List[EvolvableAlgorithm]
+ConfigType = Union[Union[MlpNetConfig, CnnNetConfig], Dict[str, Any]]

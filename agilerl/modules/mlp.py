@@ -95,16 +95,14 @@ class EvolvableMLP(EvolvableModule):
         self.hidden_size = hidden_size
         self.noisy = noisy
         self.noise_std = noise_std
-        self._net_config = {
-            "name": self.name,
-            "hidden_size": self.hidden_size,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-        }
+        self._net_config = self.init_dict.copy()
+        for attr in [
+            "num_inputs",
+            "num_outputs",
+            "device",
+            "name"
+        ]:
+            del self._net_config[attr]
 
         self.model = create_mlp(
             input_size=self.num_inputs,
@@ -124,6 +122,7 @@ class EvolvableMLP(EvolvableModule):
 
     @property
     def net_config(self) -> Dict[str, Any]:
+        """Returns model configuration in dictionary."""
         return self._net_config
 
     @property

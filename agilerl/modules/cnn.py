@@ -221,19 +221,14 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.sample_input = sample_input
         self.name = name
-        self._net_config = {
-            "name": self.name,
-            "channel_size": self.channel_size,
-            "kernel_size": self.raw_kernel_size,
-            "stride_size": self.stride_size,
-            "activation": self.activation,
-            "block_type": self.block_type,
-            "output_activation": self.output_activation,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,
-        }
+        self._net_config = self.init_dict.copy()
+        for attr in [
+            "input_shape",
+            "num_outputs",
+            "device",
+            "name"
+        ]:
+            del self._net_config[attr]
 
         if block_type == "Conv2d":
             sample_input = (
@@ -252,7 +247,7 @@ class EvolvableCNN(EvolvableModule):
             kernel_size=kernel_size,
             stride_size=stride_size,
             sample_input=sample_input,
-            name="feature",
+            name=self.name,
         )
 
     @property
@@ -264,10 +259,10 @@ class EvolvableCNN(EvolvableModule):
         """Returns model information in dictionary."""
         init_dict = {
             "input_shape": self.input_shape,
+            "num_outputs": self.num_outputs,
             "channel_size": self.channel_size,
             "kernel_size": self.raw_kernel_size,
             "stride_size": self.stride_size,
-            "num_outputs": self.num_outputs,
             "activation": self.activation,
             "block_type": self.block_type,
             "output_activation": self.output_activation,
@@ -277,6 +272,7 @@ class EvolvableCNN(EvolvableModule):
             "max_channel_size": self.max_channel_size,
             "layer_norm": self.layer_norm,
             "device": self.device,
+            "name": self.name
         }
         return init_dict
 
@@ -478,7 +474,7 @@ class EvolvableCNN(EvolvableModule):
             kernel_size=self.kernel_size.sizes,
             stride_size=self.stride_size,
             sample_input=sample_input,
-            name="feature"
+            name=self.name
         )
 
         # Copy parameters from old model to new model
