@@ -34,6 +34,12 @@ class OptimizerWrapper(Protocol):
 @runtime_checkable
 class EvolvableModule(Protocol):
     init_dict: Dict[str, Any]
+    device: DeviceType
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        ...
+    def forward(self, x: Any) -> Any:
+        ...
     def parameters(self) -> Generator:
         ...
     def to(self, device: DeviceType) -> None:

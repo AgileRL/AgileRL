@@ -63,7 +63,7 @@ def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
     
 def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
     """Asserts that the MultiInput network configuration is correct.
-    
+
     :param net_config: Configuration of the MultiInput network.
     :type net_config: Dict[str, Any]
     """

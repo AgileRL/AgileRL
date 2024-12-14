@@ -16,9 +16,7 @@ from agilerl.typing import TorchObsType, ExperiencesType, NumpyObsType, GymEnvTy
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.networks.q_networks import QNetwork
 from agilerl.modules.base import EvolvableModule
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
@@ -70,7 +68,8 @@ class DQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        net_config: Optional[Dict[str, Any]] = {"arch": "mlp", "hidden_size": [64, 64]},
+        net_config: Optional[Dict[str, Any]] = {"hidden_size": [64, 64]},
+        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -119,105 +118,26 @@ class DQN(RLAlgorithm):
         self.capturable = cudagraphs
 
         if actor_network is not None:
-            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = actor_network.net_config
-            elif isinstance(actor_network, MakeEvolvable):
-                self.net_config = None
-            else:
-                assert (
-                    False
-                ), (f"'actor_network' argument is of type {type(actor_network)}, but "
-                     "must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable")
+            if not isinstance(actor_network, EvolvableModule):
+                raise TypeError(
+                    f"'actor_network' argument is of type {type(actor_network)}, but "
+                     "must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+                     )
             
-            # Need to make deepcopies 
+            # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
             self.actor_detached = make_safe_deepcopies(actor_network) if cudagraphs else None
         else:
-            # model
-            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
-            assert (
-                "arch" in self.net_config.keys()
-            ), "Net config must contain arch: 'mlp' or 'cnn'."
-            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-                assert (
-                    "hidden_size" in self.net_config.keys()
-                ), "Net config must contain hidden_size: int."
-                assert isinstance(
-                    self.net_config["hidden_size"], list
-                ), "Net config hidden_size must be a list."
-                assert (
-                    len(self.net_config["hidden_size"]) > 0
-                ), "Net config hidden_size must contain at least one element."
-
-                create_actor = lambda: EvolvableMLP(
-                    num_inputs=self.state_dim[0],
-                    num_outputs=self.action_dim,
-                    device=self.device,
-                    **self.net_config,
-                )
-                self.actor = create_actor()
-                self.actor_target = create_actor()
-                self.actor_detached = create_actor() if cudagraphs else None
-
-            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in [
-                    "channel_size",
-                    "kernel_size",
-                    "stride_size",
-                    "hidden_size",
-                ]:
-                    assert (
-                        key in self.net_config.keys()
-                    ), f"Net config must contain {key}: int."
-                    assert isinstance(
-                        self.net_config[key], list
-                    ), f"Net config {key} must be a list."
-                    assert (
-                        len(self.net_config[key]) > 0
-                    ), f"Net config {key} must contain at least one element."
-                
-                create_actor = lambda: EvolvableCNN(
-                    input_shape=self.state_dim,
-                    num_outputs=self.action_dim,
-                    device=self.device,
-                    **self.net_config,
-                )
-
-                self.actor = create_actor()
-                self.actor_target = create_actor()
-                self.actor_detached = create_actor() if cudagraphs else None
-
-            elif self.net_config["arch"] == "composed": # Dict observations
-                for key in [
-                    "channel_size",
-                    "kernel_size",
-                    "stride_size",
-                    "hidden_size",
-                ]:
-                    assert (
-                        key in self.net_config.keys()
-                    ), f"Net config must contain {key}: int."
-                    assert isinstance(
-                        self.net_config[key], list
-                    ), f"Net config {key} must be a list."
-                    assert (
-                        len(self.net_config[key]) > 0
-                    ), f"Net config {key} must contain at least one element."
-
-                assert (
-                    "latent_dim" in self.net_config.keys()
-                ), "Net config must contain latent_dim: int."
-
-                create_actor = lambda: EvolvableMultiInput(
-                    observation_space=self.observation_space,
-                    num_outputs=self.action_dim,
-                    device=self.device,
-                    **self.net_config,
-                )
-
-                self.actor = create_actor()
-                self.actor_target = create_actor()
-                self.actor_detached = create_actor() if cudagraphs else None
+            create_actor = lambda: QNetwork(
+                observation_space=observation_space,
+                action_space=action_space,
+                encoder_config=net_config,
+                head_config=head_config,
+                device=device
+            )
+            self.actor = create_actor()
+            self.actor_target = create_actor()
+            self.actor_detached = create_actor() if cudagraphs else None
         
         # Copy over actor weights to target
         self.init_hook()
@@ -227,11 +147,6 @@ class DQN(RLAlgorithm):
             optim.Adam,
             networks=self.actor,
             optimizer_kwargs={"lr": self.lr, "capturable": self.capturable}
-        )
-
-        # TODO: Ideally refactor to remove this
-        self.arch = (
-            self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
         if self.accelerator is not None and wrap:
@@ -539,23 +454,14 @@ class DQN(RLAlgorithm):
             "optimizer_state_dict",
             "actor_init_dict",
             "actor_target_init_dict",
-            "net_config",
             "lr",
         ]
 
-        checkpoint = torch.load(path, map_location=self.device, pickle_module=dill)
-        self.net_config = checkpoint["net_config"]
-        if self.net_config is not None:
-            self.arch = checkpoint["net_config"]["arch"]
-            if self.net_config["arch"] == "mlp":
-                network_class = EvolvableMLP
-            elif self.net_config["arch"] == "cnn":
-                network_class = EvolvableCNN
-        else:
-            network_class = MakeEvolvable
+        checkpoint: Dict[str, Any] = torch.load(path, map_location=self.device, pickle_module=dill)
 
-        self.actor = network_class(**checkpoint["actor_init_dict"])
-        self.actor_target = network_class(**checkpoint["actor_target_init_dict"])
+        self.actor = self.actor.__class__(**checkpoint["actor_init_dict"])
+        self.actor_target = self.actor_target.__class__(**checkpoint["actor_target_init_dict"])
+        self.actor_detached = self.actor_detached.__class__(**checkpoint["actor_init_dict"]) if self.cudagraphs else None
 
         self.lr = checkpoint["lr"]
         self.optimizer = OptimizerWrapper(
@@ -570,74 +476,3 @@ class DQN(RLAlgorithm):
         for attribute in checkpoint.keys():
             if attribute not in network_info:
                 setattr(self, attribute, checkpoint[attribute])
-
-    @classmethod
-    def load(cls, path, device="cpu", accelerator=None):
-        """Creates agent with properties and network weights loaded from path.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-        :type device: str, optional
-        :param accelerator: Accelerator for distributed computing, defaults to None
-        :type accelerator: accelerate.Accelerator(), optional
-        """
-        checkpoint = torch.load(path, map_location=device, pickle_module=dill)
-        checkpoint["actor_init_dict"]["device"] = device
-        checkpoint["actor_target_init_dict"]["device"] = device
-
-        actor_init_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_init_dict"), device
-        )
-        actor_target_init_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_target_init_dict"), device
-        )
-        actor_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_state_dict"), device
-        )
-        optimizer_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("optimizer_state_dict"), device
-        )
-
-        checkpoint["device"] = device
-        checkpoint["accelerator"] = accelerator
-        checkpoint = chkpt_attribute_to_device(checkpoint, device)
-
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
-
-        if checkpoint["net_config"] is not None:
-            self = cls(**class_init_dict)
-            self.arch = checkpoint["net_config"]["arch"]
-            if self.arch == "mlp":
-                self.actor = EvolvableMLP(**actor_init_dict)
-                self.actor_target = EvolvableMLP(**actor_target_init_dict)
-                self.actor_detached = EvolvableMLP(**actor_init_dict)
-            elif self.arch == "cnn":
-                self.actor = EvolvableCNN(**actor_init_dict)
-                self.actor_target = EvolvableCNN(**actor_target_init_dict)
-                self.actor_detached = EvolvableCNN(**actor_init_dict)
-        else:
-            class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
-            self = cls(**class_init_dict)
-            self.actor_target = MakeEvolvable(**actor_target_init_dict)
-            self.actor_detached = MakeEvolvable(**actor_init_dict)
-
-        self.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            optimizer_kwargs={"lr": self.lr, "capturable": self.cudagraphs}
-        )
-        self.actor.load_state_dict(actor_state_dict)
-        self.optimizer.load_state_dict(optimizer_state_dict)
-        self.init_hook()
-
-        if accelerator is not None:
-            self.wrap_models()
-
-        for attribute in self.inspect_attributes().keys():
-            setattr(self, attribute, checkpoint[attribute])
-
-        return self

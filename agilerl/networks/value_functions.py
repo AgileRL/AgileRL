@@ -2,14 +2,13 @@ from typing import Union, Optional, Dict, Any
 import copy
 from gymnasium import spaces
 
+from agilerl.typing import ConfigType
 from agilerl.networks.base import EvolvableNetwork
 
-DiscreteSpace = Union[spaces.Discrete, spaces.MultiDiscrete]
-
 class ValueFunction(EvolvableNetwork):
-    """Value functions are used in reinforcement learning to estimate the value of a state. 
+    """Value functions are used in reinforcement learning to estimate the expected value of a state. 
     Therefore, for any given observation, we predict a single scalar value that represents 
-    the discounted return that can be expected from that state.
+    the discounted return from that state.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
@@ -18,11 +17,17 @@ class ValueFunction(EvolvableNetwork):
     def __init__(
             self,
             observation_space: spaces.Space,
-            action_space: DiscreteSpace,
+            encoder_config: ConfigType,
+            head_config: Optional[ConfigType] = None,
             n_agents: Optional[int] = None,
-            net_config: Dict[str, Any] = {},
+            latent_dim: int = 32,
+            device: str = "cpu"
             ):
-        super().__init__(observation_space, action_space)
 
-        assert isinstance(action_space, spaces.Discrete) or isinstance(action_space, spaces.MultiDiscrete), \
-            "Action space must be either Discrete or MultiDiscrete"
+        super().__init__(
+            observation_space, encoder_config, n_agents=n_agents,
+            latent_dim=latent_dim, device=device
+            )
+        
+        
+

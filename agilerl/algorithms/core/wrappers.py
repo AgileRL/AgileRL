@@ -97,9 +97,9 @@ class OptimizerWrapper:
     def __iter__(self):
         return iter(self.optimizer)
 
-    def __getattribute__(self, name: str):
+    def __getattr__(self, name: str):
         try:
-            return super().__getattribute__(name)
+            return super().__getattr__(name)
         except AttributeError:
             return getattr(self.optimizer, name)
 
@@ -130,3 +130,31 @@ class OptimizerWrapper:
             attr_name for attr_name, attr_value in vars(container).items()
             if _match_condition(attr_value)
         ]
+    
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """
+        Load the state of the optimizer from the passed state dictionary.
+
+        :param state_dict: State dictionary of the optimizer.
+        :type state_dict: Dict[str, Any]
+        """
+        if self.multiagent:
+            raise TypeError(
+                "Loading optimizer state dict directly is not supported for multi-agent optimizers."
+                )
+        
+        self.optimizer.load_state_dict(state_dict)
+    
+    def state_dict(self) -> Dict[str, Any]:
+        """
+        Return the state of the optimizer as a dictionary.
+
+        :return: State dictionary of the optimizer.
+        :rtype: Dict[str, Any]
+        """
+        if self.multiagent:
+            raise TypeError(
+                "Getting optimizer state dict directly is not supported for multi-agent optimizers."
+                )
+        
+        return self.optimizer.state_dict()

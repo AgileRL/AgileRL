@@ -53,7 +53,7 @@ class QNetwork(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[64, 64],
+                    hidden_size=[64],
                     output_activation=None
                     )
                 )
