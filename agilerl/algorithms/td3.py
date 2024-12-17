@@ -112,7 +112,6 @@ class TD3(RLAlgorithm):
             observation_space,
             action_space,
             index=index,
-            net_config=net_config,
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
@@ -277,7 +276,7 @@ class TD3(RLAlgorithm):
                 self.actor = EvolvableCNN(
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **self.net_config,
                 )
@@ -285,7 +284,7 @@ class TD3(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )
@@ -293,7 +292,7 @@ class TD3(RLAlgorithm):
                     input_shape=self.state_dim,
                     num_outputs=self.action_dim,
                     critic=True,
-                    device='cpu', # Use CPU since we will make deepcopy for target
+                    device=self.device,
                     accelerator=self.accelerator,
                     **critic_net_config,
                 )

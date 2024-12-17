@@ -82,7 +82,7 @@ class EvolvableMLP(EvolvableModule):
         self.name = name
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
-        self.activation = activation
+        self._activation = activation
         self.new_gelu = new_gelu
         self.output_activation = output_activation
         self.min_hidden_layers = min_hidden_layers
@@ -95,14 +95,6 @@ class EvolvableMLP(EvolvableModule):
         self.hidden_size = hidden_size
         self.noisy = noisy
         self.noise_std = noise_std
-        self._net_config = self.init_dict.copy()
-        for attr in [
-            "num_inputs",
-            "num_outputs",
-            "device",
-            "name"
-        ]:
-            del self._net_config[attr]
 
         self.model = create_mlp(
             input_size=self.num_inputs,
@@ -123,7 +115,15 @@ class EvolvableMLP(EvolvableModule):
     @property
     def net_config(self) -> Dict[str, Any]:
         """Returns model configuration in dictionary."""
-        return self._net_config
+        net_config = self.init_dict.copy()
+        for attr in [
+            "num_inputs",
+            "num_outputs",
+            "device",
+            "name"
+        ]:
+            net_config.pop(attr)
+        return net_config
 
     @property
     def init_dict(self):
@@ -148,6 +148,16 @@ class EvolvableMLP(EvolvableModule):
             "name": self.name
         }
         return init_dict
+    
+    @property
+    def activation(self) -> str:
+        """Returns activation function."""
+        return self._activation
+    
+    @activation.setter
+    def activation(self, activation: str) -> None:
+        """Set activation function."""
+        self._activation = activation
 
     def reset_noise(self) -> None:
         """Resets noise of value and advantage networks."""
@@ -163,6 +173,28 @@ class EvolvableMLP(EvolvableModule):
         :rtype: torch.Tensor
         """
         return self.model(x)
+    
+    def get_output_dense(self) -> torch.nn.Module:
+        """Returns output layer of neural network."""
+        return getattr(self.model, f"{self.name}_linear_layer_output")
+
+    @register_mutation_fn(MutationType.ACTIVATION)
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """Set the activation function for the network.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        :param output: Flag indicating whether to set the output activation function, defaults to False
+        :type output: bool, optional
+
+        :return: Activation function
+        :rtype: str
+        """
+        if output:
+            self.output_activation = activation
+
+        self.activation = activation
+        self.recreate_network()
 
     @register_mutation_fn(MutationType.LAYER)
     def add_layer(self) -> None:
@@ -184,7 +216,11 @@ class EvolvableMLP(EvolvableModule):
             self.add_node()
 
     @register_mutation_fn(MutationType.NODE)
-    def add_node(self, hidden_layer=None, numb_new_nodes=None) -> Dict[str, int]:
+    def add_node(
+        self,
+        hidden_layer: Optional[int] = None,
+        numb_new_nodes: Optional[int] = None
+        ) -> Dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -196,6 +232,7 @@ class EvolvableMLP(EvolvableModule):
             hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 
@@ -224,6 +261,7 @@ class EvolvableMLP(EvolvableModule):
             hidden_layer = np.random.randint(0, len(self.hidden_size), 1)[0]
         else:
             hidden_layer = min(hidden_layer, len(self.hidden_size) - 1)
+
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
 

@@ -117,7 +117,6 @@ class MADDPG(MultiAgentAlgorithm):
             action_spaces,
             agent_ids,
             index=index,
-            net_config=net_config,
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,

@@ -14,6 +14,7 @@ from gymnasium import spaces
 from agilerl.algorithms.dqn import DQN
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.networks.q_networks import QNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import generate_discrete_space, generate_random_box_space
 
@@ -92,7 +93,6 @@ def test_initialize_dqn_with_minimum_parameters():
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
     assert dqn.learn_step == 5
@@ -107,10 +107,9 @@ def test_initialize_dqn_with_minimum_parameters():
     assert dqn.steps == [0]
     assert dqn.double is False
     # assert dqn.actor_network is None
-    assert isinstance(dqn.actor, EvolvableMLP)
-    assert isinstance(dqn.actor_target, EvolvableMLP)
+    assert isinstance(dqn.actor, QNetwork)
+    assert isinstance(dqn.actor_target, QNetwork)
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
-    assert dqn.arch == "mlp"
     assert isinstance(dqn.criterion, nn.MSELoss)
 
 
@@ -120,8 +119,6 @@ def test_initialize_dqn_with_cnn_accelerator():
     action_space=generate_discrete_space(2)
     index = 0
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -156,7 +153,6 @@ def test_initialize_dqn_with_cnn_accelerator():
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.net_config == net_config_cnn
     assert dqn.batch_size == batch_size
     assert dqn.lr == lr
     assert dqn.learn_step == learn_step
@@ -170,9 +166,8 @@ def test_initialize_dqn_with_cnn_accelerator():
     assert dqn.steps == [0]
     assert dqn.double is True
     # assert dqn.actor_network is None
-    assert isinstance(dqn.actor, EvolvableCNN)
-    assert isinstance(dqn.actor_target, EvolvableCNN)
-    assert dqn.arch == "cnn"
+    assert isinstance(dqn.actor.encoder, EvolvableCNN)
+    assert isinstance(dqn.actor_target.encoder, EvolvableCNN)
     assert isinstance(dqn.optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(dqn.criterion, nn.MSELoss)
 
@@ -196,7 +191,6 @@ def test_initialize_dqn_with_actor_network_make_evo(
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.net_config is None
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
     assert dqn.learn_step == 5
@@ -212,7 +206,6 @@ def test_initialize_dqn_with_actor_network_make_evo(
     assert dqn.double is False
     # assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
-    assert dqn.arch == actor_network.arch
     assert isinstance(dqn.criterion, nn.MSELoss)
 
 
@@ -230,7 +223,7 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
             num_inputs=observation_space.shape[0],
             num_outputs=action_space.n,
             hidden_size=[64, 64],
-            mlp_activation="ReLU",
+            activation="ReLU",
         )
     else:
         actor_network = EvolvableCNN(
@@ -239,15 +232,13 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
+            activation="ReLU",
         )
 
     dqn = DQN(observation_space, action_space, actor_network=actor_network)
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.net_config is not None
     assert dqn.batch_size == 64
     assert dqn.lr == 0.0001
     assert dqn.learn_step == 5
@@ -264,7 +255,6 @@ def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
     # assert dqn.actor_network is None
     # assert dqn.actor == actor_network
     assert isinstance(dqn.optimizer.optimizer, optim.Adam)
-    assert dqn.arch == actor_network.arch
     assert isinstance(dqn.criterion, nn.MSELoss)
 
 
@@ -273,13 +263,13 @@ def test_initialize_dqn_with_incorrect_actor_net_type():
     action_space=generate_discrete_space(2)
     actor_network = "dummy"
 
-    with pytest.raises(AssertionError) as a:
+    with pytest.raises(TypeError) as a:
         dqn = DQN(observation_space, action_space, actor_network=actor_network)
 
         assert dqn
         assert (
             str(a.value)
-            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
         )
 
 
@@ -432,8 +422,6 @@ def test_handles_double_q_learning_cnn():
     double = True
     batch_size = 64
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -476,7 +464,7 @@ def test_handles_double_q_learning_cnn():
 def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,))
     action_space=generate_discrete_space(2)
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -555,8 +543,6 @@ def test_algorithm_test_loop_images():
     env = DummyEnv(observation_space=observation_space, vect=True)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -579,8 +565,6 @@ def test_algorithm_test_loop_images_unvectorized():
     env = DummyEnv(observation_space=observation_space, vect=False)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -606,7 +590,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.net_config == dqn.net_config
     # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
@@ -630,7 +613,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.net_config == dqn.net_config
     # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
@@ -652,7 +634,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.net_config == dqn.net_config
     # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
@@ -698,8 +679,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    assert clone_agent.net_config == dqn.net_config
-    # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
     assert clone_agent.learn_step == dqn.learn_step
@@ -740,12 +719,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -762,9 +740,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert dqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
-    assert isinstance(dqn.actor, EvolvableMLP)
-    assert isinstance(dqn.actor_target, EvolvableMLP)
+    assert isinstance(dqn.actor.encoder, EvolvableMLP)
+    assert isinstance(dqn.actor_target.encoder, EvolvableMLP)
     assert dqn.lr == 1e-4
     # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
     assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
@@ -782,8 +759,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -791,7 +766,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255), action_space=generate_discrete_space(2), net_config=net_config_cnn
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        action_space=generate_discrete_space(2),
+        net_config=net_config_cnn
     )
 
     initial_actor_state_dict = dqn.actor.state_dict()
@@ -805,12 +782,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -827,9 +803,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert dqn.net_config == net_config_cnn
-    assert isinstance(dqn.actor, EvolvableCNN)
-    assert isinstance(dqn.actor_target, EvolvableCNN)
+    assert isinstance(dqn.actor.encoder, EvolvableCNN)
+    assert isinstance(dqn.actor_target.encoder, EvolvableCNN)
     assert dqn.lr == 1e-4
     # assert str(dqn.actor.state_dict()) == str(dqn.actor_target.state_dict())
     assert str(initial_actor_state_dict) == str(dqn.actor.state_dict())
@@ -860,7 +835,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Initialize the DQN agent
     dqn = DQN(
-        observation_space=generate_random_box_space(shape=(3, 64, 64), low=0, high=255), action_space=generate_discrete_space(2), actor_network=actor_network
+        observation_space=generate_random_box_space(shape=(3, 64, 64), low=0, high=255),
+        action_space=generate_discrete_space(2),
+        actor_network=actor_network
     )
 
     initial_actor_state_dict = dqn.actor.state_dict()
@@ -874,12 +851,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -891,12 +867,14 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    dqn = DQN(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_discrete_space(2))
+    dqn = DQN(
+        observation_space=generate_random_box_space(shape=(4,)),
+        action_space=generate_discrete_space(2),
+        )
     # Load checkpoint
     dqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert dqn.net_config is None
     assert isinstance(dqn.actor, nn.Module)
     assert isinstance(dqn.actor_target, nn.Module)
     assert dqn.lr == 1e-4
@@ -942,9 +920,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert new_dqn.net_config == dqn.net_config
-    assert isinstance(new_dqn.actor, EvolvableMLP)
-    assert isinstance(new_dqn.actor_target, EvolvableMLP)
+    assert isinstance(new_dqn.actor.encoder, EvolvableMLP)
+    assert isinstance(new_dqn.actor_target.encoder, EvolvableMLP)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert new_dqn.batch_size == dqn.batch_size
@@ -972,8 +949,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_discrete_space(2),
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
@@ -990,9 +965,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert new_dqn.net_config == dqn.net_config
-    assert isinstance(new_dqn.actor, EvolvableCNN)
-    assert isinstance(new_dqn.actor_target, EvolvableCNN)
+    assert isinstance(new_dqn.actor.encoder, EvolvableCNN)
+    assert isinstance(new_dqn.actor_target.encoder, EvolvableCNN)
     assert new_dqn.lr == dqn.lr
     assert str(new_dqn.actor.to("cpu").state_dict()) == str(dqn.actor.state_dict())
     assert new_dqn.batch_size == dqn.batch_size
@@ -1038,7 +1012,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_dqn.observation_space == dqn.observation_space
     assert new_dqn.action_space == dqn.action_space
-    assert new_dqn.net_config == dqn.net_config
     assert isinstance(new_dqn.actor, nn.Module)
     assert isinstance(new_dqn.actor_target, nn.Module)
     assert new_dqn.lr == dqn.lr

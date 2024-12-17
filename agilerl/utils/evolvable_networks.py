@@ -9,10 +9,38 @@ from collections import OrderedDict
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
 
-from agilerl.typing import DeviceType
+from agilerl.typing import DeviceType, ConfigType
 from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGELU
+from agilerl.configs import MlpNetConfig, CnnNetConfig, MultiInputNetConfig
 
 TupleorInt = Union[Tuple[int, ...], int]
+
+def get_default_config(observation_space: spaces.Space) -> ConfigType:
+    """Get the default configuration for the encoder network based on the observation space.
+    
+    :param observation_space: Observation space of the environment.
+    :type observation_space: spaces.Space
+    
+    :return: Default configuration for the encoder network.
+    :rtype: Dict[str, Any]
+    """
+    if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
+        return MultiInputNetConfig(
+            channel_size=[16, 16],
+            kernel_size=[3, 3],
+            stride_size=[1, 1],
+        )
+    elif is_image_space(observation_space):
+        return CnnNetConfig(
+            channel_size=[16, 32],
+            kernel_size=[3, 3],
+            stride_size=[1, 1],
+        )
+    else:
+        return MlpNetConfig(
+            hidden_size=[64],
+            output_activation=None
+        )
 
 def unwrap_optimizer(
         optimizer: Union[Optimizer, AcceleratedOptimizer],

@@ -9,9 +9,8 @@ import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
-import gymnasium as gym
 
-from agilerl.typing import ExperiencesType
+from agilerl.typing import ExperiencesType, GymEnvType
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
@@ -90,7 +89,8 @@ class PPO(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        net_config: Dict[str, Any] = {"arch": "mlp", "hidden_size": [64, 64]},
+        net_config: Optional[Dict[str, Any]] = None,
+        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 2048,
@@ -117,7 +117,6 @@ class PPO(RLAlgorithm):
             observation_space,
             action_space,
             index=index,
-            net_config=net_config,
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
@@ -630,7 +629,7 @@ class PPO(RLAlgorithm):
 
     def test(
         self,
-        env: gym.Env,
+        env: GymEnvType,
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3

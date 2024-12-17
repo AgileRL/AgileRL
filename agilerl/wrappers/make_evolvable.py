@@ -89,7 +89,7 @@ class MakeEvolvable(EvolvableModule):
         accelerator: Optional[Accelerator] = None,
         **kwargs: dict,
     ):
-        super().__init__(device, accelerator)
+        super().__init__(device)
         assert (
             min_hidden_layers < max_hidden_layers
         ), "'min_hidden_layers' must be less than 'max_hidden_layers."
@@ -169,17 +169,26 @@ class MakeEvolvable(EvolvableModule):
                 if "cnn" not in method.__name__
             ]
 
-            self._layer_mutation_methods = {
-                key: value
-                for key, value in self._layer_mutation_methods.items()
-                if "cnn" not in key
-            }
+            self._layer_mutation_methods = [
+                method
+                for method in self._layer_mutation_methods
+                if "cnn" not in method.__name__
+            ]
 
-            self._node_mutation_methods = {
-                key: value
-                for key, value in self._node_mutation_methods.items()
-                if "cnn" not in key
-            }
+            self._node_mutation_methods = [
+                method
+                for method in self._node_mutation_methods
+                if "cnn" not in method.__name__
+            ]
+    
+    @property
+    def activation(self) -> str:
+        """Returns the activation function."""
+        return self.mlp_activation
+
+    def get_output_dense(self) -> nn.Module:
+        """Returns the output dense layer."""
+        return getattr(self.value_net, "value_linear_layer_output")
 
     def forward(self, x: ArrayOrTensor, xc: ArrayOrTensor = None, q: bool = True):
         """Returns output of neural network.
@@ -784,6 +793,24 @@ class MakeEvolvable(EvolvableModule):
         }
 
         return init_dict
+    
+    @register_mutation_fn(MutationType.ACTIVATION)
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """Set the activation function for the network.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        :param output: Flag indicating whether to set the output activation function, defaults to False
+        :type output: bool, optional
+
+        :return: Activation function
+        :rtype: str
+        """
+        if output:
+            self.mlp_output_activation = activation
+
+        self.mlp_activation = activation
+        self.recreate_nets()
 
     @register_mutation_fn(MutationType.LAYER)
     def add_mlp_layer(self):

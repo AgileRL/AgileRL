@@ -1,9 +1,12 @@
-from typing import Union, Optional, Dict, Any
-import copy
+from typing import Optional
+from dataclasses import asdict
 from gymnasium import spaces
+import torch
 
-from agilerl.typing import ConfigType
+from agilerl.typing import ConfigType, TorchObsType
+from agilerl.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
+from agilerl.modules.mlp import EvolvableMLP
 
 class ValueFunction(EvolvableNetwork):
     """Value functions are used in reinforcement learning to estimate the expected value of a state. 
@@ -12,6 +15,20 @@ class ValueFunction(EvolvableNetwork):
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
+    :param encoder_config: Configuration of the encoder.
+    :type encoder_config: ConfigType
+    :param head_config: Configuration of the head.
+    :type head_config: Optional[ConfigType]
+    :param min_latent_dim: Minimum latent dimension.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum latent dimension.
+    :type max_latent_dim: int
+    :param n_agents: Number of agents.
+    :type n_agents: Optional[int]
+    :param latent_dim: Latent dimension.
+    :type latent_dim: int
+    :param device: Device to run the network on.
+    :type device: str
     """
 
     def __init__(
@@ -19,15 +36,61 @@ class ValueFunction(EvolvableNetwork):
             observation_space: spaces.Space,
             encoder_config: ConfigType,
             head_config: Optional[ConfigType] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
             n_agents: Optional[int] = None,
             latent_dim: int = 32,
             device: str = "cpu"
             ):
 
         super().__init__(
-            observation_space, encoder_config, n_agents=n_agents,
-            latent_dim=latent_dim, device=device
+            observation_space, 
+            encoder_config=encoder_config,
+            action_space=None,
+            min_latent_dim=min_latent_dim, 
+            max_latent_dim=max_latent_dim,
+            n_agents=n_agents,
+            latent_dim=latent_dim,
+            device=device
             )
+        
+        if head_config is None:
+            head_config = asdict(
+                MlpNetConfig(
+                    hidden_size=[64],
+                    output_activation=None
+                    )
+                )
+            
+        self.value_net = self.build_network_head(head_config)
+    
+    def build_network_head(self, head_config: Optional[ConfigType] = None) -> None:
+        """Builds the head of the network.
+
+        :param head_config: Configuration of the head.
+        :type head_config: Optional[ConfigType]
+        """
+        return EvolvableMLP(
+            num_inputs=self.latent_dim,
+            num_outputs=1,
+            device=self.device,
+            name="value",
+            **head_config
+        )
+    
+    def forward(self, x: TorchObsType) -> torch.Tensor:
+        """Forward pass of the network.
+
+        :param x: Input tensor.
+        :type x: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
+        :return: Output tensor.
+        :rtype: torch.Tensor
+        """
+        return self.value_net(self.encoder(x))
+
+class StochasticValueFunction(EvolvableNetwork):
+    ...
+
         
         
 

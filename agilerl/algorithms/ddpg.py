@@ -108,7 +108,6 @@ class DDPG(RLAlgorithm):
             observation_space,
             action_space,
             index=index,
-            net_config=net_config,
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,

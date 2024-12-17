@@ -1,7 +1,5 @@
-from typing import Optional, Dict, Any, List
-import copy
-import inspect
-import dill
+from typing import Optional, Dict, Any
+import warnings
 import numpy as np
 from numpy.typing import ArrayLike
 import torch
@@ -18,15 +16,10 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.networks.q_networks import QNetwork
 from agilerl.modules.base import EvolvableModule
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
-    chkpt_attribute_to_device,
-    unwrap_optimizer,
     obs_channels_to_first,
     make_safe_deepcopies
 )
-
-torch._dynamo.config.suppress_errors = True
 
 class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
@@ -68,7 +61,7 @@ class DQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        net_config: Optional[Dict[str, Any]] = {"hidden_size": [64, 64]},
+        net_config: Optional[Dict[str, Any]] = None,
         head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
@@ -87,7 +80,6 @@ class DQN(RLAlgorithm):
             observation_space,
             action_space,
             index=index,
-            net_config=net_config,
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
@@ -119,26 +111,27 @@ class DQN(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
+                warnings.warn(
+                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
+                )
+            if not isinstance(actor_network, nn.Module):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but "
-                     "must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
                      )
-            
+
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
-            self.actor_detached = make_safe_deepcopies(actor_network) if cudagraphs else None
         else:
             create_actor = lambda: QNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
                 encoder_config=net_config,
                 head_config=head_config,
-                device=device
+                device=self.device
             )
             self.actor = create_actor()
             self.actor_target = create_actor()
-            self.actor_detached = create_actor() if cudagraphs else None
-        
+
         # Copy over actor weights to target
         self.init_hook()
 
@@ -162,25 +155,18 @@ class DQN(RLAlgorithm):
             self._get_action = CudaGraphModule(self._get_action)
         
         # Register DQN network groups and mutation hook
-        shared_networks = [self.actor_target]
-        if self.actor_detached is not None:
-            shared_networks += [self.actor_detached]
-
         self.register_network_group(
             NetworkGroup(
                 eval=self.actor,
-                shared=shared_networks,
+                shared=[self.actor_target],
                 policy=True
             )
         )
         self.register_init_hook(self.init_hook)
-    
+
     def init_hook(self) -> None:
         """Resets module parameters for the detached and target networks."""
         self.param_vals: TensorDict = from_module(self.actor).detach()
-
-        if self.actor_detached is not None:
-            self.param_vals.to_module(self.actor_detached)
 
         # NOTE: This removes the target params from the computation graph which 
         # reduces memory overhead and speeds up training, however these won't 
@@ -211,8 +197,6 @@ class DQN(RLAlgorithm):
             action_mask = torch.as_tensor(action_mask, device=device)
         else:
             action_mask = torch.ones((torch_obs.shape[0], self.action_dim), device=device)
-
-        torch._dynamo.explain(lambda: self._get_action(obs, epsilon, action_mask))
     
         return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 
@@ -233,11 +217,8 @@ class DQN(RLAlgorithm):
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
         """
-        if not self.cudagraphs:
-            with torch.no_grad():
-                q_values = self.actor(obs)
-        else:
-            q_values = self.actor_detached(obs)
+        with torch.no_grad():
+            q_values = self.actor(obs)
 
         # Masked random actions
         masked_random_values = torch.rand_like(q_values) * action_mask
@@ -371,108 +352,3 @@ class DQN(RLAlgorithm):
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
-
-    def clone(self, index=None, wrap=True):
-        """Returns cloned agent identical to self.
-
-        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
-        :type index: int, optional
-        """
-        input_args = self.inspect_attributes(input_args_only=True)
-        input_args["wrap"] = wrap
-
-        if input_args.get("net_config") is None:
-            input_args['actor_network'] = self.actor
-
-        clone = type(self)(**input_args)
-
-        actor = self.actor.clone()
-        actor_target = self.actor_target.clone()
-
-        if self.actor_detached is not None:
-            actor_detached = self.actor_detached.clone()
-        else:
-            actor_detached = None
-
-        optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=actor,
-            optimizer_kwargs={"lr": self.lr, "capturable": self.cudagraphs},
-            network_names=self.optimizer.network_names,
-        )
-        optimizer.load_state_dict(self.optimizer.state_dict())
-
-        if self.accelerator is not None and wrap:
-            (
-                clone.actor,
-                clone.optimizer,
-            ) = self.accelerator.prepare(actor, optimizer.optimizer)
-        else:
-            clone.actor = actor
-            clone.optimizer = optimizer
-    
-        clone.actor_detached = actor_detached
-        clone.actor_target = actor_target
-        
-        TensorType = (torch.Tensor, TensorDict)
-        for attribute in self.inspect_attributes().keys():
-            if hasattr(self, attribute) and hasattr(clone, attribute):
-                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, TensorType) or isinstance(clone_attr, TensorType):
-                    if not torch.equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                else:
-                    if attr != clone_attr:
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-            else:
-                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
-
-        if index is not None:
-            clone.index = index
-
-        return clone
-
-    def unwrap_models(self):
-        if self.accelerator is not None:
-            self.actor = self.accelerator.unwrap_model(self.actor)
-            self.actor_target = self.accelerator.unwrap_model(self.actor_target)
-            self.optimizer = unwrap_optimizer(self.optimizer, self.actor, lr=self.lr)
-
-    def load_checkpoint(self, path):
-        """Loads saved agent properties and network weights from checkpoint.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        """
-        network_info = [
-            "actor_state_dict",
-            "actor_target_state_dict",
-            "optimizer_state_dict",
-            "actor_init_dict",
-            "actor_target_init_dict",
-            "lr",
-        ]
-
-        checkpoint: Dict[str, Any] = torch.load(path, map_location=self.device, pickle_module=dill)
-
-        self.actor = self.actor.__class__(**checkpoint["actor_init_dict"])
-        self.actor_target = self.actor_target.__class__(**checkpoint["actor_target_init_dict"])
-        self.actor_detached = self.actor_detached.__class__(**checkpoint["actor_init_dict"]) if self.cudagraphs else None
-
-        self.lr = checkpoint["lr"]
-        self.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            optimizer_kwargs={"lr": self.lr, "capturable": self.cudagraphs}
-        )
-        self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.init_hook()
-
-        for attribute in checkpoint.keys():
-            if attribute not in network_info:
-                setattr(self, attribute, checkpoint[attribute])

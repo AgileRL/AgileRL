@@ -61,11 +61,9 @@ class EvolvableGPT(EvolvableModule):
         min_layers: int = 8,
         max_layers: int = 16,
         bias: bool = True,
-        device: str = "cpu",
-        accelerator: Optional[Accelerator] = None,
-        arch: str = "gpt"
+        device: str = "cpu"
     ):
-        super().__init__(device, accelerator)
+        super().__init__(device)
 
         assert isinstance(n_layer, int), "Number of layers must be an integer."
         assert n_layer >= 1, "Number of layers must be greater than or equal to one."
@@ -138,21 +136,6 @@ class EvolvableGPT(EvolvableModule):
 
         # report number of parameters
         # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
-
-    def get_activation(self, name: Optional[str] = None) -> nn.Module:
-        """Get the activation function by name. Uses the NewGELU activation function
-        used in OpenAI GPT.
-
-        :param name: The name of the activation function, defaults to None
-        :type name: str, optional
-
-        :return: The activation function
-        :rtype: nn.Module
-        """
-        if name == "GELU":
-            return NewGELU()
-
-        return super().get_activation(name)
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Return the number of parameters in the model.

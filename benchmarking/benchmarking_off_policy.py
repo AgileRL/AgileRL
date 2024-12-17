@@ -59,7 +59,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
         max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
         max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
-        arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )

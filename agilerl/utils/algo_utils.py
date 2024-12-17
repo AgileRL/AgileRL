@@ -14,8 +14,7 @@ from torch.nn import Module
 import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 
-from agilerl.protocols import EvolvableAttributeType, OptimizerWrapper
-from agilerl.modules.base import EvolvableModule
+from agilerl.protocols import EvolvableAttributeType, OptimizerWrapper, EvolvableModule
 from agilerl.typing import (
     NumpyObsType,
     TorchObsType,
@@ -25,7 +24,7 @@ from agilerl.typing import (
     ArrayOrTensor
 )
 
-def make_safe_deepcopies(*args: Union[EvolvableModule, List[EvolvableModule]]) -> List[EvolvableModule]:
+def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
     """Makes deep copies of EvolvableModule's and their attributes.
     
     :param args: EvolvableModule's or lists of EvolvableModule's to copy.

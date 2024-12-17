@@ -63,10 +63,8 @@ class EvolvableMultiInput(EvolvableModule):
     :type vector_space_mlp: bool, optional
     :param mlp_output_activation: Activation function for the output of the final MLP. Default is None.
     :type mlp_output_activation: Optional[str], optional
-    :param mlp_activation: Activation function for the MLP layers. Default is "ReLU".
-    :type mlp_activation: str, optional
-    :param cnn_activation: Activation function for the CNN layers. Default is "ReLU".
-    :type cnn_activation: str, optional
+    :param activation: Activation function for the module layers. Default is "ReLU".
+    :type activation: str, optional
     :param min_hidden_layers: Minimum number of hidden layers for the MLP. Default is 1.
     :type min_hidden_layers: int, optional
     :param max_hidden_layers: Maximum number of hidden layers for the MLP. Default is 3.
@@ -99,7 +97,7 @@ class EvolvableMultiInput(EvolvableModule):
     """
     feature_net: Dict[str, SupportedEvolvableTypes]
 
-    arch: str = "composed"
+    arch: str = "multi_input"
 
     def __init__(
             self,
@@ -115,8 +113,7 @@ class EvolvableMultiInput(EvolvableModule):
             hidden_size: Optional[List[int]] = None,
             init_dicts: Dict[str, Dict[str, Any]] = {},
             output_activation: Optional[str] = None,
-            mlp_activation: str = "ReLU",
-            cnn_activation: str = "ReLU",
+            activation: str = "ReLU",
             min_hidden_layers: int = 1,
             max_hidden_layers: int = 3,
             min_mlp_nodes: int = 64,
@@ -156,8 +153,7 @@ class EvolvableMultiInput(EvolvableModule):
         self.sample_input = sample_input
         self.cnn_block_type = cnn_block_type
         self.output_activation = output_activation
-        self.mlp_activation = mlp_activation
-        self.cnn_activation = cnn_activation
+        self._activation = activation
         self.min_hidden_layers = min_hidden_layers
         self.max_hidden_layers = max_hidden_layers
         self.min_mlp_nodes = min_mlp_nodes
@@ -177,14 +173,8 @@ class EvolvableMultiInput(EvolvableModule):
             if not is_image_space(space)
             ]
 
-        self._net_config = self.init_dict.copy()
-        self._net_config.pop("observation_space")
-        self._net_config.pop("num_outputs")
-        self._net_config.pop("device")
-        self._net_config.pop("name")
-
         self.feature_net = self.build_feature_extractor()
-    
+
         # Collect all vector space shapes for concatenation
         vector_input_dim = sum(
             [spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces]
@@ -194,11 +184,12 @@ class EvolvableMultiInput(EvolvableModule):
         image_features_dim = sum(
             [self.latent_dim for subspace in self.observation_space.spaces.values() if is_image_space(subspace)]
             )
+
         vector_features_dim = self.latent_dim if self.vector_space_mlp else vector_input_dim
         features_dim = image_features_dim + vector_features_dim
 
         # Final dense layer to convert feature encodings to desired num_outputs
-        self.final_dense = nn.Linear(features_dim, num_outputs)
+        self.final_dense = nn.Linear(features_dim, num_outputs, device=device)
         self.output = get_activation(output_activation)
 
         # If we dont define an EvolvableMLP for vector spaces, we should signal this for Mutations
@@ -212,7 +203,28 @@ class EvolvableMultiInput(EvolvableModule):
         :return: Network configuration
         :rtype: Dict[str, Any]
         """
-        return self._net_config
+        net_config = self.init_dict.copy()
+        for attr in ['observation_space', 'num_outputs', 'device', 'name']:
+            net_config.pop(attr)
+        return net_config
+    
+    @property
+    def activation(self) -> str:
+        """Returns the activation function for the network.
+        
+        :return: Activation function
+        :rtype: str
+        """
+        return self._activation
+    
+    @activation.setter
+    def activation(self, activation: str) -> None:
+        """Sets the activation function for the network.
+        
+        :param activation: Activation function to use.
+        :type activation: str
+        """
+        self._activation = activation
 
     @property
     def base_init_dict(self) -> Dict[str, Any]:
@@ -238,8 +250,8 @@ class EvolvableMultiInput(EvolvableModule):
         base = self.base_init_dict.copy()
         extra_kwargs = {
             "hidden_size": self.hidden_size,
-            "activation": self.mlp_activation,
-            "output_activation": self.mlp_activation,
+            "activation": self.activation,
+            "output_activation": self.activation,
             "min_hidden_layers": self.min_hidden_layers,
             "max_hidden_layers": self.max_hidden_layers,
             "min_mlp_nodes": self.min_mlp_nodes,
@@ -262,10 +274,10 @@ class EvolvableMultiInput(EvolvableModule):
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
-            "activation": self.cnn_activation,
+            "activation": self.activation,
             "sample_input": self.sample_input,
             "block_type": self.cnn_block_type,
-            "output_activation": self.cnn_activation,
+            "output_activation": self.activation,
             "min_hidden_layers": self.min_cnn_hidden_layers,
             "max_hidden_layers": self.max_cnn_hidden_layers,
             "min_channel_size": self.min_channel_size,
@@ -288,13 +300,13 @@ class EvolvableMultiInput(EvolvableModule):
             "latent_dim": self.latent_dim,
             "vector_space_mlp": self.vector_space_mlp,
             "init_dicts": self.init_dicts,
+            "activation": self.activation,
             "output_activation": self.output_activation,
             "name": self.name,
             # CNN kwargs
             "channel_size": self.channel_size,
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
-            "cnn_activation": self.cnn_activation,
             "sample_input": self.sample_input,
             "cnn_block_type": self.cnn_block_type,
             "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
@@ -303,7 +315,6 @@ class EvolvableMultiInput(EvolvableModule):
             "max_channel_size": self.max_channel_size,
             # MLP kwargs
             "hidden_size": self.hidden_size,
-            "mlp_activation": self.mlp_activation,
             "min_hidden_layers": self.min_hidden_layers,
             "max_hidden_layers": self.max_hidden_layers,
             "min_mlp_nodes": self.min_mlp_nodes,
@@ -351,7 +362,7 @@ class EvolvableMultiInput(EvolvableModule):
             del init_dict["num_inputs"]
         
         return init_dict
-    
+
     def build_feature_extractor(self) -> Dict[str, SupportedEvolvableTypes]:
         """Creates the feature extractor and final MLP networks.
         
@@ -386,7 +397,7 @@ class EvolvableMultiInput(EvolvableModule):
         
         return feature_net
 
-    def forward(self, x: TupleOrDictObservation, xc: Optional[ArrayOrTensor] = None, q: bool = True) -> torch.Tensor:
+    def forward(self, x: TupleOrDictObservation) -> torch.Tensor:
         """Forward pass of the composed network. Extracts features from each observation key and concatenates
         them with the corresponding observation key if specified. The concatenated features are then passed
         through the final MLP to produce the output tensor.
@@ -458,6 +469,26 @@ class EvolvableMultiInput(EvolvableModule):
         key = list(modules.keys())[torch.randint(len(modules.keys()), (1,)).item()]
 
         return key, self.feature_net[key]
+
+
+    @register_mutation_fn(MutationType.ACTIVATION)
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """Set the activation function for the network.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        :param output: Flag indicating whether to set the output activation function, defaults to False
+        :type output: bool, optional
+
+        :return: Activation function
+        :rtype: str
+        """
+        for key, module in self.feature_net.items():
+            module.change_activation(activation, output=True)
+            self.init_dicts[key] = self.extract_init_dict(key)
+        
+        if output:
+            self.output = get_activation(activation)
 
     @register_mutation_fn(MutationType.LAYER)
     def add_mlp_layer(self, key: Optional[str] = None) -> Dict[str, str]:

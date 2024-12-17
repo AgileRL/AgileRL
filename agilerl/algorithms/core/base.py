@@ -1,5 +1,6 @@
 from typing import Optional, Union, Tuple, Iterable, Callable, Any, Dict, TypeVar, Type
 import inspect
+import copy
 from abc import ABC, ABCMeta, abstractmethod
 from gymnasium import spaces
 from accelerate import Accelerator
@@ -7,7 +8,6 @@ import numpy as np
 from tensordict import TensorDict
 from numpy.typing import ArrayLike
 import torch
-from torch.optim import Optimizer
 from torch._dynamo import OptimizedModule
 import dill
 
@@ -29,11 +29,12 @@ from agilerl.utils.algo_utils import (
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
+SelfRLAlgorithm = TypeVar("T", bound="RLAlgorithm")
 
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done 
     intiializing with specified network groups and optimizers."""
-    def __call__(cls, *args, **kwargs):
+    def __call__(cls: Type[SelfEvolvableAlgorithm], *args, **kwargs) -> SelfEvolvableAlgorithm:
         # Create the instance
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
 
@@ -84,7 +85,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.learn_step = learn_step
         self.algo = name if name is not None else self.__class__.__name__
 
-        self.eval_network = None
         self._mut = None
         self._index = index
         self.scores = []
@@ -374,6 +374,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             else:
                 setattr(self, attr, self._wrap_attr(obj))
     
+    def unwrap_models(self):
+        if self.accelerator is None:
+            raise AttributeError("No accelerator has been set for the algorithm.")
+        
+        for attr in self.evolvable_attributes(networks_only=True):
+            obj = getattr(self, attr)
+            if isinstance(obj, list):
+                setattr(self, attr, [self.accelerator.unwrap_model(m) for m in obj])
+            else:
+                setattr(self, attr, self.accelerator.unwrap_model(obj))
+
     def models_to_device(self) -> None:
         """Moves the models in the algorithm to the device."""
         for name, obj in self.evolvable_attributes(networks_only=True).items():
@@ -382,104 +393,71 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             else:
                 setattr(self, name, obj.to(self.device))
 
-    # @classmethod
-    # def load(cls, path: str, device: str = "cpu", accelerator: Optional[Accelerator] = None):
-    #     """Creates agent with properties and network weights loaded from path.
+    def clone(
+            self: SelfEvolvableAlgorithm,
+            index: Optional[int] = None,
+            wrap: bool = False
+            ) -> SelfEvolvableAlgorithm:
+        """Creates a clone of the algorithm.
 
-    #     :param path: Location to load checkpoint from
-    #     :type path: string
-    #     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    #     :type device: str, optional
-    #     :param accelerator: Accelerator for distributed computing, defaults to None
-    #     :type accelerator: accelerate.Accelerator(), optional
-    #     """
-    #     checkpoint: Dict[str, Any] = torch.load(path, map_location=device, pickle_module=dill)
+        :param index: The index of the clone, defaults to None
+        :type index: Optional[int], optional
+        :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
+        :type wrap: bool, optional
 
-    #     # Assign specified device to underlying model init dicts
-    #     init_dict_keys = [key for key in checkpoint.keys() if key.endswith("_init_dict")]
-    #     n_agents = len(checkpoint["agent_ids"])
-    #     for agent_idx in range(n_agents):
-    #         for key in init_dict_keys:
-    #             checkpoint[key][agent_idx]["device"] = device
+        :return: A clone of the algorithm
+        :rtype: EvolvableAlgorithm
+        """
+        # Make copy using input arguments
+        input_args = self.inspect_attributes(input_args_only=True)
+        input_args["wrap"] = wrap
+        clone = type(self)(**input_args)
+
+        # Clone evolvable modules
+        cloned_modules = {}
+        for attr, obj in self.evolvable_attributes(networks_only=True).items():
+            cloned_modules[attr] = obj.clone()
+            setattr(clone, attr, cloned_modules[attr])
         
-    #     # Remove state and init dicts of models and optimizers from checkpoint
-    #     state_dict_keys = [key for key in checkpoint.keys() if key.endswith("_state_dict")]
-    #     model_keys = init_dict_keys + state_dict_keys
-    #     model_cache = {key: checkpoint.pop(key) for key in model_keys}
-
-    #     # Change device and accelerator for the agent
-    #     checkpoint["device"] = device
-    #     checkpoint["accelerator"] = accelerator
-
-    #     # Create agent instance adn initilize networks
-    #     constructor_params = inspect.signature(cls.__init__).parameters.keys()
-    #     class_init_dict = {
-    #         k: v for k, v in checkpoint.items() if k in constructor_params
-    #     }
-
-    #     raise NotImplementedError("Need to implement the rest of the load method.")
-
-    # def load_checkpoint(self, path: str) -> None:
-    #     """Loads saved agent properties and network weights from checkpoint.
-
-    #     :param path: Location to load checkpoint from
-    #     :type path: string
-    #     """
-
-    #     if self.accelerator is not None:
-    #         self.wrap_models()
-    #     else:
-    #         self.models_to_device()
-    #         if self.torch_compiler:
-    #             torch.set_float32_matmul_precision("high")
-    #             self.recompile()
-
-    #     raise NotImplementedError("Need to implement the rest of the load_checkpoint method.")
-    
-    # def clone(self, index: Optional[int] = None, wrap: bool = False) -> "EvolvableAlgorithm":
-    #     """Creates a clone of the algorithm.
-
-    #     :param index: The index of the clone, defaults to None
-    #     :type index: Optional[int], optional
-    #     :param wrap: If True, wrap the models in the clone with the accelerator, defaults to False
-    #     :type wrap: bool, optional
-
-    #     :return: A clone of the algorithm
-    #     :rtype: EvolvableAlgorithm
-    #     """
-    #     # Make copy using input arguments
-    #     input_args = self.inspect_attributes(input_args_only=True)
-    #     input_args["wrap"] = wrap
-    #     clone = type(self)(**input_args)
-
-    #     # TODO: Copy over evolvable attributes
-    #     # Here we need to know which evolvable modules belong to which optimizers,
-    #     # which is hard to determine systematically without user input -> Need to 
-    #     # think harder about this...
-
-    #     # Copy non-evolvable attributes back to clone
-    #     for attribute in self.inspect_attributes().keys():
-    #         if hasattr(self, attribute) and hasattr(clone, attribute):
-    #             attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-    #             if isinstance(attr, torch.Tensor) or isinstance(
-    #                 clone_attr, torch.Tensor
-    #             ):
-    #                 if not torch.equal(attr, clone_attr):
-    #                     setattr(
-    #                         clone, attribute, copy.deepcopy(getattr(self, attribute))
-    #                     )
-    #             else:
-    #                 if attr != clone_attr:
-    #                     setattr(
-    #                         clone, attribute, copy.deepcopy(getattr(self, attribute))
-    #                     )
-    #         else:
-    #             setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
-
-    #     if index is not None:
-    #         clone.index = index
+        # Reinitialize optimizers
+        for opt_config in self.registry.optimizers:
+            opt = OptimizerWrapper(
+                getattr(torch.optim, opt_config.optimizer_cls),
+                networks=[cloned_modules[net] for net in opt_config.networks],
+                network_names=opt_config.networks,
+                optimizer_kwargs=opt_config.optimizer_kwargs
+            )
+            orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
+            opt.load_state_dict(orig_optimizer.state_dict())
+            setattr(clone, opt_config.name, opt)
         
-    #     return clone
+        # Prepare with accelerator if necessary
+        if self.accelerator is not None and wrap:
+            clone.wrap_models()
+
+        # Copy non-evolvable attributes back to clone
+        for attribute in self.inspect_attributes().keys():
+            if hasattr(self, attribute) and hasattr(clone, attribute):
+                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
+                if isinstance(attr, torch.Tensor) or isinstance(
+                    clone_attr, torch.Tensor
+                ):
+                    if not torch.equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                else:
+                    if attr != clone_attr:
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+            else:
+                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
+
+        if index is not None:
+            clone.index = index
+        
+        return clone
 
 class RLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all single-agent algorithms in the AgileRL framework. 
@@ -508,7 +486,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             observation_space: spaces.Space,
             action_space: spaces.Space,
             index: int,
-            net_config: Dict[str, Any],
             learn_step: int = 2048,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
@@ -521,7 +498,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         assert isinstance(observation_space, spaces.Space), "Observation space must be an instance of gym.spaces.Space."
         assert isinstance(action_space, spaces.Space), "Action space must be an instance of gym.spaces.Space."
 
-        self.net_config = net_config
         self.observation_space = observation_space
         self.action_space = action_space
         self.normalize_images = normalize_images
@@ -532,110 +508,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.discrete_actions = isinstance(action_space, spaces.Discrete)
         self.min_action = np.array(action_space.low) if hasattr(action_space, "low") else None
         self.max_action = np.array(action_space.high) if hasattr(action_space, "high") else None
-
-    @classmethod
-    def load(
-        cls,
-        path: str,
-        device: DeviceType = 'cpu',
-        accelerator: Optional[Accelerator] = None
-        ) -> "RLAlgorithm":
-        """Loads an algorithm from a checkpoint.
-
-        :param path: Location to load checkpoint from.
-        :type path: string
-        :param device: Device to load the algorithm on, defaults to 'cpu'
-        :type device: str, optional
-        :param accelerator: Accelerator object for distributed computing, defaults to None
-        :type accelerator: Optional[Accelerator], optional
-
-        :return: An instance of the algorithm
-        :rtype: RLAlgorithm
-        """
-        checkpoint: Dict[str, Any] = torch.load(
-            path,
-            map_location=device,
-            pickle_module=dill
-            )
-        
-        # Reconstruct evolvable modules in algorithm
-        network_info: Dict[str, Dict[str, Any]] = checkpoint['network_info']
-        network_names = network_info['network_names']
-        loaded_modules = {}
-        for name in network_names:
-            net_dict = {
-                k: v for k, v in network_info['modules'].items() if k.startswith(name)
-                }
-            
-            # Add device to init dict
-            init_dict = net_dict.get(f"{name}_init_dict", None)
-            if init_dict is None:
-                raise ValueError(f"Init dict for {name} not found in checkpoint.")
-
-            init_dict['device'] = device
-            init_dict = chkpt_attribute_to_device(init_dict, device)
-            
-            state_dict = net_dict.get(f"{name}_state_dict", None)
-            if state_dict is None:
-                raise ValueError(f"State dict for {name} not found in checkpoint.")
-
-            state_dict = chkpt_attribute_to_device(state_dict, device)
-
-            # Reconstruct the modules
-            modules_cls: Type[EvolvableModule] = net_dict[f"{name}_cls"]
-            module = modules_cls(**init_dict)
-
-            if state_dict: # Sometimes we may have empty state dicts (e.g. detached modules)
-                module.load_state_dict(state_dict)
-            
-            loaded_modules[name] = module
-        
-        # Reconstruct optimizers in algorithm
-        optimizer_names = network_info['optimizer_names']
-        loaded_optimizers = {}
-        for name in optimizer_names:
-            opt_dict = {
-                k: v for k, v in network_info['optimizers'].items() if k.startswith(name)
-                }
-            
-            # Add device to optimizer kwargs
-            opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
-            optimizer_cls: Type[Optimizer] = opt_dict[f"{name}_cls"]
-            opt_networks = opt_dict[f"{name}_networks"]
-            optimizer = OptimizerWrapper(
-                optimizer_cls,
-                networks=[loaded_modules[net] for net in opt_networks],
-                network_names=opt_networks,
-                optimizer_kwargs=opt_kwargs
-                )
-            
-            state_dict = chkpt_attribute_to_device(opt_dict[f"{name}_state_dict"], device)
-            optimizer.load_state_dict(state_dict)
-            loaded_optimizers[name] = optimizer
-        
-        # Reconstruct the algorithm
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
-
-        self = cls(**class_init_dict)
-        self.registry = checkpoint['registry']
-
-        # Assign loaded modules and optimizers to the algorithm
-        for name, module in loaded_modules.items():
-            setattr(self, name, module)
-        
-        for name, optimizer in loaded_optimizers.items():
-            setattr(self, name, optimizer)
-
-        if accelerator is not None:
-            self.wrap_models()
-
-        for attribute in self.inspect_attributes().keys():
-            setattr(self, attribute, checkpoint[attribute])
-
-        return self
 
 
     def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
@@ -678,6 +550,62 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             on_device.append(exp)
         
         return on_device
+    
+    def load_checkpoint(self, path: str) -> None:
+        """Loads saved agent properties and network weights from checkpoint.
+
+        :param path: Location to load checkpoint from
+        :type path: string
+        """
+        checkpoint: Dict[str, Any] = torch.load(path, map_location=self.device, pickle_module=dill)
+
+        # Recreate evolvable modules
+        network_info: Dict[str, Dict[str, Any]] = checkpoint['network_info']
+        network_names = network_info['network_names']
+        for name in network_names:
+            net_dict = {
+                k: v for k, v in network_info['modules'].items() if k.startswith(name)
+                }
+            
+            module_cls = net_dict[f"{name}_cls"]
+            state_dict = net_dict[f"{name}_state_dict"]
+            loaded_module: EvolvableModule = module_cls(**net_dict[f"{name}_init_dict"])
+            
+            # NOTE: Sometimes we may have empty state dicts (e.g. detached modules)
+            if state_dict:
+                loaded_module.load_state_dict(net_dict[f"{name}_state_dict"])
+
+            setattr(self, name, loaded_module)
+        
+        optimizer_names = network_info['optimizer_names']
+        for name in optimizer_names:
+            opt_dict = {
+                k: v for k, v in network_info['optimizers'].items() if k.startswith(name)
+                }
+            
+            # Add device to optimizer kwargs
+            opt_kwargs = opt_dict[f"{name}_kwargs"]
+            optimizer_cls = opt_dict[f"{name}_cls"]
+            opt_networks = opt_dict[f"{name}_networks"]
+            optimizer = OptimizerWrapper(
+                getattr(torch.optim, optimizer_cls),
+                networks=[getattr(self, net) for net in opt_networks],
+                network_names=opt_networks,
+                optimizer_kwargs=opt_kwargs
+                )
+
+            optimizer.load_state_dict(opt_dict[f"{name}_state_dict"])
+            setattr(self, name, optimizer)
+
+        # Init hooks
+        for hook in self.registry.hooks:
+            getattr(self, hook)()
+
+        # Load other attributes
+        checkpoint.pop('network_info')
+        for attribute in checkpoint.keys():
+            setattr(self, attribute, checkpoint[attribute])
+
 
     def save_checkpoint(self, path: str) -> None:
         """Saves a checkpoint of agent properties and network weights to path.
@@ -702,7 +630,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
                 })
             elif isinstance(obj, OptimizerWrapper):
                 network_info['optimizers'].update({
-                    f"{attr}_cls": obj.optimizer_cls,
+                    f"{attr}_cls": obj.optimizer_cls.__name__,
                     f"{attr}_state_dict": obj.state_dict(),
                     f"{attr}_networks": obj.network_names,
                     f"{attr}_kwargs": obj.optimizer_kwargs
@@ -713,18 +641,126 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
                     f"when it is of type {type(obj)}."
                 )
 
-        network_attr_names = list(set(info.split("_")[0] for info in network_info['modules'].keys()))
-        optimizer_attr_names = list(set(info.split("_")[0] for info in network_info['optimizers'].keys()))
+        network_attr_names = [name for name in self.evolvable_attributes() if isinstance(getattr(self, name), (OptimizedModule, EvolvableModule))]
+        optimizer_attr_names = [name for name in self.evolvable_attributes() if isinstance(getattr(self, name), OptimizerWrapper)]
         network_info["network_names"] = network_attr_names
         network_info["optimizer_names"] = optimizer_attr_names
         attribute_dict['network_info'] = network_info
-        attribute_dict['registry'] = self.registry
 
         torch.save(
             attribute_dict,
             path,
             pickle_module=dill,
         )
+
+    @classmethod
+    def load(
+        cls: Type[SelfRLAlgorithm],
+        path: str,
+        device: DeviceType = 'cpu',
+        accelerator: Optional[Accelerator] = None
+        ) -> SelfRLAlgorithm:
+        """Loads an algorithm from a checkpoint.
+
+        :param path: Location to load checkpoint from.
+        :type path: string
+        :param device: Device to load the algorithm on, defaults to 'cpu'
+        :type device: str, optional
+        :param accelerator: Accelerator object for distributed computing, defaults to None
+        :type accelerator: Optional[Accelerator], optional
+
+        :return: An instance of the algorithm
+        :rtype: RLAlgorithm
+        """
+        checkpoint: Dict[str, Any] = torch.load(
+            path,
+            map_location=device,
+            pickle_module=dill
+            )
+
+        # Reconstruct evolvable modules in algorithm
+        network_info: Dict[str, Dict[str, Any]] = checkpoint['network_info']
+        network_names = network_info['network_names']
+        loaded_modules = {}
+        for name in network_names:
+            net_dict = {
+                k: v for k, v in network_info['modules'].items() if k.startswith(name)
+                }
+
+            # Add device to init dict
+            init_dict = net_dict.get(f"{name}_init_dict", None)
+            if init_dict is None:
+                raise ValueError(f"Init dict for {name} not found in checkpoint.")
+
+            init_dict['device'] = device
+            init_dict = chkpt_attribute_to_device(init_dict, device)
+
+            state_dict = net_dict.get(f"{name}_state_dict", None)
+            if state_dict is None:
+                raise ValueError(f"State dict for {name} not found in checkpoint.")
+
+            state_dict = chkpt_attribute_to_device(state_dict, device)
+
+            # Reconstruct the modules
+            module_cls: Type[EvolvableModule] = net_dict[f"{name}_cls"]
+            module = module_cls(**init_dict)
+
+            if state_dict: # Sometimes we may have empty state dicts (e.g. detached modules)
+                module.load_state_dict(state_dict)
+
+            loaded_modules[name] = module
+
+        # Reconstruct optimizers in algorithm
+        optimizer_names = network_info['optimizer_names']
+        loaded_optimizers = {}
+        for name in optimizer_names:
+            opt_dict = {
+                k: v for k, v in network_info['optimizers'].items() if k.startswith(name)
+                }
+
+            # Add device to optimizer kwargs
+            opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
+            optimizer_cls = opt_dict[f"{name}_cls"]
+            opt_networks = opt_dict[f"{name}_networks"]
+            optimizer = OptimizerWrapper(
+                getattr(torch.optim, optimizer_cls),
+                networks=[loaded_modules[net] for net in opt_networks],
+                network_names=opt_networks,
+                optimizer_kwargs=opt_kwargs
+                )
+
+            state_dict = chkpt_attribute_to_device(opt_dict[f"{name}_state_dict"], device)
+            optimizer.load_state_dict(state_dict)
+            loaded_optimizers[name] = optimizer
+
+        # Reconstruct the algorithm
+        constructor_params = inspect.signature(cls.__init__).parameters.keys()
+        class_init_dict = {
+            k: v for k, v in checkpoint.items() if k in constructor_params
+        }
+
+        class_init_dict['accelerator'] = accelerator
+        self = cls(**class_init_dict)
+
+        # Assign loaded modules and optimizers to the algorithm
+        for name, module in loaded_modules.items():
+            setattr(self, name, module)
+
+        for name, optimizer in loaded_optimizers.items():
+            setattr(self, name, optimizer)
+
+        if accelerator is not None:
+            self.wrap_models()
+
+        for attribute in self.inspect_attributes().keys():
+            setattr(self, attribute, checkpoint[attribute])
+
+        # Run init hooks
+        for hook in self.registry.hooks:
+            getattr(self, hook)()
+
+        return self
+
     
 class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework. 
@@ -758,7 +794,6 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             action_spaces: Iterable[spaces.Space],
             agent_ids: Iterable[int],
             index: int,
-            net_config: Dict[str, Any],
             learn_step: int = 2048,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
@@ -807,7 +842,6 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         self.agent_ids = agent_ids
         self.n_agents = len(agent_ids)
         self.torch_compiler = torch_compiler
-        self.net_config = net_config
         self.normalize_images = normalize_images
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces

@@ -15,6 +15,8 @@ from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import remove_compile_prefix
 
@@ -114,30 +116,21 @@ def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Dict[str, Offs
     
     return offspring_modules
 
-def get_exp_layer(offspring: EvolvableModule, arch: str) -> nn.Module:
+def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
     """Get the output layer of different types of offsprings for bandit algorithms. 
     Returns None if algorithm is not a bandit algorithm.
     
     :param offspring: The offspring to inspect
     :type offspring: EvolvableModule
-    :param algo_cls: The algorithm class
-    :type algo_cls: Type
-    :param arch: The network architecture type
-    :type arch: str
-    
+
     :return: The output layer of the offspring
     :rtype: nn.Module
     """
-    if arch == "mlp":
-        if isinstance(offspring, EvolvableMLP):
-            exp_layer = offspring.feature_net.mlp_linear_layer_output
-        else:
-            exp_layer = (
-                offspring.feature_net.feature_linear_layer_output
-            )
+    if isinstance(offspring, (EvolvableMLP, EvolvableCNN, MakeEvolvable)):
+        exp_layer = offspring.get_output_dense()
     else:
-        exp_layer = offspring.value_net.value_linear_layer_output
-
+        raise ValueError(f"Bandit algorithm architecture {type(offspring)} not supported.")
+    
     return exp_layer
 
 
@@ -307,8 +300,6 @@ class Mutations:
         # Random seed for repeatability
         set_global_seed(rand_seed)
         self.rng = np.random.default_rng(rand_seed)
-
-        self.arch = arch  # Network architecture type
 
         # Relative probabilities of mutation
         self.no_mut = no_mutation  # No mutation
@@ -644,19 +635,7 @@ class Mutations:
                 eval_module = self.to_device(eval_module)
 
             if isinstance(individual, (NeuralTS, NeuralUCB)):
-                if self.arch == "mlp":
-                    if isinstance(eval_module, EvolvableMLP):
-                        individual.exp_layer = (
-                            eval_module.feature_net.mlp_linear_layer_output
-                        )
-                    else:
-                        individual.exp_layer = (
-                            eval_module.feature_net.feature_linear_layer_output
-                        )
-                else:
-                    individual.exp_layer = (
-                        eval_module.value_net.value_linear_layer_output
-                    )
+                individual.exp_layer = get_exp_layer(eval_module)
 
             setattr(individual, network_group.eval, eval_module)
 
@@ -667,7 +646,7 @@ class Mutations:
     def _permutate_activation(self, network: EvolvableModule) -> EvolvableModule:
         # Function to change network activation layer
         possible_activations = copy.deepcopy(self.activation_selection)
-        current_activation = network.mlp_activation
+        current_activation = network.activation
 
         # Remove current activation from options to ensure different new
         # activation layer
@@ -675,17 +654,7 @@ class Mutations:
             possible_activations.remove(current_activation)
 
         new_activation = self.rng.choice(possible_activations, size=1)[0]  # Select new activation
-        net_dict = network.init_dict
-        if self.arch == "cnn":
-            net_dict["mlp_activation"] = new_activation
-            net_dict["cnn_activation"] = new_activation
-        else:  # mlp, gpt or bert
-            net_dict["mlp_activation"] = new_activation
-
-        new_network = type(network)(**net_dict)
-        new_network.load_state_dict(network.state_dict())
-        network = new_network
-
+        network.change_activation(new_activation, output=False)  # Change activation layer
         return network
 
     def parameter_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
@@ -806,7 +775,7 @@ class Mutations:
         for name, offsprings in offspring_evals.items():
             # Apply mutation method differently for CNN and other arch types
             # NOTE: Need to check the reason for this
-            if self.arch == "cnn" or ret_type != dict:
+            if ret_type != dict: # if self.arch == "cnn":
                 if isinstance(offsprings, list):
                     for offspring in offsprings:
                         getattr(offspring, mut_method)()
@@ -840,7 +809,7 @@ class Mutations:
 
             # Reinitialize bandit gradients after architecture mutation
             if algo_cls in [NeuralTS, NeuralUCB]:
-                old_exp_layer = get_exp_layer(offsprings, self.arch)
+                old_exp_layer = get_exp_layer(offsprings)
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
@@ -861,13 +830,10 @@ class Mutations:
         :param old_exp_layer: Old linear layer
         :type old_exp_layer: nn.Module
         """
-        if self.arch == "mlp":
-            if isinstance(offspring_actor, EvolvableMLP):
-                exp_layer: nn.Module = offspring_actor.feature_net.mlp_linear_layer_output
-            else:
-                exp_layer: nn.Module = offspring_actor.feature_net.feature_linear_layer_output
+        if isinstance(offspring_actor, (EvolvableMLP, EvolvableCNN, MakeEvolvable)):
+            exp_layer = offspring_actor.get_output_dense()
         else:
-            exp_layer: nn.Module = offspring_actor.value_net.value_linear_layer_output
+            raise ValueError(f"Bandit algorithm architecture {type(offspring_actor)} not supported.")
 
         individual.numel = sum(
             w.numel() for w in exp_layer.parameters() if w.requires_grad

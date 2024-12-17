@@ -212,7 +212,7 @@ class EvolvableCNN(EvolvableModule):
         self.block_type = block_type
         self.num_outputs = num_outputs
         self.output_activation = output_activation
-        self.activation = activation
+        self._activation = activation
         self.min_hidden_layers = min_hidden_layers
         self.max_hidden_layers = max_hidden_layers
         self.min_channel_size = min_channel_size
@@ -221,14 +221,6 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.sample_input = sample_input
         self.name = name
-        self._net_config = self.init_dict.copy()
-        for attr in [
-            "input_shape",
-            "num_outputs",
-            "device",
-            "name"
-        ]:
-            del self._net_config[attr]
 
         if block_type == "Conv2d":
             sample_input = (
@@ -252,7 +244,10 @@ class EvolvableCNN(EvolvableModule):
 
     @property
     def net_config(self) -> Dict[str, Any]:
-        return self._net_config
+        net_config = self.init_dict.copy()
+        for attr in ["input_shape", "num_outputs", "device", "name"]:
+            net_config.pop(attr, None)
+        return net_config
 
     @property
     def init_dict(self):
@@ -275,6 +270,37 @@ class EvolvableCNN(EvolvableModule):
             "name": self.name
         }
         return init_dict
+    
+    @property
+    def activation(self) -> str:
+        """Returns the activation function of the network."""
+        return self._activation
+    
+    @activation.setter
+    def activation(self, activation: str) -> None:
+        """Sets the activation function of the network."""
+        self._activation = activation
+    
+    def get_output_dense(self) -> torch.nn.Module:
+        """Returns output layer of neural network."""
+        return getattr(self.model, f"{self.name}_linear_output")
+    
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """Set the activation function for the network.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        :param output: Flag indicating whether to set the output activation function, defaults to False
+        :type output: bool, optional
+
+        :return: Activation function
+        :rtype: str
+        """
+        if output:
+            self.output_activation = activation
+
+        self.activation = activation
+        self.recreate_network()
 
     def create_cnn(
         self,
@@ -368,7 +394,7 @@ class EvolvableCNN(EvolvableModule):
             self.stride_size = self.stride_size + [
                 np.random.randint(1, self.stride_size[-1] + 1)
             ]
-            self.recreate_nets()
+            self.recreate_network()
         else:
             self.add_channel()
 
@@ -379,7 +405,7 @@ class EvolvableCNN(EvolvableModule):
             self.channel_size = self.channel_size[:-1]
             self.kernel_size.remove_layer()
             self.stride_size = self.stride_size[:-1]
-            self.recreate_nets(shrink_params=True)
+            self.recreate_network(shrink_params=True)
         else:
             self.add_channel()
 
@@ -391,7 +417,7 @@ class EvolvableCNN(EvolvableModule):
             self.kernel_size.change_kernel_size(
                 hidden_layer, self.channel_size, self.stride_size, self.input_shape
                 )
-            self.recreate_nets()
+            self.recreate_network()
         else:
             self.add_layer()
 
@@ -422,7 +448,7 @@ class EvolvableCNN(EvolvableModule):
         # HARD LIMIT
         if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:
             self.channel_size[hidden_layer] += numb_new_channels
-            self.recreate_nets()
+            self.recreate_network()
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
@@ -452,11 +478,11 @@ class EvolvableCNN(EvolvableModule):
         # HARD LIMIT
         if self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size:
             self.channel_size[hidden_layer] -= numb_new_channels
-            self.recreate_nets(shrink_params=True)
+            self.recreate_network(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
-    def recreate_nets(self, shrink_params: bool = False) -> None:
+    def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates neural networks.
 
         :param shrink_params: Flag indicating whether to shrink the parameters, defaults to False

@@ -16,6 +16,7 @@ DeviceType = Union[str, torch.device]
 class MutationType(Enum):
     LAYER = "layer"
     NODE = "node"
+    ACTIVATION = "activation"
 
 @runtime_checkable
 class MutationMethod(Protocol):

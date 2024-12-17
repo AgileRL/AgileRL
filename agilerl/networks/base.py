@@ -8,15 +8,15 @@ import torch
 
 from agilerl.protocols import MutationType, MutationMethod
 from agilerl.typing import DeviceType, TorchObsType, ConfigType
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule, register_mutation_fn
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.evolvable_networks import is_image_space
-from agilerl.utils.algo_utils import recursive_check_module_attrs
+from agilerl.utils.evolvable_networks import is_image_space, get_default_config
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
 SupportedEvolvable = Union[EvolvableMLP, EvolvableCNN, EvolvableMultiInput]
+
 
 def assert_correct_mlp_net_config(net_config: Dict[str, Any]) -> None:
     """Asserts that the MLP network configuration is correct.
@@ -74,23 +74,7 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
     ), "Net config must contain latent_dim: int."
 
 
-class _NetworkMeta(type):
-    """Metaclass to wrap registry information after algorithm is done 
-    intiializing with specified network groups and optimizers."""
-    def __call__(cls, *args, **kwargs):
-        # Create the instance
-        instance: SelfEvolvableNetwork = super().__call__(*args, **kwargs)
-
-        # Call the base class post_init_hook after all initialization
-        if isinstance(instance, cls) and hasattr(instance, "_parse_mutation_methods"):
-            instance._parse_mutation_methods()
-
-        return instance
-
-class NetworkMeta(_NetworkMeta, ABCMeta):
-    ...
-
-class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
+class EvolvableNetwork(EvolvableModule, ABC):
     """Base class for evolvable networks i.e. evolvable modules that are configured in 
     a specific way for a reinforcement learning algorithm - analogously to how CNNs are used 
     as building blocks in ResNet, VGG, etc. Specifically, we automatically inspect the passed 
@@ -114,13 +98,18 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
     def __init__(
             self,
             observation_space: spaces.Space,
-            encoder_config: ConfigType,
+            encoder_config: Optional[ConfigType] = None,
             action_space: Optional[spaces.Space] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
             n_agents: Optional[int] = None,
             latent_dim: int = 32,
             device: DeviceType = "cpu"
             ) -> None:
         super().__init__(device)
+
+        if encoder_config is None:
+            encoder_config = get_default_config(observation_space)
 
         # For multi-agent settings, we use a depth corresponding to that of the 
         # sample input for the kernel of the first layer of CNN-based networks
@@ -130,15 +119,19 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
                 observation_space=observation_space
                 )
 
+        self.arch = None
         self.observation_space = observation_space
         self.action_space = action_space
         self.n_agents = n_agents
         self.latent_dim = latent_dim
+        self.min_latent_dim = min_latent_dim
+        self.max_latent_dim = max_latent_dim
+        self.device = device
         self.encoder_config = (
             encoder_config if isinstance(encoder_config, dict) 
             else asdict(encoder_config)
         )
-
+    
         # Encoder processes an observation into a latent vector representation
         output_activation = self.encoder_config.get("output_activation", None)
         if output_activation is None:
@@ -163,6 +156,15 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             "device": self.device
         }
     
+    @property
+    def activation(self) -> str:
+        """Activation function of the network.
+        
+        :return: Activation function.
+        :rtype: str
+        """
+        return self.encoder.activation
+
     @abstractmethod
     def forward(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
@@ -174,27 +176,6 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         :rtype: torch.Tensor
         """
         raise NotImplementedError
-    
-    @abstractmethod
-    def build_network_head(self, net_config: Dict[str, Any]) -> Union[EvolvableModule, Iterable[EvolvableModule]]:
-        """Builds the head of the network based on the passed configuration.
-        
-        :param net_config: Configuration of the network head.
-        :type net_config: Dict[str, Any]
-        
-        :return: Network head.
-        :rtype: EvolvableModule
-        """
-        raise NotImplementedError
-    
-    def __getattr__(self, name: str) -> Any:
-        try:
-            return super().__getattr__(name)
-        except AttributeError as e:
-            mut_method = self.get_mutation_methods().get(name)
-            if mut_method is not None:
-                return mut_method
-            raise e
 
     @staticmethod
     def modify_multi_agent_config(
@@ -234,50 +215,55 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
     
         return net_config
     
-    def evolvable_modules(self) -> Dict[str, EvolvableModule]:
-        """Returns the attributes related to the evolvable networks in the algorithm. Includes 
-        attributes that are either evolvable networks or a list of evolvable networks, as well 
-        as the optimizers associated with the networks.
+    def change_activation(self, activation: str, output: bool = False) -> None:
+        """Change the activation function for the network.
 
-        :param networks_only: If True, only include evolvable networks, defaults to False
-        :type networks_only: bool, optionals
-        
-        :return: A dictionary of network attributes.
-        :rtype: dict[str, Any]
+        :param activation: Activation function to use.
+        :type activation: str
+        :param output: If True, change the output activation function, defaults to False
+        :type output: bool, optional
         """
-        def is_evolvable(attr: str, obj: Any):
-            return (
-                recursive_check_module_attrs(obj, networks_only=True)
-                and not attr.startswith("_") and not attr.endswith("_")
-            )
-        # Inspect evolvable
-        evolvable_attrs = {}
-        for attr in dir(self):
-            obj = getattr(self, attr)
-            if is_evolvable(attr, obj):
-                evolvable_attrs[attr] = obj
+        for attr, module in self.modules().items():
+            _output = False if attr == "encoder" else output
+            module.change_activation(activation, output=_output)
 
-        return evolvable_attrs
+    @register_mutation_fn(MutationType.NODE)
+    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
+        """Add a latent node to the network.
 
-    
-    def _parse_mutation_methods(self) -> None:
-        """Parse the mutation methods for the network. Here we form a mapping 
-        between mutation methods and the evolvable modules they belong to."""
-        self._mutation_methods = []
-        self._layer_mutation_methods = []
-        self._node_mutation_methods = []
-        for attr, module in self.evolvable_modules().items():
-            for name, method in module.get_mutation_methods().items():
-                method_name = ".".join([attr, name])
-                self._mutation_methods.append(method_name)
+        :param numb_new_nodes: Number of new nodes to add, defaults to None
+        :type numb_new_nodes: int, optional
 
-                method_type = method._mutation_type
-                if method_type == MutationType.LAYER:
-                    self._layer_mutation_methods.append(method_name)
-                elif method_type == MutationType.NODE:
-                    self._node_mutation_methods.append(method_name)
-                else:
-                    raise ValueError(f"Invalid mutation type: {method_type}")
+        :return: Configuration for adding a latent node.
+        :rtype: Dict[str, Any]
+        """
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+
+        if self.latent_dim + numb_new_nodes < self.max_latent_dim:
+            self.latent_dim += numb_new_nodes
+            self.recreate_network()
+
+        return {"numb_new_nodes": numb_new_nodes}
+
+    @register_mutation_fn(MutationType.NODE)
+    def remove_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
+        """Remove a latent node from the network.
+
+        :param numb_new_nodes: Number of nodes to remove, defaults to None
+        :type numb_new_nodes: int, optional
+
+        :return: Configuration for removing a latent node.
+        :rtype: Dict[str, Any]
+        """
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+
+        if self.latent_dim - numb_new_nodes > self.min_latent_dim:
+            self.latent_dim -= numb_new_nodes
+            self.recreate_network(shrink_params=True)
+
+        return {"numb_new_nodes": numb_new_nodes}
     
     def _build_encoder(self, net_config: Dict[str, Any]) -> SupportedEvolvable:
         """Builds the encoder for the network based on the environment's observation space.
@@ -287,7 +273,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         """
         if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             assert_correct_multi_input_net_config(net_config)
-
+            self.arch = "multi_input"
             encoder = EvolvableMultiInput(
                 observation_space=self.observation_space,
                 num_outputs=self.latent_dim,
@@ -297,7 +283,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             )
         elif is_image_space(self.observation_space):
             assert_correct_cnn_net_config(net_config)
-
+            self.arch = "cnn"
             encoder = EvolvableCNN(
                 input_shape=self.observation_space.shape,
                 num_outputs=self.latent_dim,
@@ -307,7 +293,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             )
         else:
             assert_correct_mlp_net_config(net_config)
-
+            self.arch = "mlp"
             encoder = EvolvableMLP(
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
@@ -317,19 +303,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             )
 
         return encoder
-    
-    def get_mutation_methods(self) -> Dict[str, MutationMethod]:
-        """Get all mutation methods for the network.
 
-        :return: A dictionary of mutation methods.
-        :rtype: Dict[str, MutationMethod]
-        """
-        def get_method_from_name(name: str) -> MutationMethod:
-            attr, method = name.split(".")
-            return getattr(getattr(self, attr), method)
-
-        return {name: get_method_from_name(name) for name in self._mutation_methods}
-    
     def clone(self) -> SelfEvolvableNetwork:
         """Clone the network.
         
@@ -339,10 +313,22 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         clone = self.__class__(**copy.deepcopy(self.init_dict))
 
         # Load state dicts of underlying evolvable modules
-        for attr, module in self.evolvable_modules().items():
+        for attr, module in self.modules().items():
             clone_module: EvolvableModule = getattr(clone, attr)
             if module.state_dict():
                 clone_module.load_state_dict(module.state_dict())
             
         return clone
     
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreate the network.
+        
+        :param shrink_params: If True, shrink the parameters of the network, defaults to False
+        :type shrink_params: bool, optional
+        """
+        encoder = self._build_encoder(self.encoder_config)
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+        self.encoder = preserve_params_fn(self.encoder, encoder)

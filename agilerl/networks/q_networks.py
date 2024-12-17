@@ -8,12 +8,16 @@ from agilerl.typing import TorchObsType, ConfigType
 from agilerl.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 
 DiscreteSpace = Union[spaces.Discrete, spaces.MultiDiscrete]
 
 class QNetwork(EvolvableNetwork):
     """Q Networks correspond to state-action value functions in deep reinforcement learning. From any given 
-    state, they predict the value of each action that can be taken from that state.
+    state, they predict the value of each action that can be taken from that state. By default, we build an 
+    encoder that extracts features from an input corresponding to the passed observation space using the 
+    AgileRL evolvable modules. The QNetwork then uses an EvolvableMLP as head to predict a value for each 
+    possible discrete action for the given state.
     
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
@@ -36,15 +40,24 @@ class QNetwork(EvolvableNetwork):
             self,
             observation_space: spaces.Space,
             action_space: DiscreteSpace,
-            encoder_config: ConfigType,
+            encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
             n_agents: Optional[int] = None,
             latent_dim: int = 32,
             device: str = "cpu"
             ):
         
         super().__init__(
-            observation_space, encoder_config, action_space, n_agents, latent_dim, device
+            observation_space, 
+            encoder_config=encoder_config,
+            action_space=action_space,
+            min_latent_dim=min_latent_dim, 
+            max_latent_dim=max_latent_dim,
+            n_agents=n_agents,
+            latent_dim=latent_dim,
+            device=device
             )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
@@ -77,7 +90,7 @@ class QNetwork(EvolvableNetwork):
             "latent_dim": self.latent_dim,
             "device": self.device
             }
-    
+
     def build_network_head(self, net_config: Dict[str, Any]) -> EvolvableMLP:
         """Builds the head of the network based on the passed configuration.
         
@@ -106,6 +119,22 @@ class QNetwork(EvolvableNetwork):
         """
         latent = self.encoder(x)
         return self.value_net(latent)
+    
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the same parameters as the current network.
+
+        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
+        :type shrink_params: bool
+        """
+        super().recreate_network(shrink_params)
+        value_net = self.build_network_head(self.value_net.net_config)
+
+        # Preserve parameters of the network
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+        self.value_net = preserve_params_fn(self.value_net, value_net)
 
 
 class RainbowQNetwork(EvolvableNetwork):
@@ -124,6 +153,10 @@ class RainbowQNetwork(EvolvableNetwork):
     :type num_atoms: int
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
+    :type max_latent_dim: int
     :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to 
         single-agent environments.
     :type n_agents: Optional[int]
@@ -137,17 +170,26 @@ class RainbowQNetwork(EvolvableNetwork):
             self,
             observation_space: spaces.Space,
             action_space: DiscreteSpace,
-            encoder_config: ConfigType,
             support: torch.Tensor,
             num_atoms: int = 51,
+            encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
             n_agents: Optional[int] = None,
             latent_dim: int = 32,
-            device: str = "cpu",
+            device: str = "cpu"
             ):
-
+        
         super().__init__(
-            observation_space, encoder_config, action_space, n_agents, latent_dim, device
+            observation_space, 
+            encoder_config=encoder_config,
+            action_space=action_space,
+            min_latent_dim=min_latent_dim, 
+            max_latent_dim=max_latent_dim,
+            n_agents=n_agents,
+            latent_dim=latent_dim,
+            device=device
             )
 
         if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
@@ -168,7 +210,12 @@ class RainbowQNetwork(EvolvableNetwork):
         self.num_atoms = num_atoms
         self.support = support
 
-        self.value_net, self.advantage_net = self.build_network_head(head_config)
+        self.value_net = self.build_network_head(
+            "value", num_outputs=self.num_atoms, net_config=head_config
+            )
+        self.advantage_net = self.build_network_head(
+            "advantage", num_outputs=self.num_actions * self.num_atoms, net_config=head_config
+            )
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -189,7 +236,7 @@ class RainbowQNetwork(EvolvableNetwork):
             "device": self.device
             }
     
-    def build_network_head(self, net_config: Dict[str, Any]) -> Tuple[EvolvableMLP, EvolvableMLP]:
+    def build_network_head(self, name: str, num_outputs: int, net_config: Dict[str, Any]) -> EvolvableMLP:
         """Builds the head of the network based on the passed configuration.
         
         :param net_config: Configuration of the network head.
@@ -198,29 +245,20 @@ class RainbowQNetwork(EvolvableNetwork):
         :return: Network head.
         :rtype: Tuple[EvolvableModule, EvolvableModule]
         """
-        value_net = EvolvableMLP(
+        return EvolvableMLP(
             num_inputs=self.latent_dim,
-            num_outputs=self.num_atoms,
+            num_outputs=num_outputs,
             device=self.device,
-            name="value",
+            name=name,
             **net_config
             )
         
-        advantage_net = EvolvableMLP(
-            num_inputs=self.latent_dim,
-            num_outputs=self.num_actions * self.num_atoms,
-            device=self.device,
-            name="advantage",
-            **net_config
-            )
-        
-        return value_net, advantage_net
     
     def forward(self, x: TorchObsType, q: bool = True, log: bool = False) -> torch.Tensor:
         """Forward pass of the Rainbow Q network.
 
         :param x: Input to the network.
-        :type x: TorchObsType
+        :type x: :type x: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
         :param q: Whether to return Q values. Defaults to True.
         :type q: bool
         :param log: Whether to return log probabilities. Defaults to False.
@@ -253,6 +291,124 @@ class RainbowQNetwork(EvolvableNetwork):
             x = torch.sum(x * self.support, dim=2)
 
         return x
+
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the same parameters as the current network.
+
+        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
+        :type shrink_params: bool
+        """
+        super().recreate_network(shrink_params)
+
+        # Build the network heads
+        value_net = self.build_network_head(
+            "value",
+            num_outputs=self.num_atoms,
+            net_config=self.value_net.net_config
+            )
+        advantage_net = self.build_network_head(
+            "advantage",
+            num_outputs=self.num_actions * self.num_atoms,
+            net_config=self.advantage_net.net_config
+            )
+
+        # Preserve parameters of the network
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+        self.value_net = preserve_params_fn(self.value_net, value_net)
+        self.advantage_net = preserve_params_fn(self.advantage_net, advantage_net)
+
+
+class ContinuousQNetwork(EvolvableNetwork):
+    """ContinuousQNetwork is an extension of the QNetwork that is used for continuous action spaces.
+    This is used in off-policy algorithms like DDPG and TD3. The network predicts the Q value for a
+    given state-action pair.
+
+    :param observation_space: Observation space of the environment.
+    :type observation_space: spaces.Space
+    :param action_space: Action space of the environment
+    :type action_space: spaces.Box
+    :param encoder_config: Configuration of the encoder network.
+    :type encoder_config: ConfigType
+    :param head_config: Configuration of the network MLP head.
+    :type head_config: Optional[ConfigType]
+    :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
+    :type max_latent_dim: int
+    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to 
+        single-agent environments.
+    :type n_agents: Optional[int]
+    :param latent_dim: Dimension of the latent space representation.
+    :type latent_dim: int
+    :param device: Device to use for the network.
+    :type device: str
+    """
+
+    def __init__(
+            self,
+            observation_space: spaces.Space,
+            action_space: spaces.Box,
+            encoder_config: Optional[ConfigType] = None,
+            head_config: Optional[ConfigType] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
+            n_agents: Optional[int] = None,
+            latent_dim: int = 32,
+            device: str = "cpu"
+            ):
+
+        super().__init__(
+            observation_space, 
+            encoder_config=encoder_config,
+            action_space=action_space,
+            min_latent_dim=min_latent_dim, 
+            max_latent_dim=max_latent_dim,
+            n_agents=n_agents,
+            latent_dim=latent_dim,
+            device=device
+            )
         
+        if not isinstance(action_space, spaces.Box):
+            raise ValueError("ContinuousQNetwork only supports continuous action spaces (spaces.Box).")
+        
+        if head_config is None:
+            head_config = asdict(
+                MlpNetConfig(
+                    hidden_size=[64],
+                    output_activation=None
+                    )
+                )
+            
+        self.num_actions = spaces.flatdim(action_space)
+        self.value_net = self.build_network_head(head_config)
+    
+    def build_network_head(self, head_config: Optional[ConfigType] = None) -> None:
+        """Builds the head of the network.
 
+        :param head_config: Configuration of the head.
+        :type head_config: Optional[ConfigType]
+        """
+        return EvolvableMLP(
+            num_inputs=self.latent_dim + self.num_actions,
+            num_outputs=1,
+            device=self.device,
+            name="value",
+            **head_config
+        )
+    
+    def forward(self, obs: TorchObsType, actions: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the network.
 
+        :param obs: Input tensor.
+        :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
+        :param actions: Actions tensor.
+        :type actions: torch.Tensor
+        :return: Output tensor.
+        :rtype: torch.Tensor
+        """
+        x = self.encoder(obs)
+        x = torch.cat([x, actions], dim=-1)
+        return self.value_net(x)
