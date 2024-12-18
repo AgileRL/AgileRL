@@ -271,6 +271,7 @@ def layer_init(layer: LayerType, std: float = np.sqrt(2), bias_const: float = 0.
 
     return layer
 
+
 def calc_max_kernel_sizes(
         channel_size: List[int],
         kernel_size: List[int],

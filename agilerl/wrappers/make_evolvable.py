@@ -166,19 +166,19 @@ class MakeEvolvable(EvolvableModule):
             self._mutation_methods = [
                 method
                 for method in self._mutation_methods
-                if "cnn" not in method.__name__
+                if "cnn" not in method
             ]
 
             self._layer_mutation_methods = [
                 method
                 for method in self._layer_mutation_methods
-                if "cnn" not in method.__name__
+                if "cnn" not in method
             ]
 
             self._node_mutation_methods = [
                 method
                 for method in self._node_mutation_methods
-                if "cnn" not in method.__name__
+                if "cnn" not in method
             ]
     
     @property
@@ -1059,7 +1059,7 @@ class MakeEvolvable(EvolvableModule):
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
 
-    def calc_max_kernel_sizes(self):
+    def calc_max_kernel_sizes(self) -> List[Tuple[int, int]]:
         "Calculates the max kernel size for each convolutional layer of the feature net."
         max_kernel_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
@@ -1116,7 +1116,7 @@ class MakeEvolvable(EvolvableModule):
 
         return max_kernel_list
 
-    def calc_stride_size_ranges(self):
+    def calc_stride_size_ranges(self) -> List[Tuple[int, int]]:
         "Calculates a range of stride sizes for each convolutional layer of the feature net."
         stride_range_list = []
         if self.cnn_layer_info["conv_layer_type"] != "Conv3d":
@@ -1177,7 +1177,7 @@ class MakeEvolvable(EvolvableModule):
 
         return stride_range_list
 
-    def recreate_nets(self, shrink_params=False):
+    def recreate_nets(self, shrink_params: bool = False) -> None:
         """Recreates neural networks.
 
         :param shrink_params: Boolean flag to shrink parameters

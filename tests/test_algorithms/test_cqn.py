@@ -88,7 +88,6 @@ def test_initialize_cqn_with_minimum_parameters():
 
     assert cqn.observation_space == observation_space
     assert cqn.action_space == action_space
-    assert cqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
     assert cqn.batch_size == 64
     assert cqn.lr == 0.0001
     assert cqn.learn_step == 5
@@ -102,10 +101,9 @@ def test_initialize_cqn_with_minimum_parameters():
     assert cqn.fitness == []
     assert cqn.steps == [0]
     assert cqn.double is False
-    assert isinstance(cqn.actor, EvolvableMLP)
-    assert isinstance(cqn.actor_target, EvolvableMLP)
+    assert isinstance(cqn.actor.encoder, EvolvableMLP)
+    assert isinstance(cqn.actor_target.encoder, EvolvableMLP)
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
-    assert cqn.arch == "mlp"
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 
@@ -115,8 +113,6 @@ def test_initialize_cqn_with_cnn_accelerator():
     action_space = spaces.Discrete(2)
     index = 0
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -151,7 +147,6 @@ def test_initialize_cqn_with_cnn_accelerator():
 
     assert cqn.observation_space == observation_space
     assert cqn.action_space == action_space
-    assert cqn.net_config == net_config_cnn
     assert cqn.batch_size == batch_size
     assert cqn.lr == lr
     assert cqn.learn_step == learn_step
@@ -164,9 +159,8 @@ def test_initialize_cqn_with_cnn_accelerator():
     assert cqn.fitness == []
     assert cqn.steps == [0]
     assert cqn.double is True
-    assert isinstance(cqn.actor, EvolvableCNN)
-    assert isinstance(cqn.actor_target, EvolvableCNN)
-    assert cqn.arch == "cnn"
+    assert isinstance(cqn.actor.encoder, EvolvableCNN)
+    assert isinstance(cqn.actor_target.encoder, EvolvableCNN)
     assert isinstance(cqn.optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(cqn.criterion, nn.MSELoss)
 
@@ -188,7 +182,6 @@ def test_initialize_cqn_with_make_evo(observation_space, actor_network, input_te
 
     assert cqn.observation_space == observation_space
     assert cqn.action_space == action_space
-    assert cqn.net_config is None
     assert cqn.batch_size == 64
     assert cqn.lr == 0.0001
     assert cqn.learn_step == 5
@@ -205,7 +198,6 @@ def test_initialize_cqn_with_make_evo(observation_space, actor_network, input_te
     # assert cqn.actor_network == actor_network
     # assert cqn.actor == actor_network
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
-    assert cqn.arch == actor_network.arch
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 
@@ -223,7 +215,7 @@ def test_initialize_cqn_with_actor_network_evo_net(observation_space, net_type):
             num_inputs=observation_space.shape[0],
             num_outputs=action_space.n,
             hidden_size=[64, 64],
-            mlp_activation="ReLU",
+            activation="ReLU",
         )
     else:
         actor_network = EvolvableCNN(
@@ -232,15 +224,13 @@ def test_initialize_cqn_with_actor_network_evo_net(observation_space, net_type):
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
+            activation="ReLU",
         )
 
     cqn = CQN(observation_space, action_space, actor_network=actor_network)
 
     assert cqn.observation_space == observation_space
     assert cqn.action_space == action_space
-    assert cqn.net_config is not None
     assert cqn.batch_size == 64
     assert cqn.lr == 0.0001
     assert cqn.learn_step == 5
@@ -257,7 +247,6 @@ def test_initialize_cqn_with_actor_network_evo_net(observation_space, net_type):
     # assert cqn.actor_network is None
     # assert cqn.actor == actor_network
     assert isinstance(cqn.optimizer.optimizer, optim.Adam)
-    assert cqn.arch == actor_network.arch
     assert isinstance(cqn.criterion, nn.MSELoss)
 
 
@@ -266,12 +255,12 @@ def test_init_with_incorrect_actor_net():
     action_space = spaces.Discrete(2)
     actor_network = "String"
 
-    with pytest.raises(AssertionError) as e:
+    with pytest.raises(TypeError) as e:
         cqn = CQN(observation_space, action_space, actor_network=actor_network)
         assert cqn
         assert (
             e
-            == "'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
         )
 
 
@@ -399,7 +388,7 @@ def test_handles_double_q_learning():
 def test_soft_update():
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -477,8 +466,6 @@ def test_algorithm_test_loop_images():
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -501,8 +488,6 @@ def test_algorithm_test_loop_images_unvectorized():
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -528,7 +513,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == cqn.observation_space
     assert clone_agent.action_space == cqn.action_space
-    assert clone_agent.net_config == cqn.net_config
     # assert clone_agent.actor_network == cqn.actor_network
     assert clone_agent.batch_size == cqn.batch_size
     assert clone_agent.lr == cqn.lr
@@ -555,7 +539,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == cqn.observation_space
     assert clone_agent.action_space == cqn.action_space
-    assert clone_agent.net_config == cqn.net_config
     # assert clone_agent.actor_network == cqn.actor_network
     assert clone_agent.batch_size == cqn.batch_size
     assert clone_agent.lr == cqn.lr
@@ -580,7 +563,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == cqn.observation_space
     assert clone_agent.action_space == cqn.action_space
-    assert clone_agent.net_config == cqn.net_config
     # assert clone_agent.actor_network == cqn.actor_network
     assert clone_agent.batch_size == cqn.batch_size
     assert clone_agent.lr == cqn.lr
@@ -614,8 +596,8 @@ def test_clone_new_index():
 def test_unwrap_models():
     cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), accelerator=Accelerator())
     cqn.unwrap_models()
-    assert isinstance(cqn.actor, nn.Module)
-    assert isinstance(cqn.actor_target, nn.Module)
+    assert isinstance(cqn.actor.encoder, nn.Module)
+    assert isinstance(cqn.actor_target.encoder, nn.Module)
 
 
 # The saved checkpoint file contains the correct data and format.
@@ -631,12 +613,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -653,9 +634,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert cqn.net_config == {"arch": "mlp", "hidden_size": [64, 64]}
-    assert isinstance(cqn.actor, EvolvableMLP)
-    assert isinstance(cqn.actor_target, EvolvableMLP)
+    assert isinstance(cqn.actor.encoder, EvolvableMLP)
+    assert isinstance(cqn.actor_target.encoder, EvolvableMLP)
     assert cqn.lr == 1e-4
     assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
     assert cqn.batch_size == 64
@@ -671,8 +651,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -680,7 +658,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the cqn agent
     cqn = CQN(
-        observation_space=spaces.Box(0, 255, shape=(3, 32, 32)), action_space=spaces.Discrete(2), net_config=net_config_cnn
+        observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
+        net_config=net_config_cnn
     )
 
     # Save the checkpoint to a file
@@ -691,12 +671,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -713,9 +692,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert cqn.net_config == net_config_cnn
-    assert isinstance(cqn.actor, EvolvableCNN)
-    assert isinstance(cqn.actor_target, EvolvableCNN)
+    assert isinstance(cqn.actor.encoder, EvolvableCNN)
+    assert isinstance(cqn.actor_target.encoder, EvolvableCNN)
     assert cqn.lr == 1e-4
     assert str(cqn.actor.state_dict()) == str(cqn.actor_target.state_dict())
     assert cqn.batch_size == 64
@@ -755,12 +733,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -777,7 +754,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     cqn.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert cqn.net_config is None
     assert isinstance(cqn.actor, nn.Module)
     assert isinstance(cqn.actor_target, nn.Module)
     assert cqn.lr == 1e-4
@@ -815,9 +791,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert new_cqn.net_config == cqn.net_config
-    assert isinstance(new_cqn.actor, EvolvableMLP)
-    assert isinstance(new_cqn.actor_target, EvolvableMLP)
+    assert isinstance(new_cqn.actor.encoder, EvolvableMLP)
+    assert isinstance(new_cqn.actor_target.encoder, EvolvableMLP)
     assert new_cqn.lr == cqn.lr
     assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
     assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
@@ -848,8 +823,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
@@ -866,9 +839,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert new_cqn.net_config == cqn.net_config
-    assert isinstance(new_cqn.actor, EvolvableCNN)
-    assert isinstance(new_cqn.actor_target, EvolvableCNN)
+    assert isinstance(new_cqn.actor.encoder, EvolvableCNN)
+    assert isinstance(new_cqn.actor_target.encoder, EvolvableCNN)
     assert new_cqn.lr == cqn.lr
     assert str(new_cqn.actor.to("cpu").state_dict()) == str(cqn.actor.state_dict())
     assert str(new_cqn.actor_target.to("cpu").state_dict()) == str(
@@ -917,7 +889,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_cqn.observation_space == cqn.observation_space
     assert new_cqn.action_space == cqn.action_space
-    assert new_cqn.net_config == cqn.net_config
     assert isinstance(new_cqn.actor, nn.Module)
     assert isinstance(new_cqn.actor_target, nn.Module)
     assert new_cqn.lr == cqn.lr

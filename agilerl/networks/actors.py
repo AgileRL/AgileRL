@@ -1,50 +1,119 @@
-from typing import Union, Optional, Tuple, Type, Dict, Any
-from dataclasses import asdict
+from typing import Optional, Type, Dict, Any
+import numpy as np
 import torch
-import torch.nn.functional as F
 from gymnasium import spaces
-from torch.distributions import Distribution, Categorical, Normal, Independent
+from torch.distributions import Distribution, Categorical, Normal, Bernoulli
 
-from agilerl.typing import TorchObsType, ConfigType
-from agilerl.configs import MlpNetConfig, NetConfig
-from agilerl.networks.base import EvolvableNetwork
+from agilerl.typing import TorchObsType, ConfigType, DeviceType
+from agilerl.configs import MlpNetConfig
+from agilerl.networks.base import EvolvableNetwork, SupportedEvolvable
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule
 
-def get_distribution_cls(action_space: spaces.Space) -> Type[Distribution]:
-    if isinstance(action_space, spaces.Discrete):
-        return Categorical
-    elif isinstance(action_space, spaces.Box):
-        return Normal
-    else:
-        raise NotImplementedError(f"Action space {action_space} not supported.")
-    
-class DistributionWrapper(EvolvableModule):
-    """Wrapper for a distribution over an action space. It provides methods to sample
-    actions and compute log probabilities.
+class EvolvableDistribution(EvolvableModule):
+    """Wrapper to output a distribution over an action space for an evolvable module. It provides methods 
+    to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as 
+    PPO, A2C, TRPO.
 
     :param action_space: Action space of the environment.
     :type action_space: spaces.Space
     :param network: Network that outputs the logits of the distribution.
     :type network: EvolvableModule
     """
-    def __init__(self, action_space: spaces.Space, network: EvolvableModule):
+    def __init__(self, action_space: spaces.Space, network: SupportedEvolvable, device: DeviceType = "cpu"):
         self.action_space = action_space
-        self.action_net = network
-    
+        self.actor_net = network
+        self.device = device
 
-class Actor(EvolvableNetwork):
-    """Actor network for policy-gradient algorithms. Given an observation space, it outputs 
-    a distribution over the action space.
+        # For continuous action spaces, we also learn the standard deviation (log_std) 
+        # of the action distribution
+        if isinstance(action_space, spaces.Box):
+            self.log_std = torch.nn.Parameter(
+                torch.zeros(spaces.flatdim(action_space)), requires_grad=True).to(device)
+        else:
+            self.log_std = None
+
+    @property
+    def net_config(self) -> ConfigType:
+        """Configuration of the network.
+
+        :return: Configuration of the network.
+        :rtype: ConfigType
+        """
+        return self.actor_net.net_config
+
+    def get_distribution(
+            self,
+            logits: torch.Tensor,
+            log_std: Optional[torch.Tensor] = None
+            ) -> Distribution:
+        """Get the distribution over the action space given an observation.
+
+        :param logits: Logits output by the network.
+        :type logits: torch.Tensor
+        :param log_std: Log standard deviation of the action distribution. Defaults to None.
+        :type log_std: Optional[torch.Tensor]
+        :return: Distribution over the action space.
+        :rtype: Distribution
+        """
+        if isinstance(self.action_space, spaces.Box):
+            assert log_std is not None, "log_std must be provided for continuous action spaces."
+            std = torch.ones_like(logits) * torch.exp(log_std)
+            return Normal(loc=logits, scale=std)
+
+        elif isinstance(self.action_space, spaces.Discrete):
+            return Categorical(logits=logits)
+
+        elif isinstance(self.action_space, spaces.MultiDiscrete):
+            return[
+                Categorical(logits=split) 
+                for split in torch.split(logits, list(self.action_space.nvec), dim=1)
+                ]
+
+        elif isinstance(self.action_space, spaces.MultiBinary):
+            return Bernoulli(logits=logits)
+
+        else:
+            raise NotImplementedError(f"Action space {self.action_space} not supported.")
+    
+    def forward(self, obs: TorchObsType) -> Distribution:
+        """Forward pass of the network.
+
+        :param obs: Observation input.
+        :type obs: TorchObsType
+        :return: Distribution over the action space.
+        :rtype: Distribution
+        """
+        logits = self.actor_net(obs)
+        return self.get_distribution(logits, self.log_std)
+    
+    def clone(self) -> "EvolvableDistribution":
+        """Clones the distribution.
+
+        :return: Cloned distribution.
+        :rtype: EvolvableDistribution
+        """
+        return EvolvableDistribution(
+            self.action_space, self.actor_net.clone(), self.device
+            )
+
+
+class DeterministicActor(EvolvableNetwork):
+    """Deterministic actor network for policy-gradient algorithms. Given an observation, it outputs 
+    the mean of the action distribution. This is useful for e.g. DDPG, SAC, TD3.
 
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
     :param action_space: Action space of the environment
-    :type action_space: DiscreteSpace
+    :type action_space: spaces.Space
     :param encoder_config: Configuration of the encoder network.
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param min_latent_dim: Minimum dimension of the latent space representation.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum dimension of the latent space representation.
+    :type max_latent_dim: int
     :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to 
         single-agent environments.
     :type n_agents: Optional[int]
@@ -57,7 +126,7 @@ class Actor(EvolvableNetwork):
     def __init__(
             self,
             observation_space: spaces.Space,
-            action_space: spaces.Box,
+            action_space: spaces.Space,
             encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
             min_latent_dim: int = 8,
@@ -78,5 +147,153 @@ class Actor(EvolvableNetwork):
             device=device
             )
         
+        self.min_action = action_space.low if isinstance(action_space, spaces.Box) else None
+        self.max_action = action_space.high if isinstance(action_space, spaces.Box) else None
 
+        # Set output activation based on action space
+        if isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
+            output_activation = "Softmax"
+        elif np.any(self.min_action < 0):
+            output_activation = "Tanh"
+        else:
+            output_activation = "Sigmoid"
+
+        head_config = head_config or MlpNetConfig(
+            hidden_size=[64],
+            output_activation=output_activation
+        )
+
+        if head_config['output_activation'] != output_activation:
+            head_config['output_activation'] = output_activation
         
+        self.actor_net = self.build_network_head(head_config)
+
+    @property
+    def init_dict(self) -> Dict[str, Any]:
+        """Initializes the configuration of the Rainbow Q network.
+        
+        :return: Configuration of the Rainbow Q network.
+        :rtype: Dict[str, Any]
+        """
+        return {
+            "observation_space": self.observation_space,
+            "action_space": self.action_space,
+            "encoder_config": self.encoder.net_config,
+            "head_config": self.actor_net.net_config,
+            "min_latent_dim": self.min_latent_dim,
+            "max_latent_dim": self.max_latent_dim,
+            "n_agents": self.n_agents,
+            "latent_dim": self.latent_dim,
+            "device": self.device
+            }
+    
+    def build_network_head(self, head_config: Optional[ConfigType] = None) -> SupportedEvolvable:
+        """Builds the head of the network.
+
+        :param head_config: Configuration of the head.
+        :type head_config: Optional[ConfigType]
+        """
+        return EvolvableMLP(
+            num_inputs=self.latent_dim,
+            num_outputs=spaces.flatdim(self.action_space),
+            device=self.device,
+            name="actor",
+            **head_config
+        )
+    
+    def forward(self, obs: TorchObsType) -> torch.Tensor:
+        """Forward pass of the network.
+
+        :param obs: Observation input.
+        :type obs: TorchObsType
+        :return: Output of the network.
+        :rtype: torch.Tensor
+        """
+        latent = self.encoder(obs)
+        return self.actor_net(latent)
+
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the same parameters as the current network.
+
+        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
+        :type shrink_params: bool
+        """
+        super().recreate_network(shrink_params)
+        actor_net = self.build_network_head(self.actor_net.net_config)
+
+        # Preserve parameters of the network
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+        self.actor_net = preserve_params_fn(self.actor_net, actor_net)
+
+
+class StochasticActor(DeterministicActor):
+    """Stochastic actor network for policy-gradient algorithms. Given an observation, it outputs
+    a distribution over the action space. This is useful for on-policy policy-gradient algorithms
+    like PPO, A2C, TRPO.
+    
+    :param observation_space: Observation space of the environment.
+    :type observation_space: spaces.Space
+    :param action_space: Action space of the environment
+    :type action_space: spaces.Space
+    :param encoder_config: Configuration of the encoder network.
+    :type encoder_config: ConfigType
+    :param head_config: Configuration of the network MLP head.
+    :type head_config: Optional[ConfigType]
+    :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to 
+        single-agent environments.
+    :type n_agents: Optional[int]
+    :param latent_dim: Dimension of the latent space representation.
+    :type latent_dim: int
+    :param device: Device to use for the network.
+    :type device: str
+    """
+
+    def __init__(
+            self,
+            observation_space: spaces.Space,
+            action_space: spaces.Space,
+            encoder_config: Optional[ConfigType] = None,
+            head_config: Optional[ConfigType] = None,
+            n_agents: Optional[int] = None,
+            latent_dim: int = 32,
+            device: str = "cpu"
+            ):
+        
+        super().__init__(
+            observation_space, 
+            action_space=action_space,
+            encoder_config=encoder_config,
+            head_config=head_config,
+            n_agents=n_agents,
+            latent_dim=latent_dim,
+            device=device
+            )
+        
+        self.actor_net = EvolvableDistribution(action_space, self.actor_net, device=device)
+    
+    def forward(self, obs: TorchObsType) -> Distribution:
+        """Forward pass of the network.
+
+        :param obs: Observation input.
+        :type obs: TorchObsType
+        :return: Distribution over the action space.
+        :rtype: Distribution
+        """
+        return super().forward(obs)
+    
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the same parameters as the current network.
+
+        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
+        :type shrink_params: bool
+        """
+        super().recreate_network(shrink_params)
+
+        self.actor_net = EvolvableDistribution(
+            self.action_space, self.actor_net, device=self.device
+            )
+
+

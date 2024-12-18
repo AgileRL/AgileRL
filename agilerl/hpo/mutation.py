@@ -88,9 +88,7 @@ def get_architecture_mut_method(
     if isinstance(eval, list):
         eval = eval[0]
 
-    mutation_methods = list(eval.get_mutation_methods().keys())
-    mutation_probs = eval.get_mutation_probs(new_layer_prob) 
-    mutation_method = rng.choice(mutation_methods, size=1, p=mutation_probs)[0]
+    mutation_method = eval.sample_mutation_method(new_layer_prob, rng)
     mut_return_type = get_return_type(getattr(eval, mutation_method))
 
     return mutation_method, mut_return_type

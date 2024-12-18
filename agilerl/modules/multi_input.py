@@ -1,13 +1,13 @@
 from typing import List, Optional, Dict, Any, Union, Literal, Tuple
 import copy
-
+import numpy as np
 import torch
 import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.typing import ArrayOrTensor
 from agilerl.utils.evolvable_networks import is_image_space, get_activation
-from agilerl.modules.base import EvolvableModule, register_mutation_fn, MutationType
+from agilerl.modules.base import EvolvableModule, ModuleDict, register_mutation_fn, MutationType
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 
@@ -28,6 +28,7 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
         f"observation_{i}": space for i, space in enumerate(observation_space.spaces)
     })
 
+
 class EvolvableMultiInput(EvolvableModule):
     """
     General object that allows for the composition of multiple evolvable networks given a dictionary 
@@ -47,22 +48,30 @@ class EvolvableMultiInput(EvolvableModule):
 
     :param observation_space: Dictionary or Tuple space of observations.
     :type observation_space: spaces.Dict, spaces.Tuple
+    :param num_outputs: Dimension of the output tensor.
+    :type num_outputs: int
     :param channel_size: List of channel sizes for the convolutional layers.
     :type channel_size: List[int]
     :param kernel_size: List of kernel sizes for the convolutional layers.
     :type kernel_size: List[int]
     :param stride_size: List of stride sizes for the convolutional layers.
     :type stride_size: List[int]
-    :param hidden_size: List of hidden sizes for the MLP layers.
-    :type hidden_size: List[int]
-    :param num_outputs: Dimension of the output tensor.
-    :type num_outputs: int
+    :param latent_dim: Dimension of the latent space representation. Default is 16.
+    :type latent_dim: int, optional
+    :param cnn_block_type: Type of convolutional block to use. Default is "Conv2d".
+    :type cnn_block_type: Literal["Conv2d", "Conv3d"], optional
+    :param sample_input: Sample input tensor for the CNN. Default is None.
+    :type sample_input: Optional[torch.Tensor], optional
     :param vector_space_mlp: Whether to use an MLP for the vector spaces. This is done by concatenating the 
         flattened observations and passing them through an `EvolvableMLP`. Default is False, whereby the 
         observations are concatenated directly to the feature encodings before the final MLP.
     :type vector_space_mlp: bool, optional
-    :param mlp_output_activation: Activation function for the output of the final MLP. Default is None.
-    :type mlp_output_activation: Optional[str], optional
+    :param hidden_size: List of hidden sizes for the MLP. Default is None.
+    :type hidden_size: List[int], optional
+    :param init_dicts: Dictionary of initialization dictionaries for the feature extractors. Default is {}.
+    :type init_dicts: Dict[str, Dict[str, Any]], optional
+    :param output_activation: Activation function for the output layer. Default is None.
+    :type output_activation: Optional[str], optional
     :param activation: Activation function for the module layers. Default is "ReLU".
     :type activation: str, optional
     :param min_hidden_layers: Minimum number of hidden layers for the MLP. Default is 1.
@@ -81,17 +90,14 @@ class EvolvableMultiInput(EvolvableModule):
     :type min_channel_size: int, optional
     :param max_channel_size: Maximum channel size for the CNN. Default is 256.
     :type max_channel_size: int, optional
-    :param n_agents: Number of agents. Default is None.
-    :type n_agents: Optional[int], optional
     :param layer_norm: Whether to use layer normalization. Default is False.
     :type layer_norm: bool, optional
     :param noise_std: Standard deviation of the noise. Default is 0.5.
     :type noise_std: float, optional
-    :type critic: bool, optional
+    :param noisy: Whether to use noisy layers. Default is False.
+    :type noisy: bool, optional
     :param init_layers: Whether to initialize the layers. Default is True.
     :type init_layers: bool, optional
-    :param output_vanish: Whether the output of the network vanishes. Default is False.
-    :type output_vanish: bool, optional
     :param device: Device to use for the network. Default is "cpu".
     :type device: str, optional
     """
@@ -122,6 +128,8 @@ class EvolvableMultiInput(EvolvableModule):
             max_cnn_hidden_layers: int = 6,
             min_channel_size: int = 32,
             max_channel_size: int = 256,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
             layer_norm: bool = False,
             noisy: bool = False,
             noise_std: float = 0.5,
@@ -153,11 +161,12 @@ class EvolvableMultiInput(EvolvableModule):
         self.sample_input = sample_input
         self.cnn_block_type = cnn_block_type
         self.output_activation = output_activation
-        self._activation = activation
         self.min_hidden_layers = min_hidden_layers
         self.max_hidden_layers = max_hidden_layers
         self.min_mlp_nodes = min_mlp_nodes
         self.max_mlp_nodes = max_mlp_nodes
+        self.min_latent_dim = min_latent_dim
+        self.max_latent_dim = max_latent_dim
         self.min_cnn_hidden_layers = min_cnn_hidden_layers
         self.max_cnn_hidden_layers = max_cnn_hidden_layers
         self.min_channel_size = min_channel_size
@@ -167,7 +176,8 @@ class EvolvableMultiInput(EvolvableModule):
         self.latent_dim = latent_dim
         self.noisy = noisy
         self.noise_std = noise_std
-        self.init_dicts = init_dicts
+        self._init_dicts = init_dicts
+        self._activation = activation
         self.vector_spaces = [
             key for key, space in observation_space.spaces.items() 
             if not is_image_space(space)
@@ -322,7 +332,25 @@ class EvolvableMultiInput(EvolvableModule):
         }
         kwargs.update(extra_kwargs)
         return kwargs
+    
+    @property
+    def init_dicts(self) -> Dict[str, Dict[str, Any]]:
+        """Returns the initialization dictionaries for the network.
+        
+        :return: Initialization dictionaries
+        :rtype: Dict[str, Dict[str, Any]]
+        """
+        if not self._init_dicts:
+            return {}
 
+        reformatted_dicts = {}
+        for key, d in self._init_dicts.items():
+            d.pop("input_shape", None)
+            d.pop("num_inputs", None)
+            d['num_outputs'] = self.latent_dim
+            reformatted_dicts[key] = d
+
+        return reformatted_dicts
     
     def get_init_dict(self, key: str, default: Literal['cnn', 'mlp']) -> Dict[str, Any]:
         """Returns the initialization dictionary for the specified key.
@@ -333,35 +361,13 @@ class EvolvableMultiInput(EvolvableModule):
         Returns:
             Dict[str, Any]: Initialization dictionary.
         """
-        if key in self.init_dicts:
-            return self.init_dicts[key]
+        init_dicts = self.init_dicts
+        if key in init_dicts:
+            return init_dicts[key]
         
         assert default in ['cnn', 'mlp'], "Invalid default value provided, must be 'cnn' or 'mlp'."
 
         return self.cnn_init_dict if default == 'cnn' else self.mlp_init_dict
-    
-    def extract_init_dict(self, key: str) -> Dict[str, Any]:
-        """Extracts and reformats the initialization dictionary to include all keys.
-        
-        Arguments:
-            init_dict (Dict[str, Any]): Initialization dictionary.
-        
-        Returns:
-            Dict[str, Any]: Reformatted initialization dictionary.
-        """
-        if key in self.feature_net.keys():
-            module = self.feature_net[key]
-        else:
-            raise ValueError(f"Invalid key {key} provided.")
-
-        init_dict = module.init_dict.copy()
-        del init_dict["num_outputs"]
-        if isinstance(module, EvolvableCNN):
-            del init_dict["input_shape"]
-        elif isinstance(module, EvolvableMLP):
-            del init_dict["num_inputs"]
-        
-        return init_dict
 
     def build_feature_extractor(self) -> Dict[str, SupportedEvolvableTypes]:
         """Creates the feature extractor and final MLP networks.
@@ -371,13 +377,18 @@ class EvolvableMultiInput(EvolvableModule):
                 value network, and advantage network.
         """
         # Build feature extractors for image spaces only
-        feature_net = nn.ModuleDict()
+        feature_net = ModuleDict(device=self.device)
         for key, space in self.observation_space.spaces.items():
             if is_image_space(space):  # Use CNN if it's an image space
-                feature_net[key] = EvolvableCNN(
+                init_dict = copy.deepcopy(self.get_init_dict(key, default='cnn'))
+                feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
-                    **copy.deepcopy(self.get_init_dict(key, default='cnn'))
-                )
+                    name=init_dict.pop("name", key),
+                    **init_dict
+                    )
+
+                self._init_dicts[key] = feature_extractor.init_dict
+                feature_net[key] = feature_extractor
 
         # Collect all vector space shapes for concatenation
         vector_input_dim = sum(
@@ -390,10 +401,15 @@ class EvolvableMultiInput(EvolvableModule):
                 self.hidden_size is not None,
                 "Hidden size must be specified for vector space MLP."
             )
-            feature_net['vector_mlp'] = EvolvableMLP(
+            init_dict = copy.deepcopy(self.get_init_dict("vector_mlp", default='mlp'))
+            vector_mlp = EvolvableMLP(
                 num_inputs=vector_input_dim,
-                **copy.deepcopy(self.get_init_dict("vector_mlp", default='mlp'))
-            )
+                name=init_dict.pop("name", "vector_mlp"),
+                **init_dict
+                )
+
+            self._init_dicts["vector_mlp"] = vector_mlp.init_dict
+            feature_net["vector_mlp"] = vector_mlp
         
         return feature_net
 
@@ -413,11 +429,6 @@ class EvolvableMultiInput(EvolvableModule):
         """
         if isinstance(x, tuple):
             x = dict(zip(self.observation_space.spaces.keys(), x))
-
-        # Convert observations to tensors
-        for key, obs in x.items():
-            if not isinstance(obs, torch.Tensor):
-                x[key] = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
         
         # Extract features from image spaces
         image_features = [
@@ -447,30 +458,6 @@ class EvolvableMultiInput(EvolvableModule):
         features = torch.cat([image_features, vector_features], dim=1)
         return self.output(self.final_dense(features))
 
-    def choose_random_module(
-            self,
-            mtype: Optional[Literal["cnn", "mlp"]] = None
-            ) -> Tuple[str, SupportedEvolvableTypes]:
-        """Randomly selects a module from the feature extractors or the final MLP.
-        
-        return: Tuple containing the key and the selected module.
-        rtype: Tuple[str, SupportedEvolvableTypes]
-        """
-        if mtype is not None:
-            modules = {}
-            for key, module in self.feature_net.items():
-                if isinstance(module, EvolvableCNN) and mtype == "cnn":
-                    modules[key] = module
-                elif isinstance(module, EvolvableMLP) and mtype == "mlp":
-                    modules[key] = module
-        else:
-            modules = self.feature_net
-
-        key = list(modules.keys())[torch.randint(len(modules.keys()), (1,)).item()]
-
-        return key, self.feature_net[key]
-
-
     @register_mutation_fn(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
@@ -490,196 +477,73 @@ class EvolvableMultiInput(EvolvableModule):
         if output:
             self.output = get_activation(activation)
 
-    @register_mutation_fn(MutationType.LAYER)
-    def add_mlp_layer(self, key: Optional[str] = None) -> Dict[str, str]:
-        """Adds a hidden layer from the fully connected layer.
-        
-        param key: Key specifying the available evolvable module to add the layer to. Default is None.
-        type key: str, optional
-        rtype: Dict[str, str]
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("mlp")
-
-        module.add_layer()
-        self.init_dicts[key] = self.extract_init_dict(key)
-        return {"key": key}
-
-    @register_mutation_fn(MutationType.LAYER)
-    def remove_mlp_layer(self, key: Optional[str] = None) -> Dict[str, str]:
-        """Removes a hidden layer from the fully connected layer.
-        
-        param key: Key specifying the available evolvable module to remove the layer from. Default is None.
-        type key: str, optional
-        rtype: Dict[str, str]
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("mlp")
-            
-        module.remove_layer()
-        self.init_dicts[key] = self.extract_init_dict(key)
-        return {"key": key}
-
     @register_mutation_fn(MutationType.NODE)
-    def add_mlp_node(
-            self,
-            key: Optional[str] = None,
-            hidden_layer: Optional[int] = None,
-            numb_new_nodes: Optional[int] = None
-            ) -> Dict[str, Union[str, int]]:
-        """Adds nodes to the hidden layer of the Multi-layer Perceptron.
+    def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
+        """Add a latent node to the network.
 
-        :param key: Key specifying the available evolvable module to add the nodes to, defaults to None
-        :type key: str, optional
-        :param hidden_layer: Depth of the hidden layer to add nodes to, defaults to None
-        :type hidden_layer: int, optional
-        :param numb_new_nodes: Number of nodes to add to the hidden layer, defaults to None
+        :param numb_new_nodes: Number of new nodes to add, defaults to None
         :type numb_new_nodes: int, optional
-        :return: Dictionary containing the hidden layer and number of new nodes added
-        :rtype: dict
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("mlp")
 
-        mut_dict = module.add_node(hidden_layer, numb_new_nodes)
-        self.init_dicts[key] = self.extract_init_dict(key)
-        mut_dict["key"] = key
-        return mut_dict
+        :return: Configuration for adding a latent node.
+        :rtype: Dict[str, Any]
+        """
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
+
+        if self.latent_dim + numb_new_nodes < self.max_latent_dim:
+            self.latent_dim += numb_new_nodes
+            self.recreate_network()
+
+        return {"numb_new_nodes": numb_new_nodes}
 
     @register_mutation_fn(MutationType.NODE)
-    def remove_mlp_node(
-            self,
-            key: Optional[str] = None,
-            hidden_layer: Optional[int] = None,
-            numb_new_nodes: Optional[int] = None
-            ) -> Dict[str, Union[str, int]]:
-        """Removes nodes from hidden layer of fully connected layer.
+    def remove_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
+        """Remove a latent node from the network.
 
-        :param key: Key specifying the available evolvable module to remove the nodes from, defaults to None
-        :type key: str, optional
-        :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
-        :type hidden_layer: int, optional
-        :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
+        :param numb_new_nodes: Number of nodes to remove, defaults to None
         :type numb_new_nodes: int, optional
-        :return: Dictionary containing the hidden layer index and the number of nodes removed
-        :rtype: Dict[str, Optional[Union[str, int]]]
+
+        :return: Configuration for removing a latent node.
+        :rtype: Dict[str, Any]
         """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("mlp")
+        if numb_new_nodes is None:
+            numb_new_nodes = np.random.choice([8, 16, 32], 1)[0]
 
-        mut_dict = module.remove_node(hidden_layer, numb_new_nodes)
-        self.init_dicts[key] = self.extract_init_dict(key)
-        mut_dict["key"] = key
-        return mut_dict
+        if self.latent_dim - numb_new_nodes > self.min_latent_dim:
+            self.latent_dim -= numb_new_nodes
+            self.recreate_network(shrink_params=True)
 
-    @register_mutation_fn(MutationType.LAYER)
-    def add_cnn_layer(self, key: Optional[str] = None) -> Dict[str, str]:
-        """Adds a hidden layer to convolutional neural network.
-        
-        param key: Key specifying the available evolvable module to add the layer to. Default is None.
-        type key: str, optional
-        rtype: Dict[str, str]
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("cnn")
-
-        module.add_layer()
-        self.init_dicts[key] = self.extract_init_dict(key)
-        return {"key": key}
+        return {"numb_new_nodes": numb_new_nodes}
     
-    @register_mutation_fn(MutationType.LAYER)
-    def remove_cnn_layer(self, key: Optional[str] = None) -> Dict[str, str]:
-        """Removes a hidden layer from convolutional neural network.
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the new latent dimension.
         
-        param key: Key specifying the available evolvable module to remove the layer from. Default is None.
-        type key: str, optional
-        rtype: Dict[str, str]
+        :param shrink_params: Flag to indicate if the network should be recreated 
+            with smaller parameters, defaults to False.
+        :type shrink_params: bool, optional
         """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("cnn")
+        feature_net = self.build_feature_extractor()
 
-        module.remove_layer()
-        self.init_dicts[key] = self.extract_init_dict(key)
-        return {"key": key}
-    
-    @register_mutation_fn(MutationType.NODE)
-    def change_cnn_kernel(self, key: Optional[str] = None) -> Dict[str, str]:
-        """Randomly alters convolution kernel of random CNN layer.
-        
-        param key: Key specifying the available evolvable module to change the kernel of. Default is None.
-        type key: str, optional
-        rtype: Dict[str, str]
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("cnn")
+        # Collect all vector space shapes for concatenation
+        vector_input_dim = sum(
+            [spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces]
+            )
 
-        module.change_kernel()
-        self.init_dicts[key] = self.extract_init_dict(key)
-        return {"key": key}
-    
-    @register_mutation_fn(MutationType.NODE)
-    def add_cnn_channel(
-            self,
-            key: Optional[str] = None,
-            hidden_layer: Optional[int] = None,
-            numb_new_channels: Optional[int] = None
-            ) -> Dict[str, Union[str, int]]:
-        """Adds channel to hidden layer of convolutional neural networks.
+        # Calculate total feature dimension for final MLP
+        image_features_dim = sum(
+            [self.latent_dim for subspace in self.observation_space.spaces.values() if is_image_space(subspace)]
+            )
 
-        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
-        :type hidden_layer: int, optional
-        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
-        :type numb_new_channels: int, optional
-        :return: Dictionary containing the hidden layer and number of new channels added
-        :rtype: Dict[str, Union[str, int]]
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("cnn")
+        vector_features_dim = self.latent_dim if self.vector_space_mlp else vector_input_dim
+        features_dim = image_features_dim + vector_features_dim
 
-        mut_dict = module.add_channel(hidden_layer, numb_new_channels)
-        self.init_dicts[key] = self.extract_init_dict(key)
-        mut_dict["key"] = key
-        return mut_dict
+        final_dense = nn.Linear(features_dim, self.num_outputs, device=self.device)
 
-    @register_mutation_fn(MutationType.NODE)
-    def remove_cnn_channel(
-            self,
-            key: Optional[str] = None,
-            hidden_layer: Optional[int] = None,
-            numb_new_channels: Optional[int] = None
-            ) -> Dict[str, Union[str, int]]:
-        """Remove channel from hidden layer of convolutional neural networks.
+        # Copy parameters from old model to new model
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
 
-        :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
-        :type hidden_layer: int, optional
-        :param numb_new_channels: Number of channels to add to hidden layer, defaults to None
-        :type numb_new_channels: int, optional
-        :return: Dictionary containing the hidden layer and number of new channels
-        :rtype: Dict[str, Optional[Union[str, int]]]
-        """
-        if key is not None:
-            module = self.feature_net[key]
-        else:
-            key, module = self.choose_random_module("cnn")
-
-        mut_dict = module.remove_channel(hidden_layer, numb_new_channels)
-        self.init_dicts[key] = self.extract_init_dict(key)
-        mut_dict["key"] = key
-        return mut_dict
-
+        self.feature_net = preserve_params_fn(old_net=self.feature_net, new_net=feature_net)
+        self.final_dense = preserve_params_fn(old_net=self.final_dense, new_net=final_dense)

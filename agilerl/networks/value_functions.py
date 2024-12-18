@@ -7,6 +7,7 @@ from agilerl.typing import ConfigType, TorchObsType
 from agilerl.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.base import EvolvableModule
 
 class ValueFunction(EvolvableNetwork):
     """Value functions are used in reinforcement learning to estimate the expected value of a state. 
@@ -34,7 +35,7 @@ class ValueFunction(EvolvableNetwork):
     def __init__(
             self,
             observation_space: spaces.Space,
-            encoder_config: ConfigType,
+            encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
             min_latent_dim: int = 8,
             max_latent_dim: int = 128,
@@ -64,7 +65,7 @@ class ValueFunction(EvolvableNetwork):
             
         self.value_net = self.build_network_head(head_config)
     
-    def build_network_head(self, head_config: Optional[ConfigType] = None) -> None:
+    def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
         """Builds the head of the network.
 
         :param head_config: Configuration of the head.
@@ -87,6 +88,23 @@ class ValueFunction(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         return self.value_net(self.encoder(x))
+
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the same parameters as the current network.
+
+        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
+        :type shrink_params: bool
+        """
+        super().recreate_network(shrink_params)
+        value_net = self.build_network_head(self.value_net.net_config)
+
+        # Preserve parameters of the network
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+        self.value_net = preserve_params_fn(self.value_net, value_net)
+
 
 class StochasticValueFunction(EvolvableNetwork):
     ...

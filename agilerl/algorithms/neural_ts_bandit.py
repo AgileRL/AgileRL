@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any
 import copy
 import inspect
-
+import warnings
 import dill
 import numpy as np
 import torch
@@ -13,11 +13,10 @@ from gymnasium import spaces
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.modules.base import EvolvableModule
+from agilerl.networks.value_functions import ValueFunction
+from agilerl.utils.evolvable_networks import get_default_config
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     unwrap_optimizer,
@@ -65,7 +64,8 @@ class NeuralTS(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
-        net_config: Optional[Dict[str, Any]] = {"arch": "mlp", "hidden_size": [128]},
+        net_config: Optional[Dict[str, Any]] = None,
+        head_config: Optional[Dict[str, Any]] = None,
         gamma: float = 1.0,
         lamb: float = 1.0,
         reg: float = 0.000625,
@@ -117,95 +117,31 @@ class NeuralTS(RLAlgorithm):
         self.regret = [0]
 
         if actor_network is not None:
-            if isinstance(actor_network, (EvolvableMLP, EvolvableCNN)):
-                self.net_config = actor_network.net_config
-            elif isinstance(actor_network, MakeEvolvable):
-                self.net_config = None
-            else:
-                assert (
-                    False
-                ), f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-            
-            self.actor = make_safe_deepcopies(actor_network)
+            if not isinstance(actor_network, EvolvableModule):
+                warnings.warn(
+                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
+                )
+            if not isinstance(actor_network, nn.Module):
+                raise TypeError(
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+                     )
 
+            # Need to make deepcopies for target and detached networks
+            self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
         else:
-            # model
-            assert isinstance(self.net_config, dict), "Net config must be a dictionary."
-            assert (
-                "arch" in self.net_config.keys()
-            ), "Net config must contain arch: 'mlp' or 'cnn'."
-            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-                assert (
-                    "hidden_size" in self.net_config.keys()
-                ), "Net config must contain hidden_size: int."
-                assert isinstance(
-                    self.net_config["hidden_size"], list
-                ), "Net config hidden_size must be a list."
-                assert (
-                    len(self.net_config["hidden_size"]) > 0
-                ), "Net config hidden_size must contain at least one element."
-                self.actor = EvolvableMLP(
-                    num_inputs=self.state_dim[0],
-                    num_outputs=1,
-                    layer_norm=False,
-                    device=self.device,
-                    accelerator=self.accelerator,
-                    **self.net_config,
-                )
-            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for key in [
-                    "channel_size",
-                    "kernel_size",
-                    "stride_size",
-                    "hidden_size",
-                ]:
-                    assert (
-                        key in self.net_config.keys()
-                    ), f"Net config must contain {key}: int."
-                    assert isinstance(
-                        self.net_config[key], list
-                    ), f"Net config {key} must be a list."
-                    assert (
-                        len(self.net_config[key]) > 0
-                    ), f"Net config {key} must contain at least one element."
+            net_config = get_default_config(observation_space) if net_config is None else net_config
+            
+            # Layer norm is not used in the original implementation
+            net_config['layer_norm'] = False
 
-                self.actor = EvolvableCNN(
-                    input_shape=self.state_dim,
-                    num_outputs=1,
-                    layer_norm=False,
-                    device=self.device,
-                    accelerator=self.accelerator,
-                    **self.net_config,
-                )
-            elif self.net_config["arch"] == "composed":
-                for key in [
-                    "channel_size",
-                    "kernel_size",
-                    "stride_size",
-                    "hidden_size",
-                ]:
-                    assert (
-                        key in self.net_config.keys()
-                    ), f"Net config must contain {key}: int."
-                    assert isinstance(
-                        self.net_config[key], list
-                    ), f"Net config {key} must be a list."
-                    assert (
-                        len(self.net_config[key]) > 0
-                    ), f"Net config {key} must contain at least one element."
-
-                assert (
-                    "latent_dim" in self.net_config.keys()
-                ), "Net config must contain latent_dim: int."
-
-                self.actor = EvolvableMultiInput(
-                    observation_space=self.observation_space,
-                    num_outputs=1,
-                    layer_norm=False,
-                    device=self.device,
-                    accelerator=self.accelerator,
-                    **self.net_config,
-                )
+            create_actor = lambda: ValueFunction(
+                observation_space=observation_space,
+                encoder_config=net_config,
+                head_config=head_config,
+                device=self.device
+            )
+            self.actor = create_actor()
+            self.actor_target = create_actor()
 
         layers = [module for module in self.actor.feature_net.children()]
         if self.actor.arch == "cnn":
@@ -215,10 +151,6 @@ class NeuralTS(RLAlgorithm):
             optim.Adam,
             networks=self.actor,
             optimizer_kwargs={"lr": self.lr}
-        )
-
-        self.arch = (
-            self.net_config["arch"] if self.net_config is not None else self.actor.arch
         )
 
         if self.accelerator is not None and wrap:
@@ -271,6 +203,7 @@ class NeuralTS(RLAlgorithm):
             init.normal_(m.weight, mean=mean, std=std)
             if m.bias is not None:
                 init.constant_(m.bias, 0)
+
 
     def get_action(self, state, action_mask=None):
         """Returns the next action to take in the environment.

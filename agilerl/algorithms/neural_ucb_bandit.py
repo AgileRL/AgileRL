@@ -220,10 +220,6 @@ class NeuralUCB(RLAlgorithm):
             optimizer_kwargs={"lr": self.lr}
         )
 
-        self.arch = (
-            self.net_config["arch"] if self.net_config is not None else self.actor.arch
-        )
-
         if self.accelerator is not None and wrap:
             self.wrap_models()
 

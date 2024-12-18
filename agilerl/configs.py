@@ -93,9 +93,8 @@ class MultiInputNetConfig(NetConfig):
     vector_space_mlp: bool = False
     hidden_size: Optional[List[int]] = field(default=None)
     init_dicts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    activation: str = "ReLU"
     output_activation: Optional[str] = field(default=None)
-    mlp_activation: str = "ReLU"
-    cnn_activation: str = "ReLU"
     min_hidden_layers: int = 1
     max_hidden_layers: int = 3
     min_mlp_nodes: int = 64
@@ -104,6 +103,8 @@ class MultiInputNetConfig(NetConfig):
     max_cnn_hidden_layers: int = 6
     min_channel_size: int = 32
     max_channel_size: int = 256
+    min_latent_dim: int = 8
+    max_latent_dim: int = 128
     layer_norm: bool = False
     noisy: bool = False
     noise_std: float = 0.5

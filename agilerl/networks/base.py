@@ -77,9 +77,9 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
 class EvolvableNetwork(EvolvableModule, ABC):
     """Base class for evolvable networks i.e. evolvable modules that are configured in 
     a specific way for a reinforcement learning algorithm - analogously to how CNNs are used 
-    as building blocks in ResNet, VGG, etc. Specifically, we automatically inspect the passed 
+    as building blocks in ResNet, VGG, etc. An evolvable network automatically inspects the passed 
     observation space to determine the appropriate encoder to build through the AgileRL 
-    evolvable modules.
+    evolvable modules, inheriting the mutation methods of any underlying evolvable module.
     
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
@@ -119,7 +119,6 @@ class EvolvableNetwork(EvolvableModule, ABC):
                 observation_space=observation_space
                 )
 
-        self.arch = None
         self.observation_space = observation_space
         self.action_space = action_space
         self.n_agents = n_agents
@@ -273,7 +272,7 @@ class EvolvableNetwork(EvolvableModule, ABC):
         """
         if isinstance(self.observation_space, (spaces.Dict, spaces.Tuple)):
             assert_correct_multi_input_net_config(net_config)
-            self.arch = "multi_input"
+
             encoder = EvolvableMultiInput(
                 observation_space=self.observation_space,
                 num_outputs=self.latent_dim,
@@ -283,7 +282,7 @@ class EvolvableNetwork(EvolvableModule, ABC):
             )
         elif is_image_space(self.observation_space):
             assert_correct_cnn_net_config(net_config)
-            self.arch = "cnn"
+
             encoder = EvolvableCNN(
                 input_shape=self.observation_space.shape,
                 num_outputs=self.latent_dim,
@@ -293,7 +292,7 @@ class EvolvableNetwork(EvolvableModule, ABC):
             )
         else:
             assert_correct_mlp_net_config(net_config)
-            self.arch = "mlp"
+
             encoder = EvolvableMLP(
                 num_inputs=spaces.flatdim(self.observation_space),
                 num_outputs=self.latent_dim,
@@ -315,6 +314,8 @@ class EvolvableNetwork(EvolvableModule, ABC):
         # Load state dicts of underlying evolvable modules
         for attr, module in self.modules().items():
             clone_module: EvolvableModule = getattr(clone, attr)
+
+            # NOTE: Sometimes e.g. target networks have empty state dicts (when detached)
             if module.state_dict():
                 clone_module.load_state_dict(module.state_dict())
             

@@ -333,7 +333,8 @@ def preprocess_observation(
     elif isinstance(observation_space, spaces.Tuple):
         assert isinstance(observation, tuple), f"Expected tuple, got {type(observation)}"
         return tuple(
-            preprocess_observation(_obs, _space, device, normalize_images) for _obs, _space in zip(observation, observation_space.spaces)
+            preprocess_observation(_obs, _space, device, normalize_images) 
+            for _obs, _space in zip(observation, observation_space.spaces)
             )
     
     assert isinstance(observation, torch.Tensor), f"Expected torch.Tensor, got {type(observation)}"

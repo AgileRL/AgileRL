@@ -86,6 +86,8 @@ class QNetwork(EvolvableNetwork):
             "action_space": self.action_space,
             "encoder_config": self.encoder.net_config,
             "head_config": self.value_net.net_config,
+            "min_latent_dim": self.min_latent_dim,
+            "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
             "latent_dim": self.latent_dim,
             "device": self.device
@@ -108,16 +110,16 @@ class QNetwork(EvolvableNetwork):
             **net_config
             )
 
-    def forward(self, x: TorchObsType) -> torch.Tensor:
+    def forward(self, obs: TorchObsType) -> torch.Tensor:
         """Forward pass of the Q network.
 
-        :param x: Input to the network.
-        :type x: TorchObsType
+        :param obs: Input to the network.
+        :type obs: TorchObsType
 
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        latent = self.encoder(x)
+        latent = self.encoder(obs)
         return self.value_net(latent)
     
     def recreate_network(self, shrink_params: bool = False) -> None:
@@ -231,6 +233,8 @@ class RainbowQNetwork(EvolvableNetwork):
             "num_atoms": self.num_atoms,
             "encoder_config": self.encoder.net_config,
             "head_config": self.value_net.net_config,
+            "min_latent_dim": self.min_latent_dim,
+            "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
             "latent_dim": self.latent_dim,
             "device": self.device
@@ -254,11 +258,11 @@ class RainbowQNetwork(EvolvableNetwork):
             )
         
     
-    def forward(self, x: TorchObsType, q: bool = True, log: bool = False) -> torch.Tensor:
+    def forward(self, obs: TorchObsType, q: bool = True, log: bool = False) -> torch.Tensor:
         """Forward pass of the Rainbow Q network.
 
-        :param x: Input to the network.
-        :type x: :type x: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
+        :param obs: Input to the network.
+        :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
         :param q: Whether to return Q values. Defaults to True.
         :type q: bool
         :param log: Whether to return log probabilities. Defaults to False.
@@ -267,9 +271,9 @@ class RainbowQNetwork(EvolvableNetwork):
         :return: Output of the network.
         :rtype: torch.Tensor
         """
-        latent = self.encoder(x)
-        value = self.value_net(latent)
-        advantage = self.advantage_net(latent)
+        latent = self.encoder(obs)
+        value: torch.Tensor = self.value_net(latent)
+        advantage: torch.Tensor = self.advantage_net(latent)
         
         batch_size = value.size(0)
         value = value.view(batch_size, 1, self.num_atoms)
@@ -384,8 +388,28 @@ class ContinuousQNetwork(EvolvableNetwork):
             
         self.num_actions = spaces.flatdim(action_space)
         self.value_net = self.build_network_head(head_config)
+
+    @property
+    def init_dict(self) -> Dict[str, Any]:
+        """Initializes the configuration of the Rainbow Q network.
+        
+        :return: Configuration of the Rainbow Q network.
+        :rtype: Dict[str, Any]
+        """
+        return {
+            "observation_space": self.observation_space,
+            "action_space": self.action_space,
+            "encoder_config": self.encoder.net_config,
+            "head_config": self.value_net.net_config,
+            "min_latent_dim": self.min_latent_dim,
+            "max_latent_dim": self.max_latent_dim,
+            "n_agents": self.n_agents,
+            "latent_dim": self.latent_dim,
+            "device": self.device
+            }
     
-    def build_network_head(self, head_config: Optional[ConfigType] = None) -> None:
+    
+    def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
         """Builds the head of the network.
 
         :param head_config: Configuration of the head.
@@ -398,7 +422,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             name="value",
             **head_config
         )
-    
+
     def forward(self, obs: TorchObsType, actions: torch.Tensor) -> torch.Tensor:
         """Forward pass of the network.
 
@@ -412,3 +436,19 @@ class ContinuousQNetwork(EvolvableNetwork):
         x = self.encoder(obs)
         x = torch.cat([x, actions], dim=-1)
         return self.value_net(x)
+
+    def recreate_network(self, shrink_params: bool = False) -> None:
+        """Recreates the network with the same parameters as the current network.
+
+        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
+        :type shrink_params: bool
+        """
+        super().recreate_network(shrink_params)
+        value_net = self.build_network_head(self.value_net.net_config)
+
+        # Preserve parameters of the network
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+        self.value_net = preserve_params_fn(self.value_net, value_net)

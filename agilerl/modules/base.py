@@ -1,7 +1,9 @@
-from typing import Any, Dict, List, Callable, Optional, TypeVar
+from typing import Any, Dict, List, Callable, Optional, TypeVar, Iterable, Tuple
 import copy
 from functools import wraps
-from abc import ABC, ABCMeta, abstractmethod
+from abc import ABC, ABCMeta
+from numpy.random import Generator
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -48,33 +50,53 @@ class ModuleMeta(_ModuleMeta, ABCMeta):
     ...
 
 class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
-    """Base class for evolvable neural networks. Provides methods that allow for 
-    seamless network mutations."""
-
-    model: nn.Module
+    """Base class for evolvable neural networks."""
 
     def __init__(self, device: str) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
-
         self.device = device
 
     @property
-    @abstractmethod
     def init_dict(self) -> Dict[str, Any]:
-        raise NotImplementedError(
-            "init_dict property must be implemented in order to store the configuration of the evolvable module."
-            )
+        return {"device": self.device}
     
     @property
-    @abstractmethod
-    def activation(self) -> str:
-        raise NotImplementedError("activation property must be implemented in order to get the activation function.")
-
-    @abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("forward method must be implemented in order to use the evolvable module.")
+    def mutation_methods(self) -> List[str]:
+        return self._mutation_methods
     
+    @property
+    def layer_mutation_methods(self) -> List[str]:
+        return self._layer_mutation_methods
+    
+    @property
+    def node_mutation_methods(self) -> List[str]:
+        return self._node_mutation_methods
+    
+    @property
+    def activation(self) -> Optional[str]:
+        return None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError(
+            "forward method must be implemented in order to use the evolvable module."
+            )
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the network."""
+        return self.forward(x)
+    
+    def change_activation(self, activation: str, output: bool) -> None:
+        """Set the activation function for the network.
+
+        :param activation: Activation function to use.
+        :type activation: str
+        """
+        raise NotImplementedError(
+            "change_activation method must be implemented in order to set the activation function."
+            )
+
+
     def __getattr__(self, name: str) -> Any:
         try:
             return super().__getattr__(name)
@@ -84,14 +106,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                 return mut_method
             raise e
 
-    @abstractmethod
-    def change_activation(self, activation: str, output: bool) -> None:
-        """Set the activation function for the network.
-
-        :param activation: Activation function to use.
-        :type activation: str
-        """
-        raise NotImplementedError("change_activation method must be implemented in order to set the activation function.")
     
     @staticmethod
     def preserve_parameters(old_net: nn.Module, new_net: nn.Module) -> nn.Module:
@@ -187,7 +201,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                 evolvable_attrs[attr] = obj
 
         return evolvable_attrs
-    
+
     def _init_surface_methods(self) -> None:
         # Check mutation methods in class
         self._layer_mutation_methods = []
@@ -248,7 +262,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             method = ".".join(name.split(".")[1:])
             return getattr(getattr(self, attr), method)
 
-        return {name: get_method_from_name(name) for name in self._mutation_methods}
+        return {name: get_method_from_name(name) for name in self.mutation_methods}
     
     def filter_mutation_methods(self, remove: str) -> None:
         """Filter out mutation methods that contain the specified string in their name.
@@ -271,8 +285,8 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         return: A list of probabilities for each mutation method.
         rtype: List[float]
         """
-        num_layer_fns = len(self._layer_mutation_methods)
-        num_node_fns = len(self._node_mutation_methods)
+        num_layer_fns = len(self.layer_mutation_methods)
+        num_node_fns = len(self.node_mutation_methods)
 
         probs = []
         for fn in self.get_mutation_methods().values():
@@ -284,6 +298,20 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             probs.append(prob)
         
         return probs
+    
+    def sample_mutation_method(self, new_layer_prob: float, rng: Optional[Generator] = None) -> MutationMethod:
+        """Sample a mutation method based on the mutation probabilities.
+        
+        param new_layer_prob: The probability of selecting a layer mutation method.
+        type new_layer_prob: float
+        return: The sampled mutation method.
+        rtype: MutationMethod
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        probs = self.get_mutation_probs(new_layer_prob)
+        return rng.choice(self.mutation_methods, p=probs, size=1)
 
     def clone(self) -> "EvolvableModule":
         """Returns clone of neural net with identical parameters."""
@@ -294,3 +322,51 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             clone.load_state_dict(self.state_dict())
 
         return clone
+    
+class ModuleDict(EvolvableModule, nn.ModuleDict):
+    """Analogous to nn.ModuleDict, but allows for the recursive inheritance of the 
+    mutation methods of underlying evolvable modules.
+    """
+    @property
+    def mutation_methods(self) -> List[str]:
+        return [
+            f"{name}.{method}" for name, module in self.items() 
+            for method in module.mutation_methods
+        ]
+
+    @property
+    def layer_mutation_methods(self) -> List[str]:
+        return [
+            f"{name}.{method}" for name, module in self.items() 
+            for method in module.layer_mutation_methods
+        ]
+    
+    @property
+    def node_mutation_methods(self) -> List[str]:
+        return [
+            f"{name}.{method}" for name, module in self.items() 
+            for method in module.node_mutation_methods
+        ]
+
+    def values(self) -> Iterable[EvolvableModule]:
+        return super().values()
+    
+    def items(self) -> Iterable[Tuple[str, EvolvableModule]]:
+        return super().items()
+    
+    def get_mutation_methods(self) -> Dict[str, MutationMethod]:
+        """Get all mutation methods for the network.
+
+        :return: A dictionary of mutation methods.
+        :rtype: Dict[str, MutationMethod]
+        """
+        def get_method_from_name(name: str) -> MutationMethod:
+            if "." not in name:
+                return getattr(self, name)
+
+            key = name.split(".")[0]
+            method = ".".join(name.split(".")[1:])
+            return getattr(self[key], method)
+
+        return {name: get_method_from_name(name) for name in self.mutation_methods}
+    
