@@ -281,18 +281,16 @@ class RainbowQNetwork(EvolvableNetwork):
 
         x = value + advantage - advantage.mean(1, keepdim=True)
         if log:
-            x = F.log_softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                -1, self.num_actions, self.num_atoms
-            )
-            return x
-        else:
-            x = F.softmax(x.view(-1, self.num_atoms), dim=-1).view(
-                -1, self.num_actions, self.num_atoms
-            )
-            x = x.clamp(min=1e-3)
+            x = F.log_softmax(x.view(-1, self.num_atoms), dim=-1)
+            return x.view(-1, self.num_actions, self.num_atoms)
 
+        x = F.softmax(x.view(-1, self.num_atoms), dim=-1)
+        x = x.view(-1, self.num_actions, self.num_atoms).clamp(min=1e-3)
+        print(q)
         if q:
+            print("Q1 ", x.shape)
             x = torch.sum(x * self.support, dim=2)
+            print("Q2 ", x.shape)
 
         return x
 

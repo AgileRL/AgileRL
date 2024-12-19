@@ -77,14 +77,14 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     def activation(self) -> Optional[str]:
         return None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError(
             "forward method must be implemented in order to use the evolvable module."
             )
     
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, *args, **kwargs) -> torch.Tensor:
         """Forward pass of the network."""
-        return self.forward(x)
+        return self.forward(*args, **kwargs)
     
     def change_activation(self, activation: str, output: bool) -> None:
         """Set the activation function for the network.
@@ -304,6 +304,8 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         
         param new_layer_prob: The probability of selecting a layer mutation method.
         type new_layer_prob: float
+        param rng: The random number generator.
+        type rng: Optional[Generator]
         return: The sampled mutation method.
         rtype: MutationMethod
         """

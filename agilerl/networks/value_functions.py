@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 from dataclasses import asdict
 from gymnasium import spaces
 import torch
@@ -64,6 +64,25 @@ class ValueFunction(EvolvableNetwork):
                 )
             
         self.value_net = self.build_network_head(head_config)
+    
+    @property
+    def init_dict(self) -> Dict[str, Any]:
+        """Initializes the configuration of the Q network.
+        
+        :return: Configuration of the Q network.
+        :rtype: Dict[str, Any]
+        """
+        return {
+            "observation_space": self.observation_space,
+            "encoder_config": self.encoder.net_config,
+            "head_config": self.value_net.net_config,
+            "min_latent_dim": self.min_latent_dim,
+            "max_latent_dim": self.max_latent_dim,
+            "n_agents": self.n_agents,
+            "latent_dim": self.latent_dim,
+            "device": self.device
+            }
+
     
     def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
         """Builds the head of the network.

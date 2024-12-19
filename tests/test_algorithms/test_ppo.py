@@ -146,22 +146,14 @@ class SimpleCNN(nn.Module):
 def test_initializes_with_default_values():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
     action_space = generate_random_box_space(shape=(2,), low=-1, high=1)
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
 
     ppo = PPO(observation_space, action_space, net_config=net_config)
 
-    print("ppo net config", ppo.net_config)
     assert ppo.algo == "PPO"
-    assert ppo.observation_space ==generate_random_box_space(shape=(4,), low=0, high=1)
+    assert ppo.observation_space == generate_random_box_space(shape=(4,), low=0, high=1)
     assert ppo.action_space == generate_random_box_space(shape=(2,), low=-1, high=1)
     assert ppo.discrete_actions == False
-    assert ppo.net_config == {
-        "arch": "mlp",
-        "hidden_size": [64, 64],
-        "mlp_activation": "Tanh",
-        "mlp_output_activation": "Tanh",
-    }, ppo.net_config
-
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -180,10 +172,10 @@ def test_initializes_with_default_values():
     assert ppo.scores == []
     assert ppo.fitness == []
     assert ppo.steps == [0]
-    assert isinstance(ppo.actor, EvolvableMLP)
-    assert isinstance(ppo.critic, EvolvableMLP)
+    assert isinstance(ppo.actor.encoder, EvolvableMLP)
+    assert isinstance(ppo.critic.encoder, EvolvableMLP)
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-    assert ppo.arch == "mlp"
+    
 
 
 # Initializes actor network with EvolvableCNN based on net_config and Accelerator.
@@ -191,8 +183,6 @@ def test_initialize_ppo_with_cnn_accelerator():
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
     action_space = generate_discrete_space(2)
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -236,12 +226,11 @@ def test_initialize_ppo_with_cnn_accelerator():
         wrap=wrap
     )
 
-    net_config_cnn.update({"mlp_output_activation": "Softmax"})
+    net_config_cnn.update({"output_activation": "Softmax"})
 
     assert ppo.observation_space == observation_space
     assert ppo.action_space == action_space
     assert ppo.discrete_actions == True
-    assert ppo.net_config == net_config_cnn
     assert ppo.batch_size == batch_size
     assert ppo.lr == lr
     assert ppo.gamma == gamma
@@ -254,9 +243,8 @@ def test_initialize_ppo_with_cnn_accelerator():
     assert ppo.max_grad_norm == max_grad_norm
     assert ppo.target_kl == target_kl
     assert ppo.update_epochs == update_epochs
-    assert isinstance(ppo.actor, EvolvableCNN)
-    assert isinstance(ppo.critic, EvolvableCNN)
-    assert ppo.arch == "cnn"
+    assert isinstance(ppo.actor.encoder, EvolvableCNN)
+    assert isinstance(ppo.critic.encoder, EvolvableCNN)
     assert isinstance(ppo.optimizer.optimizer, AcceleratedOptimizer)
 
 # Can initialize ppo with an actor network
@@ -285,7 +273,6 @@ def test_initialize_ppo_with_actor_network(
 
     assert ppo.observation_space == obs_space
     assert ppo.action_space == action_space
-    assert ppo.net_config is None
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -305,7 +292,6 @@ def test_initialize_ppo_with_actor_network(
     assert ppo.fitness == []
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-    assert ppo.arch == actor_network.arch
 
 
 @pytest.mark.parametrize(
@@ -322,14 +308,14 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
             num_inputs=observation_space.shape[0],
             num_outputs=action_space.n,
             hidden_size=[64, 64],
-            mlp_activation="Tanh",
-            mlp_output_activation="Tanh",
+            activation="Tanh",
+            output_activation="Tanh",
         )
         critic_network = EvolvableMLP(
             num_inputs=observation_space.shape[0] + action_space.n,
             num_outputs=1,
             hidden_size=[64, 64],
-            mlp_activation="Tanh",
+            activation="Tanh",
         )
     else:
         actor_network = EvolvableCNN(
@@ -338,9 +324,8 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
-            hidden_size=[64, 64],
-            mlp_activation="Tanh",
-            mlp_output_activation="Tanh",
+            activation="Tanh",
+            output_activation="Tanh",
         )
 
         critic_network = EvolvableCNN(
@@ -349,9 +334,7 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
             channel_size=[8, 8],
             kernel_size=[2, 2],
             stride_size=[1, 1],
-            hidden_size=[64, 64],
-            critic=True,
-            mlp_activation="Tanh",
+            activation="Tanh",
         )
 
     ppo = PPO(
@@ -382,7 +365,6 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
     assert ppo.fitness == []
     assert ppo.steps == [0]
     assert isinstance(ppo.optimizer.optimizer, optim.Adam)
-    assert ppo.arch == actor_network.arch
 
 
 def test_initialize_ppo_with_incorrect_actor_net():
@@ -390,7 +372,7 @@ def test_initialize_ppo_with_incorrect_actor_net():
     action_space = generate_discrete_space(2)
     actor_network = "dummy"
     critic_network = "dummy"
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         ppo = PPO(
             observation_space,
             action_space,
@@ -443,8 +425,6 @@ def test_prepare_state_cnn_accelerator():
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
     state = torch.rand(*observation_space.shape)
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -538,7 +518,7 @@ def test_returns_expected_action_mask_vectorized(build_ppo):
     state = np.array([[1, 2, 4, 5], [2, 3, 5, 1]])
     action_mask = np.array([[0, 1], [1, 0]])
     action, _, _, _ = build_ppo.get_action(state, action_mask=action_mask)
-    assert np.array_equal(action, [1, 0])
+    assert np.array_equal(action, [1, 0]), action
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
@@ -546,8 +526,6 @@ def test_learns_from_experiences():
     action_space = generate_discrete_space(2)
     batch_size = 45
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -604,9 +582,8 @@ def test_learns_from_experiences_continuous_accel():
         observation_space=observation_space,
         action_space=action_space,
         net_config={
-            "arch": "mlp",
             "hidden_size": [64, 64],
-            "mlp_output_activation": "Tanh",
+            "output_activation": "Tanh",
         },
         target_kl=target_kl,
         batch_size=batch_size,
@@ -682,8 +659,6 @@ def test_algorithm_test_loop_images():
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -706,8 +681,6 @@ def test_algorithm_test_loop_images_unvectorized():
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -736,7 +709,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.net_config == ppo.net_config
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -766,7 +738,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.net_config == ppo.net_config
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -799,7 +770,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.net_config == ppo.net_config
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -851,7 +821,6 @@ def test_clone_after_learning():
     clone_agent = ppo.clone()
     assert clone_agent.observation_space == ppo.observation_space
     assert clone_agent.action_space == ppo.action_space
-    assert clone_agent.net_config == ppo.net_config
     assert clone_agent.batch_size == ppo.batch_size
     assert clone_agent.lr == ppo.lr
     assert clone_agent.gamma == ppo.gamma
@@ -889,15 +858,12 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Load the saved checkpoint file
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
-    print("netty c ", ppo.net_config)
-
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "critic_init_dict" in checkpoint
-    assert "critic_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "gamma" in checkpoint
@@ -924,14 +890,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ppo.net_config == {
-        "arch": "mlp",
-        "hidden_size": [64, 64],
-        "mlp_output_activation": "Softmax",
-        "mlp_activation": "Tanh",
-    }
-    assert isinstance(ppo.actor, EvolvableMLP)
-    assert isinstance(ppo.critic, EvolvableMLP)
+    assert isinstance(ppo.actor.encoder, EvolvableMLP)
+    assert isinstance(ppo.critic.encoder, EvolvableMLP)
     assert ppo.lr == 1e-4
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
@@ -951,8 +911,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -973,12 +931,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "critic_init_dict" in checkpoint
-    assert "critic_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "gamma" in checkpoint
@@ -1005,9 +962,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ppo.net_config == net_config_cnn
-    assert isinstance(ppo.actor, EvolvableCNN)
-    assert isinstance(ppo.critic, EvolvableCNN)
+    assert isinstance(ppo.actor.encoder, EvolvableCNN)
+    assert isinstance(ppo.critic.encoder, EvolvableCNN)
     assert ppo.lr == 1e-4
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
@@ -1063,12 +1019,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "critic_init_dict" in checkpoint
-    assert "critic_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "gamma" in checkpoint
@@ -1095,7 +1050,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ppo.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ppo.net_config is None
     assert isinstance(ppo.actor, nn.Module)
     assert isinstance(ppo.critic, nn.Module)
     assert ppo.lr == 1e-4
@@ -1141,9 +1095,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
     assert new_ppo.discrete_actions == ppo.discrete_actions
-    assert new_ppo.net_config == ppo.net_config
-    assert isinstance(new_ppo.actor, EvolvableMLP)
-    assert isinstance(new_ppo.critic, EvolvableMLP)
+    assert isinstance(new_ppo.actor.encoder, EvolvableMLP)
+    assert isinstance(new_ppo.critic.encoder, EvolvableMLP)
     assert new_ppo.lr == ppo.lr
     assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
@@ -1170,8 +1123,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
@@ -1189,9 +1140,8 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
     assert new_ppo.discrete_actions == ppo.discrete_actions
-    assert new_ppo.net_config == ppo.net_config
-    assert isinstance(new_ppo.actor, EvolvableCNN)
-    assert isinstance(new_ppo.critic, EvolvableCNN)
+    assert isinstance(new_ppo.actor.encoder, EvolvableCNN)
+    assert isinstance(new_ppo.critic.encoder, EvolvableCNN)
     assert new_ppo.lr == ppo.lr
     assert str(new_ppo.actor.to("cpu").state_dict()) == str(ppo.actor.state_dict())
     assert str(new_ppo.critic.to("cpu").state_dict()) == str(ppo.critic.state_dict())
@@ -1238,7 +1188,6 @@ def test_load_from_pretrained_networks(
     assert new_ppo.observation_space == ppo.observation_space
     assert new_ppo.action_space == ppo.action_space
     assert new_ppo.discrete_actions == ppo.discrete_actions
-    assert new_ppo.net_config == ppo.net_config
     assert isinstance(new_ppo.actor, nn.Module)
     assert isinstance(new_ppo.critic, nn.Module)
     assert new_ppo.lr == ppo.lr

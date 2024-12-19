@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
+from agilerl.typing import ArrayLike
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -218,13 +219,22 @@ class RainbowDQN(RLAlgorithm):
             )
         )
 
-    def get_action(self, state, action_mask=None, training=True):
+    def get_action(
+            self,
+            state: ArrayLike,
+            action_mask: Optional[ArrayLike] = None,
+            training: bool = True
+            ) -> ArrayLike:
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
         :type state: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :param training: Flag indicating whether the model is in training mode, defaults to True
+        :type training: bool, optional
+        :return: The action to take
+        :rtype: numpy.ndarray
         """
         state = self.preprocess_observation(state)
 
@@ -254,7 +264,9 @@ class RainbowDQN(RLAlgorithm):
             next_actions = self.actor(next_states).argmax(1)
 
             # Predict the target q distribution for the same next states
+            print("Calling without q")
             target_q_dist = self.actor_target(next_states, q=False)
+            print("Done")
 
             # Index the target q_dist to select the distributions corresponding to next_actions
             target_q_dist = target_q_dist[range(self.batch_size), next_actions]
@@ -289,6 +301,7 @@ class RainbowDQN(RLAlgorithm):
             else:
                 offset = offset.to(self.accelerator.device)
                 proj_dist = proj_dist.to(self.accelerator.device)
+
             proj_dist.view(-1).index_add_(
                 0, (L + offset).view(-1), (target_q_dist * (u.float() - b)).view(-1)
             )
@@ -452,7 +465,7 @@ class RainbowDQN(RLAlgorithm):
 
         return loss.item(), idxs, new_priorities
 
-    def soft_update(self):
+    def soft_update(self) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(
             self.actor.parameters(), self.actor_target.parameters()

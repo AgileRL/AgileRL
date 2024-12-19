@@ -9,7 +9,7 @@ from torch.distributions import Categorical, MultivariateNormal
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
-from agilerl.typing import ExperiencesType, GymEnvType
+from agilerl.typing import ExperiencesType, GymEnvType, ArrayOrTensor, ArrayLike
 from agilerl.configs import MlpNetConfig
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.actors import StochasticActor
@@ -221,12 +221,17 @@ class PPO(RLAlgorithm):
             self.actor = StochasticActor(
                 observation_space,
                 action_space,
-                net_config=net_config,
+                encoder_config=net_config,
                 head_config=head_config,
                 device=device
             )
 
-
+            self.critic = ValueFunction(
+                observation_space,
+                encoder_config=net_config,
+                head_config=critic_head_config,
+                device=device
+            )
 
         self.optimizer = OptimizerWrapper(
             optim.Adam,
@@ -250,7 +255,7 @@ class PPO(RLAlgorithm):
             )
         )
 
-    def scale_to_action_space(self, action, convert_to_torch=False):
+    def scale_to_action_space(self, action: ArrayLike, convert_to_torch: bool = False) -> ArrayOrTensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
@@ -274,7 +279,7 @@ class PPO(RLAlgorithm):
             max_action = self.max_action
             min_action = self.min_action
 
-        mlp_output_activation = self.actor.mlp_output_activation
+        mlp_output_activation = self.actor.output_activation
         if mlp_output_activation in ["Tanh"]:
             pre_scaled_min = -1
             pre_scaled_max = 1
@@ -323,35 +328,31 @@ class PPO(RLAlgorithm):
             self.actor.eval()
             self.critic.eval()
             with torch.no_grad():
-                action_values = self.actor(state)
+                action_dist = self.actor(state, action_mask=action_mask)
                 state_values = self.critic(state).squeeze(-1)
             
             self.actor.train()
             self.critic.train()
         else:
-            action_values = self.actor(state)
+            action_dist = self.actor(state, action_mask=action_mask)
             state_values = self.critic(state).squeeze(-1)
-
-        if self.discrete_actions:
-            if action_mask is not None:
-                action_mask = torch.from_numpy(action_mask)
-                action_values *= action_mask
-            dist = Categorical(action_values)
-        else:
-            cov_mat = torch.diag(self.action_var).unsqueeze(dim=0)
-            dist = MultivariateNormal(action_values, cov_mat)
 
         return_tensors = True
         if action is None:
-            action = dist.sample()
+            action = action_dist.sample()
             return_tensors = False
         elif self.accelerator is None:
             action = action.to(self.device)
         else:
             action = action.to(self.accelerator.device)
 
-        action_logprob = dist.log_prob(action)
-        dist_entropy = dist.entropy()
+        action_logprob = action_dist.log_prob(action)
+
+        # Sum log probs across action dimensions (assumed independent)
+        if not self.discrete_actions:
+            action_logprob = action_logprob.sum(dim=1)
+
+        dist_entropy = action_dist.entropy()
 
         if return_tensors:
             return (

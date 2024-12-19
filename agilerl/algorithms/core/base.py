@@ -446,8 +446,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
-                else:
-                    if attr != clone_attr:
+                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
+                    if not np.array_equal(attr, clone_attr):
+                        setattr(
+                            clone, attribute, copy.deepcopy(getattr(self, attribute))
+                        )
+                elif attr != clone_attr:
                         setattr(
                             clone, attribute, copy.deepcopy(getattr(self, attribute))
                         )
@@ -508,7 +512,6 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.discrete_actions = isinstance(action_space, spaces.Discrete)
         self.min_action = np.array(action_space.low) if hasattr(action_space, "low") else None
         self.max_action = np.array(action_space.high) if hasattr(action_space, "high") else None
-
 
     def preprocess_observation(self, observation: NumpyObsType) -> TorchObsType:
         """Preprocesses observations for forward pass through neural network.

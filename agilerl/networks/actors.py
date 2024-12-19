@@ -1,10 +1,10 @@
-from typing import Optional, Type, Dict, Any
+from typing import Optional, Dict, Any
 import numpy as np
 import torch
 from gymnasium import spaces
-from torch.distributions import Distribution, Categorical, Normal, Bernoulli
+from torch.distributions import Distribution, Categorical, Normal, Bernoulli, MultivariateNormal
 
-from agilerl.typing import TorchObsType, ConfigType, DeviceType
+from agilerl.typing import TorchObsType, ConfigType, DeviceType, ArrayOrTensor
 from agilerl.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, SupportedEvolvable
 from agilerl.modules.mlp import EvolvableMLP
@@ -20,16 +20,24 @@ class EvolvableDistribution(EvolvableModule):
     :param network: Network that outputs the logits of the distribution.
     :type network: EvolvableModule
     """
-    def __init__(self, action_space: spaces.Space, network: SupportedEvolvable, device: DeviceType = "cpu"):
+    def __init__(
+            self,
+            action_space: spaces.Space,
+            network: SupportedEvolvable,
+            log_std_init: float = 0.0,
+            device: DeviceType = "cpu"):
+        super().__init__(device)
+
         self.action_space = action_space
         self.actor_net = network
+        self.log_std_init = log_std_init
         self.device = device
 
         # For continuous action spaces, we also learn the standard deviation (log_std) 
         # of the action distribution
         if isinstance(action_space, spaces.Box):
             self.log_std = torch.nn.Parameter(
-                torch.zeros(spaces.flatdim(action_space)), requires_grad=True).to(device)
+                torch.ones(spaces.flatdim(action_space)) * log_std_init, requires_grad=True).to(device)
         else:
             self.log_std = None
 
@@ -76,15 +84,23 @@ class EvolvableDistribution(EvolvableModule):
         else:
             raise NotImplementedError(f"Action space {self.action_space} not supported.")
     
-    def forward(self, obs: TorchObsType) -> Distribution:
+    def forward(self, latent: torch.Tensor, action_mask: Optional[ArrayOrTensor] = None) -> Distribution:
         """Forward pass of the network.
 
         :param obs: Observation input.
         :type obs: TorchObsType
+        :param action_mask: Mask to apply to the logits. Defaults to None.
+        :type action_mask: Optional[ArrayOrTensor]
         :return: Distribution over the action space.
         :rtype: Distribution
         """
-        logits = self.actor_net(obs)
+        logits = self.actor_net(latent)
+
+        if action_mask is not None and isinstance(self.action_space, spaces.Discrete):
+            action_mask = torch.as_tensor(action_mask, dtype=torch.bool, device=self.device).reshape(logits.shape)
+            HUGE_NEG = torch.tensor(-1e8, dtype=logits.dtype, device=self.device)
+            logits = torch.where(action_mask, logits, HUGE_NEG)
+
         return self.get_distribution(logits, self.log_std)
     
     def clone(self) -> "EvolvableDistribution":
@@ -94,7 +110,10 @@ class EvolvableDistribution(EvolvableModule):
         :rtype: EvolvableDistribution
         """
         return EvolvableDistribution(
-            self.action_space, self.actor_net.clone(), self.device
+            action_space=self.action_space,
+            network=self.actor_net.clone(),
+            log_std_init=self.log_std_init,
+            device=self.device
             )
 
 
@@ -167,6 +186,7 @@ class DeterministicActor(EvolvableNetwork):
             head_config['output_activation'] = output_activation
         
         self.actor_net = self.build_network_head(head_config)
+        self.output_activation = output_activation
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -257,6 +277,8 @@ class StochasticActor(DeterministicActor):
             action_space: spaces.Space,
             encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
             n_agents: Optional[int] = None,
             latent_dim: int = 32,
             device: str = "cpu"
@@ -267,6 +289,8 @@ class StochasticActor(DeterministicActor):
             action_space=action_space,
             encoder_config=encoder_config,
             head_config=head_config,
+            min_latent_dim=min_latent_dim,
+            max_latent_dim=max_latent_dim,
             n_agents=n_agents,
             latent_dim=latent_dim,
             device=device
@@ -274,7 +298,7 @@ class StochasticActor(DeterministicActor):
         
         self.actor_net = EvolvableDistribution(action_space, self.actor_net, device=device)
     
-    def forward(self, obs: TorchObsType) -> Distribution:
+    def forward(self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None) -> Distribution:
         """Forward pass of the network.
 
         :param obs: Observation input.
@@ -282,7 +306,18 @@ class StochasticActor(DeterministicActor):
         :return: Distribution over the action space.
         :rtype: Distribution
         """
-        return super().forward(obs)
+        latent = self.encoder(obs)
+        return self.actor_net.forward(latent, action_mask)
+    
+    def __call__(self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None) -> Distribution:
+        """Calls the forward method.
+
+        :param obs: Observation input.
+        :type obs: TorchObsType
+        :return: Distribution over the action space.
+        :rtype: Distribution
+        """
+        return self.forward(obs, action_mask)
     
     def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates the network with the same parameters as the current network.
