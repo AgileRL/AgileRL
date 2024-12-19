@@ -11,7 +11,7 @@ from gymnasium import spaces
 
 from agilerl.typing import DeviceType, ConfigType
 from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGELU
-from agilerl.configs import MlpNetConfig, CnnNetConfig, MultiInputNetConfig
+from agilerl.modules.configs import MlpNetConfig, CnnNetConfig, MultiInputNetConfig
 
 TupleorInt = Union[Tuple[int, ...], int]
 

@@ -8,7 +8,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from agilerl.protocols import EvolvableAlgorithm
-from agilerl.configs import MlpNetConfig, CnnNetConfig
+from agilerl.modules.configs import MlpNetConfig, CnnNetConfig
 
 ArrayOrTensor = Union[ArrayLike, torch.Tensor]
 TensorDict = Dict[str, torch.Tensor]

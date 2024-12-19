@@ -26,6 +26,9 @@ class NetConfig:
     def __setitem__(self, key: str, value: Any) -> None:
         setattr(self, key, value)
 
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
     def keys(self) -> List[str]:
         return list(self.__dataclass_fields__.keys())
     

@@ -15,6 +15,8 @@ from agilerl.algorithms.ddpg import DDPG
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.networks.actors import DeterministicActor
 from tests.helper_functions import generate_random_box_space, generate_discrete_space
 
 class DummyDDPG(DDPG):
@@ -135,11 +137,6 @@ def test_initialize_ddpg_with_minimum_parameters():
 
     assert ddpg.observation_space == observation_space
     assert ddpg.action_space == action_space
-    assert ddpg.net_config == {
-        "arch": "mlp",
-        "hidden_size": [64, 64],
-        "mlp_output_activation": "Tanh",
-    }
     assert ddpg.batch_size == 64
     assert ddpg.lr_actor == 0.0001
     assert ddpg.lr_critic == 0.001
@@ -154,13 +151,12 @@ def test_initialize_ddpg_with_minimum_parameters():
     assert ddpg.fitness == []
     assert ddpg.steps == [0]
     # assert ddpg.actor_network is None
-    assert isinstance(ddpg.actor, EvolvableMLP)
-    assert isinstance(ddpg.actor_target, EvolvableMLP)
+    assert isinstance(ddpg.actor.encoder, EvolvableMLP)
+    assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
-    assert isinstance(ddpg.critic, EvolvableMLP)
-    assert isinstance(ddpg.critic_target, EvolvableMLP)
+    assert isinstance(ddpg.critic.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
-    assert ddpg.arch == "mlp"
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
@@ -170,8 +166,6 @@ def test_initialize_ddpg_with_cnn_accelerator():
     action_space = generate_random_box_space(shape=(2,))
     index = 0
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -206,7 +200,6 @@ def test_initialize_ddpg_with_cnn_accelerator():
 
     assert ddpg.observation_space == observation_space
     assert ddpg.action_space == action_space
-    assert ddpg.net_config == net_config_cnn
     assert ddpg.batch_size == batch_size
     assert ddpg.lr_actor == lr_actor
     assert ddpg.learn_step == learn_step
@@ -219,11 +212,10 @@ def test_initialize_ddpg_with_cnn_accelerator():
     assert ddpg.fitness == []
     assert ddpg.steps == [0]
     # assert ddpg.actor_network is None
-    assert isinstance(ddpg.actor, EvolvableCNN)
-    assert isinstance(ddpg.actor_target, EvolvableCNN)
-    assert isinstance(ddpg.critic, EvolvableCNN)
-    assert isinstance(ddpg.critic_target, EvolvableCNN)
-    assert ddpg.arch == "cnn"
+    assert isinstance(ddpg.actor.encoder, EvolvableCNN)
+    assert isinstance(ddpg.actor_target.encoder, EvolvableCNN)
+    assert isinstance(ddpg.critic.encoder, EvolvableCNN)
+    assert isinstance(ddpg.critic_target.encoder, EvolvableCNN)
     assert isinstance(ddpg.actor_optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(ddpg.critic_optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(ddpg.criterion, nn.MSELoss)
@@ -254,7 +246,6 @@ def test_initialize_ddpg_with_actor_network(
 
     assert ddpg.observation_space == observation_space
     assert ddpg.action_space == action_space
-    assert ddpg.net_config is None
     assert ddpg.batch_size == 64
     assert ddpg.lr_actor == 0.0001
     assert ddpg.lr_critic == 0.001
@@ -268,61 +259,23 @@ def test_initialize_ddpg_with_actor_network(
     assert ddpg.scores == []
     assert ddpg.fitness == []
     assert ddpg.steps == [0]
-    # assert ddpg.actor_network == actor_network
-    # assert ddpg.actor == actor_network
-    # assert ddpg.critic_network == critic_network
-    # assert ddpg.critic == critic_network
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
-    assert ddpg.arch == actor_network.arch
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
 @pytest.mark.parametrize(
-    "observation_space, net_type",
+    "observation_space",
     [
-        (generate_random_box_space(shape=(4,)), "mlp"),
-        (spaces.Box(0, 1, shape=(3, 64, 64)), "cnn"),
+        (generate_random_box_space(shape=(4,))),
+        (spaces.Box(0, 1, shape=(3, 64, 64))),
     ],
 )
-def test_initialize_ddpg_with_actor_network_evo_net(observation_space, net_type):
+def test_initialize_ddpg_with_actor_network_evo_net(observation_space):
     action_space = generate_random_box_space(shape=(2,))
-    if net_type == "mlp":
-        actor_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0],
-            num_outputs=action_space.shape[0],
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
-            mlp_output_activation="Tanh",
-        )
-        critic_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0] + action_space.shape[0],
-            num_outputs=1,
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
-        )
-    else:
-        actor_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.shape[0],
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
-            mlp_output_activation="Tanh",
-        )
 
-        critic_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.shape[0],
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            hidden_size=[64, 64],
-            critic=True,
-            mlp_activation="ReLU",
-        )
+    actor_network = DeterministicActor(observation_space, action_space)
+    critic_network = ContinuousQNetwork(observation_space, action_space)
 
     ddpg = DDPG(
         observation_space,
@@ -350,7 +303,6 @@ def test_initialize_ddpg_with_actor_network_evo_net(observation_space, net_type)
     # assert ddpg.critic == critic_network
     assert isinstance(ddpg.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(ddpg.critic_optimizer.optimizer, optim.Adam)
-    assert ddpg.arch == actor_network.arch
     assert isinstance(ddpg.criterion, nn.MSELoss)
 
 
@@ -359,11 +311,11 @@ def test_initialize_ddpg_with_incorrect_actor_net():
     action_space = generate_random_box_space(shape=(2,))
     actor_network = "dummy"
     critic_network = "dummy"
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         ddpg = DDPG(
             observation_space,
             action_space,
-            expl_noise=np.zeros(action_space.shape[0]),
+            expl_noise=np.zeros((1, action_space.shape[0])),
             actor_network=actor_network,
             critic_network=critic_network,
         )
@@ -393,7 +345,6 @@ def test_initialize_ddpg_with_actor_network_no_critic(
 
     assert ddpg.observation_space == observation_space
     assert ddpg.action_space == action_space
-    assert ddpg.net_config is not None
     assert ddpg.batch_size == 64
     assert ddpg.lr_actor == 0.0001
     assert ddpg.lr_critic == 0.001
@@ -461,8 +412,6 @@ def test_learns_from_experiences():
     batch_size = 4
     policy_freq = 4
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -571,7 +520,7 @@ def test_learns_from_experiences_with_accelerator():
 def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,))
     action_space = generate_random_box_space(shape=(2,))
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -664,8 +613,6 @@ def test_algorithm_test_loop_images():
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -688,8 +635,6 @@ def test_algorithm_test_loop_images_unvectorized():
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -718,9 +663,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.net_config == ddpg.net_config
-    # assert clone_agent.actor_network == ddpg.actor_network
-    # assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
     assert clone_agent.lr_actor == ddpg.lr_actor
     assert clone_agent.lr_critic == ddpg.lr_critic
@@ -755,9 +697,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.net_config == ddpg.net_config
-    # assert clone_agent.actor_network == ddpg.actor_network
-    # assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
     assert clone_agent.lr_actor == ddpg.lr_actor
     assert clone_agent.lr_critic == ddpg.lr_critic
@@ -791,9 +730,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.net_config == ddpg.net_config
-    # assert clone_agent.actor_network == ddpg.actor_network
-    # assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
     assert clone_agent.lr_actor == ddpg.lr_actor
     assert clone_agent.lr_critic == ddpg.lr_critic
@@ -854,9 +790,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == ddpg.observation_space
     assert clone_agent.action_space == ddpg.action_space
-    assert clone_agent.net_config == ddpg.net_config
-    # assert clone_agent.actor_network == ddpg.actor_network
-    # assert clone_agent.critic_network == ddpg.critic_network
     assert clone_agent.batch_size == ddpg.batch_size
     assert clone_agent.lr_actor == ddpg.lr_actor
     assert clone_agent.lr_critic == ddpg.lr_critic
@@ -889,10 +822,10 @@ def test_clone_after_learning():
 def test_unwrap_models():
     ddpg = DDPG(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_random_box_space(shape=(2,)), accelerator=Accelerator())
     ddpg.unwrap_models()
-    assert isinstance(ddpg.actor, nn.Module)
-    assert isinstance(ddpg.actor_target, nn.Module)
-    assert isinstance(ddpg.critic, nn.Module)
-    assert isinstance(ddpg.critic_target, nn.Module)
+    assert isinstance(ddpg.actor.encoder, nn.Module)
+    assert isinstance(ddpg.actor_target.encoder, nn.Module)
+    assert isinstance(ddpg.critic.encoder, nn.Module)
+    assert isinstance(ddpg.critic_target.encoder, nn.Module)
 
 
 # The saved checkpoint file contains the correct data and format.
@@ -908,17 +841,16 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "actor_optimizer_state_dict" in checkpoint
-    assert "critic_init_dict" in checkpoint
-    assert "critic_state_dict" in checkpoint
-    assert "critic_target_init_dict" in checkpoint
-    assert "critic_target_state_dict" in checkpoint
-    assert "critic_optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -939,15 +871,10 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     ddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ddpg.net_config == {
-        "arch": "mlp",
-        "hidden_size": [64, 64],
-        "mlp_output_activation": "Tanh",
-    }
-    assert isinstance(ddpg.actor, EvolvableMLP)
-    assert isinstance(ddpg.actor_target, EvolvableMLP)
-    assert isinstance(ddpg.critic, EvolvableMLP)
-    assert isinstance(ddpg.critic_target, EvolvableMLP)
+    assert isinstance(ddpg.actor.encoder, EvolvableMLP)
+    assert isinstance(ddpg.actor_target.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic.encoder, EvolvableMLP)
+    assert isinstance(ddpg.critic_target.encoder, EvolvableMLP)
     assert ddpg.lr_actor == 1e-4
     assert ddpg.lr_critic == 1e-3
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
@@ -965,8 +892,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -974,7 +899,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Initialize the ddpg agent
     ddpg = DDPG(
-        observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255), action_space=generate_random_box_space(shape=(2,)), net_config=net_config_cnn
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        action_space=generate_random_box_space(shape=(2,)),
+        net_config=net_config_cnn
     )
 
     # Save the checkpoint to a file
@@ -985,17 +912,16 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "actor_optimizer_state_dict" in checkpoint
-    assert "critic_init_dict" in checkpoint
-    assert "critic_state_dict" in checkpoint
-    assert "critic_target_init_dict" in checkpoint
-    assert "critic_target_state_dict" in checkpoint
-    assert "critic_optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1008,22 +934,18 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    assert checkpoint["net_config"] == net_config_cnn
-
     # Load checkpoint
     ddpg = DDPG(
         observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_random_box_space(shape=(2,)),
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        action_space=generate_random_box_space(shape=(2,))
     )
     ddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ddpg.net_config == net_config_cnn
-    assert isinstance(ddpg.actor, EvolvableCNN)
-    assert isinstance(ddpg.actor_target, EvolvableCNN)
-    assert isinstance(ddpg.critic, EvolvableCNN)
-    assert isinstance(ddpg.critic_target, EvolvableCNN)
+    assert isinstance(ddpg.actor.encoder, EvolvableCNN)
+    assert isinstance(ddpg.actor_target.encoder, EvolvableCNN)
+    assert isinstance(ddpg.critic.encoder, EvolvableCNN)
+    assert isinstance(ddpg.critic_target.encoder, EvolvableCNN)
     assert ddpg.lr_actor == 1e-4
     assert ddpg.lr_critic == 1e-3
     assert str(ddpg.actor.state_dict()) == str(ddpg.actor_target.state_dict())
@@ -1077,17 +999,16 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "actor_optimizer_state_dict" in checkpoint
-    assert "critic_init_dict" in checkpoint
-    assert "critic_state_dict" in checkpoint
-    assert "critic_target_init_dict" in checkpoint
-    assert "critic_target_state_dict" in checkpoint
-    assert "critic_optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1108,7 +1029,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert ddpg.net_config is None
     assert isinstance(ddpg.actor, nn.Module)
     assert isinstance(ddpg.actor_target, nn.Module)
     assert isinstance(ddpg.critic, nn.Module)
@@ -1147,15 +1067,15 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 )
 def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
     net_config = {
-        "arch": "mlp",
         "hidden_size": [64, 64],
-        "mlp_output_activation": activation_func,
+        "output_activation": activation_func,
     }
     min_action, max_action = min_max
     if activation_func == "Tanh":
         min_activation_val, max_activation_val = -1, 1
     else:
         min_activation_val, max_activation_val = 0, 1
+
     action = np.array(action_array_vals)
 
     min_action = np.array(min_action) if isinstance(min_action, list) else min_action
@@ -1163,7 +1083,7 @@ def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(4,)),
         action_space=generate_random_box_space(shape=(4,), low=min_action, high=max_action),
-        net_config=net_config,
+        head_config=net_config,
     )
     scaled_action = ddpg.scale_to_action_space(action)
     min_action = np.array(min_action) if isinstance(min_action, list) else min_action
@@ -1238,11 +1158,10 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_ddpg.action_space == ddpg.action_space
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
-    assert new_ddpg.net_config == ddpg.net_config
-    assert isinstance(new_ddpg.actor, EvolvableMLP)
-    assert isinstance(new_ddpg.actor_target, EvolvableMLP)
-    assert isinstance(new_ddpg.critic, EvolvableMLP)
-    assert isinstance(new_ddpg.critic_target, EvolvableMLP)
+    assert isinstance(new_ddpg.actor.encoder, EvolvableMLP)
+    assert isinstance(new_ddpg.actor_target.encoder, EvolvableMLP)
+    assert isinstance(new_ddpg.critic.encoder, EvolvableMLP)
+    assert isinstance(new_ddpg.critic_target.encoder, EvolvableMLP)
     assert new_ddpg.lr_actor == ddpg.lr_actor
     assert new_ddpg.lr_critic == ddpg.lr_critic
     assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
@@ -1279,8 +1198,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,)),
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
@@ -1299,11 +1216,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_ddpg.action_space == ddpg.action_space
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
-    assert new_ddpg.net_config == ddpg.net_config
-    assert isinstance(new_ddpg.actor, EvolvableCNN)
-    assert isinstance(new_ddpg.actor_target, EvolvableCNN)
-    assert isinstance(new_ddpg.critic, EvolvableCNN)
-    assert isinstance(new_ddpg.critic_target, EvolvableCNN)
+    assert isinstance(new_ddpg.actor.encoder, EvolvableCNN)
+    assert isinstance(new_ddpg.actor_target.encoder, EvolvableCNN)
+    assert isinstance(new_ddpg.critic.encoder, EvolvableCNN)
+    assert isinstance(new_ddpg.critic_target.encoder, EvolvableCNN)
     assert new_ddpg.lr_actor == ddpg.lr_actor
     assert new_ddpg.lr_critic == ddpg.lr_critic
     assert str(new_ddpg.actor.to("cpu").state_dict()) == str(ddpg.actor.state_dict())
@@ -1361,7 +1277,6 @@ def test_load_from_pretrained_networks(
     assert new_ddpg.action_space == ddpg.action_space
     assert np.all(new_ddpg.min_action == ddpg.min_action)
     assert np.all(new_ddpg.max_action == ddpg.max_action)
-    assert new_ddpg.net_config == ddpg.net_config
     assert isinstance(new_ddpg.actor, nn.Module)
     assert isinstance(new_ddpg.actor_target, nn.Module)
     assert isinstance(new_ddpg.critic, nn.Module)

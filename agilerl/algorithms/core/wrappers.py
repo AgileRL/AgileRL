@@ -159,3 +159,26 @@ class OptimizerWrapper:
                 )
         
         return self.optimizer.state_dict()
+
+    def zero_grad(self) -> None:
+        """
+        Zero the gradients of the optimizer.
+        """
+        if self.multiagent:
+            optimizers: List[Optimizer] = self.optimizer
+            for opt in optimizers:
+                opt.zero_grad()
+        else:
+            self.optimizer.zero_grad()
+    
+    def step(self) -> None:
+        """
+        Perform a single optimization step.
+        """
+        if self.multiagent:
+            optimizers: List[Optimizer] = self.optimizer
+            for opt in optimizers:
+                opt.step()
+        else:
+            self.optimizer.step()
+    

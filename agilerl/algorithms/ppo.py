@@ -10,7 +10,7 @@ from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
 from agilerl.typing import ExperiencesType, GymEnvType, ArrayOrTensor, ArrayLike
-from agilerl.configs import MlpNetConfig
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_functions import ValueFunction

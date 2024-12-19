@@ -1,12 +1,12 @@
-from typing import Optional, Union, Iterable, TypeVar, Dict, Any
+from typing import Optional, Union, TypeVar, Dict, Any
 from dataclasses import asdict
 import copy
-from abc import ABC, abstractmethod, ABCMeta
+from abc import ABC, abstractmethod
 from gymnasium import spaces
 import numpy as np 
 import torch
 
-from agilerl.protocols import MutationType, MutationMethod
+from agilerl.protocols import MutationType
 from agilerl.typing import DeviceType, TorchObsType, ConfigType
 from agilerl.modules.base import EvolvableModule, register_mutation_fn
 from agilerl.modules.cnn import EvolvableCNN

@@ -12,7 +12,7 @@ from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.base import EvolvableModule
-from agilerl.configs import MlpNetConfig
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import (
@@ -163,13 +163,9 @@ class RainbowDQN(RLAlgorithm):
                 actor_network.num_atoms = self.num_atoms
                 actor_network = MakeEvolvable(**actor_network.init_dict)
                 actor_network.load_state_dict(actor_network.state_dict())
-            elif not isinstance(actor_network, nn.Module):
+            elif not isinstance(actor_network, RainbowQNetwork):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
-                )
-            elif not isinstance(actor_network, EvolvableModule):
-                warnings.warn(
-                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type MakeEvolvable or RainbowQNetwork."
                 )
             
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
@@ -264,9 +260,7 @@ class RainbowDQN(RLAlgorithm):
             next_actions = self.actor(next_states).argmax(1)
 
             # Predict the target q distribution for the same next states
-            print("Calling without q")
             target_q_dist = self.actor_target(next_states, q=False)
-            print("Done")
 
             # Index the target q_dist to select the distributions corresponding to next_actions
             target_q_dist = target_q_dist[range(self.batch_size), next_actions]

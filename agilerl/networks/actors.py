@@ -5,7 +5,7 @@ from gymnasium import spaces
 from torch.distributions import Distribution, Categorical, Normal, Bernoulli, MultivariateNormal
 
 from agilerl.typing import TorchObsType, ConfigType, DeviceType, ArrayOrTensor
-from agilerl.configs import MlpNetConfig
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, SupportedEvolvable
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule
@@ -181,12 +181,9 @@ class DeterministicActor(EvolvableNetwork):
             hidden_size=[64],
             output_activation=output_activation
         )
-
-        if head_config['output_activation'] != output_activation:
-            head_config['output_activation'] = output_activation
         
         self.actor_net = self.build_network_head(head_config)
-        self.output_activation = output_activation
+        self.output_activation = head_config.get("output_activation", output_activation)
 
     @property
     def init_dict(self) -> Dict[str, Any]:

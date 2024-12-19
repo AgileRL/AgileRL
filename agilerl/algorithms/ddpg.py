@@ -9,7 +9,7 @@ from gymnasium import spaces
 import gymnasium as gym
 
 from agilerl.typing import ArrayLike, ArrayOrTensor, NumpyObsType, ExperiencesType
-from agilerl.configs import MlpNetConfig
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
@@ -115,7 +115,7 @@ class DDPG(RLAlgorithm):
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
-        ), "Exploration action noise rate must be a float, or an array of size action_dim"
+        ), f"Exploration action noise rate must be a float, or an array of size {self.action_dim}"
         if isinstance(expl_noise, (float, int)):
             assert (
                 expl_noise >= 0
@@ -168,10 +168,6 @@ class DDPG(RLAlgorithm):
         self.learn_counter = 0
 
         if actor_network is not None and critic_network is not None:
-            assert type(actor_network) is type(
-                critic_network
-            ), "'actor_network' and 'critic_network' must be the same type."
-
             if not isinstance(actor_network, EvolvableModule) and not isinstance(critic_network, EvolvableModule):
                 warnings.warn(
                     f"'actor_network' and 'critic_network' are not EvolvableModule's - architecture mutations will be disabled."
@@ -183,6 +179,7 @@ class DDPG(RLAlgorithm):
                      )
 
             self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
+            self.actor_target, self.critic_target = make_safe_deepcopies(actor_network, critic_network)
         else:
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
@@ -257,14 +254,13 @@ class DDPG(RLAlgorithm):
         :rtype: numpy.ndarray
         """
         if convert_to_torch:
-            device = self.device if self.accelerator is None else self.accelerator.device
             max_action = (
-                torch.from_numpy(self.max_action).to(device)
+                torch.from_numpy(self.max_action).to(self.device)
                 if isinstance(self.max_action, (np.ndarray))
                 else self.max_action
             )
             min_action = (
-                torch.from_numpy(self.min_action).to(device)
+                torch.from_numpy(self.min_action).to(self.device)
                 if isinstance(self.min_action, (np.ndarray))
                 else self.min_action
             )
@@ -272,10 +268,10 @@ class DDPG(RLAlgorithm):
             max_action = self.max_action
             min_action = self.min_action
 
-        if self.output_activation in ["Tanh"]:
+        if self.actor.output_activation in ["Tanh"]:
             pre_scaled_min = -1
             pre_scaled_max = 1
-        elif self.output_activation in ["Sigmoid", "Softmax"]:
+        elif self.actor.output_activation in ["Sigmoid", "Softmax"]:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
@@ -385,7 +381,12 @@ class DDPG(RLAlgorithm):
         """Reset action noise."""
         self.current_noise[indices] = self.mean_noise[indices]
 
-    def learn(self, experiences: ExperiencesType, noise_clip: float = 0.5, policy_noise: float = 0.2) -> Tuple[float, float]:
+    def learn(
+            self,
+            experiences: ExperiencesType,
+            noise_clip: float = 0.5,
+            policy_noise: float = 0.2
+            ) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, rewards, next_states, dones in that order.
@@ -422,7 +423,7 @@ class DDPG(RLAlgorithm):
 
         y_j = rewards + ((1 - dones) * self.gamma * q_value_next_state)
 
-        critic_loss = self.criterion(q_value, y_j)
+        critic_loss: torch.Tensor = self.criterion(q_value, y_j)
 
         # critic loss backprop
         self.critic_optimizer.zero_grad()

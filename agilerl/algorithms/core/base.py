@@ -396,7 +396,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def clone(
             self: SelfEvolvableAlgorithm,
             index: Optional[int] = None,
-            wrap: bool = False
+            wrap: bool = True
             ) -> SelfEvolvableAlgorithm:
         """Creates a clone of the algorithm.
 

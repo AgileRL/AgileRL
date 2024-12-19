@@ -14,6 +14,8 @@ from agilerl.algorithms.td3 import TD3
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.q_networks import ContinuousQNetwork
 from tests.helper_functions import generate_random_box_space, generate_discrete_space
 
 class DummyTD3(TD3):
@@ -136,11 +138,6 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
     assert np.all(td3.max_action == 1)
-    assert td3.net_config == {
-        "arch": "mlp",
-        "hidden_size": [64, 64],
-        "mlp_output_activation": "Tanh",
-    }
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -154,16 +151,15 @@ def test_initialize_td3_with_minimum_parameters():
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert isinstance(td3.actor, EvolvableMLP)
-    assert isinstance(td3.actor_target, EvolvableMLP)
+    assert isinstance(td3.actor.encoder, EvolvableMLP)
+    assert isinstance(td3.actor_target.encoder, EvolvableMLP)
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
-    assert isinstance(td3.critic_1, EvolvableMLP)
-    assert isinstance(td3.critic_target_1, EvolvableMLP)
+    assert isinstance(td3.critic_1.encoder, EvolvableMLP)
+    assert isinstance(td3.critic_target_1.encoder, EvolvableMLP)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
-    assert isinstance(td3.critic_2, EvolvableMLP)
-    assert isinstance(td3.critic_target_2, EvolvableMLP)
+    assert isinstance(td3.critic_2.encoder, EvolvableMLP)
+    assert isinstance(td3.critic_target_2.encoder, EvolvableMLP)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
-    assert td3.arch == "mlp"
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -174,8 +170,6 @@ def test_initialize_td3_with_cnn_accelerator():
     max_action = 1
     index = 0
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -211,7 +205,6 @@ def test_initialize_td3_with_cnn_accelerator():
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
     assert np.all(td3.max_action == max_action)
-    assert td3.net_config == net_config_cnn
     assert td3.batch_size == batch_size
     assert td3.lr_actor == lr_actor
     assert td3.lr_critic == lr_critic
@@ -224,13 +217,12 @@ def test_initialize_td3_with_cnn_accelerator():
     assert td3.scores == []
     assert td3.fitness == []
     assert td3.steps == [0]
-    assert isinstance(td3.actor, EvolvableCNN)
-    assert isinstance(td3.actor_target, EvolvableCNN)
-    assert isinstance(td3.critic_1, EvolvableCNN)
-    assert isinstance(td3.critic_target_1, EvolvableCNN)
-    assert isinstance(td3.critic_2, EvolvableCNN)
-    assert isinstance(td3.critic_target_2, EvolvableCNN)
-    assert td3.arch == "cnn"
+    assert isinstance(td3.actor.encoder, EvolvableCNN)
+    assert isinstance(td3.actor_target.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_1.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_target_1.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_2.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_target_2.encoder, EvolvableCNN)
     assert isinstance(td3.actor_optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(td3.critic_1_optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(td3.critic_2_optimizer.optimizer, AcceleratedOptimizer)
@@ -281,7 +273,6 @@ def test_initialize_td3_with_actor_network(
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
     assert np.all(td3.max_action == max_action)
-    assert td3.net_config is None
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -298,7 +289,6 @@ def test_initialize_td3_with_actor_network(
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
-    assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -343,7 +333,6 @@ def test_initialize_td3_with_actor_network_no_critics(
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
     assert np.all(td3.max_action == max_action)
-    assert td3.net_config is not None
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -401,7 +390,6 @@ def test_initialize_td3_with_actor_network_cnn(
     assert td3.observation_space == observation_space
     assert td3.action_space == action_space
     assert np.all(td3.max_action == max_action)
-    assert td3.net_config is None
     assert td3.batch_size == 64
     assert td3.lr_actor == 0.0001
     assert td3.lr_critic == 0.001
@@ -418,7 +406,6 @@ def test_initialize_td3_with_actor_network_cnn(
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
-    assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -479,8 +466,6 @@ def test_learns_from_experiences(min_action, max_action):
     action_space = generate_random_box_space(shape=(2,), low=min_action, high=max_action)
     batch_size = 64
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -598,7 +583,7 @@ def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
     max_action = 1
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -706,8 +691,6 @@ def test_algorithm_test_loop_images():
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -730,8 +713,6 @@ def test_algorithm_test_loop_images_unvectorized():
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -761,7 +742,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
     assert np.all(clone_agent.max_action == td3.max_action)
-    assert clone_agent.net_config == td3.net_config
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -805,7 +785,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
     assert np.all(clone_agent.max_action == td3.max_action)
-    assert clone_agent.net_config == td3.net_config
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -849,7 +828,6 @@ def test_clone_returns_identical_agent():
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
     assert np.all(clone_agent.max_action == td3.max_action)
-    assert clone_agent.net_config == td3.net_config
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -913,7 +891,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == td3.observation_space
     assert clone_agent.action_space == td3.action_space
-    assert clone_agent.net_config == td3.net_config
     assert clone_agent.batch_size == td3.batch_size
     assert clone_agent.lr_actor == td3.lr_actor
     assert clone_agent.lr_critic == td3.lr_critic
@@ -981,23 +958,22 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "actor_optimizer_state_dict" in checkpoint
-    assert "critic_1_init_dict" in checkpoint
-    assert "critic_1_state_dict" in checkpoint
-    assert "critic_target_1_init_dict" in checkpoint
-    assert "critic_target_1_state_dict" in checkpoint
-    assert "critic_1_optimizer_state_dict" in checkpoint
-    assert "critic_2_init_dict" in checkpoint
-    assert "critic_2_state_dict" in checkpoint
-    assert "critic_target_2_init_dict" in checkpoint
-    assert "critic_target_2_state_dict" in checkpoint
-    assert "critic_2_optimizer_state_dict" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_1_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "max_action" in checkpoint
-    assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1018,17 +994,12 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert td3.net_config == {
-        "arch": "mlp",
-        "hidden_size": [64, 64],
-        "mlp_output_activation": "Tanh",
-    }
-    assert isinstance(td3.actor, EvolvableMLP)
-    assert isinstance(td3.actor_target, EvolvableMLP)
-    assert isinstance(td3.critic_1, EvolvableMLP)
-    assert isinstance(td3.critic_target_1, EvolvableMLP)
-    assert isinstance(td3.critic_2, EvolvableMLP)
-    assert isinstance(td3.critic_target_2, EvolvableMLP)
+    assert isinstance(td3.actor.encoder, EvolvableMLP)
+    assert isinstance(td3.actor_target.encoder, EvolvableMLP)
+    assert isinstance(td3.critic_1.encoder, EvolvableMLP)
+    assert isinstance(td3.critic_target_1.encoder, EvolvableMLP)
+    assert isinstance(td3.critic_2.encoder, EvolvableMLP)
+    assert isinstance(td3.critic_target_2.encoder, EvolvableMLP)
     assert td3.lr_actor == 1e-4
     assert td3.lr_critic == 1e-3
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
@@ -1048,8 +1019,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1070,23 +1039,22 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "actor_optimizer_state_dict" in checkpoint
-    assert "critic_1_init_dict" in checkpoint
-    assert "critic_1_state_dict" in checkpoint
-    assert "critic_target_1_init_dict" in checkpoint
-    assert "critic_target_1_state_dict" in checkpoint
-    assert "critic_1_optimizer_state_dict" in checkpoint
-    assert "critic_2_init_dict" in checkpoint
-    assert "critic_2_state_dict" in checkpoint
-    assert "critic_target_2_init_dict" in checkpoint
-    assert "critic_target_2_state_dict" in checkpoint
-    assert "critic_2_optimizer_state_dict" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_1_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "max_action" in checkpoint
-    assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1107,13 +1075,12 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert td3.net_config == net_config_cnn
-    assert isinstance(td3.actor, EvolvableCNN)
-    assert isinstance(td3.actor_target, EvolvableCNN)
-    assert isinstance(td3.critic_1, EvolvableCNN)
-    assert isinstance(td3.critic_target_1, EvolvableCNN)
-    assert isinstance(td3.critic_2, EvolvableCNN)
-    assert isinstance(td3.critic_target_2, EvolvableCNN)
+    assert isinstance(td3.actor.encoder, EvolvableCNN)
+    assert isinstance(td3.actor_target.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_1.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_target_1.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_2.encoder, EvolvableCNN)
+    assert isinstance(td3.critic_target_2.encoder, EvolvableCNN)
     assert td3.lr_actor == 1e-4
     assert td3.lr_critic == 1e-3
     assert str(td3.actor.state_dict()) == str(td3.actor_target.state_dict())
@@ -1174,23 +1141,22 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "actor_target_init_dict" in checkpoint
-    assert "actor_target_state_dict" in checkpoint
-    assert "actor_optimizer_state_dict" in checkpoint
-    assert "critic_1_init_dict" in checkpoint
-    assert "critic_1_state_dict" in checkpoint
-    assert "critic_target_1_init_dict" in checkpoint
-    assert "critic_target_1_state_dict" in checkpoint
-    assert "critic_1_optimizer_state_dict" in checkpoint
-    assert "critic_2_init_dict" in checkpoint
-    assert "critic_2_state_dict" in checkpoint
-    assert "critic_target_2_init_dict" in checkpoint
-    assert "critic_target_2_state_dict" in checkpoint
-    assert "critic_2_optimizer_state_dict" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_1_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critic_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_target_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "max_action" in checkpoint
-    assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1211,7 +1177,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     td3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert td3.net_config is None
     assert isinstance(td3.actor, nn.Module)
     assert isinstance(td3.actor_target, nn.Module)
     assert isinstance(td3.critic_1, nn.Module)
@@ -1245,48 +1210,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
     max_action = 1
-    if net_type == "mlp":
-        actor_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0],
-            num_outputs=action_space.shape[0],
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
-            mlp_output_activation="Tanh",
-        )
-        critic_networks = [
-            EvolvableMLP(
-                num_inputs=observation_space.shape[0] + action_space.shape[0],
-                num_outputs=1,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-            )
-            for _ in range(2)
-        ]
-    else:
-        actor_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.shape[0],
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            hidden_size=[64, 64],
-            mlp_activation="ReLU",
-            mlp_output_activation="Tanh",
-        )
 
-        critic_networks = [
-            EvolvableCNN(
-                input_shape=observation_space.shape,
-                num_outputs=action_space.shape[0],
-                channel_size=[8, 8],
-                kernel_size=[2, 2],
-                stride_size=[1, 1],
-                hidden_size=[64, 64],
-                critic=True,
-                mlp_activation="ReLU",
-            )
-            for _ in range(2)
-        ]
+    actor_network = DeterministicActor(observation_space, action_space)
+    critic_networks = [ContinuousQNetwork(observation_space, action_space) for _ in range(2)]
 
     td3 = TD3(
         observation_space,
@@ -1314,7 +1240,6 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
     assert isinstance(td3.actor_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_1_optimizer.optimizer, optim.Adam)
     assert isinstance(td3.critic_2_optimizer.optimizer, optim.Adam)
-    assert td3.arch == actor_network.arch
     assert isinstance(td3.criterion, nn.MSELoss)
 
 
@@ -1351,9 +1276,8 @@ def test_initialize_td3_with_incorrect_actor_net():
 )
 def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     net_config = {
-        "arch": "mlp",
         "hidden_size": [64, 64],
-        "mlp_output_activation": activation_func,
+        "output_activation": activation_func,
     }
     min_action, max_action = min_max
     if activation_func == "Tanh":
@@ -1366,7 +1290,7 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(shape=(4,), low=min_action, high=max_action),
-        net_config=net_config,
+        head_config=net_config,
     )
     scaled_action = td3.scale_to_action_space(action)
     min_action = np.array(min_action) if isinstance(min_action, list) else min_action
@@ -1444,13 +1368,12 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_td3.action_space == td3.action_space
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
-    assert new_td3.net_config == td3.net_config
-    assert isinstance(new_td3.actor, EvolvableMLP)
-    assert isinstance(new_td3.actor_target, EvolvableMLP)
-    assert isinstance(new_td3.critic_1, EvolvableMLP)
-    assert isinstance(new_td3.critic_target_1, EvolvableMLP)
-    assert isinstance(new_td3.critic_2, EvolvableMLP)
-    assert isinstance(new_td3.critic_target_2, EvolvableMLP)
+    assert isinstance(new_td3.actor.encoder, EvolvableMLP)
+    assert isinstance(new_td3.actor_target.encoder, EvolvableMLP)
+    assert isinstance(new_td3.critic_1.encoder, EvolvableMLP)
+    assert isinstance(new_td3.critic_target_1.encoder, EvolvableMLP)
+    assert isinstance(new_td3.critic_2.encoder, EvolvableMLP)
+    assert isinstance(new_td3.critic_target_2.encoder, EvolvableMLP)
     assert new_td3.lr_actor == td3.lr_actor
     assert new_td3.lr_critic == td3.lr_critic
     assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
@@ -1495,8 +1418,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
@@ -1515,13 +1436,12 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     assert new_td3.action_space == td3.action_space
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
-    assert new_td3.net_config == td3.net_config
-    assert isinstance(new_td3.actor, EvolvableCNN)
-    assert isinstance(new_td3.actor_target, EvolvableCNN)
-    assert isinstance(new_td3.critic_1, EvolvableCNN)
-    assert isinstance(new_td3.critic_target_1, EvolvableCNN)
-    assert isinstance(new_td3.critic_2, EvolvableCNN)
-    assert isinstance(new_td3.critic_target_2, EvolvableCNN)
+    assert isinstance(new_td3.actor.encoder, EvolvableCNN)
+    assert isinstance(new_td3.actor_target.encoder, EvolvableCNN)
+    assert isinstance(new_td3.critic_1.encoder, EvolvableCNN)
+    assert isinstance(new_td3.critic_target_1.encoder, EvolvableCNN)
+    assert isinstance(new_td3.critic_2.encoder, EvolvableCNN)
+    assert isinstance(new_td3.critic_target_2.encoder, EvolvableCNN)
     assert new_td3.lr_actor == td3.lr_actor
     assert new_td3.lr_critic == td3.lr_critic
     assert str(new_td3.actor.to("cpu").state_dict()) == str(td3.actor.state_dict())
@@ -1587,7 +1507,6 @@ def test_load_from_pretrained_networks(
     assert new_td3.action_space == td3.action_space
     assert np.all(new_td3.min_action == td3.min_action)
     assert np.all(new_td3.max_action == td3.max_action)
-    assert new_td3.net_config == td3.net_config
     assert isinstance(new_td3.actor, nn.Module)
     assert isinstance(new_td3.actor_target, nn.Module)
     assert isinstance(new_td3.critic_1, nn.Module)

@@ -15,6 +15,7 @@ from agilerl.algorithms.dqn_rainbow import RainbowDQN
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+from agilerl.networks.q_networks import RainbowQNetwork
 from tests.helper_functions import generate_discrete_space, generate_random_box_space
 
 
@@ -111,30 +112,20 @@ def test_initialize_dqn_with_minimum_parameters():
 
 
 @pytest.mark.parametrize(
-    "observation_space, net_type",
+    "observation_space",
     [
-        (generate_random_box_space(shape=(4,)), "mlp"),
-        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255), "cnn"),
+        (generate_random_box_space(shape=(4,))),
+        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255)),
     ],
 )
-def test_initialize_dqn_with_actor_network_evo_net(observation_space, net_type):
+def test_initialize_dqn_with_actor_network_evo_net(observation_space):
     action_space = generate_discrete_space(2)
-    if net_type == "mlp":
-        actor_network = EvolvableMLP(
-            num_inputs=observation_space.shape[0],
-            num_outputs=action_space.n,
-            hidden_size=[64, 64],
-            activation="ReLU",
-        )
-    else:
-        actor_network = EvolvableCNN(
-            input_shape=observation_space.shape,
-            num_outputs=action_space.n,
-            channel_size=[8, 8],
-            kernel_size=[2, 2],
-            stride_size=[1, 1],
-            activation="ReLU",
-        )
+    support = torch.linspace(0, 1, 51)
+    actor_network = RainbowQNetwork(
+        observation_space=observation_space,
+        action_space=action_space,
+        support=support,
+    )
 
     dqn = RainbowDQN(observation_space, action_space, actor_network=actor_network)
 
@@ -806,7 +797,6 @@ def test_clone_returns_identical_agent():
 
     assert clone_agent.observation_space == dqn.observation_space
     assert clone_agent.action_space == dqn.action_space
-    # assert clone_agent.actor_network == dqn.actor_network
     assert clone_agent.batch_size == dqn.batch_size
     assert clone_agent.lr == dqn.lr
     assert clone_agent.learn_step == dqn.learn_step

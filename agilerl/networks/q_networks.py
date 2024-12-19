@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from gymnasium import spaces
 
 from agilerl.typing import TorchObsType, ConfigType
-from agilerl.configs import MlpNetConfig, NetConfig
+from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule
