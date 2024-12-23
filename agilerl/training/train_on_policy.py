@@ -3,8 +3,9 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from tqdm import trange
+
+import wandb
 
 
 def train_on_policy(
@@ -65,7 +66,7 @@ def train_on_policy(
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: object, optional
-    :param checkpoint: Checkpoint frequency (episodes), defaults to None
+    :param checkpoint: Checkpoint frequency (steps), defaults to None
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional

@@ -33,6 +33,7 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
 .. code-block:: python
 
     from agilerl.utils.utils import create_population
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
     from pettingzoo.mpe import simple_speaker_listener_v4
     import torch
 
@@ -219,10 +220,9 @@ for multi-agent environments) it is easiest to use our training function, which 
         env=env,  # Pettingzoo-style environment
         env_name='simple_speaker_listener_v4',  # Environment name
         algo="MADDPG",  # Algorithm
-        pop=agent_pop,  # Population of agents
+        pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
         INIT_HP=INIT_HP,  # IINIT_HP dictionary
-        MUT_P=MUTATION_PARAMS,  # MUTATION_PARAMS dictionary
         net_config=NET_CONFIG,  # Network configuration
         swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=2000000,  # Max number of training steps
@@ -288,21 +288,21 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     # Configure the multi-agent algo input arguments
     try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
         one_hot = True
     except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
+        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
         one_hot = False
     try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
+        action_dim = [env.single_action_space(agent).n for agent in env.agents]
         INIT_HP["DISCRETE_ACTIONS"] = True
         INIT_HP["MAX_ACTION"] = None
         INIT_HP["MIN_ACTION"] = None
     except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
+        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
         INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
-        INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
+        INIT_HP["MAX_ACTION"] = [env.single_action_space(agent).high for agent in env.agents]
+        INIT_HP["MIN_ACTION"] = [env.single_action_space(agent).low for agent in env.agents]
 
     # Not applicable to MPE environments, used when images are used for observations (Atari environments)
     if INIT_HP["CHANNELS_LAST"]:

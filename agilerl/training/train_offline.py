@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 from agilerl.utils.minari_utils import minari_to_agile_buffer
@@ -77,7 +77,7 @@ def train_offline(
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: object, optional
-    :param checkpoint: Checkpoint frequency (episodes), defaults to None
+    :param checkpoint: Checkpoint frequency (steps), defaults to None
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional
