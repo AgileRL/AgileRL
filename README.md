@@ -156,7 +156,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 num_envs = 16
 env = make_vect_envs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
 try:
-    state_dim = env.single_observation_space.n          # Discrete observation space
+    state_dim = env.single_observation_space.n,          # Discrete observation space
     one_hot = True                                      # Requires one-hot encoding
 except Exception:
     state_dim = env.single_observation_space.shape      # Continuous observation space

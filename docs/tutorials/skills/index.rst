@@ -269,7 +269,7 @@ Once the skills have been defined, training agents to solve them is very straigh
          )  # Create environment
 
          try:
-               state_dim = env.single_observation_space.n  # Discrete observation space
+               state_dim = env.single_observation_space.n, # Discrete observation space
                one_hot = True  # Requires one-hot encoding
          except Exception:
                state_dim = (
@@ -353,7 +353,7 @@ Next we can define the variables we will need in our training loop.
       env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
       try:
-         state_dim = env.single_observation_space.n  # Discrete observation space
+         state_dim = env.single_observation_space.n,  # Discrete observation space
          one_hot = True  # Requires one-hot encoding
       except Exception:
          state_dim = env.single_observation_space.shape  # Continuous observation space

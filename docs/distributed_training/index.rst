@@ -62,7 +62,7 @@ Example distributed training loop:
     num_envs = 8
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = env.single_observation_space.n, # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space

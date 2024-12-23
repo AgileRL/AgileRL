@@ -3,9 +3,9 @@ from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import create_population, make_skill_vect_envs, make_vect_envs
@@ -172,7 +172,7 @@ if __name__ == "__main__":
         )  # Create environment
 
         try:
-            state_dim = env.single_observation_space.n  # Discrete observation space
+            state_dim = (env.single_observation_space.n,)  # Discrete observation space
             one_hot = True  # Requires one-hot encoding
         except Exception:
             state_dim = (
@@ -236,7 +236,7 @@ if __name__ == "__main__":
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = (env.single_observation_space.n,)  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space
