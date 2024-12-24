@@ -3,10 +3,10 @@ import warnings
 from datetime import datetime
 
 import numpy as np
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
 
@@ -485,7 +485,7 @@ def train_off_policy(
             }
 
             # Create the loss dictionaries
-            if algo in ["RainbowDQN", "DQN"]:
+            if algo in ["Rainbow DQN", "DQN"]:
                 actor_loss_dict = {
                     f"train/agent_{index}_actor_loss": np.mean(loss[-10:])
                     for index, loss in enumerate(pop_loss)
