@@ -67,7 +67,7 @@ are more likely to remain present in the population. The sequence of evolution (
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = env.single_observation_space.n, # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space
@@ -175,7 +175,7 @@ The easiest way to train a population of agents using PPO is to use our online t
         env=env,                              # Gym-style environment
         env_name="LunarLander-v2",  # Environment name
         algo="PPO",  # Algorithm
-        pop=agent_pop,  # Population of agents
+        pop=pop,  # Population of agents
         swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=200000,  # Max number of training steps
         evo_steps=10000,  # Evolution frequency
@@ -184,7 +184,7 @@ The easiest way to train a population of agents using PPO is to use our online t
         target=200.,  # Target score for early stopping
         tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
-        wb=INIT_HP['WANDB'],  # Weights and Biases tracking
+        wb=True,  # Weights and Biases tracking
     )
 
 Alternatively, use a custom on-policy training loop:
@@ -228,7 +228,7 @@ Alternatively, use a custom on-policy training loop:
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = env.single_observation_space.n, # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space

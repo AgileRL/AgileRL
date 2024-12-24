@@ -172,7 +172,7 @@ if __name__ == "__main__":
         )  # Create environment
 
         try:
-            state_dim = env.single_observation_space.n  # Discrete observation space
+            state_dim = (env.single_observation_space.n,)  # Discrete observation space
             one_hot = True  # Requires one-hot encoding
         except Exception:
             state_dim = (
@@ -236,7 +236,7 @@ if __name__ == "__main__":
     env = make_vect_envs(INIT_HP["ENV_NAME"], num_envs=1)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = (env.single_observation_space.n,)  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space

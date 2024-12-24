@@ -66,7 +66,7 @@ are more likely to remain present in the population. The sequence of evolution (
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = env.single_observation_space.n, # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space
@@ -246,7 +246,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = env.single_observation_space.n, # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space

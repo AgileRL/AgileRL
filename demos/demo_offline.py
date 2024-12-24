@@ -42,7 +42,7 @@ if __name__ == "__main__":
     dataset = h5py.File("data/cartpole/cartpole_random_v1.1.0.h5", "r")  # Load dataset
 
     try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
+        state_dim = (env.single_observation_space.n,)  # Discrete observation space
         one_hot = True  # Requires one-hot encoding
     except Exception:
         state_dim = env.single_observation_space.shape  # Continuous observation space

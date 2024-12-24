@@ -41,7 +41,7 @@ Example
 
   max_action = float(env.single_action_space.high[0])
   try:
-      state_dim = env.single_observation_space.n          # Discrete observation space
+      state_dim = env.single_observation_space.n,         # Discrete observation space
       one_hot = True                                      # Requires one-hot encoding
   except:
       state_dim = env.single_observation_space.shape      # Continuous observation space
