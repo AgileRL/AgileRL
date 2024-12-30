@@ -18,7 +18,7 @@ from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 
 def make_vect_envs(
-    env_name,
+    env_name: Optional[str] = None,
     num_envs=1,
     *,
     make_env: Optional[Callable] = None,
@@ -36,6 +36,9 @@ def make_vect_envs(
     :param should_async_vector: Whether to asynchronous vectorized environments, defaults to True
     :type should_async_vector: bool, optional
     """
+    if env_name is None and make_env is None:
+        raise ValueError("Either env_name or make_env must be provided")
+
     vectorize = (
         gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
     )
