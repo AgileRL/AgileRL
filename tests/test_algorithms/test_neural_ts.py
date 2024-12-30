@@ -22,7 +22,7 @@ class DummyNeuralTS(NeuralTS):
         self,
         observation_space,
         action_space,
-        net_config={"arch": "mlp", "hidden_size": [128]},
+        net_config=None,
         *args,
         **kwargs,
     ):
@@ -92,7 +92,6 @@ def test_initialize_bandit_with_minimum_parameters():
 
     assert bandit.observation_space == observation_space
     assert bandit.action_space == action_space
-    assert bandit.net_config == {"arch": "mlp", "hidden_size": [128]}
     assert bandit.batch_size == 64
     assert bandit.lr == 0.003
     assert bandit.learn_step == 2
@@ -106,9 +105,8 @@ def test_initialize_bandit_with_minimum_parameters():
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert isinstance(bandit.actor, EvolvableMLP)
+    assert isinstance(bandit.actor.encoder, EvolvableMLP)
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
-    assert bandit.arch == "mlp"
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
@@ -118,8 +116,6 @@ def test_initialize_bandit_with_cnn_accelerator():
     action_space = spaces.Discrete(2)
     index = 0
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -154,7 +150,6 @@ def test_initialize_bandit_with_cnn_accelerator():
 
     assert bandit.observation_space == observation_space
     assert bandit.action_space == action_space
-    assert bandit.net_config == net_config_cnn
     assert bandit.batch_size == batch_size
     assert bandit.lr == lr
     assert bandit.learn_step == learn_step
@@ -167,8 +162,7 @@ def test_initialize_bandit_with_cnn_accelerator():
     assert bandit.scores == []
     assert bandit.fitness == []
     assert bandit.steps == [0]
-    assert isinstance(bandit.actor, EvolvableCNN)
-    assert bandit.arch == "cnn"
+    assert isinstance(bandit.actor.encoder, EvolvableCNN)
     assert isinstance(bandit.optimizer.optimizer, AcceleratedOptimizer)
     assert isinstance(bandit.criterion, nn.MSELoss)
 
@@ -192,7 +186,6 @@ def test_initialize_bandit_with_actor_network(
 
     assert bandit.observation_space == observation_space
     assert bandit.action_space == action_space
-    assert bandit.net_config is None
     assert bandit.batch_size == 64
     assert bandit.lr == 0.003
     assert bandit.learn_step == 2
@@ -207,7 +200,6 @@ def test_initialize_bandit_with_actor_network(
     assert bandit.fitness == []
     assert bandit.steps == [0]
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
-    assert bandit.arch == actor_network.arch
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
@@ -221,7 +213,6 @@ def test_initialize_bandit_with_evo_nets():  #
     bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
     assert bandit.observation_space == observation_space
     assert bandit.action_space == action_space
-    assert bandit.net_config is not None
     assert bandit.batch_size == 64
     assert bandit.lr == 0.003
     assert bandit.learn_step == 2
@@ -236,7 +227,6 @@ def test_initialize_bandit_with_evo_nets():  #
     assert bandit.fitness == []
     assert bandit.steps == [0]
     assert isinstance(bandit.optimizer.optimizer, optim.Adam)
-    assert bandit.arch == actor_network.arch
     assert isinstance(bandit.criterion, nn.MSELoss)
 
 
@@ -245,12 +235,12 @@ def test_initialize_neuralts_with_incorrect_actor_net_type():
     action_space = spaces.Discrete(2)
     actor_network = "dummy"
 
-    with pytest.raises(AssertionError) as a:
+    with pytest.raises(TypeError) as a:
         bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
         assert bandit
         assert (
             str(a.value)
-            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
+            == f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule"
         )
 
 
@@ -383,8 +373,6 @@ def test_learning_cnn():
     action_space = spaces.Discrete(2)
     batch_size = 64
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -437,8 +425,6 @@ def test_algorithm_test_loop_images():
     env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
 
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -460,14 +446,12 @@ def test_algorithm_test_loop_images():
         (
             spaces.Box(0, 1, shape=(3, 32, 32)),
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1]
             },
         ),
-        (spaces.Box(0, 1, shape=(4,)), {"arch": "mlp", "hidden_size": [128]}),
+        (spaces.Box(0, 1, shape=(4,)), {"hidden_size": [128]}),
     ],
 )
 def test_clone_returns_identical_agent(observation_space, net_config):
@@ -480,7 +464,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
 
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
-    assert clone_agent.net_config == bandit.net_config
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -504,7 +487,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
 
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
-    assert clone_agent.net_config == bandit.net_config
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -524,7 +506,6 @@ def test_clone_returns_identical_agent(observation_space, net_config):
 
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
-    assert clone_agent.net_config == bandit.net_config
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -555,7 +536,6 @@ def test_clone_with_make_evo(observation_space, actor_network, input_tensor, req
 
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
-    assert clone_agent.net_config == bandit.net_config
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -594,7 +574,6 @@ def test_clone_after_learning():
 
     assert clone_agent.observation_space == bandit.observation_space
     assert clone_agent.action_space == bandit.action_space
-    assert clone_agent.net_config == bandit.net_config
     assert clone_agent.batch_size == bandit.batch_size
     assert clone_agent.lr == bandit.lr
     assert clone_agent.learn_step == bandit.learn_step
@@ -629,10 +608,9 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -648,8 +626,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert bandit.net_config == {"arch": "mlp", "hidden_size": [128]}
-    assert isinstance(bandit.actor, EvolvableMLP)
+    assert isinstance(bandit.actor.encoder, EvolvableMLP)
     assert bandit.lr == 3e-3
     assert bandit.batch_size == 64
     assert bandit.learn_step == 2
@@ -675,8 +652,6 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
@@ -693,10 +668,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -712,8 +686,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert bandit.net_config == net_config_cnn
-    assert isinstance(bandit.actor, EvolvableCNN)
+    assert isinstance(bandit.actor.encoder, EvolvableCNN)
     assert bandit.lr == 3e-3
     assert bandit.batch_size == 64
     assert bandit.learn_step == 2
@@ -761,10 +734,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint
-    assert "actor_state_dict" in checkpoint
-    assert "optimizer_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actor_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_state_dict" in checkpoint['network_info']['modules']
+    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -780,7 +752,6 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     bandit.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert bandit.net_config is None
     assert isinstance(bandit.actor, nn.Module)
     assert bandit.lr == 3e-3
     assert bandit.batch_size == 64
@@ -827,8 +798,7 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_bandit.observation_space == bandit.observation_space
     assert new_bandit.action_space == bandit.action_space
-    assert new_bandit.net_config == bandit.net_config
-    assert isinstance(new_bandit.actor, EvolvableMLP)
+    assert isinstance(new_bandit.actor.encoder, EvolvableMLP)
     assert new_bandit.lr == bandit.lr
     assert str(copy.deepcopy(new_bandit.actor).to("cpu").state_dict()) == str(
         bandit.actor.state_dict()
@@ -869,8 +839,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
@@ -887,8 +855,7 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Check if properties and weights are loaded correctly
     assert new_bandit.observation_space == bandit.observation_space
     assert new_bandit.action_space == bandit.action_space
-    assert new_bandit.net_config == bandit.net_config
-    assert isinstance(new_bandit.actor, EvolvableCNN)
+    assert isinstance(new_bandit.actor.encoder, EvolvableCNN)
     assert new_bandit.lr == bandit.lr
     assert str(copy.deepcopy(new_bandit.actor).to("cpu").state_dict()) == str(
         bandit.actor.state_dict()
@@ -947,7 +914,6 @@ def test_load_from_pretrained_networks(
     # Check if properties and weights are loaded correctly
     assert new_bandit.observation_space == bandit.observation_space
     assert new_bandit.action_space == bandit.action_space
-    assert new_bandit.net_config == bandit.net_config
     assert isinstance(new_bandit.actor, nn.Module)
     assert new_bandit.lr == bandit.lr
     assert str(new_bandit.actor.to("cpu").state_dict()) == str(

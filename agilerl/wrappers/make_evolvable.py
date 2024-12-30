@@ -188,7 +188,32 @@ class MakeEvolvable(EvolvableModule):
 
     def get_output_dense(self) -> nn.Module:
         """Returns the output dense layer."""
-        return getattr(self.value_net, "value_linear_layer_output")
+        final_layer = self.value_net if self.value_net is not None else self.feature_net
+        return getattr(final_layer, f"{'value' if self.value_net is not None else 'feature'}_linear_layer_output")
+    
+    def init_weights_gaussian(self, std_coeff: float = 4.0, output_coeff: float = 2.0):
+        """Initialise network weights using Gaussian distribution.
+
+        :param std_coeff: Standard deviation coefficient, defaults to 4.0
+        :type std_coeff: float, optional
+        :param output_coeff: Output coefficient, defaults to 2.0
+        :type output_coeff: float, optional
+        """
+        layers = [module for module in self.feature_net.children()]
+        if self.arch == "cnn":
+            layers += [module for module in self.value_net.children()]
+
+        # Initialize network layers
+        l_no = 0
+        for i, layer in enumerate(layers):
+            if i < len(layers) - 1:
+                if isinstance(layer, nn.Linear):
+                    EvolvableModule.init_weights_gaussian(layer, std_coeff=std_coeff)
+                    l_no += 1
+            else:
+                EvolvableModule.init_weights_gaussian(
+                    layer, std_coeff=output_coeff
+                )
 
     def forward(self, x: ArrayOrTensor, xc: ArrayOrTensor = None, q: bool = True):
         """Returns output of neural network.

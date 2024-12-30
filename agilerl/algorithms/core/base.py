@@ -435,6 +435,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if self.accelerator is not None and wrap:
             clone.wrap_models()
 
+        # Run init hooks
+        for hook in clone.registry.hooks:
+            getattr(clone, hook)()
+
         # Copy non-evolvable attributes back to clone
         for attribute in self.inspect_attributes().keys():
             if hasattr(self, attribute) and hasattr(clone, attribute):
@@ -443,9 +447,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     clone_attr, torch.Tensor
                 ):
                     if not torch.equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
+                        try:
+                            setattr(
+                                clone, attribute, copy.deepcopy(getattr(self, attribute))
+                            )
+                        except RuntimeError:
+                            # If the tensor is not a leaf tensor, we need to clone it
+                            setattr(clone, attribute, torch.clone(getattr(self, attribute)))
+
                 elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
                     if not np.array_equal(attr, clone_attr):
                         setattr(

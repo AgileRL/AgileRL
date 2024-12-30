@@ -271,6 +271,21 @@ def layer_init(layer: LayerType, std: float = np.sqrt(2), bias_const: float = 0.
 
     return layer
 
+def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
+    """Initialize weights of a module using Gaussian distribution.
+
+    :param m: Module to initialize
+    :type m: nn.Module
+    :param mean: Mean of the Gaussian distribution
+    :type mean: float
+    :param std: Standard deviation of the Gaussian distribution
+    :type std: float
+    """
+    if isinstance(m, nn.Linear):
+        torch.nn.init.normal_(m.weight, mean=mean, std=std)
+        if m.bias is not None:
+            torch.nn.init.constant_(m.bias, 0)
+
 
 def calc_max_kernel_sizes(
         channel_size: List[int],

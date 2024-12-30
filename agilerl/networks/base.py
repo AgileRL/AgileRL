@@ -214,6 +214,31 @@ class EvolvableNetwork(EvolvableModule, ABC):
     
         return net_config
     
+    def modules(self) -> Dict[str, SupportedEvolvable]:
+        """Modules of the network.
+        
+        :return: Modules of the network.
+        :rtype: Dict[str, EvolvableModule]
+        """
+        return super().modules()
+    
+    def init_weights_gaussian(self, std_coeff: float = 4.0, output_coeff: float = 2.0) -> None:
+        """Initialize the weights of the network with a Gaussian distribution.
+        
+        :param std_coeff: Coefficient for the standard deviation of the Gaussian distribution, defaults to 4.0
+        :type std_coeff: float, optional
+        :param output_coeff: Coefficient for the standard deviation of the Gaussian distribution for the output layer, defaults to 2.0
+        :type output_coeff: float, optional
+        """
+        # Initialize the weights of the encoder
+        self.encoder.init_weights_gaussian(std_coeff=std_coeff)
+
+        # Initialize weights of network heads
+        # NOTE: We assume the head is an instance of EvolvableMLP
+        for attr, module in self.modules().items():
+            if attr != "encoder":
+                module.init_weights_gaussian(std_coeff=std_coeff, output_coeff=output_coeff)
+    
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Change the activation function for the network.
 

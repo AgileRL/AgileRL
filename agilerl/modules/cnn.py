@@ -280,6 +280,12 @@ class EvolvableCNN(EvolvableModule):
     def activation(self, activation: str) -> None:
         """Sets the activation function of the network."""
         self._activation = activation
+
+    def init_weights_gaussian(self, std_coeff: float = 4) -> None:
+        """Initialise weights of linear layer using Gaussian distribution."""
+        # Output layer is initialised with std_coeff=2
+        output_layer = self.get_output_dense()
+        EvolvableModule.init_weights_gaussian(output_layer, std_coeff=std_coeff)
     
     def get_output_dense(self) -> torch.nn.Module:
         """Returns output layer of neural network."""

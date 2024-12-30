@@ -34,13 +34,12 @@ def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], Mu
     return decorator
 
 class _ModuleMeta(type):
-    """Metaclass to wrap registry information after algorithm is done 
-    intiializing with specified network groups and optimizers."""
+    """Metaclass to parse the mutation methods of an EvolvableModule instance 
+    and its superclasses."""
     def __call__(cls, *args, **kwargs):
-        # Create the instance
         instance: SelfEvolvableModule = super().__call__(*args, **kwargs)
 
-        # Call the base class post_init_hook after all initialization
+        # Parse and log mutation methods from the instance
         if isinstance(instance, cls) and hasattr(instance, "_init_underlying_methods"):
             instance._init_underlying_methods()
 
@@ -98,6 +97,15 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
 
 
     def __getattr__(self, name: str) -> Any:
+        """Get attribute of the network. If the attribute is a mutation method, return the
+        method (from an underlying EvolvableModule attribute also). Otherwise, raise an 
+        AttributeError.
+        
+        :param name: The name of the attribute.
+        :type name: str
+        :return: The attribute of the network.
+        :rtype: Any
+        """
         try:
             return super().__getattr__(name)
         except AttributeError as e:
@@ -180,9 +188,31 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                 if isinstance(layer, NoisyLinear):
                     layer.reset_noise()
 
+    @staticmethod
+    def init_weights_gaussian(module: nn.Module, std_coeff: float) -> None:
+        """Initialize the weights of the neural network using a Gaussian distribution.
+
+        :param module: The neural network module.
+        :type module: nn.Module
+        """
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                hidden_size = m.weight.size(1)
+                nn.init.normal_(m.weight, mean=0, std=std_coeff / hidden_size)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        if isinstance(module, nn.Linear):
+            init_weights(module)
+            return
+
+        layers = [m for m in module.children()]
+        for layer in layers:
+            init_weights(layer)
+
     def modules(self) -> Dict[str, "EvolvableModule"]:
-        """Returns the attributes related to the evolvable networks in the algorithm. Includes 
-        attributes that are either evolvable networks or a list of evolvable networks, as well 
+        """Returns the attributes related to the evolvable modules in the algorithm. Includes 
+        attributes that are either evolvable modules or a list of evolvable modules, as well 
         as the optimizers associated with the networks.
 
         :return: A dictionary of network attributes.

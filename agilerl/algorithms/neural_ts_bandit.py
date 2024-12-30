@@ -1,28 +1,25 @@
-from typing import Optional, Dict, Any
-import copy
-import inspect
-import warnings
-import dill
+from typing import Optional, Union, Dict, Any
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import torch.optim as optim
 from gymnasium import spaces
 
+from agilerl.typing import NumpyObsType, ArrayLike, ExperiencesType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.modules.base import EvolvableModule
+from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_functions import ValueFunction
 from agilerl.utils.evolvable_networks import get_default_config
-from agilerl.utils.algo_utils import (
-    chkpt_attribute_to_device,
-    unwrap_optimizer,
-    obs_channels_to_first,
-    make_safe_deepcopies
-)
+from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+
+SupportedEvolvable = Union[EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableNetwork]
+
 
 class NeuralTS(RLAlgorithm):
     """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827    
@@ -118,34 +115,22 @@ class NeuralTS(RLAlgorithm):
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):
-                warnings.warn(
-                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
-                )
-            if not isinstance(actor_network, nn.Module):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                      )
 
             # Need to make deepcopies for target and detached networks
-            self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
+            self.actor = make_safe_deepcopies(actor_network)
         else:
             net_config = get_default_config(observation_space) if net_config is None else net_config
-            
-            # Layer norm is not used in the original implementation
-            net_config['layer_norm'] = False
+            net_config['layer_norm'] = False # Layer norm is not used in the original implementation
 
-            create_actor = lambda: ValueFunction(
+            self.actor = ValueFunction(
                 observation_space=observation_space,
                 encoder_config=net_config,
                 head_config=head_config,
                 device=self.device
             )
-            self.actor = create_actor()
-            self.actor_target = create_actor()
-
-        layers = [module for module in self.actor.feature_net.children()]
-        if self.actor.arch == "cnn":
-            layers += [module for module in self.actor.value_net.children()]
 
         self.optimizer = OptimizerWrapper(
             optim.Adam,
@@ -157,39 +142,13 @@ class NeuralTS(RLAlgorithm):
             self.wrap_models()
 
         # Initialize network layers
-        l_no = 0
-        for i, layer in enumerate(layers):
-            if i < len(layers) - 1:
-                if isinstance(layer, (nn.Linear, nn.Conv2d)):
-                    if self.actor.arch == "mlp":
-                        hidden_size = self.actor.hidden_size[l_no]
-                    else:
-                        hidden_size = (
-                            self.actor.channel_size[l_no]
-                            if i <= len(self.actor.channel_size)
-                            else self.actor.hidden_size[
-                                l_no - len(self.actor.channel_size)
-                            ]
-                        )
-                    self._init_weights_gaussian(layer, mean=0, std=4 / hidden_size)
-                    l_no += 1
-            else:
-                self._init_weights_gaussian(layer, mean=0, std=2 / hidden_size)
-                self.exp_layer = layer
-
-        self.numel = sum(
-            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
-        )
-        self.sigma_inv = lamb * torch.eye(self.numel).to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-        self.theta_0 = torch.cat(
-            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
-        )
+        self.actor.init_weights_gaussian(std_coeff=4, output_coeff=2)
+        self.init_params()
 
         self.criterion = nn.MSELoss()
 
         # Register network groups for mutations
+        self.register_init_hook(self.init_params)
         self.register_network_group(
             NetworkGroup(
                 eval=self.actor,
@@ -198,33 +157,38 @@ class NeuralTS(RLAlgorithm):
             )
         )
 
-    def _init_weights_gaussian(self, m, mean, std):
-        if isinstance(m, nn.Linear):
-            init.normal_(m.weight, mean=mean, std=std)
-            if m.bias is not None:
-                init.constant_(m.bias, 0)
+    def init_params(self) -> None:
+        self.exp_layer = self.actor.get_output_dense()
+
+        self.numel = sum(
+            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
+        )
+        self.sigma_inv = self.lamb * torch.eye(self.numel).to(self.device)
+        self.theta_0 = torch.cat(
+            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
+        )
 
 
-    def get_action(self, state, action_mask=None):
+    def get_action(self, state: NumpyObsType, action_mask: Optional[ArrayLike] = None) -> int:
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
         :type state: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+        :return: Action to take in the environment
+        :rtype: int
         """
         state = self.preprocess_observation(state)
 
         mu = self.actor(state)
-        g = torch.zeros((self.action_dim, self.numel)).to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
+        g = torch.zeros((self.action_dim, self.numel)).to(self.device)
         for k, fx in enumerate(mu):
             self.optimizer.zero_grad()
             fx.backward(retain_graph=True)
             g[k] = torch.cat(
                 [
-                    w.grad.detach().flatten() / np.sqrt(self.actor.hidden_size[-1])
+                    w.grad.detach().flatten() / np.sqrt(self.exp_layer.weight.size(0))
                     for w in self.exp_layer.parameters()
                     if w.requires_grad
                 ]
@@ -257,7 +221,7 @@ class NeuralTS(RLAlgorithm):
 
         return action
 
-    def learn(self, experiences):
+    def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
@@ -291,11 +255,17 @@ class NeuralTS(RLAlgorithm):
             self.accelerator.backward(loss)
         else:
             loss.backward()
+
         self.optimizer.step()
 
         return loss.item()
 
-    def test(self, env, swap_channels=False, max_steps=100, loop=1):
+    def test(
+            self,
+            env: GymEnvType,
+            swap_channels: bool = False,
+            max_steps: int = 100,
+            loop: int = 1) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -312,15 +282,11 @@ class NeuralTS(RLAlgorithm):
             for i in range(loop):
                 state = env.reset()
                 score = 0
-                for idx_step in range(max_steps):
+                for _ in range(max_steps):
                     if swap_channels:
                         state = obs_channels_to_first(state)
-                    state = torch.from_numpy(state)
-                    state = state.to(
-                        self.device
-                        if self.accelerator is None
-                        else self.accelerator.device
-                    )
+                    state = torch.from_numpy(state).float()
+                    state = state.to(self.device)
                     action = np.argmax(self.actor(state).cpu().numpy())
                     state, reward = env.step(action)
                     score += reward
@@ -328,221 +294,3 @@ class NeuralTS(RLAlgorithm):
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
-
-    def clone(self, index=None, wrap=True):
-        """Returns cloned agent identical to self.
-
-        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
-        :type index: int, optional
-        """
-        input_args = self.inspect_attributes(input_args_only=True)
-        input_args["wrap"] = wrap
-
-        if input_args.get("net_config") is None:
-            input_args['actor_network'] = self.actor
-
-        clone = type(self)(**input_args)
-
-        actor = self.actor.clone()
-        optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=actor,
-            optimizer_kwargs={"lr": self.lr},
-            network_names=self.optimizer.network_names,
-        )
-        optimizer.load_state_dict(self.optimizer.state_dict())
-        if self.accelerator is not None and wrap:
-            (
-                clone.actor,
-                clone.optimizer,
-            ) = self.accelerator.prepare(actor, optimizer)
-
-        else:
-            clone.actor = actor
-            clone.optimizer = optimizer
-
-        for attribute in self.inspect_attributes().keys():
-            if hasattr(self, attribute) and hasattr(clone, attribute):
-                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(
-                    clone_attr, torch.Tensor
-                ):
-                    setattr(clone, attribute, torch.clone(getattr(self, attribute)))
-                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
-                    if not np.array_equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                else:
-                    if attr != clone_attr:
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-            else:
-                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
-
-        if clone.actor.arch == "mlp":
-            if isinstance(clone.actor, EvolvableMLP):
-                clone.exp_layer = clone.actor.feature_net.mlp_linear_layer_output
-            else:
-                clone.exp_layer = clone.actor.feature_net.feature_linear_layer_output
-        else:
-            clone.exp_layer = clone.actor.value_net.value_linear_layer_output
-
-        clone.numel = sum(
-            w.numel() for w in clone.exp_layer.parameters() if w.requires_grad
-        )
-        clone.theta_0 = torch.cat(
-            [w.flatten() for w in clone.exp_layer.parameters() if w.requires_grad]
-        )
-        clone.sigma_inv = clone.sigma_inv.to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-
-        if index is not None:
-            clone.index = index
-
-        return clone
-
-    def unwrap_models(self):
-        if self.accelerator is not None:
-            self.actor = self.accelerator.unwrap_model(self.actor)
-            self.optimizer = unwrap_optimizer(self.optimizer, self.actor, self.lr)
-
-    def load_checkpoint(self, path):
-        """Loads saved agent properties and network weights from checkpoint.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        """
-        network_info = [
-            "actor_state_dict",
-            "optimizer_state_dict",
-            "actor_init_dict",
-            "net_config",
-            "lr",
-        ]
-
-        checkpoint = torch.load(path, map_location=self.device, pickle_module=dill)
-        self.net_config = checkpoint["net_config"]
-        if self.net_config is not None:
-            self.arch = checkpoint["net_config"]["arch"]
-            if self.net_config["arch"] == "mlp":
-                network_class = EvolvableMLP
-            elif self.net_config["arch"] == "cnn":
-                network_class = EvolvableCNN
-        else:
-            network_class = MakeEvolvable
-
-        self.actor = network_class(**checkpoint["actor_init_dict"])
-
-        self.lr = checkpoint["lr"]
-        self.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            optimizer_kwargs={"lr": self.lr},
-            network_names=self.optimizer.network_names
-        )
-        self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-        for attribute in checkpoint.keys():
-            if attribute not in network_info:
-                setattr(self, attribute, checkpoint[attribute])
-
-        if self.actor.arch == "mlp":
-            if isinstance(self.actor, EvolvableMLP):
-                self.exp_layer = self.actor.feature_net.mlp_linear_layer_output
-            else:
-                self.exp_layer = self.actor.feature_net.feature_linear_layer_output
-        else:
-            self.exp_layer = self.actor.value_net.value_linear_layer_output
-
-        self.numel = sum(
-            w.numel() for w in self.exp_layer.parameters() if w.requires_grad
-        )
-        self.theta_0 = torch.cat(
-            [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
-        )
-        self.sigma_inv = self.sigma_inv.to(
-            self.device if self.accelerator is None else self.accelerator.device
-        )
-
-    @classmethod
-    def load(cls, path, device="cpu", accelerator=None):
-        """Creates agent with properties and network weights loaded from path.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-        :type device: str, optional
-        :param accelerator: Accelerator for distributed computing, defaults to None
-        :type accelerator: accelerate.Accelerator(), optional
-        """
-        checkpoint = torch.load(path, map_location=device, pickle_module=dill)
-        checkpoint["actor_init_dict"]["device"] = device
-
-        actor_init_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_init_dict"), device
-        )
-        actor_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("actor_state_dict"), device
-        )
-        optimizer_state_dict = chkpt_attribute_to_device(
-            checkpoint.pop("optimizer_state_dict"), device
-        )
-
-        checkpoint["device"] = device
-        checkpoint["accelerator"] = accelerator
-        checkpoint = chkpt_attribute_to_device(checkpoint, device)
-
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
-
-        if checkpoint["net_config"] is not None:
-            agent = cls(**class_init_dict)
-            agent.arch = checkpoint["net_config"]["arch"]
-            if agent.arch == "mlp":
-                agent.actor = EvolvableMLP(**actor_init_dict)
-            elif agent.arch == "cnn":
-                agent.actor = EvolvableCNN(**actor_init_dict)
-        else:
-            class_init_dict["actor_network"] = MakeEvolvable(**actor_init_dict)
-            agent = cls(**class_init_dict)
-
-        agent.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=agent.actor,
-            optimizer_kwargs={"lr": agent.lr},
-            network_names=agent.optimizer.network_names,
-        )
-        agent.actor.load_state_dict(actor_state_dict)
-        agent.optimizer.load_state_dict(optimizer_state_dict)
-
-        if accelerator is not None:
-            agent.wrap_models()
-
-        for attribute in agent.inspect_attributes().keys():
-            setattr(agent, attribute, checkpoint[attribute])
-
-        if agent.actor.arch == "mlp":
-            if isinstance(agent.actor, EvolvableMLP):
-                agent.exp_layer = agent.actor.feature_net.mlp_linear_layer_output
-            else:
-                agent.exp_layer = agent.actor.feature_net.feature_linear_layer_output
-        else:
-            agent.exp_layer = agent.actor.value_net.value_linear_layer_output
-
-        agent.numel = sum(
-            w.numel() for w in agent.exp_layer.parameters() if w.requires_grad
-        )
-        agent.theta_0 = torch.cat(
-            [w.flatten() for w in agent.exp_layer.parameters() if w.requires_grad]
-        )
-        agent.sigma_inv = agent.sigma_inv.to(
-            device if accelerator is None else accelerator.device
-        )
-
-        return agent

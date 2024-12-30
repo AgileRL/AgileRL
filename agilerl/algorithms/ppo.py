@@ -190,11 +190,6 @@ class PPO(RLAlgorithm):
         self.compile = compile
         self.cudagraphs = cudagraphs
 
-        # For continuous action spaces
-        if not self.discrete_actions:
-            device = self.device if self.accelerator is None else self.accelerator.device
-            self.action_var = torch.full((self.action_dim,), action_std_init**2, device=device)
-
         if actor_network is not None and critic_network is not None:
             assert type(actor_network) is type(
                 critic_network
@@ -221,6 +216,7 @@ class PPO(RLAlgorithm):
             self.actor = StochasticActor(
                 observation_space,
                 action_space,
+                log_std_init=self.action_std_init,
                 encoder_config=net_config,
                 head_config=head_config,
                 device=device

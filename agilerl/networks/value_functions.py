@@ -54,7 +54,7 @@ class ValueFunction(EvolvableNetwork):
             latent_dim=latent_dim,
             device=device
             )
-        
+
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
@@ -82,7 +82,14 @@ class ValueFunction(EvolvableNetwork):
             "latent_dim": self.latent_dim,
             "device": self.device
             }
+    
+    def get_output_dense(self) -> torch.nn.Linear:
+        """Returns the output dense layer of the network.
 
+        :return: Output dense layer.
+        :rtype: torch.nn.Linear
+        """
+        return self.value_net.get_output_dense()
     
     def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
         """Builds the head of the network.

@@ -352,6 +352,14 @@ class EvolvableMultiInput(EvolvableModule):
 
         return reformatted_dicts
     
+    def init_weights_gaussian(self, std_coeff: float = 4, output_coeff: float = 4) -> None:
+        """Initialise weights of linear layers using Gaussian distribution."""
+        for module in self.feature_net.values():
+            module.init_weights_gaussian(std_coeff=std_coeff)
+
+        # Initialise final dense layer
+        EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
+    
     def get_init_dict(self, key: str, default: Literal['cnn', 'mlp']) -> Dict[str, Any]:
         """Returns the initialization dictionary for the specified key.
         

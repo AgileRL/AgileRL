@@ -162,6 +162,14 @@ class EvolvableMLP(EvolvableModule):
     def reset_noise(self) -> None:
         """Resets noise of value and advantage networks."""
         EvolvableModule.reset_noise(self.model)
+        
+    def init_weights_gaussian(self, std_coeff: float = 4, output_coeff: float = 4) -> None:
+        """Initialise weights of neural network using Gaussian distribution."""
+        EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
+
+        # Output layer is initialised with std_coeff=2
+        output_layer = self.get_output_dense()
+        EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns output of neural network.

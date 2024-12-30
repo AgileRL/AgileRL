@@ -274,6 +274,7 @@ class StochasticActor(DeterministicActor):
             action_space: spaces.Space,
             encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
+            log_std_init: float = 0.0,
             min_latent_dim: int = 8,
             max_latent_dim: int = 128,
             n_agents: Optional[int] = None,
@@ -293,7 +294,29 @@ class StochasticActor(DeterministicActor):
             device=device
             )
         
-        self.actor_net = EvolvableDistribution(action_space, self.actor_net, device=device)
+        self.actor_net = EvolvableDistribution(
+            action_space, self.actor_net, log_std_init=log_std_init, device=device
+            )
+        
+    @property
+    def init_dict(self) -> Dict[str, Any]:
+        """Initializes the configuration of the Rainbow Q network.
+        
+        :return: Configuration of the Rainbow Q network.
+        :rtype: Dict[str, Any]
+        """
+        return {
+            "observation_space": self.observation_space,
+            "action_space": self.action_space,
+            "encoder_config": self.encoder.net_config,
+            "head_config": self.actor_net.actor_net.net_config,
+            "log_std_init": self.actor_net.log_std_init,
+            "min_latent_dim": self.min_latent_dim,
+            "max_latent_dim": self.max_latent_dim,
+            "n_agents": self.n_agents,
+            "latent_dim": self.latent_dim,
+            "device": self.device
+            }
     
     def forward(self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None) -> Distribution:
         """Forward pass of the network.
@@ -324,8 +347,19 @@ class StochasticActor(DeterministicActor):
         """
         super().recreate_network(shrink_params)
 
-        self.actor_net = EvolvableDistribution(
-            self.action_space, self.actor_net, device=self.device
+        actor_net = self.build_network_head(self.actor_net.actor_net.net_config)
+        actor_net = EvolvableDistribution(
+            self.action_space, actor_net, device=self.device
             )
+
+        # Preserve parameters of the network
+        preserve_params_fn = (
+            EvolvableModule.shrink_preserve_parameters if shrink_params 
+            else EvolvableModule.preserve_parameters
+        )
+
+        self.actor_net = preserve_params_fn(self.actor_net, actor_net)
+
+        
 
 
