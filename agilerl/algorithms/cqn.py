@@ -19,12 +19,8 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.typing import NumpyObsType
-from agilerl.utils.algo_utils import (
-    chkpt_attribute_to_device,
-    unwrap_optimizer,
-    obs_channels_to_first,
-    make_safe_deepcopies
-)
+from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+
 
 class CQN(RLAlgorithm):
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779

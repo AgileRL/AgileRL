@@ -53,6 +53,9 @@ def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableM
     :return: True if the object is a list of EvolvableModule's, False otherwise.
     :rtype: bool.
     """
+    if not isinstance(obj, list):
+        return False
+
     return all(isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj)
 
 def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimizer]]:
@@ -160,6 +163,11 @@ def chkpt_attribute_to_device(chkpt_dict: Dict[str, torch.Tensor], device: str) 
     :param device: Device for accelerated computing, 'cpu' or 'cuda'
     :type device: str
     """
+    if isinstance(chkpt_dict, list):
+        return [chkpt_attribute_to_device(chkpt, device) for chkpt in chkpt_dict]
+
+    assert isinstance(chkpt_dict, dict), f"Expected dict, got {type(chkpt_dict)}"
+
     for key, value in chkpt_dict.items():
         if hasattr(value, "device") and not isinstance(value, Accelerator):
             chkpt_dict[key] = value.to(device)

@@ -48,6 +48,7 @@ class OptimizerConfig:
     networks: Union[str, List[str]]
     optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
     optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
+    multiagent: bool = field(default=False)
 
     def __post_init__(self):
         # Save optimizer_cls as string for serialization

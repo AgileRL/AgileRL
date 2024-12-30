@@ -209,7 +209,7 @@ class PPO(RLAlgorithm):
         else:
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = None
+                critic_head_config["output_activation"] = None # Value function has no output activation
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
