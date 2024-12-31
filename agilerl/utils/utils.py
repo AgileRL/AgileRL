@@ -23,7 +23,7 @@ def make_vect_envs(
     *,
     make_env: Optional[Callable] = None,
     should_async_vector: bool = True,
-    **kwargs
+    **env_kwargs
 ):
     """Returns async-vectorized gym environments.
 
@@ -44,7 +44,7 @@ def make_vect_envs(
     )
 
     def default_make_env():
-        return gym.make(env_name, **kwargs)
+        return gym.make(env_name, **env_kwargs)
 
     make_env = make_env or default_make_env
 
