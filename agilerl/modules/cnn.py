@@ -124,27 +124,32 @@ class MutableKernelSizes:
 
 
 class EvolvableCNN(EvolvableModule):
-    """The Evolvable Convolutional Neural Network class. It supports the evolution of the CNN architecture
+    """
+    The Evolvable Convolutional Neural Network class. It supports the evolution of the CNN architecture
     by adding or removing convolutional layers, changing the number of channels in each layer, changing the
     kernel size and stride size of each layer, and changing the number of nodes in the fully connected layer.
 
     :param input_shape: Input shape
-    :type input_shape: list[int]
+    :type input_shape: List[int]
     :param num_outputs: Action dimension
     :type num_outputs: int
     :param channel_size: CNN channel size
-    :type channel_size: list[int]
+    :type channel_size: List[int]
     :param kernel_size: Convolution kernel size
-    :type kernel_size: list[int], list[tuple[int, ...]]
+    :type kernel_size: List[KernelSizeType]
     :param stride_size: Convolution stride size
-    :type stride_size: list[int]
-    :param output_activation: MLP output activation layer, defaults to None
-    :type output_activation: str, optional
-    :param activation: CNN activation layer, defaults to 'relu'
+    :type stride_size: List[int]
+    :param sample_input: Sample input tensor, defaults to None
+    :type sample_input: Optional[torch.Tensor], optional
+    :param block_type: Type of convolutional block, either 'Conv2d' or 'Conv3d', defaults to 'Conv2d'
+    :type block_type: Literal["Conv2d", "Conv3d"], optional
+    :param activation: CNN activation layer, defaults to 'ReLU'
     :type activation: str, optional
+    :param output_activation: MLP output activation layer, defaults to None
+    :type output_activation: Optional[str], optional
     :param min_hidden_layers: Minimum number of hidden layers the fully connected layer will shrink down to, defaults to 1
     :type min_hidden_layers: int, optional
-    :param max_hidden_layers: Maximum number of hidden layers the fully connected layer will expand to, defaults to 3
+    :param max_hidden_layers: Maximum number of hidden layers the fully connected layer will expand to, defaults to 6
     :type max_hidden_layers: int, optional
     :param min_channel_size: Minimum number of channels a convolutional layer can have, defaults to 32
     :type min_channel_size: int, optional
@@ -156,8 +161,9 @@ class EvolvableCNN(EvolvableModule):
     :type init_layers: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
+    :param name: Name of the CNN, defaults to 'cnn'
+    :type name: str, optional
     """
-    arch: str = "cnn"
 
     def __init__(
         self,

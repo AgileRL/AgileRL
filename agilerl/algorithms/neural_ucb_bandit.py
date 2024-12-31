@@ -24,8 +24,10 @@ class NeuralUCB(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head configuration for the network, defaults to None
+    :type head_config: dict, optional
     :param gamma: Positive scaling factor, defaults to 1.0
     :type gamma: float, optional
     :param lamb: Regularization parameter lambda, defaults to 1.0
@@ -34,18 +36,20 @@ class NeuralUCB(RLAlgorithm):
     :type reg: float, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :param normalize_images: Flag to normalize images, defaults to True
+    :type normalize_images: bool, optional
+    :param lr: Learning rate for optimizer, defaults to 1e-3
     :type lr: float, optional
     :param learn_step: Learning frequency, defaults to 2
     :type learn_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -171,6 +175,9 @@ class NeuralUCB(RLAlgorithm):
         :type state: numpy.ndarray[float]
         :param action_mask: Mask of legal actions 1=legal 0=illegal, defaults to None
         :type action_mask: numpy.ndarray, optional
+
+        :return: Action to take in the environment
+        :rtype: int
         """
         state = self.preprocess_observation(state)
 
@@ -216,7 +223,10 @@ class NeuralUCB(RLAlgorithm):
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: Batched states, rewards in that order.
-        :type state: list[torch.Tensor[float]]
+        :type experiences: tuple[numpy.ndarray, numpy.ndarray]
+
+        :return: Loss value from training step
+        :rtype: float
         """
         states, rewards = experiences
         if self.accelerator is not None:
@@ -267,6 +277,9 @@ class NeuralUCB(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 3
         :type loop: int, optional
+
+        :return: Mean test score of agent in environment
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []

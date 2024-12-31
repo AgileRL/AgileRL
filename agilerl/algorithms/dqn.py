@@ -25,13 +25,15 @@ class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
 
     :param observation_space: Observation space of the environment
-    :type observation_space: gym.spaces.Space
+    :type observation_space: gymnasium.spaces.Space
     :param action_space: Action space of the environment
-    :type action_space: gym.spaces.Space
+    :type action_space: gymnasium.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head configuration for the network, defaults to None
+    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -47,11 +49,13 @@ class DQN(RLAlgorithm):
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
+    :param cudagraphs: Use CUDA graphs for optimization, defaults to False
+    :type cudagraphs: bool, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -323,6 +327,9 @@ class DQN(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean over these tests. Defaults to 1
         :type loop: int, optional
+
+        :return: Mean test score of agent in environment
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []

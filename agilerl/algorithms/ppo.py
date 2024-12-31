@@ -387,6 +387,9 @@ class PPO(RLAlgorithm):
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
+
+        :return: Mean loss of actor and critic networks
+        :rtype: float
         """
         (
             states,
@@ -514,12 +517,12 @@ class PPO(RLAlgorithm):
         return mean_loss
 
     def test(
-        self,
-        env: GymEnvType,
-        swap_channels: bool = False,
-        max_steps: Optional[int] = None,
-        loop: int = 3
-    ) -> float:
+            self,
+            env: GymEnvType,
+            swap_channels: bool = False,
+            max_steps: Optional[int] = None,
+            loop: int = 3
+        ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -530,6 +533,9 @@ class PPO(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
+
+        :return: Mean test score of agent in environment
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []

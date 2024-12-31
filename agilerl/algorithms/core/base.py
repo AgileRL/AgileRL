@@ -49,17 +49,19 @@ class RegistryMeta(_RegistryMeta, ABCMeta):
     ...
 
 class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
-    """Base object for all algorithms in the AgileRL framework. 
-    
+    """Base object for all algorithms in the AgileRL framework.
+
     :param index: The index of the individual.
-    :type index: int.
-    :param learn_step: Learning frequency, defaults to 2048
+    :type index: int
+    :param learn_step: Learning frequency, defaults to 2048.
     :type learn_step: int, optional
-    :param device: Device to run the algorithm on, defaults to "cpu"
-    :type device: str, optional
-    :param accelerator: Accelerator object for distributed computing, defaults to None
+    :param device: Device to run the algorithm on, defaults to "cpu".
+    :type device: Union[str, torch.device], optional
+    :param accelerator: Accelerator object for distributed computing, defaults to None.
     :type accelerator: Optional[Accelerator], optional
-    :param name: Name of the algorithm, defaults to the class name
+    :param torch_compiler: The torch compiler mode to use, defaults to None.
+    :type torch_compiler: Optional[Any], optional
+    :param name: Name of the algorithm, defaults to the class name.
     :type name: Optional[str], optional
     """
     def __init__(
@@ -765,20 +767,20 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all single-agent algorithms in the AgileRL framework. 
     
     :param observation_space: The observation space of the environment.
-    :type observation_space: spaces.Space.
+    :type observation_space: spaces.Space
     :param action_space: The action space of the environment.
-    :type action_space: spaces.Space.
+    :type action_space: spaces.Space
     :param index: The index of the individual.
-    :type index: int.
-    :param learn_step: Learning frequency, defaults to 2048
+    :type index: int
+    :param learn_step: Learning frequency, defaults to 2048.
     :type learn_step: int, optional
-    :param device: Device to run the algorithm on, defaults to "cpu"
-    :type device: str, optional
-    :param accelerator: Accelerator object for distributed computing, defaults to None
+    :param device: Device to run the algorithm on, defaults to "cpu".
+    :type device: Union[str, torch.device], optional
+    :param accelerator: Accelerator object for distributed computing, defaults to None.
     :type accelerator: Optional[Accelerator], optional
-    :param normalize_images: If True, normalize images, defaults to True
+    :param normalize_images: If True, normalize images, defaults to True.
     :type normalize_images: bool, optional
-    :param name: Name of the algorithm, defaults to the class name
+    :param name: Name of the algorithm, defaults to the class name.
     :type name: Optional[str], optional
     """
 

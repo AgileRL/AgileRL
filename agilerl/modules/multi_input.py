@@ -44,10 +44,10 @@ class EvolvableMultiInput(EvolvableModule):
 
     .. note::
         The mutations are done on the basis of the allowed methods in the `EvolvableCNN` and `EvolvableMLP`
-        classes. For any selected method, we choose a random module containing the method to apply it against.
+        classes.
 
     :param observation_space: Dictionary or Tuple space of observations.
-    :type observation_space: spaces.Dict, spaces.Tuple
+    :type observation_space: spaces.Dict or spaces.Tuple
     :param num_outputs: Dimension of the output tensor.
     :type num_outputs: int
     :param channel_size: List of channel sizes for the convolutional layers.
@@ -102,8 +102,6 @@ class EvolvableMultiInput(EvolvableModule):
     :type device: str, optional
     """
     feature_net: Dict[str, SupportedEvolvableTypes]
-
-    arch: str = "multi_input"
 
     def __init__(
             self,

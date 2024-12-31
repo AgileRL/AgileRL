@@ -30,8 +30,10 @@ class NeuralTS(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head configuration, defaults to None
+    :type head_config: dict, optional
     :param gamma: Positive scaling factor, defaults to 1.0
     :type gamma: float, optional
     :param lamb: Regularization parameter lambda, defaults to 1.0
@@ -40,18 +42,20 @@ class NeuralTS(RLAlgorithm):
     :type reg: float, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
-    :param lr: Learning rate for optimizer, defaults to 1e-4
+    :param lr: Learning rate for optimizer, defaults to 3e-3
     :type lr: float, optional
+    :param normalize_images: Normalize images flag, defaults to True
+    :type normalize_images: bool, optional
     :param learn_step: Learning frequency, defaults to 2
     :type learn_step: int, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -158,9 +162,7 @@ class NeuralTS(RLAlgorithm):
         )
 
     def init_params(self) -> None:
-        print(self.actor.device)
-        print("Device =", self.device)
-        print("Accelerator = ", self.accelerator)
+        """Initializes parameters for the agent network."""
         self.exp_layer = self.actor.get_output_dense()
 
         self.numel = sum(

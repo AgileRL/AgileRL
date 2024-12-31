@@ -14,36 +14,35 @@ class EvolvableMLP(EvolvableModule):
     :type num_outputs: int
     :param hidden_size: Hidden layer(s) size
     :type hidden_size: List[int]
-    :param mlp_activation: Activation layer, defaults to 'ReLU'
-    :type mlp_activation: Optional[str]
-    :param mlp_output_activation: Output activation layer, defaults to None
-    :type mlp_output_activation: Optional[str]
+    :param activation: Activation layer, defaults to 'ReLU'
+    :type activation: str, optional
+    :param output_activation: Output activation layer, defaults to None
+    :type output_activation: str, optional
     :param min_hidden_layers: Minimum number of hidden layers the network will shrink down to, defaults to 1
-    :type min_hidden_layers: Optional[int]
+    :type min_hidden_layers: int, optional
     :param max_hidden_layers: Maximum number of hidden layers the network will expand to, defaults to 3
-    :type max_hidden_layers: Optional[int]
+    :type max_hidden_layers: int, optional
     :param min_mlp_nodes: Minimum number of nodes a layer can have within the network, defaults to 64
-    :type min_mlp_nodes: Optional[int]
+    :type min_mlp_nodes: int, optional
     :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
-    :type max_mlp_nodes: Optional[int]
+    :type max_mlp_nodes: int, optional
     :param layer_norm: Normalization between layers, defaults to True
-    :type layer_norm: Optional[bool]
+    :type layer_norm: bool, optional
     :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
-    :type output_vanish: Optional[bool]
+    :type output_vanish: bool, optional
     :param init_layers: Initialise network layers, defaults to True
-    :type init_layers: Optional[bool]
+    :type init_layers: bool, optional
     :param noise_std: Noise standard deviation, defaults to 0.5
-    :type noise_std: Optional[float]
+    :type noise_std: float, optional
     :param noisy: Add noise to network, defaults to False
-    :type noisy: Optional[bool]
+    :type noisy: bool, optional
     :param new_gelu: Use new GELU activation function, defaults to False
-    :type new_gelu: Optional[bool]
+    :type new_gelu: bool, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-    :type device: Optional[str]
+    :type device: str, optional
     :param name: Name of the network, defaults to 'mlp'
-    :type name: Optional[str]
+    :type name: str, optional
     """
-    arch: str = "mlp"
 
     def __init__(
         self,

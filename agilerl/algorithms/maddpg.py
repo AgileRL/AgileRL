@@ -29,8 +29,6 @@ class MADDPG(MultiAgentAlgorithm):
     :type observation_spaces: list[spaces.Space]
     :param action_spaces: Action space for each agent
     :type action_spaces: list[spaces.Space]
-    :param n_agents: Number of agents
-    :type n_agents: int
     :param agent_ids: Agent ID for each agent
     :type agent_ids: list[str]
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
@@ -63,18 +61,20 @@ class MADDPG(MultiAgentAlgorithm):
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 0.01
     :type tau: float, optional
-    :param mutation: Most recent mutation to agent, defaults to None
-    :type mutation: str, optional
+    :param mut: Most recent mutation to agent, defaults to None
+    :type mut: str, optional
+    :param normalize_images: Normalize image observations, defaults to True
+    :type normalize_images: bool, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[nn.Module], optional
+    :type actor_networks: list[EvolvableModule], optional
     :param critic_networks: List of custom critic networks, defaults to None
-    :type critic_networks: list[nn.Module], optional
+    :type critic_networks: list[EvolvableModule], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param torch_compile: the torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
-    :type torch_compile: str, optional
+    :type accelerator: Any, optional
+    :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
+    :type torch_compiler: str, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -539,7 +539,7 @@ class MADDPG(MultiAgentAlgorithm):
             noise = self.sample_gaussian[idx]
         return noise
 
-    def reset_action_noise(self, indices: List[int]):
+    def reset_action_noise(self, indices: List[int]) -> None:
         """Reset action noise."""
         for i in range(len(self.current_noise)):
             for idx in indices:

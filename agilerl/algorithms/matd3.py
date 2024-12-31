@@ -22,31 +22,31 @@ class MATD3(MultiAgentAlgorithm):
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent
-    :type observation_spaces: list[spaces.Space]
+    :type observation_spaces: List[spaces.Space]
     :param action_spaces: Action space for each agent
-    :type action_spaces: list[spaces.Space]
-    :param n_agents: Number of agents
-    :type n_agents: int
+    :type action_spaces: List[spaces.Space]
     :param agent_ids: Agent ID for each agent
-    :type agent_ids: list[str]
+    :type agent_ids: List[str]
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
-    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
-    :type vect_noise_dim: int, optional
     :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
     :type expl_noise: float, optional
+    :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
+    :type vect_noise_dim: int, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
     :type mean_noise: float, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
     :type theta: float, optional
     :param dt: Timestep for Ornstein Uhlenbeck action noise update, defaults to 1e-2
     :type dt: float, optional
-    :param policy_freq: Policy update frequency, defaults to 2
-    :type policy_freq: int, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
-    :type net_config: dict, optional
+    :param policy_freq: Policy update frequency, defaults to 2
+    :type policy_freq: int, optional
+    :param net_config: Network configuration, defaults to None
+    :type net_config: Optional[Dict[str, Any]], optional
+    :param head_config: Head configuration for the network, defaults to None
+    :type head_config: Optional[Dict[str, Any]], optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 0.001
@@ -59,18 +59,20 @@ class MATD3(MultiAgentAlgorithm):
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 0.01
     :type tau: float, optional
-    :param mutation: Most recent mutation to agent, defaults to None
-    :type mutation: str, optional
+    :param normalize_images: Normalize image observations, defaults to True
+    :type normalize_images: bool, optional
+    :param mut: Most recent mutation to agent, defaults to None
+    :type mut: Optional[str], optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[nn.Module], optional
+    :type actor_networks: Optional[List[EvolvableModule]], optional
     :param critic_networks: List containing two lists of custom critic networks, defaults to None
-    :type critic_networks: list[list[nn.Module]], optional
+    :type critic_networks: Optional[List[List[EvolvableModule]]], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
-    :param torch_compile: the torch compile mode 'default', 'reduce-overhead' or 'max-autotune'
-    :type torch_compile: str, optional
+    :type accelerator: Optional[Any], optional
+    :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
+    :type torch_compiler: Optional[str], optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

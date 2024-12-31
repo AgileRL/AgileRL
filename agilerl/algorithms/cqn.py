@@ -1,9 +1,6 @@
 from typing import Optional, Dict, Any, Tuple
 import warnings
-import copy
-import inspect
 import random
-import dill
 import numpy as np
 from numpy.typing import ArrayLike
 import torch
@@ -17,7 +14,6 @@ from agilerl.networks.q_networks import QNetwork
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.typing import NumpyObsType
 from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
 
@@ -31,8 +27,10 @@ class CQN(RLAlgorithm):
     :type action_space: spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head network configuration, defaults to None
+    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -43,16 +41,18 @@ class CQN(RLAlgorithm):
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 1e-3
     :type tau: float, optional
-    :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
+    :param normalize_images: Normalize image observations, defaults to True
+    :type normalize_images: bool, optional
+    :param mut: Most recent mutation to agent, defaults to None
+    :type mut: str, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

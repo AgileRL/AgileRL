@@ -25,10 +25,6 @@ class TD3(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param max_action: Upper bound of the action space, defaults to 1
-    :type max_action: float, optional
-    :param min_action: Lower bound of the action space, defaults to -1
-    :type min_action: float, optional
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
@@ -43,8 +39,10 @@ class TD3(RLAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head configuration for the network, defaults to None
+    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
@@ -55,20 +53,22 @@ class TD3(RLAlgorithm):
     :type learn_step: int, optional
     :param gamma: Discount factor, defaults to 0.99
     :type gamma: float, optional
-    :param tau: For soft update of target network parameters, defaults to 1e-3
+    :param tau: For soft update of target network parameters, defaults to 0.005
     :type tau: float, optional
+    :param normalize_images: Flag to normalize images, defaults to True
+    :type normalize_images: bool, optional
     :param mut: Most recent mutation to agent, defaults to None
     :type mut: str, optional
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule, optional
     :param critic_networks: List of two custom critic networks (one for each of TD3's two critics), defaults to None
-    :type critic_networks: list[nn.Module], optional
+    :type critic_networks: list[EvolvableModule], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

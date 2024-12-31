@@ -28,10 +28,10 @@ class DDPG(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param O_U_noise: Use Ornstein Uhlenbeck action noise for exploration. If False, uses Gaussian noise. Defaults to True
     :type O_U_noise: bool, optional
+    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise, defaults to 0.1
+    :type expl_noise: Union[float, ArrayLike], optional
     :param vect_noise_dim: Vectorization dimension of environment for action noise, defaults to 1
     :type vect_noise_dim: int, optional
-    :param expl_noise: Scale for Ornstein Uhlenbeck action noise, or standard deviation for Gaussian exploration noise
-    :type expl_noise: float, optional
     :param mean_noise: Mean of exploration noise, defaults to 0.0
     :type mean_noise: float, optional
     :param theta: Rate of mean reversion in Ornstein Uhlenbeck action noise, defaults to 0.15
@@ -41,9 +41,9 @@ class DDPG(RLAlgorithm):
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
     :param net_config: Encoder configuration, defaults to None
-    :type net_config: Dict[str, Any], optional
+    :type net_config: Optional[Dict[str, Any]], optional
     :param head_config: Head configuration, defaults to None
-    :type head_config: Dict[str, Any], optional
+    :type head_config: Optional[Dict[str, Any]], optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
@@ -56,18 +56,20 @@ class DDPG(RLAlgorithm):
     :type gamma: float, optional
     :param tau: For soft update of target network parameters, defaults to 1e-3
     :type tau: float, optional
+    :param normalize_images: Normalize images flag, defaults to True
+    :type normalize_images: bool, optional
     :param mut: Most recent mutation to agent, defaults to None
-    :type mut: str, optional
+    :type mut: Optional[str], optional
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: Optional[nn.Module], optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: nn.Module, optional
+    :type critic_network: Optional[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Optional[Any], optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

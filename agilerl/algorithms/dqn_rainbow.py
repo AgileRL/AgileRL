@@ -1,13 +1,11 @@
 from typing import Optional, Dict, Any
-import warnings
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
 
-from agilerl.typing import ArrayLike
+from agilerl.typing import ArrayLike, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -15,10 +13,8 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.utils.algo_utils import (
-    obs_channels_to_first,
-    make_safe_deepcopies
-)
+from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+
 class RainbowDQN(RLAlgorithm):
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
 
@@ -28,8 +24,10 @@ class RainbowDQN(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head network configuration, defaults to None
+    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -46,9 +44,9 @@ class RainbowDQN(RLAlgorithm):
     :type prior_eps: float, optional
     :param num_atoms: Unit number of support, defaults to 51
     :type num_atoms: int, optional
-    :param v_min: Minimum value of support, defaults to 0
+    :param v_min: Minimum value of support, defaults to -10
     :type v_min: float, optional
-    :param v_max: Maximum value of support, defaults to 200
+    :param v_max: Maximum value of support, defaults to 10
     :type v_max: float, optional
     :param noise_std: Noise standard deviation, defaults to 0.5
     :type noise_std: float, optional
@@ -59,11 +57,11 @@ class RainbowDQN(RLAlgorithm):
     :param combined_reward: Boolean flag indicating whether to use combined 1-step and n-step reward, defaults to False
     :type combined_reward: bool, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -468,7 +466,13 @@ class RainbowDQN(RLAlgorithm):
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(
+            self,
+            env: GymEnvType,
+            swap_channels: bool = False,
+            max_steps: Optional[int] = None,
+            loop: int = 3
+            ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
