@@ -34,8 +34,14 @@ class EvolvableMLP(EvolvableModule):
     :type init_layers: Optional[bool]
     :param noise_std: Noise standard deviation, defaults to 0.5
     :type noise_std: Optional[float]
+    :param noisy: Add noise to network, defaults to False
+    :type noisy: Optional[bool]
+    :param new_gelu: Use new GELU activation function, defaults to False
+    :type new_gelu: Optional[bool]
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: Optional[str]
+    :param name: Name of the network, defaults to 'mlp'
+    :type name: Optional[str]
     """
     arch: str = "mlp"
 

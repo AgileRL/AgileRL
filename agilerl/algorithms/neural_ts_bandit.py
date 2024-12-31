@@ -158,6 +158,9 @@ class NeuralTS(RLAlgorithm):
         )
 
     def init_params(self) -> None:
+        print(self.actor.device)
+        print("Device =", self.device)
+        print("Accelerator = ", self.accelerator)
         self.exp_layer = self.actor.get_output_dense()
 
         self.numel = sum(

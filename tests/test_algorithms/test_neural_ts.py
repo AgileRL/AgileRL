@@ -817,6 +817,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     assert new_bandit.numel == sum(
         w.numel() for w in bandit.exp_layer.parameters() if w.requires_grad
     )
+    print(next(iter(new_bandit.exp_layer.parameters())))
+    print(new_bandit.theta_0)
     assert torch.equal(
         new_bandit.theta_0,
         torch.cat(

@@ -734,6 +734,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         }
 
         checkpoint['accelerator'] = accelerator
+        checkpoint['device'] = device
         self = cls(**class_init_dict)
 
         # Assign loaded modules and optimizers to the algorithm
@@ -746,16 +747,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         for attribute in self.inspect_attributes().keys():
             setattr(self, attribute, checkpoint[attribute])
 
-        # Run init hooks
-        for hook in self.registry.hooks:
-            getattr(self, hook)()
-
         # Wrap models / compile if necessary
         if accelerator is not None:
             self.wrap_models()
         elif self.torch_compiler:
             torch.set_float32_matmul_precision("high")
             self.recompile()
+
+        # Run init hooks
+        for hook in self.registry.hooks:
+            getattr(self, hook)()
 
         return self
 

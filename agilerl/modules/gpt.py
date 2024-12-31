@@ -111,7 +111,7 @@ class EvolvableGPT(EvolvableModule):
         self.dim_feedfwd = dim_feedfwd
         self.block_size = block_size
         self.dropout = dropout
-        self.activation = activation
+        self._activation = activation
         self.layer_norm_eps = layer_norm_eps
         self.min_layers = min_layers
         self.max_layers = max_layers
@@ -136,6 +136,16 @@ class EvolvableGPT(EvolvableModule):
 
         # report number of parameters
         # print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+
+    @property
+    def activation(self) -> str:
+        """Return activation function."""
+        return self._activation
+    
+    @activation.setter
+    def activation(self, activation: str) -> None:
+        """Set activation function."""
+        self._activation = activation
 
     def get_num_params(self, non_embedding: bool = True) -> int:
         """Return the number of parameters in the model.
@@ -880,8 +890,8 @@ class MLP(EvolvableMLP):
             num_outputs=n_embd,
             hidden_size=[hidden_size],
             layer_norm=False,
-            mlp_output_activation=activation,
-            new_gelu=True
+            output_activation=activation,
+            new_gelu=True,
             **kwargs,
         )
         self.dropout = nn.Dropout(dropout)
