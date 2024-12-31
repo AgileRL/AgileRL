@@ -177,10 +177,13 @@ class DeterministicActor(EvolvableNetwork):
         else:
             output_activation = "Sigmoid"
 
-        head_config = head_config or MlpNetConfig(
-            hidden_size=[64],
-            output_activation=output_activation
-        )
+        if head_config is None:
+            head_config = MlpNetConfig(
+                hidden_size=[64],
+                output_activation=output_activation
+            )
+        elif head_config["output_activation"] is None:
+            head_config["output_activation"] = output_activation
         
         self.actor_net = self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)

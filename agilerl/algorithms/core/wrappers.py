@@ -3,7 +3,7 @@ import inspect
 import torch.nn as nn
 from torch.optim import Optimizer
 
-from agilerl.typing import OptimizerType
+from agilerl.typing import OptimizerType, StateDict
 from agilerl.protocols import EvolvableAlgorithm
 from agilerl.modules.base import EvolvableModule
 
@@ -38,6 +38,11 @@ class OptimizerWrapper:
         if isinstance(networks, nn.Module):
             self.networks = [networks]
         else:
+            assert (
+                isinstance(networks, list) 
+                and all(isinstance(net, nn.Module) for net in networks), 
+                "Expected a single network or a list of networks."
+            )
             self.networks = networks
 
         # NOTE: This should be passed when reintializing the optimizer
@@ -51,8 +56,8 @@ class OptimizerWrapper:
         assert self.network_names, "No networks found in the parent container."
 
         # Initialize the optimizer/s
-        # NOTE: For multi-agent algorithms, we want to have a different optimizer for each of the 
-        # networks.
+        # NOTE: For multi-agent algorithms, we want to have a different optimizer 
+        # for each of the networks in the passed list
         multiple_attrs = len(self.network_names) > 1
         multiple_networks = len(self.networks) > 1
         if multiagent:
@@ -132,7 +137,7 @@ class OptimizerWrapper:
         ]
     
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: StateDict) -> None:
         """
         Load the state of the optimizer from the passed state dictionary.
 
@@ -140,13 +145,19 @@ class OptimizerWrapper:
         :type state_dict: Dict[str, Any]
         """
         if self.multiagent:
-            raise TypeError(
-                "Loading optimizer state dict directly is not supported for multi-agent optimizers."
-                )
-        
-        self.optimizer.load_state_dict(state_dict)
+            assert isinstance(state_dict, list) and len(state_dict) == len(self.optimizer), (
+                "Expected a list of optimizer state dictionaries for multi-agent optimizers."
+            )
+            optimizers: List[Optimizer] = self.optimizer
+            for i, opt in enumerate(optimizers):
+                opt.load_state_dict(state_dict[i])
+        else:
+            assert isinstance(state_dict, dict), (
+                "Expected a single optimizer state dictionary for single-agent optimizers."
+            )
+            self.optimizer.load_state_dict(state_dict)
     
-    def state_dict(self) -> Dict[str, Any]:
+    def state_dict(self) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Return the state of the optimizer as a dictionary.
 
@@ -154,9 +165,8 @@ class OptimizerWrapper:
         :rtype: Dict[str, Any]
         """
         if self.multiagent:
-            raise TypeError(
-                "Getting optimizer state dict directly is not supported for multi-agent optimizers."
-                )
+            optimizers: List[Optimizer] = self.optimizer
+            return [opt.state_dict() for opt in optimizers]
         
         return self.optimizer.state_dict()
 

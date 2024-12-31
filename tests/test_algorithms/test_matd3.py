@@ -19,7 +19,11 @@ from agilerl.algorithms.matd3 import MATD3
 from agilerl.modules.custom_components import GumbelSoftmax
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.utils.algo_utils import concatenate_spaces
+from agilerl.utils.evolvable_networks import get_default_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
 from tests.helper_functions import (
@@ -77,7 +81,7 @@ class MultiAgentCNNCritic(nn.Module):
         return x
 
 
-class DummyEvolvableMLP(EvolvableMLP):
+class DummyContinuousQNetwork(ContinuousQNetwork):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -95,7 +99,7 @@ class DummyEvolvableMLP(EvolvableMLP):
         return DummyNoSync()
 
 
-class DummyEvolvableCNN(EvolvableCNN):
+class DummyDeterministicActor(DeterministicActor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -223,11 +227,9 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
 @pytest.mark.parametrize(
     "net_config, accelerator_flag, observation_spaces, compile_mode",
     [
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), None),
+        ({"hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), None),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -238,8 +240,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
         ),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -248,11 +248,9 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             None,
         ),
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), "default"),
+        ({"hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), "default"),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -263,8 +261,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
         ),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -305,28 +301,21 @@ def test_initialize_matd3_with_net_config(
     assert matd3.agent_ids == agent_ids
     for noise_vec in matd3.expl_noise:
         assert torch.all(noise_vec == expl_noise)
-    assert matd3.net_config == net_config, matd3.net_config
     assert matd3.batch_size == batch_size
-    assert matd3.multi
     assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert matd3.total_actions == sum(space.shape[0] for space in action_spaces)
     assert matd3.scores == []
     assert matd3.fitness == []
     assert matd3.steps == [0]
-    if net_config["arch"] == "mlp":
-        evo_type = EvolvableMLP
-        assert matd3.arch == "mlp"
-    else:
-        evo_type = EvolvableCNN
-        assert matd3.arch == "cnn"
+
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in matd3.actors)
         assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_1)
         assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
     else:
-        assert all(isinstance(actor, evo_type) for actor in matd3.actors)
-        assert all(isinstance(critic, evo_type) for critic in matd3.critics_1)
-        assert all(isinstance(critic, evo_type) for critic in matd3.critics_2)
+        assert all(isinstance(actor, DeterministicActor) for actor in matd3.actors)
+        assert all(isinstance(critic, ContinuousQNetwork) for critic in matd3.critics_1)
+        assert all(isinstance(critic, ContinuousQNetwork) for critic in matd3.critics_2)
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
@@ -372,14 +361,13 @@ def test_initialize_matd3_with_mlp_networks_gumbel_softmax(
     compile_mode,
 ):
     net_config = {
-        "arch": "mlp",
         "hidden_size": [64, 64],
         "min_hidden_layers": 1,
         "max_hidden_layers": 3,
         "min_mlp_nodes": 64,
         "max_mlp_nodes": 500,
-        "mlp_output_activation": "GumbelSoftmax",
-        "mlp_activation": "ReLU",
+        "output_activation": "GumbelSoftmax",
+        "activation": "ReLU",
     }
     matd3 = MATD3(
         observation_spaces=observation_spaces,
@@ -446,15 +434,12 @@ def test_initialize_matd3_with_mlp_networks(
         assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
-    assert matd3.net_config is None
-    assert matd3.arch == "mlp"
     assert matd3.observation_spaces == observation_spaces
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
     assert matd3.policy_freq == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
     assert matd3.discrete_actions is True
-    assert matd3.multi
     assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
@@ -557,15 +542,12 @@ def test_initialize_matd3_with_cnn_networks(
         assert all(isinstance(actor, MakeEvolvable) for actor in matd3.actors)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_1)
         assert all(isinstance(critic, MakeEvolvable) for critic in matd3.critics_2)
-    assert matd3.net_config is None
-    assert matd3.arch == "cnn"
     assert matd3.observation_spaces == observation_spaces
     assert matd3.policy_freq == 2
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
     assert matd3.discrete_actions is True
-    assert matd3.multi
     assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
@@ -613,62 +595,51 @@ def test_initialize_matd3_with_cnn_networks(
 def test_initialize_matd3_with_evo_networks(
     observation_spaces, action_spaces, net, device, compile_mode, accelerator
 ):
-    if net == "mlp":
-        evo_actors = [
-            EvolvableMLP(
-                num_inputs=observation_spaces[x].shape[0],
-                num_outputs=action_spaces[x].n,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-                mlp_output_activation="Tanh",
-            )
-            for x in range(2)
-        ]
-        evo_critics = [
-            [
-                EvolvableMLP(
-                    num_inputs=sum(observation_space.shape[0] for observation_space in observation_spaces)
-                    + sum(space.n for space in action_spaces),
-                    num_outputs=1,
-                    hidden_size=[64, 64],
-                    mlp_activation="ReLU",
-                )
-                for x in range(2)
-            ]
-            for _ in range(2)
-        ]
-    else:
-        evo_actors = [
-            EvolvableCNN(
-                input_shape=observation_spaces[0].shape,
-                num_outputs=action_spaces[0].n,
-                channel_size=[8, 8],
-                kernel_size=[2, 2],
-                stride_size=[1, 1],
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
+    net_config = get_default_config(observation_spaces[0])
+    
+    # For image spaces we need to give a sample input tensor to build networks
+    critic_net_config = copy.deepcopy(net_config)
+    if len(observation_spaces[0].shape) == 3:
+        net_config["sample_input"] = torch.zeros(
+            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
+        ).unsqueeze(2)
+
+        critic_net_config['sample_input'] = torch.zeros(
+            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
+        ).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+
+    head_config = {
+        "output_activation": "Tanh",
+        "activation": "ReLU",
+        "hidden_size": [64, 64]
+        }
+
+    critic_head_config = copy.deepcopy(head_config)
+    critic_head_config.update({"output_activation": None})
+
+    evo_actors = [
+        DeterministicActor(
+                observation_spaces[x],
+                action_spaces[x],
+                encoder_config=net_config,
+                head_config=head_config,
                 n_agents=2,
-                mlp_output_activation="Tanh",
+                device=device,
             )
-            for _ in range(2)
-        ]
-        evo_critics = [
-            [
-                EvolvableCNN(
-                    input_shape=observation_spaces[0].shape,
-                    num_outputs=sum(space.n for space in action_spaces),
-                    channel_size=[8, 8],
-                    kernel_size=[2, 2],
-                    stride_size=[1, 1],
-                    hidden_size=[64, 64],
-                    n_agents=2,
-                    critic=True,
-                    mlp_activation="ReLU",
-                )
-                for _ in range(2)
-            ]
-            for _ in range(2)
-        ]
+        for x in range(2)
+    ]
+    evo_critics = [[
+        ContinuousQNetwork(
+                observation_space=concatenate_spaces(observation_spaces),
+                action_space=concatenate_spaces(action_spaces),
+                encoder_config=critic_net_config,
+                head_config=critic_head_config,
+                n_agents=2,
+                device=device
+            )
+        for x in range(2)
+    ] for _ in range(2)
+    ]
     matd3 = MATD3(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -685,27 +656,23 @@ def test_initialize_matd3_with_evo_networks(
         assert all(isinstance(critic, OptimizedModule) for critic in matd3.critics_2)
     else:
         assert all(
-            isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in matd3.actors
+            isinstance(actor.encoder, (EvolvableMLP, EvolvableCNN)) for actor in matd3.actors
         )
         assert all(
-            isinstance(critic, (EvolvableMLP, EvolvableCNN))
+            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
             for critic in matd3.critics_1
         )
         assert all(
-            isinstance(critic, (EvolvableMLP, EvolvableCNN))
+            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
             for critic in matd3.critics_2
         )
-    if net == "mlp":
-        assert matd3.arch == "mlp"
-    else:
-        assert matd3.arch == "cnn"
+
     assert matd3.observation_spaces == observation_spaces
     assert matd3.policy_freq == 2
     assert matd3.action_spaces == action_spaces
     assert matd3.n_agents == 2
     assert matd3.agent_ids == ["agent_0", "agent_1"]
     assert matd3.discrete_actions is True
-    assert matd3.multi
     assert matd3.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert matd3.total_actions == sum(space.n for space in action_spaces)
     assert matd3.scores == []
@@ -886,7 +853,7 @@ def test_matd3_get_action_mlp(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        net_config={"arch": "mlp", "hidden_size": [8, 8]},
+        net_config={"hidden_size": [8, 8]},
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -933,8 +900,6 @@ def test_matd3_get_action_cnn(
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [64, 64],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1004,12 +969,12 @@ def test_matd3_get_action_distributed(
         torch_compiler=compile_mode,
     )
     new_actors = [
-        DummyEvolvableMLP(
-            num_inputs=actor.num_inputs,
-            num_outputs=actor.num_outputs,
-            hidden_size=actor.hidden_size,
+        DummyDeterministicActor(
+            observation_space=actor.observation_space,
+            action_space=actor.action_space,
+            head_config=actor.actor_net.net_config,
             device=actor.device,
-            mlp_output_activation=actor.mlp_output_activation,
+            n_agents=actor.n_agents,
         )
         for actor in matd3.actors
     ]
@@ -1161,7 +1126,7 @@ def test_matd3_get_action_action_masking_exception(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        net_config={"hidden_size": [64, 64]},
         agent_ids=agent_ids,
         device=device,
     )
@@ -1192,7 +1157,7 @@ def test_matd3_get_action_action_masking(
     matd3 = MATD3(
         observation_spaces,
         action_spaces,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        net_config={"hidden_size": [64, 64]},
         agent_ids=agent_ids,
         device=device,
     )
@@ -1433,8 +1398,6 @@ def test_matd3_learns_from_experiences_cnn(
     agent_ids = ["agent_0", "agent_1"]
     policy_freq = 2
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1544,8 +1507,6 @@ def test_matd3_learns_from_experiences_cnn_distributed(
     accelerator = Accelerator(device_placement=False)
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1735,8 +1696,6 @@ def test_matd3_algorithm_test_loop_cnn(device, sum_score, compile_mode):
     env_observation_spaces = generate_multi_agent_box_spaces(2, (32, 32, 3), low=0, high=255)
     agent_observation_spaces = generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1768,8 +1727,6 @@ def test_matd3_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mod
     env_observation_spaces = generate_multi_agent_box_spaces(2, (32, 32, 3), low=0, high=255)
     agent_observation_spaces = generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1815,7 +1772,7 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     index = 0
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
     batch_size = 64
     lr_actor = 0.001
     lr_critic = 0.01
@@ -1867,7 +1824,6 @@ def test_matd3_clone_returns_identical_agent(accelerator_flag, wrap, compile_mod
     assert all(torch.equal(clone_expl_noise, expl_noise) for clone_expl_noise, expl_noise in zip(clone_agent.expl_noise, matd3.expl_noise))
     assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
-    assert clone_agent.net_config == matd3.net_config
     assert clone_agent.batch_size == matd3.batch_size
     assert clone_agent.lr_actor == matd3.lr_actor
     assert clone_agent.lr_critic == matd3.lr_critic
@@ -1964,7 +1920,6 @@ def test_clone_after_learning(compile_mode):
     assert all(torch.equal(clone_expl_noise, expl_noise) for clone_expl_noise, expl_noise in zip(clone_agent.expl_noise, matd3.expl_noise))
     assert clone_agent.discrete_actions == matd3.discrete_actions
     assert clone_agent.index == matd3.index
-    assert clone_agent.net_config == matd3.net_config
     assert clone_agent.batch_size == matd3.batch_size
     assert clone_agent.lr_actor == matd3.lr_actor
     assert clone_agent.lr_critic == matd3.lr_critic
@@ -2031,7 +1986,7 @@ def test_clone_after_learning(compile_mode):
 def test_matd3_save_load_checkpoint_correct_data_and_format(
     tmpdir, device, accelerator, compile_mode
 ):
-    net_config = {"arch": "mlp", "hidden_size": [32, 32]}
+    net_config = {"hidden_size": [32, 32]}
     # Initialize the ddpg agent
     matd3 = MATD3(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
@@ -2051,23 +2006,22 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint
-    assert "actors_state_dict" in checkpoint
-    assert "actor_targets_init_dict" in checkpoint
-    assert "actor_targets_state_dict" in checkpoint
-    assert "actor_optimizers_state_dict" in checkpoint
-    assert "critics_1_init_dict" in checkpoint
-    assert "critics_1_state_dict" in checkpoint
-    assert "critic_targets_1_init_dict" in checkpoint
-    assert "critic_targets_1_state_dict" in checkpoint
-    assert "critic_2_optimizers_state_dict" in checkpoint
-    assert "critics_2_init_dict" in checkpoint
-    assert "critics_2_state_dict" in checkpoint
-    assert "critic_targets_2_init_dict" in checkpoint
-    assert "critic_targets_2_state_dict" in checkpoint
-    assert "critic_2_optimizers_state_dict" in checkpoint
+    assert "actors_init_dict" in checkpoint['network_info']['modules']
+    assert "actors_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizers_state_dict" in checkpoint['network_info']['optimizers']
     assert "policy_freq" in checkpoint
-    assert "net_config" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -2091,7 +2045,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
     )
     loaded_matd3.load_checkpoint(checkpoint_path)
     # Check if properties and weights are loaded correctly
-    assert loaded_matd3.net_config == net_config
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
         assert all(
@@ -2113,23 +2066,23 @@ def test_matd3_save_load_checkpoint_correct_data_and_format(
             for critic_target in loaded_matd3.critic_targets_2
         )
     else:
-        assert all(isinstance(actor, EvolvableMLP) for actor in loaded_matd3.actors)
+        assert all(isinstance(actor.encoder, EvolvableMLP) for actor in loaded_matd3.actors)
         assert all(
-            isinstance(actor_target, EvolvableMLP)
+            isinstance(actor_target.encoder, EvolvableMLP)
             for actor_target in loaded_matd3.actor_targets
         )
         assert all(
-            isinstance(critic, EvolvableMLP) for critic in loaded_matd3.critics_1
+            isinstance(critic.encoder, EvolvableMLP) for critic in loaded_matd3.critics_1
         )
         assert all(
-            isinstance(critic_target, EvolvableMLP)
+            isinstance(critic_target.encoder, EvolvableMLP)
             for critic_target in loaded_matd3.critic_targets_1
         )
         assert all(
-            isinstance(critic, EvolvableMLP) for critic in loaded_matd3.critics_2
+            isinstance(critic.encoder, EvolvableMLP) for critic in loaded_matd3.critics_2
         )
         assert all(
-            isinstance(critic_target, EvolvableMLP)
+            isinstance(critic_target.encoder, EvolvableMLP)
             for critic_target in loaded_matd3.critic_targets_2
         )
     assert matd3.lr_actor == 0.001
@@ -2176,8 +2129,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     tmpdir, device, accelerator, compile_mode
 ):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -2203,22 +2154,21 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint
-    assert "actors_state_dict" in checkpoint
-    assert "actor_targets_init_dict" in checkpoint
-    assert "actor_targets_state_dict" in checkpoint
-    assert "actor_optimizers_state_dict" in checkpoint
-    assert "critics_1_init_dict" in checkpoint
-    assert "critics_1_state_dict" in checkpoint
-    assert "critic_targets_1_init_dict" in checkpoint
-    assert "critic_targets_1_state_dict" in checkpoint
-    assert "critic_1_optimizers_state_dict" in checkpoint
-    assert "critics_2_init_dict" in checkpoint
-    assert "critics_2_state_dict" in checkpoint
-    assert "critic_targets_2_init_dict" in checkpoint
-    assert "critic_targets_2_state_dict" in checkpoint
-    assert "critic_2_optimizers_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actors_init_dict" in checkpoint['network_info']['modules']
+    assert "actors_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizers_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -2244,7 +2194,6 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
     loaded_matd3.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert loaded_matd3.net_config == net_config_cnn
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in loaded_matd3.actors)
         assert all(
@@ -2266,23 +2215,23 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_cnn(
             for critic_target in loaded_matd3.critic_targets_2
         )
     else:
-        assert all(isinstance(actor, EvolvableCNN) for actor in loaded_matd3.actors)
+        assert all(isinstance(actor.encoder, EvolvableCNN) for actor in loaded_matd3.actors)
         assert all(
-            isinstance(actor_target, EvolvableCNN)
+            isinstance(actor_target.encoder, EvolvableCNN)
             for actor_target in loaded_matd3.actor_targets
         )
         assert all(
-            isinstance(critic, EvolvableCNN) for critic in loaded_matd3.critics_1
+            isinstance(critic.encoder, EvolvableCNN) for critic in loaded_matd3.critics_1
         )
         assert all(
-            isinstance(critic_target, EvolvableCNN)
+            isinstance(critic_target.encoder, EvolvableCNN)
             for critic_target in loaded_matd3.critic_targets_1
         )
         assert all(
-            isinstance(critic, EvolvableCNN) for critic in loaded_matd3.critics_2
+            isinstance(critic.encoder, EvolvableCNN) for critic in loaded_matd3.critics_2
         )
         assert all(
-            isinstance(critic_target, EvolvableCNN)
+            isinstance(critic_target.encoder, EvolvableCNN)
             for critic_target in loaded_matd3.critic_targets_2
         )
     assert matd3.lr_actor == 0.001
@@ -2375,22 +2324,21 @@ def test_matd3_save_load_checkpoint_correct_data_and_format_make_evo(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint
-    assert "actors_state_dict" in checkpoint
-    assert "actor_targets_init_dict" in checkpoint
-    assert "actor_targets_state_dict" in checkpoint
-    assert "actor_optimizers_state_dict" in checkpoint
-    assert "critics_1_init_dict" in checkpoint
-    assert "critics_1_state_dict" in checkpoint
-    assert "critic_targets_1_init_dict" in checkpoint
-    assert "critic_targets_1_state_dict" in checkpoint
-    assert "critic_1_optimizers_state_dict" in checkpoint
-    assert "critics_2_init_dict" in checkpoint
-    assert "critics_2_state_dict" in checkpoint
-    assert "critic_targets_2_init_dict" in checkpoint
-    assert "critic_targets_2_state_dict" in checkpoint
-    assert "critic_2_optimizers_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actors_init_dict" in checkpoint['network_info']['modules']
+    assert "actors_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_1_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_1_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_2_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_2_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_2_optimizers_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -2533,28 +2481,28 @@ def test_action_scaling(compile_mode):
         agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
         torch_compiler=compile_mode,
     )
-    matd3.actors[0].mlp_output_activation = "Tanh"
+    matd3.actors[0].output_activation = "Tanh"
     scaled_action = matd3.scale_to_action_space(action, idx=0)
     assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
 
-    matd3.actors[1].mlp_output_activation = "Tanh"
+    matd3.actors[1].output_activation = "Tanh"
     action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = matd3.scale_to_action_space(action, idx=1)
     torch.testing.assert_close(
         scaled_action, torch.Tensor([0.2, 0.4, 0.6, -0.2, -0.4, -0.6])
     )
 
-    matd3.actors[2].mlp_output_activation = "Sigmoid"
+    matd3.actors[2].output_activation = "Sigmoid"
     action = torch.Tensor([0.1, 0.2, 0.3, 0])
     scaled_action = matd3.scale_to_action_space(action, idx=2)
     assert torch.equal(scaled_action, torch.Tensor([0.1, 0.2, 0.3, 0]))
 
-    matd3.actors[3].mlp_output_activation = "GumbelSoftmax"
+    matd3.actors[3].output_activation = "GumbelSoftmax"
     action = torch.Tensor([0.1, 0.2, 0.3, 0])
     scaled_action = matd3.scale_to_action_space(action, idx=3)
     assert torch.equal(scaled_action, torch.Tensor([0.2, 0.4, 0.6, 0]))
 
-    matd3.actors[4].mlp_output_activation = "Tanh"
+    matd3.actors[4].output_activation = "Tanh"
     action = torch.Tensor([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = matd3.scale_to_action_space(action, idx=4)
     torch.testing.assert_close(
@@ -2610,7 +2558,6 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
     assert new_matd3.agent_ids == matd3.agent_ids
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
-    assert new_matd3.net_config == matd3.net_config
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
     for (
@@ -2648,12 +2595,12 @@ def test_load_from_pretrained(device, accelerator, compile_mode, tmpdir):
             assert isinstance(new_critic_2, OptimizedModule)
             assert isinstance(new_critic_target_2, OptimizedModule)
         else:
-            assert isinstance(new_actor, EvolvableMLP)
-            assert isinstance(new_actor_target, EvolvableMLP)
-            assert isinstance(new_critic_1, EvolvableMLP)
-            assert isinstance(new_critic_target_1, EvolvableMLP)
-            assert isinstance(new_critic_2, EvolvableMLP)
-            assert isinstance(new_critic_target_2, EvolvableMLP)
+            assert isinstance(new_actor.encoder, EvolvableMLP)
+            assert isinstance(new_actor_target.encoder, EvolvableMLP)
+            assert isinstance(new_critic_1.encoder, EvolvableMLP)
+            assert isinstance(new_critic_target_1.encoder, EvolvableMLP)
+            assert isinstance(new_critic_2.encoder, EvolvableMLP)
+            assert isinstance(new_critic_target_2.encoder, EvolvableMLP)
 
         new_actor_sd = str(new_actor.state_dict())
         new_actor_target_sd = str(new_actor_target.state_dict())
@@ -2700,8 +2647,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
         action_spaces=generate_multi_agent_box_spaces(2, (1,)),
         agent_ids=["agent_a", "agent_b"],
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
@@ -2725,7 +2670,6 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
     assert new_matd3.agent_ids == matd3.agent_ids
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
-    assert new_matd3.net_config == matd3.net_config
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
     for (
@@ -2763,12 +2707,12 @@ def test_load_from_pretrained_cnn(device, accelerator, compile_mode, tmpdir):
             assert isinstance(new_critic_2, OptimizedModule)
             assert isinstance(new_critic_target_2, OptimizedModule)
         else:
-            assert isinstance(new_actor, EvolvableCNN)
-            assert isinstance(new_actor_target, EvolvableCNN)
-            assert isinstance(new_critic_1, EvolvableCNN)
-            assert isinstance(new_critic_target_1, EvolvableCNN)
-            assert isinstance(new_critic_2, EvolvableCNN)
-            assert isinstance(new_critic_target_2, EvolvableCNN)
+            assert isinstance(new_actor.encoder, EvolvableCNN)
+            assert isinstance(new_actor_target.encoder, EvolvableCNN)
+            assert isinstance(new_critic_1.encoder, EvolvableCNN)
+            assert isinstance(new_critic_target_1.encoder, EvolvableCNN)
+            assert isinstance(new_critic_2.encoder, EvolvableCNN)
+            assert isinstance(new_critic_target_2.encoder, EvolvableCNN)
 
         new_actor_sd = str(new_actor.state_dict())
         new_actor_target_sd = str(new_actor_target.state_dict())
@@ -2888,7 +2832,6 @@ def test_load_from_pretrained_networks(
     assert new_matd3.agent_ids == matd3.agent_ids
     assert new_matd3.min_action == matd3.min_action
     assert new_matd3.max_action == matd3.max_action
-    assert new_matd3.net_config == matd3.net_config
     assert new_matd3.lr_actor == matd3.lr_actor
     assert new_matd3.lr_critic == matd3.lr_critic
     for (

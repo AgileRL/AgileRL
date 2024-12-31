@@ -260,6 +260,7 @@ class EvolvableCNN(EvolvableModule):
             "stride_size": self.stride_size,
             "activation": self.activation,
             "block_type": self.block_type,
+            "sample_input": self.sample_input,
             "output_activation": self.output_activation,
             "min_hidden_layers": self.min_hidden_layers,
             "max_hidden_layers": self.max_hidden_layers,
@@ -381,6 +382,10 @@ class EvolvableCNN(EvolvableModule):
         :return: Output of the neural network
         :rtype: torch.Tensor
         """
+        # Handle single-image input for 3D convolutions
+        if self.block_type == "Conv3d" and len(x.shape) == 4:
+            x = x.unsqueeze(2)
+
         return self.model(x)
 
     @register_mutation_fn(MutationType.LAYER)

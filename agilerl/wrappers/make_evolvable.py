@@ -185,6 +185,11 @@ class MakeEvolvable(EvolvableModule):
     def activation(self) -> str:
         """Returns the activation function."""
         return self.mlp_activation
+    
+    @property
+    def output_activation(self) -> str:
+        """Returns the output activation function."""
+        return self.mlp_output_activation
 
     def get_output_dense(self) -> nn.Module:
         """Returns the output dense layer."""

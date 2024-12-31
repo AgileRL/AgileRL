@@ -1,16 +1,13 @@
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union
 import copy
-import inspect
 import warnings
-
-import dill
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.typing import NumpyObsType, ArrayDict, InfosDict, TensorDict, ExperiencesType, ArrayLike
+from agilerl.typing import NumpyObsType, ArrayDict, InfosDict, TensorDict, ExperiencesType, ArrayLike, GymEnvType
 from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -18,9 +15,11 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
+from agilerl.utils.evolvable_networks import is_image_space, get_default_config
 from agilerl.utils.algo_utils import (
     key_in_nested_dict,
-    make_safe_deepcopies
+    make_safe_deepcopies,
+    concatenate_spaces
 )
 
 class MADDPG(MultiAgentAlgorithm):
@@ -79,10 +78,10 @@ class MADDPG(MultiAgentAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
-    actors: List[EvolvableModule]
-    actor_targets: List[EvolvableModule]
-    critics: List[EvolvableModule]
-    critic_targets: List[EvolvableModule]
+    actors: List[Union[EvolvableModule, DeterministicActor]]
+    actor_targets: List[Union[EvolvableModule, DeterministicActor]]
+    critics: List[Union[EvolvableModule, ContinuousQNetwork]]
+    critic_targets: List[Union[EvolvableModule, ContinuousQNetwork]]
 
     def __init__(
         self,
@@ -150,6 +149,7 @@ class MADDPG(MultiAgentAlgorithm):
                 assert x > 0, "Max action must be greater than zero."
                 assert n <= 0, "Min action must be less than or equal to zero."
 
+        self.is_image_space = is_image_space(observation_spaces[0])
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -187,15 +187,6 @@ class MADDPG(MultiAgentAlgorithm):
         self.dt = dt
         self.sqdt = dt ** (0.5)
 
-        # if "mlp_output_activation" not in self.net_config.keys():
-        #     if not self.discrete_actions:
-        #         if self.min_action[idx][0] < 0:
-        #             self.net_config["mlp_output_activation"] = "Tanh"
-        #         else:
-        #             self.net_config["mlp_output_activation"] = "Sigmoid"
-        #     else:
-        #         self.net_config["mlp_output_activation"] = "GumbelSoftmax"
-
         if actor_networks is not None and critic_networks is not None:
             assert (
                 len({type(net) for net in actor_networks}) == 1
@@ -213,23 +204,55 @@ class MADDPG(MultiAgentAlgorithm):
                     "All critic networks must be instances of EvolvableModule"
                 )
             self.actors, self.critics = make_safe_deepcopies(actor_networks, critic_networks)
+            self.actor_targets, self.critic_targets = make_safe_deepcopies(actor_networks, critic_networks)
         else:
-            # model
-            self.actors = []
+            output_activation = None if not self.discrete_actions else "GumbelSoftmax"
             if head_config is not None:
+                head_config["output_activation"] = output_activation
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None
             else:
+                head_config = MlpNetConfig(hidden_size=[64], output_activation=output_activation)
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
-            # create_actor = lambda: 
+            if net_config is None:
+                net_config = get_default_config(observation_spaces[0]) if net_config is None else net_config
+            
+            # For image spaces we need to give a sample input tensor to 
+            # build networks with Conv3d blocks approproately
+            critic_net_config = copy.deepcopy(net_config)
+            if self.is_image_space:
+                net_config["sample_input"] = torch.zeros(
+                    (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
+                ).unsqueeze(2)
+    
+                critic_net_config['sample_input'] = torch.zeros(
+                    (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
+                ).unsqueeze(2).repeat(1, 1, self.n_agents, 1, 1)
 
-            # create_critic = lambda: 
+            create_actor = lambda idx: DeterministicActor(
+                self.observation_spaces[idx],
+                self.action_spaces[idx],
+                encoder_config=net_config,
+                head_config=head_config,
+                n_agents=self.n_agents,
+                device=self.device
+            )
 
+            # NOTE: Critic uses observations + actions of all agents to predict Q-value
+            create_critic = lambda: ContinuousQNetwork(
+                observation_space=concatenate_spaces(observation_spaces),
+                action_space=concatenate_spaces(action_spaces),
+                encoder_config=critic_net_config,
+                head_config=critic_head_config,
+                n_agents=self.n_agents,
+                device=self.device
+            )
 
-        # Create target networks
-        self.actor_targets = copy.deepcopy(self.actors)
-        self.critic_targets = copy.deepcopy(self.critics)
+            self.actors = [create_actor(idx) for idx in range(self.n_agents)]
+            self.critics = [create_critic() for _ in range(self.n_agents)]
+            self.actor_targets = [create_actor(idx) for idx in range(self.n_agents)]
+            self.critic_targets = [create_critic() for _ in range(self.n_agents)]
 
         # Initialise target network parameters
         for actor, actor_target in zip(self.actors, self.actor_targets):
@@ -253,21 +276,21 @@ class MADDPG(MultiAgentAlgorithm):
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
-        else:
-            if self.torch_compiler:
-                if (
-                    any(
-                        actor.output_activation == "GumbelSoftmax"
-                        for actor in self.actors
-                    )
-                    and self.torch_compiler != "default"
-                ):
-                    warnings.warn(
-                        f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
-                    )
-                    self.torch_compiler = "default"
-                torch.set_float32_matmul_precision("high")
-                self.recompile()
+        elif self.torch_compiler:
+            if (
+                any(
+                    actor.output_activation == "GumbelSoftmax"
+                    for actor in self.actors
+                )
+                and self.torch_compiler != "default"
+            ):
+                warnings.warn(
+                    f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
+                )
+                self.torch_compiler = "default"
+
+            torch.set_float32_matmul_precision("high")
+            self.recompile()
 
         self.criterion = nn.MSELoss()
 
@@ -434,8 +457,6 @@ class MADDPG(MultiAgentAlgorithm):
 
         # Preprocess observations
         preprocessed_states = list(self.preprocess_observation(states).values())
-        if self.arch == "cnn":
-            preprocessed_states = [state.unsqueeze(2) for state in preprocessed_states]
 
         action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(
@@ -469,11 +490,8 @@ class MADDPG(MultiAgentAlgorithm):
                     if action_masks[agent] is not None
                     else None
                 )
-                action = np.ma.array(action, mask=mask)
-                if self.one_hot:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-                else:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
+                action: np.ndarray = np.ma.array(action, mask=mask)
+                discrete_action_dict[agent] = action.argmax(axis=-1)
                 if len(discrete_action_dict[agent].shape) == 1:
                     discrete_action_dict[agent] = discrete_action_dict[agent][
                         :, np.newaxis
@@ -547,13 +565,6 @@ class MADDPG(MultiAgentAlgorithm):
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
 
-        # Need to unsqueeze next states for Conv3d
-        if self.arch == "cnn":
-            next_states = {
-                agent_id: next_state.unsqueeze(2)
-                for agent_id, next_state in next_states.items()
-            }
-
         # Get next actions
         next_actions = []
         with torch.no_grad():
@@ -571,30 +582,17 @@ class MADDPG(MultiAgentAlgorithm):
                 else:
                     next_actions.append(unscaled_actions)
 
-        # Stack values from different agents
-        if self.arch == "mlp":
-            action_values = list(actions.values())
-            state_values = list(states.values())
-            input_combined = torch.cat(state_values + action_values, dim=1)
-            next_input_combined = torch.cat(
-                list(next_states.values()) + next_actions, dim=1
-            )
-        elif self.arch == "cnn":
-            next_states = {
-                agent_id: next_state.squeeze(2) 
-                for agent_id, next_state in next_states.items()
-                }
-
+        # Stack states and actions
+        if self.is_image_space:
             stacked_states = torch.stack(list(states.values()), dim=2)
-            stacked_actions = torch.cat(list(actions.values()), dim=1)
             stacked_next_states = torch.stack(list(next_states.values()), dim=2)
-            stacked_next_actions = torch.cat(next_actions, dim=1)
+        else:
+            stacked_states = torch.cat(list(states.values()), dim=1)
+            stacked_next_states = torch.cat(list(next_states.values()), dim=1)
+
+        stacked_actions = torch.cat(list(actions.values()), dim=1)
+        stacked_next_actions = torch.cat(next_actions, dim=1)
             
-            # Need to unsqueeze states for Conv3d
-            states = {
-                agent_id: state.unsqueeze(2) for agent_id, state in states.items()
-            }
-        
         loss_dict = {}
         for idx, (
             agent_id,
@@ -621,12 +619,10 @@ class MADDPG(MultiAgentAlgorithm):
                 critic_target,
                 actor_optimizer,
                 critic_optimizer,
-                input_combined if self.arch == "mlp" else None,
-                stacked_states if self.arch == "cnn" else None,
-                stacked_actions if self.arch == "cnn" else None,
-                next_input_combined if self.arch == "mlp" else None,
-                stacked_next_states if self.arch == "cnn" else None,
-                stacked_next_actions if self.arch == "cnn" else None,
+                stacked_states,
+                stacked_actions,
+                stacked_next_states,
+                stacked_next_actions,
                 states,
                 actions,
                 rewards,
@@ -650,12 +646,10 @@ class MADDPG(MultiAgentAlgorithm):
         critic_target: nn.Module,
         actor_optimizer: optim.Optimizer,
         critic_optimizer: optim.Optimizer,
-        input_combined: Optional[torch.Tensor],
-        stacked_states: Optional[torch.Tensor],
-        stacked_actions: Optional[torch.Tensor],
-        next_input_combined: Optional[torch.Tensor],
-        stacked_next_states: Optional[torch.Tensor],
-        stacked_next_actions: Optional[torch.Tensor],
+        stacked_states: torch.Tensor,
+        stacked_actions: torch.Tensor,
+        stacked_next_states: torch.Tensor,
+        stacked_next_actions: torch.Tensor,
         states: TensorDict,
         actions: TensorDict,
         rewards: TensorDict,
@@ -679,18 +673,14 @@ class MADDPG(MultiAgentAlgorithm):
         :type actor_optimizer: optim.Optimizer
         :param critic_optimizer: Optimizer for the critic network
         :type critic_optimizer: optim.Optimizer
-        :param input_combined: Combined input tensor for MLP architecture
-        :type input_combined: Optional[torch.Tensor]
-        :param stacked_states: Stacked states tensor for CNN architecture
-        :type stacked_states: Optional[torch.Tensor]
-        :param stacked_actions: Stacked actions tensor for CNN architecture
-        :type stacked_actions: Optional[torch.Tensor]
-        :param next_input_combined: Combined input tensor for next state in MLP architecture
-        :type next_input_combined: Optional[torch.Tensor]
-        :param stacked_next_states: Stacked next states tensor for CNN architecture
-        :type stacked_next_states: Optional[torch.Tensor]
-        :param stacked_next_actions: Stacked next actions tensor for CNN architecture
-        :type stacked_next_actions: Optional[torch.Tensor]
+        :param stacked_states: Stacked states tensor
+        :type stacked_states: torch.Tensor
+        :param stacked_actions: Stacked actions tensor
+        :type stacked_actions: torch.Tensor
+        :param stacked_next_states: Stacked next states tensor
+        :type stacked_next_states: torch.Tensor
+        :param stacked_next_actions: Stacked next actions tensor
+        :type stacked_next_actions: torch.Tensor
         :param states: Dictionary of current states for each agent
         :type states: TensorDict
         :param actions: Dictionary of actions for each agent
@@ -702,36 +692,22 @@ class MADDPG(MultiAgentAlgorithm):
         :return: Tuple containing actor loss and critic loss
         :rtype: Tuple[float, float]
         """
-        if self.arch == "mlp":
-            if self.accelerator is not None:
-                with critic.no_sync():
-                    q_value = critic(input_combined)
-            else:
-                q_value = critic(input_combined)
-        elif self.arch == "cnn":
-            if self.accelerator is not None:
-                with critic.no_sync():
-                    q_value = critic(stacked_states, stacked_actions)
-            else:
+        if self.accelerator is not None:
+            with critic.no_sync():
                 q_value = critic(stacked_states, stacked_actions)
+        else:
+            q_value = critic(stacked_states, stacked_actions)
 
         with torch.no_grad():
-            if self.arch == "mlp":
-                if self.accelerator is not None:
-                    with critic_target.no_sync():
-                        q_value_next_state = critic_target(next_input_combined)
-                else:
-                    q_value_next_state = critic_target(next_input_combined)
-            elif self.arch == "cnn":
-                if self.accelerator is not None:
-                    with critic_target.no_sync():
-                        q_value_next_state = critic_target(
-                            stacked_next_states, stacked_next_actions
-                        )
-                else:
+            if self.accelerator is not None:
+                with critic_target.no_sync():
                     q_value_next_state = critic_target(
                         stacked_next_states, stacked_next_actions
                     )
+            else:
+                q_value_next_state = critic_target(
+                    stacked_next_states, stacked_next_actions
+                )
 
         y_j = (
             rewards[agent_id] + (1 - dones[agent_id]) * self.gamma * q_value_next_state
@@ -763,25 +739,14 @@ class MADDPG(MultiAgentAlgorithm):
         detached_actions[agent_id] = action
 
         # update actor and targets
-        if self.arch == "mlp":
-            input_combined = torch.cat(
-                list(states.values()) + list(detached_actions.values()), 1
-            )
-            if self.accelerator is not None:
-                with critic.no_sync():
-                    actor_loss = -critic(input_combined).mean()
-            else:
-                actor_loss = -critic(input_combined).mean()
-
-        elif self.arch == "cnn":
-            stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
-            if self.accelerator is not None:
-                with critic.no_sync():
-                    actor_loss = -critic(
-                        stacked_states, stacked_detached_actions
-                    ).mean()
-            else:
-                actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
+        stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
+        if self.accelerator is not None:
+            with critic.no_sync():
+                actor_loss = -critic(
+                    stacked_states, stacked_detached_actions
+                ).mean()
+        else:
+            actor_loss = -critic(stacked_states, stacked_detached_actions).mean()
 
         # actor loss backprop
         actor_optimizer.zero_grad()
@@ -793,14 +758,27 @@ class MADDPG(MultiAgentAlgorithm):
 
         return actor_loss.item(), critic_loss.item()
 
-    def soft_update(self, net, target):
-        """Soft updates target network."""
+    def soft_update(self, net: nn.Module, target: nn.Module) -> None:
+        """Soft updates target network.
+        
+        :param net: Network to be updated
+        :type net: nn.Module
+        :param target: Target network
+        :type target: nn.Module
+        """
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, sum_scores=True):
+    def test(
+            self,
+            env: GymEnvType,
+            swap_channels: bool = False,
+            max_steps: Optional[int] = None,
+            loop: int = 3,
+            sum_scores: bool = True
+            ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -813,6 +791,8 @@ class MADDPG(MultiAgentAlgorithm):
         :type loop: int, optional
         :param sum_scores: Boolean flag to indicate whether to sum sub-agent scores, defaults to True
         :type sum_scores: book, optional
+        :return: Mean test score
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []

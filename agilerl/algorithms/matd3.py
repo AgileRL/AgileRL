@@ -1,28 +1,22 @@
-from typing import Optional, Any, List, Tuple, Dict
+from typing import Optional, Any, List, Tuple, Dict, Union
 import copy
-import inspect
 import warnings
-import dill
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict
+from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict, ArrayLike, GymEnvType
 from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.modules.configs import MlpNetConfig
+from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.utils.algo_utils import (
-    key_in_nested_dict,
-    unwrap_optimizer,
-    make_safe_deepcopies
-)
+from agilerl.utils.evolvable_networks import get_default_config, is_image_space
+from agilerl.utils.algo_utils import key_in_nested_dict, make_safe_deepcopies, concatenate_spaces
 
 class MATD3(MultiAgentAlgorithm):
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
@@ -80,12 +74,12 @@ class MATD3(MultiAgentAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
-    actors: List[EvolvableModule]
-    actor_targets: List[EvolvableModule]
-    critics_1: List[EvolvableModule]
-    critic_targets_1: List[EvolvableModule]
-    critics_2: List[EvolvableModule]
-    critic_targets_2: List[EvolvableModule]
+    actors: List[Union[EvolvableModule, DeterministicActor]]
+    actor_targets: List[Union[EvolvableModule, DeterministicActor]]
+    critics_1: List[Union[EvolvableModule, ContinuousQNetwork]]
+    critic_targets_1: List[Union[EvolvableModule, ContinuousQNetwork]]
+    critics_2: List[Union[EvolvableModule, ContinuousQNetwork]]
+    critic_targets_2: List[Union[EvolvableModule, ContinuousQNetwork]]
 
     def __init__(
         self,
@@ -100,7 +94,8 @@ class MATD3(MultiAgentAlgorithm):
         dt: float = 1e-2,
         index: int = 0,
         policy_freq: int = 2,
-        net_config: dict = {"arch": "mlp", "hidden_size": [64, 64]},
+        net_config: Optional[Dict[str, Any]] = None,
+        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 0.001,
         lr_critic: float = 0.01,
@@ -150,6 +145,7 @@ class MATD3(MultiAgentAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
+        self.is_image_space = is_image_space(observation_spaces[0])
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -193,195 +189,78 @@ class MATD3(MultiAgentAlgorithm):
                 len({type(net) for net in actor_networks}) == 1
             ), "'actor_networks' must all be the same type"
             assert (
-                len({type(net) for net in critic_networks[0]}) == 1
-            ), "Critic networks must all be the same type"
-            assert (
-                len({type(net) for net in critic_networks[-1]}) == 1
-            ), "Critic networks must all be the same type"
-            assert isinstance(
-                actor_networks[0], type(critic_networks[0][0])
-            ), "actor and critic networks must be the same type"
+                len({type(net) for net in critic_networks}) == 1
+            ), "'critic_networks' must all be the same type"
 
-            if (
-                isinstance(actor_networks[0], (EvolvableMLP, EvolvableCNN))
-                and isinstance(critic_networks[0][0], (EvolvableMLP, EvolvableCNN))
-                and isinstance(critic_networks[1][0], (EvolvableMLP, EvolvableCNN))
-            ):
-                self.net_config = actor_networks[0].net_config
-            elif (
-                isinstance(actor_networks[0], MakeEvolvable)
-                and isinstance(critic_networks[0][0], MakeEvolvable)
-                and isinstance(critic_networks[1][0], MakeEvolvable)
-            ):
-                self.net_config = None
-            else:
-                assert (
-                    False
-                ), "'actor_networks' and 'critic_networks' must be lists of networks all of which must be the same  \
-                                type and be of type EvolvableMLP, EvolvableCNN or MakeEvolvable"
-            
+            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
+                raise ValueError(
+                    "All actor networks must be instances of EvolvableModule"
+                )
+            if not all(isinstance(net, EvolvableModule) for net in critic_networks[0]):
+                raise ValueError(
+                    "All critic networks must be instances of EvolvableModule"
+                )
+            if not all(isinstance(net, EvolvableModule) for net in critic_networks[1]):
+                raise ValueError(
+                    "All critic networks must be instances of EvolvableModule"
+                )
             self.actors, self.critics_1, self.critics_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
+            self.actor_targets, self.critic_targets_1, self.critic_targets_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
         else:
-            # model
-            critic_net_config = copy.deepcopy(self.net_config)
-            critic_net_config["mlp_output_activation"] = (
-                None  # Critic must have no output activation
+            output_activation = None if not self.discrete_actions else "GumbelSoftmax"
+            if head_config is not None:
+                head_config["output_activation"] = output_activation
+                critic_head_config = copy.deepcopy(head_config)
+                critic_head_config["output_activation"] = None
+            else:
+                head_config = MlpNetConfig(hidden_size=[64], output_activation=output_activation)
+                critic_head_config = MlpNetConfig(hidden_size=[64])
+
+            if net_config is None:
+                net_config = get_default_config(observation_spaces[0]) if net_config is None else net_config
+            
+            # For image spaces we need to give a sample input tensor to 
+            # build networks with Conv3d blocks approproately
+            critic_net_config = copy.deepcopy(net_config)
+            if self.is_image_space:
+                net_config["sample_input"] = torch.zeros(
+                    (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
+                ).unsqueeze(2)
+    
+                critic_net_config['sample_input'] = torch.zeros(
+                    (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
+                ).unsqueeze(2).repeat(1, 1, self.n_agents, 1, 1)
+
+            create_actor = lambda idx: DeterministicActor(
+                self.observation_spaces[idx],
+                self.action_spaces[idx],
+                encoder_config=net_config,
+                head_config=head_config,
+                n_agents=self.n_agents,
+                device=self.device
             )
-            self.actors = []
-            if self.net_config["arch"] == "mlp":  # Multi-layer Perceptron
-                for idx, (action_dim, state_dim) in enumerate(
-                    zip(self.action_dims, self.state_dims)
-                ):
-                    if "mlp_output_activation" not in self.net_config.keys():
-                        if not self.discrete_actions:
-                            if self.min_action[idx][0] < 0:
-                                self.net_config["mlp_output_activation"] = "Tanh"
-                            else:
-                                self.net_config["mlp_output_activation"] = "Sigmoid"
-                        else:
-                            self.net_config["mlp_output_activation"] = "GumbelSoftmax"
-                    self.actors.append(
-                        EvolvableMLP(
-                            num_inputs=state_dim[0],
-                            num_outputs=action_dim,
-                            device=self.device,
-                            accelerator=self.accelerator,
-                            **self.net_config,
-                        )
-                    )
 
-                self.critics_1 = [
-                    EvolvableMLP(
-                        num_inputs=self.total_state_dims + self.total_actions,
-                        num_outputs=1,
-                        device=self.device,
-                        accelerator=self.accelerator,
-                        **critic_net_config,
-                    )
-                    for _ in range(self.n_agents)
-                ]
-                self.critics_2 = [
-                    EvolvableMLP(
-                        num_inputs=self.total_state_dims + self.total_actions,
-                        num_outputs=1,
-                        device=self.device,
-                        accelerator=self.accelerator,
-                        **critic_net_config,
-                    )
-                    for _ in range(self.n_agents)
-                ]
-            elif self.net_config["arch"] == "cnn":  # Convolutional Neural Network
-                for idx, (action_dim, state_dim) in enumerate(
-                    zip(self.action_dims, self.state_dims)
-                ):
-                    if "mlp_output_activation" not in self.net_config.keys():
-                        if not self.discrete_actions:
-                            if self.min_action[idx][0] < 0:
-                                self.net_config["mlp_output_activation"] = "Tanh"
-                            else:
-                                self.net_config["mlp_output_activation"] = "Sigmoid"
-                        else:
-                            self.net_config["mlp_output_activation"] = "GumbelSoftmax"
+            # NOTE: Critic uses observations + actions of all agents to predict Q-value
+            create_critic = lambda: ContinuousQNetwork(
+                observation_space=concatenate_spaces(observation_spaces),
+                action_space=concatenate_spaces(action_spaces),
+                encoder_config=critic_net_config,
+                head_config=critic_head_config,
+                n_agents=self.n_agents,
+                device=self.device
+            )
 
-                    self.actors.append(
-                        EvolvableCNN(
-                            input_shape=state_dim,
-                            num_outputs=action_dim,
-                            n_agents=self.n_agents,
-                            device=self.device,
-                            accelerator=self.accelerator,
-                            **self.net_config,
-                        )
-                    )
-
-                self.critics_1 = [
-                    EvolvableCNN(
-                        input_shape=state_dim,
-                        num_outputs=self.total_actions,
-                        critic=True,
-                        n_agents=self.n_agents,
-                        device=self.device,
-                        accelerator=self.accelerator,
-                        **critic_net_config,
-                    )
-                    for state_dim in self.state_dims
-                ]
-                self.critics_2 = [
-                    EvolvableCNN(
-                        input_shape=state_dim,
-                        num_outputs=self.total_actions,
-                        critic=True,
-                        n_agents=self.n_agents,
-                        device=self.device,
-                        accelerator=self.accelerator,
-                        **critic_net_config,
-                    )
-                    for state_dim in self.state_dims
-                ]
-            elif self.net_config["arch"] == "composed":  # Multi Input
-                for idx, (action_dim, obs_space) in enumerate(
-                    zip(self.action_dims, self.observation_spaces)
-                ):
-                    if "mlp_output_activation" not in self.net_config.keys():
-                        if not self.discrete_actions:
-                            if self.min_action[idx][0] < 0:
-                                self.net_config["mlp_output_activation"] = "Tanh"
-                            else:
-                                self.net_config["mlp_output_activation"] = "Sigmoid"
-                        else:
-                            self.net_config["mlp_output_activation"] = "GumbelSoftmax"
-
-                    self.actors.append(
-                        EvolvableMultiInput(
-                            observation_space=obs_space,
-                            num_outputs=action_dim,
-                            n_agents=self.n_agents,
-                            device=self.device,
-                            accelerator=self.accelerator,
-                            **self.net_config,
-                        )
-                    )
-
-                self.critics_1 = [
-                    EvolvableMultiInput(
-                        observation_space=obs_space,
-                        num_outputs=self.total_actions,
-                        critic=True,
-                        n_agents=self.n_agents,
-                        device=self.device,
-                        accelerator=self.accelerator,
-                        **critic_net_config,
-                    )
-                    for obs_space in self.observation_spaces
-                ]
-                self.critics_2 = [
-                    EvolvableMultiInput(
-                        observation_space=obs_space,
-                        num_outputs=self.total_actions,
-                        critic=True,
-                        n_agents=self.n_agents,
-                        device=self.device,
-                        accelerator=self.accelerator,
-                        **critic_net_config,
-                    )
-                    for obs_space in self.observation_spaces
-                ]
-
-        # Assign architecture
-        self.arch = (
-            self.net_config["arch"]
-            if self.net_config is not None
-            else self.actors[0].arch
-        )
-
-        # Create target networks
-        self.actor_targets = copy.deepcopy(self.actors)
-        self.critic_targets_1 = copy.deepcopy(self.critics_1)
-        self.critic_targets_2 = copy.deepcopy(self.critics_2)
+            self.actors = [create_actor(idx) for idx in range(self.n_agents)]
+            self.critics_1 = [create_critic() for _ in range(self.n_agents)]
+            self.critics_2 = [create_critic() for _ in range(self.n_agents)]
+            self.actor_targets = [create_actor(idx) for idx in range(self.n_agents)]
+            self.critic_targets_1 = [create_critic() for _ in range(self.n_agents)]
+            self.critic_targets_2 = [create_critic() for _ in range(self.n_agents)]
 
         # Initialise target network parameters
         for actor, actor_target in zip(self.actors, self.actor_targets):
             actor_target.load_state_dict(actor.state_dict())
+
         for critic_1, critic_2, critic_target_1, critic_target_2 in zip(
             self.critics_1, self.critics_2, self.critic_targets_1, self.critic_targets_2
         ):
@@ -412,22 +291,21 @@ class MATD3(MultiAgentAlgorithm):
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
-        else:
-            self.place_models_on_device(self.device)
-            if self.torch_compiler:
-                if (
-                    any(
-                        actor.mlp_output_activation == "GumbelSoftmax"
-                        for actor in self.actors
-                    )
-                    and self.torch_compiler != "default"
-                ):
-                    warnings.warn(
-                        f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
-                    )
-                    self.torch_compiler = "default"
-                torch.set_float32_matmul_precision("high")
-                self.recompile()
+        elif self.torch_compiler:
+            if (
+                any(
+                    actor.output_activation == "GumbelSoftmax"
+                    for actor in self.actors
+                )
+                and self.torch_compiler != "default"
+            ):
+                warnings.warn(
+                    f"{self.torch_compiler} compile mode is not compatible with GumbelSoftmax activation, changing to 'default' mode."
+                )
+                self.torch_compiler = "default"
+
+            torch.set_float32_matmul_precision("high")
+            self.recompile()
 
         self.criterion = nn.MSELoss()
 
@@ -455,7 +333,7 @@ class MATD3(MultiAgentAlgorithm):
             )
         )
 
-    def scale_to_action_space(self, action: np.ndarray, idx: int) -> torch.Tensor:
+    def scale_to_action_space(self, action: ArrayLike, idx: int) -> torch.Tensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
@@ -466,7 +344,7 @@ class MATD3(MultiAgentAlgorithm):
         :return: Scaled action
         :rtype: torch.Tensor
         """
-        mlp_output_activation = self.actors[idx].mlp_output_activation
+        mlp_output_activation = self.actors[idx].output_activation
         if mlp_output_activation in ["Tanh"]:
             pre_scaled_min = -1
             pre_scaled_max = 1
@@ -605,8 +483,6 @@ class MATD3(MultiAgentAlgorithm):
 
         # Preprocess observations
         preprocessed_states = list(self.preprocess_observation(states).values())
-        if self.arch == "cnn":
-            preprocessed_states = [state.unsqueeze(2) for state in preprocessed_states]
 
         action_dict = {}
         for idx, (agent_id, state, actor) in enumerate(
@@ -641,7 +517,7 @@ class MATD3(MultiAgentAlgorithm):
                     if action_masks[agent] is not None
                     else None
                 )
-                action = np.ma.array(action, mask=mask)
+                action: np.ndarray = np.ma.array(action, mask=mask)
                 if self.one_hot:
                     discrete_action_dict[agent] = action.argmax(axis=-1)
                 else:
@@ -724,13 +600,6 @@ class MATD3(MultiAgentAlgorithm):
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
 
-        # Need to unsqueeze next states for Conv3d
-        if self.arch == "cnn":
-            next_states = {
-                agent_id: next_state.unsqueeze(2)
-                for agent_id, next_state in next_states.items()
-            }
-
         next_actions = []
         with torch.no_grad():
             for i, agent_id_label in enumerate(self.agent_ids):
@@ -747,28 +616,16 @@ class MATD3(MultiAgentAlgorithm):
                 else:
                     next_actions.append(unscaled_actions)
 
-        if self.arch == "mlp":
-            action_values = list(actions.values())
-            state_values = list(states.values())
-            input_combined = torch.cat(state_values + action_values, dim=1)
-            next_input_combined = torch.cat(
-                list(next_states.values()) + next_actions, dim=1
-            )
-        elif self.arch == "cnn":
-            next_states = {
-                agent_id: next_state.squeeze(2) 
-                for agent_id, next_state in next_states.items()
-                }
-
+        # Stack states and actions
+        if self.is_image_space:
             stacked_states = torch.stack(list(states.values()), dim=2)
-            stacked_actions = torch.cat(list(actions.values()), dim=1)
             stacked_next_states = torch.stack(list(next_states.values()), dim=2)
-            stacked_next_actions = torch.cat(next_actions, dim=1)
+        else:
+            stacked_states = torch.cat(list(states.values()), dim=1)
+            stacked_next_states = torch.cat(list(next_states.values()), dim=1)
 
-            # Need to unsqueeze states for Conv3d
-            states = {
-                agent_id: state.unsqueeze(2) for agent_id, state in states.items()
-            }
+        stacked_actions = torch.cat(list(actions.values()), dim=1)
+        stacked_next_actions = torch.cat(next_actions, dim=1)
 
         loss_dict = {}
         for idx, (
@@ -805,12 +662,10 @@ class MATD3(MultiAgentAlgorithm):
                 actor_optimizer,
                 critic_1_optimizer,
                 critic_2_optimizer,
-                input_combined if self.arch == "mlp" else None,
-                stacked_states if self.arch == "cnn" else None,
-                stacked_actions if self.arch == "cnn" else None,
-                next_input_combined if self.arch == "mlp" else None,
-                stacked_next_states if self.arch == "cnn" else None,
-                stacked_next_actions if self.arch == "cnn" else None,
+                stacked_states,
+                stacked_actions,
+                stacked_next_states,
+                stacked_next_actions,
                 states,
                 actions,
                 rewards,
@@ -851,12 +706,10 @@ class MATD3(MultiAgentAlgorithm):
         actor_optimizer: optim.Optimizer,
         critic_1_optimizer: optim.Optimizer,
         critic_2_optimizer: optim.Optimizer,
-        input_combined: Optional[torch.Tensor],
-        stacked_states: Optional[torch.Tensor],
-        stacked_actions: Optional[torch.Tensor],
-        next_input_combined: Optional[torch.Tensor],
-        stacked_next_states: Optional[torch.Tensor],
-        stacked_next_actions: Optional[torch.Tensor],
+        stacked_states: torch.Tensor,
+        stacked_actions: torch.Tensor,
+        stacked_next_states: torch.Tensor,
+        stacked_next_actions: torch.Tensor,
         states: TensorDict,
         actions: TensorDict,
         rewards: TensorDict,
@@ -886,14 +739,10 @@ class MATD3(MultiAgentAlgorithm):
         :type critic_1_optimizer: optim.Optimizer
         :param critic_2_optimizer: Optimizer for the second critic network
         :type critic_2_optimizer: optim.Optimizer
-        :param input_combined: Combined input tensor for MLP architecture
-        :type input_combined: Optional[torch.Tensor]
         :param stacked_states: Stacked states tensor for CNN architecture
         :type stacked_states: Optional[torch.Tensor]
         :param stacked_actions: Stacked actions tensor for CNN architecture
         :type stacked_actions: Optional[torch.Tensor]
-        :param next_input_combined: Combined input tensor for next states in MLP architecture
-        :type next_input_combined: Optional[torch.Tensor]
         :param stacked_next_states: Stacked next states tensor for CNN architecture
         :type stacked_next_states: Optional[torch.Tensor]
         :param stacked_next_actions: Stacked next actions tensor for CNN architecture
@@ -910,52 +759,32 @@ class MATD3(MultiAgentAlgorithm):
         :return: Tuple containing actor loss (if applicable) and critic loss
         :rtype: Tuple[Optional[float], float]
         """
-        if self.arch == "mlp":
-            if self.accelerator is not None:
-                with critic_1.no_sync():
-                    q_value_1 = critic_1(input_combined)
-                with critic_2.no_sync():
-                    q_value_2 = critic_2(input_combined)
-            else:
-                q_value_1 = critic_1(input_combined)
-                q_value_2 = critic_2(input_combined)
-        elif self.arch == "cnn":
-            if self.accelerator is not None:
-                with critic_1.no_sync():
-                    q_value_1 = critic_1(stacked_states, stacked_actions)
-                with critic_2.no_sync():
-                    q_value_2 = critic_2(stacked_states, stacked_actions)
-            else:
+        if self.accelerator is not None:
+            with critic_1.no_sync():
                 q_value_1 = critic_1(stacked_states, stacked_actions)
+            with critic_2.no_sync():
                 q_value_2 = critic_2(stacked_states, stacked_actions)
+        else:
+            q_value_1 = critic_1(stacked_states, stacked_actions)
+            q_value_2 = critic_2(stacked_states, stacked_actions)
 
         with torch.no_grad():
-            if self.arch == "mlp":
-                if self.accelerator is not None:
-                    with critic_target_1.no_sync():
-                        q_value_next_state_1 = critic_target_1(next_input_combined)
-                    with critic_target_2.no_sync():
-                        q_value_next_state_2 = critic_target_2(next_input_combined)
-                else:
-                    q_value_next_state_1 = critic_target_1(next_input_combined)
-                    q_value_next_state_2 = critic_target_2(next_input_combined)
-            elif self.arch == "cnn":
-                if self.accelerator is not None:
-                    with critic_target_1.no_sync():
-                        q_value_next_state_1 = critic_target_1(
-                            stacked_next_states, stacked_next_actions
-                        )
-                    with critic_target_2.no_sync():
-                        q_value_next_state_2 = critic_target_2(
-                            stacked_next_states, stacked_next_actions
-                        )
-                else:
+            if self.accelerator is not None:
+                with critic_target_1.no_sync():
                     q_value_next_state_1 = critic_target_1(
                         stacked_next_states, stacked_next_actions
                     )
+                with critic_target_2.no_sync():
                     q_value_next_state_2 = critic_target_2(
                         stacked_next_states, stacked_next_actions
                     )
+            else:
+                q_value_next_state_1 = critic_target_1(
+                    stacked_next_states, stacked_next_actions
+                )
+                q_value_next_state_2 = critic_target_2(
+                    stacked_next_states, stacked_next_actions
+                )
 
         q_value_next_state = torch.min(q_value_next_state_1, q_value_next_state_2)
 
@@ -995,29 +824,18 @@ class MATD3(MultiAgentAlgorithm):
         # update actor and targets every policy_freq learn steps
         self.learn_counter[agent_id] += 1
         if self.learn_counter[agent_id] % self.policy_freq == 0:
-            if self.arch == "mlp":
-                input_combined = torch.cat(
-                    list(states.values()) + list(detached_actions.values()), 1
-                )
-                if self.accelerator is not None:
-                    with critic_1.no_sync():
-                        actor_loss = -critic_1(input_combined).mean()
-                else:
-                    actor_loss = -critic_1(input_combined).mean()
-
-            elif self.arch == "cnn":
-                stacked_detached_actions = torch.cat(
-                    list(detached_actions.values()), dim=1
-                )
-                if self.accelerator is not None:
-                    with critic_1.no_sync():
-                        actor_loss = -critic_1(
-                            stacked_states, stacked_detached_actions
-                        ).mean()
-                else:
+            stacked_detached_actions = torch.cat(
+                list(detached_actions.values()), dim=1
+            )
+            if self.accelerator is not None:
+                with critic_1.no_sync():
                     actor_loss = -critic_1(
                         stacked_states, stacked_detached_actions
                     ).mean()
+            else:
+                actor_loss = -critic_1(
+                    stacked_states, stacked_detached_actions
+                ).mean()
 
             # actor loss backprop
             actor_optimizer.zero_grad()
@@ -1029,14 +847,21 @@ class MATD3(MultiAgentAlgorithm):
 
         return actor_loss.item() if actor_loss is not None else None, critic_loss.item()
 
-    def soft_update(self, net, target):
+    def soft_update(self, net: nn.Module, target: nn.Module) -> None:
         """Soft updates target network."""
         for eval_param, target_param in zip(net.parameters(), target.parameters()):
             target_param.data.copy_(
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3, sum_scores=True):
+    def test(
+            self,
+            env: GymEnvType,
+            swap_channels: bool = False,
+            max_steps: Optional[int] = None,
+            loop: int = 3,
+            sum_scores: bool = True
+            ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -1132,579 +957,3 @@ class MATD3(MultiAgentAlgorithm):
         mean_fit = mean_fit[0] if sum_scores else mean_fit
         self.fitness.append(mean_fit)
         return mean_fit
-
-    def clone(self, index=None, wrap=True):
-        """Returns cloned agent identical to self.
-
-        :param index: Index to keep track of agent for tournament selection and mutation, defaults to None
-        :type index: int, optional
-        """
-        input_args = self.inspect_attributes(input_args_only=True)
-        input_args["wrap"] = wrap
-
-        if input_args.get("net_config") is None:
-            input_args['actor_networks'] = self.actors
-            input_args['critic_networks'] = [self.critics_1, self.critics_2]
-
-        clone = type(self)(**input_args)
-
-        if self.accelerator is not None:
-            self.unwrap_models()
-
-        # Copy models to clone
-        clone.actors = [actor.clone() for actor in self.actors]
-        clone.actor_targets = [
-            actor_target.clone() for actor_target in self.actor_targets
-        ]
-        clone.critics_1 = [critic.clone() for critic in self.critics_1]
-        clone.critic_targets_1 = [
-            critic_target.clone() for critic_target in self.critic_targets_1
-        ]
-        clone.critics_2 = [critic.clone() for critic in self.critics_2]
-        clone.critic_targets_2 = [
-            critic_target.clone() for critic_target in self.critic_targets_2
-        ]
-        clone.actor_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=clone.actors,
-            optimizer_kwargs={"lr": clone.lr_actor},
-            network_names=clone.actor_optimizers.network_names,
-            multiagent=True
-        )
-        clone.critic_1_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=clone.critics_1,
-            optimizer_kwargs={"lr": clone.lr_critic},
-            network_names=clone.critic_1_optimizers.network_names,
-            multiagent=True
-        )
-        clone.critic_2_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=clone.critics_2,
-            optimizer_kwargs={"lr": clone.lr_critic},
-            network_names=clone.critic_2_optimizers.network_names,
-            multiagent=True
-        )
-
-        # Load optimizer state dicts to clone
-        for (
-            clone_actor_optimizer,
-            actor_optimizer,
-            clone_critic_1_optimizer,
-            critic_1_optimizer,
-            clone_critic_2_optimizer,
-            critic_2_optimizer,
-        ) in zip(
-            clone.actor_optimizers,
-            self.actor_optimizers,
-            clone.critic_1_optimizers,
-            self.critic_1_optimizers,
-            clone.critic_2_optimizers,
-            self.critic_2_optimizers,
-        ):
-            clone_actor_optimizer.load_state_dict(actor_optimizer.state_dict())
-            clone_critic_1_optimizer.load_state_dict(critic_1_optimizer.state_dict())
-            clone_critic_2_optimizer.load_state_dict(critic_2_optimizer.state_dict())
-
-        # Compile and accelerator wrap
-        if clone.accelerator is not None and wrap:
-            clone.wrap_models()
-
-        # move to device
-        else:
-            clone.place_models_on_device(clone.device)
-            if clone.torch_compiler:
-                clone.recompile()
-
-        for attribute in self.inspect_attributes().keys():
-            if hasattr(self, attribute) and hasattr(clone, attribute):
-                attr, clone_attr = getattr(self, attribute), getattr(clone, attribute)
-                if isinstance(attr, torch.Tensor) or isinstance(
-                    clone_attr, torch.Tensor
-                ):
-                    if not torch.equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                elif isinstance(attr, np.ndarray) or isinstance(clone_attr, np.ndarray):
-                    if not np.array_equal(attr, clone_attr):
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-                elif isinstance(attr, list) or isinstance(clone_attr, list):
-                    setattr(clone, attribute, [])
-                    for el in attr:
-                        getattr(clone, attribute).append(copy.deepcopy(el))
-                else:
-                    if attr != clone_attr:
-                        setattr(
-                            clone, attribute, copy.deepcopy(getattr(self, attribute))
-                        )
-            else:
-                setattr(clone, attribute, copy.deepcopy(getattr(self, attribute)))
-
-        if index is not None:
-            clone.index = index
-
-        return clone
-
-    def place_models_on_device(self, device):
-        self.actors = [actor.to(device) for actor in self.actors]
-        self.actor_targets = [
-            actor_target.to(device) for actor_target in self.actor_targets
-        ]
-        self.critics_1 = [critic.to(device) for critic in self.critics_1]
-        self.critic_targets_1 = [
-            critic_target.to(device) for critic_target in self.critic_targets_1
-        ]
-        self.critics_2 = [critic.to(device) for critic in self.critics_2]
-        self.critic_targets_2 = [
-            critic_target.to(device) for critic_target in self.critic_targets_2
-        ]
-
-    def unwrap_models(self):
-        if self.accelerator is not None:
-            self.actors = [
-                self.accelerator.unwrap_model(actor) for actor in self.actors
-            ]
-            self.actor_targets = [
-                self.accelerator.unwrap_model(actor_target)
-                for actor_target in self.actor_targets
-            ]
-            self.critics_1 = [
-                self.accelerator.unwrap_model(critic) for critic in self.critics_1
-            ]
-            self.critic_targets_1 = [
-                self.accelerator.unwrap_model(critic_target)
-                for critic_target in self.critic_targets_1
-            ]
-            self.critics_2 = [
-                self.accelerator.unwrap_model(critic) for critic in self.critics_2
-            ]
-            self.critic_targets_2 = [
-                self.accelerator.unwrap_model(critic_target)
-                for critic_target in self.critic_targets_2
-            ]
-            self.actor_optimizers.optimizer = [
-                unwrap_optimizer(actor_optimizer, actor, self.lr_actor)
-                for actor_optimizer, actor in zip(self.actor_optimizers, self.actors)
-            ]
-            self.critic_1_optimizers.optimizer = [
-                unwrap_optimizer(critic_optimizer, critic_1, self.lr_critic)
-                for critic_optimizer, critic_1 in zip(
-                    self.critic_1_optimizers, self.critics_1
-                )
-            ]
-            self.critic_2_optimizers.optimizer = [
-                unwrap_optimizer(critic_optimizer, critic_2, self.lr_critic)
-                for critic_optimizer, critic_2 in zip(
-                    self.critic_2_optimizers, self.critics_2
-                )
-            ]
-
-    def load_checkpoint(self, path):
-        """Loads saved agent properties and network weights from checkpoint.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        """
-        network_info = {
-            "actors_init_dict",
-            "actors_state_dict",
-            "actor_targets_init_dict",
-            "actor_targets_state_dict",
-            "actor_optimizers_state_dict",
-            "critics_1_init_dict",
-            "critics_1_state_dict",
-            "critic_targets_1_init_dict",
-            "critic_targets_1_state_dict",
-            "critic_1_optimizers_state_dict",
-            "critics_2_init_dict",
-            "critics_2_state_dict",
-            "critic_targets_2_init_dict",
-            "critic_targets_2_state_dict",
-            "critic_2_optimizers_state_dict",
-            "net_config",
-            "lr_actor",
-            "lr_critic",
-        }
-        checkpoint = torch.load(path, map_location=self.device, pickle_module=dill)
-        self.net_config = checkpoint["net_config"]
-        if self.net_config is not None:
-            self.arch = checkpoint["net_config"]["arch"]
-            if self.arch == "mlp":
-                network_class = EvolvableMLP
-            elif self.arch == "cnn":
-                network_class = EvolvableCNN
-        else:
-            network_class = MakeEvolvable
-
-        self.actors = [
-            network_class(**checkpoint["actors_init_dict"][idx])
-            for idx, _ in enumerate(self.agent_ids)
-        ]
-        self.actor_targets = [
-            network_class(**checkpoint["actor_targets_init_dict"][idx])
-            for idx, _ in enumerate(self.agent_ids)
-        ]
-        self.critics_1 = [
-            network_class(**checkpoint["critics_1_init_dict"][idx])
-            for idx, _ in enumerate(self.agent_ids)
-        ]
-        self.critic_targets_1 = [
-            network_class(**checkpoint["critic_targets_1_init_dict"][idx])
-            for idx, _ in enumerate(self.agent_ids)
-        ]
-        self.critics_2 = [
-            network_class(**checkpoint["critics_2_init_dict"][idx])
-            for idx, _ in enumerate(self.agent_ids)
-        ]
-        self.critic_targets_2 = [
-            network_class(**checkpoint["critic_targets_2_init_dict"][idx])
-            for idx, _ in enumerate(self.agent_ids)
-        ]
-
-        self.lr_actor = checkpoint["lr_actor"]
-        self.lr_critic = checkpoint["lr_critic"]
-        self.actor_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actors,
-            optimizer_kwargs={"lr": self.lr_actor},
-            network_names=self.actor_optimizers.network_names,
-            multiagent=True
-        )
-        self.critic_1_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=self.critics_1,
-            optimizer_kwargs={"lr": self.lr_critic},
-            network_names=self.critic_1_optimizers.network_names,
-            multiagent=True
-        )
-        self.critic_2_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=self.critics_2,
-            optimizer_kwargs={"lr": self.lr_critic},
-            network_names=self.critic_2_optimizers.network_names,
-            multiagent=True
-        )
-        actor_list = []
-        critic_1_list = []
-        critic_2_list = []
-        actor_target_list = []
-        critic_target_1_list = []
-        critic_target_2_list = []
-        actor_optimizer_list = []
-        critic_1_optimizer_list = []
-        critic_2_optimizer_list = []
-
-        for idx, (
-            actor,
-            actor_target,
-            critic_1,
-            critic_target_1,
-            critic_2,
-            critic_target_2,
-            actor_optimizer,
-            critic_1_optimizer,
-            critic_2_optimizer,
-        ) in enumerate(
-            zip(
-                self.actors,
-                self.actor_targets,
-                self.critics_1,
-                self.critic_targets_1,
-                self.critics_2,
-                self.critic_targets_2,
-                self.actor_optimizers,
-                self.critic_1_optimizers,
-                self.critic_2_optimizers,
-            )
-        ):
-            actor.load_state_dict(checkpoint["actors_state_dict"][idx])
-            actor_list.append(actor)
-            actor_target.load_state_dict(checkpoint["actor_targets_state_dict"][idx])
-            actor_target_list.append(actor_target)
-            critic_1.load_state_dict(checkpoint["critics_1_state_dict"][idx])
-            critic_1_list.append(critic_1)
-            critic_2.load_state_dict(checkpoint["critics_2_state_dict"][idx])
-            critic_2_list.append(critic_2)
-            critic_target_1.load_state_dict(
-                checkpoint["critic_targets_1_state_dict"][idx]
-            )
-            critic_target_1_list.append(critic_target_1)
-            critic_target_2.load_state_dict(
-                checkpoint["critic_targets_2_state_dict"][idx]
-            )
-            critic_target_2_list.append(critic_target_2)
-            actor_optimizer.load_state_dict(
-                checkpoint["actor_optimizers_state_dict"][idx]
-            )
-            actor_optimizer_list.append(actor_optimizer)
-            critic_1_optimizer.load_state_dict(
-                checkpoint["critic_1_optimizers_state_dict"][idx]
-            )
-            critic_1_optimizer_list.append(critic_1_optimizer)
-            critic_2_optimizer.load_state_dict(
-                checkpoint["critic_2_optimizers_state_dict"][idx]
-            )
-            critic_2_optimizer_list.append(critic_2_optimizer)
-
-        self.actors = actor_list
-        self.actor_targets = actor_target_list
-        self.critics_1 = critic_1_list
-        self.critic_targets_1 = critic_target_1_list
-        self.critics_2 = critic_2_list
-        self.critic_targets_2 = critic_target_2_list
-        self.actor_optimizers.optimizer = actor_optimizer_list
-        self.critic_1_optimizers.optimizer = critic_1_optimizer_list
-        self.critic_2_optimizers.optimizer = critic_2_optimizer_list
-
-        for attribute in checkpoint.keys():
-            if attribute not in network_info:
-                setattr(self, attribute, checkpoint[attribute])
-
-        if self.accelerator is not None:
-            self.wrap_models()
-        else:
-            self.place_models_on_device(self.device)
-            if self.torch_compiler:
-                torch.set_float32_matmul_precision("high")
-                self.recompile()
-
-    @classmethod
-    def load(cls, path, device="cpu", accelerator=None):
-        """Creates agent with properties and network weights loaded from path.
-
-        :param path: Location to load checkpoint from
-        :type path: string
-        :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
-        :type device: str, optional
-        :param accelerator: Accelerator for distributed computing, defaults to None
-        :type accelerator: accelerate.Accelerator(), optional
-        """
-        checkpoint = torch.load(path, map_location=device, pickle_module=dill)
-        for idx, _ in enumerate(checkpoint["agent_ids"]):
-            checkpoint["actors_init_dict"][idx]["device"] = device
-            checkpoint["actor_targets_init_dict"][idx]["device"] = device
-            checkpoint["critics_1_init_dict"][idx]["device"] = device
-            checkpoint["critic_targets_1_init_dict"][idx]["device"] = device
-            checkpoint["critics_2_init_dict"][idx]["device"] = device
-            checkpoint["critic_targets_2_init_dict"][idx]["device"] = device
-
-        actors_init_dict = checkpoint.pop("actors_init_dict")
-        actor_targets_init_dict = checkpoint.pop("actor_targets_init_dict")
-        actors_state_dict = checkpoint.pop("actors_state_dict")
-        actor_targets_state_dict = checkpoint.pop("actor_targets_state_dict")
-        actor_optimizers_state_dict = checkpoint.pop("actor_optimizers_state_dict")
-        critics_1_init_dict = checkpoint.pop("critics_1_init_dict")
-        critic_targets_1_init_dict = checkpoint.pop("critic_targets_1_init_dict")
-        critics_1_state_dict = checkpoint.pop("critics_1_state_dict")
-        critic_targets_1_state_dict = checkpoint.pop("critic_targets_1_state_dict")
-        critic_1_optimizers_state_dict = checkpoint.pop(
-            "critic_1_optimizers_state_dict"
-        )
-        critics_2_init_dict = checkpoint.pop("critics_2_init_dict")
-        critic_targets_2_init_dict = checkpoint.pop("critic_targets_2_init_dict")
-        critics_2_state_dict = checkpoint.pop("critics_2_state_dict")
-        critic_targets_2_state_dict = checkpoint.pop("critic_targets_2_state_dict")
-        critic_2_optimizers_state_dict = checkpoint.pop(
-            "critic_2_optimizers_state_dict"
-        )
-
-        checkpoint["device"] = device
-        checkpoint["accelerator"] = accelerator
-
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
-
-        if checkpoint["net_config"] is not None:
-            agent = cls(**class_init_dict)
-            agent.arch = checkpoint["net_config"]["arch"]
-            if agent.arch == "mlp":
-                agent.actors = [
-                    EvolvableMLP(**actors_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.actor_targets = [
-                    EvolvableMLP(**actor_targets_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critics_1 = [
-                    EvolvableMLP(**critics_1_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critic_targets_1 = [
-                    EvolvableMLP(**critic_targets_1_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critics_2 = [
-                    EvolvableMLP(**critics_2_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critic_targets_2 = [
-                    EvolvableMLP(**critic_targets_2_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-            elif agent.arch == "cnn":
-                agent.actors = [
-                    EvolvableCNN(**actors_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.actor_targets = [
-                    EvolvableCNN(**actor_targets_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critics_1 = [
-                    EvolvableCNN(**critics_1_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critic_targets_1 = [
-                    EvolvableCNN(**critic_targets_1_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critics_2 = [
-                    EvolvableCNN(**critics_2_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-                agent.critic_targets_2 = [
-                    EvolvableCNN(**critic_targets_2_init_dict[idx])
-                    for idx, _ in enumerate(agent.agent_ids)
-                ]
-        else:
-            class_init_dict["actor_networks"] = [
-                MakeEvolvable(**actors_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-            class_init_dict["critic_networks"] = [
-                [
-                    MakeEvolvable(**critics_1_init_dict[idx])
-                    for idx, _ in enumerate(checkpoint["agent_ids"])
-                ],
-                [
-                    MakeEvolvable(**critics_2_init_dict[idx])
-                    for idx, _ in enumerate(checkpoint["agent_ids"])
-                ],
-            ]
-            agent = cls(**class_init_dict)
-            agent.actors = [
-                MakeEvolvable(**actors_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-            agent.critics_1 = [
-                MakeEvolvable(**critics_1_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-            agent.critics_2 = [
-                MakeEvolvable(**critics_2_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-            agent.actor_targets = [
-                MakeEvolvable(**actor_targets_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-            agent.critic_targets_1 = [
-                MakeEvolvable(**critic_targets_1_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-            agent.critic_targets_2 = [
-                MakeEvolvable(**critic_targets_2_init_dict[idx])
-                for idx, _ in enumerate(checkpoint["agent_ids"])
-            ]
-
-        agent.actor_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=agent.actors,
-            optimizer_kwargs={"lr": agent.lr_actor},
-            network_names=agent.actor_optimizers.network_names,
-            multiagent=True
-        )
-        agent.critic_1_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=agent.critics_1,
-            optimizer_kwargs={"lr": agent.lr_critic},
-            network_names=agent.critic_1_optimizers.network_names,
-            multiagent=True
-        )
-        agent.critic_2_optimizers = OptimizerWrapper(
-            optim.Adam,
-            networks=agent.critics_2,
-            optimizer_kwargs={"lr": agent.lr_critic},
-            network_names=agent.critic_2_optimizers.network_names,
-            multiagent=True
-        )
-        actor_list = []
-        critic_1_list = []
-        critic_2_list = []
-        actor_target_list = []
-        critic_target_1_list = []
-        critic_target_2_list = []
-        actor_optimizer_list = []
-        critic_1_optimizer_list = []
-        critic_2_optimizer_list = []
-
-        for idx, (
-            actor,
-            actor_target,
-            critic_1,
-            critic_target_1,
-            critic_2,
-            critic_target_2,
-            actor_optimizer,
-            critic_1_optimizer,
-            critic_2_optimizer,
-        ) in enumerate(
-            zip(
-                agent.actors,
-                agent.actor_targets,
-                agent.critics_1,
-                agent.critic_targets_1,
-                agent.critics_2,
-                agent.critic_targets_2,
-                agent.actor_optimizers,
-                agent.critic_1_optimizers,
-                agent.critic_2_optimizers,
-            )
-        ):
-            actor.load_state_dict(actors_state_dict[idx])
-            actor_list.append(actor)
-            actor_target.load_state_dict(actor_targets_state_dict[idx])
-            actor_target_list.append(actor_target)
-            critic_1.load_state_dict(critics_1_state_dict[idx])
-            critic_1_list.append(critic_1)
-            critic_2.load_state_dict(critics_2_state_dict[idx])
-            critic_2_list.append(critic_2)
-            critic_target_1.load_state_dict(critic_targets_1_state_dict[idx])
-            critic_target_1_list.append(critic_target_1)
-            critic_target_2.load_state_dict(critic_targets_2_state_dict[idx])
-            critic_target_2_list.append(critic_target_2)
-            actor_optimizer.load_state_dict(actor_optimizers_state_dict[idx])
-            actor_optimizer_list.append(actor_optimizer)
-            critic_1_optimizer.load_state_dict(critic_1_optimizers_state_dict[idx])
-            critic_1_optimizer_list.append(critic_1_optimizer)
-            critic_2_optimizer.load_state_dict(critic_2_optimizers_state_dict[idx])
-            critic_2_optimizer_list.append(critic_2_optimizer)
-
-        agent.actors = actor_list
-        agent.actor_targets = actor_target_list
-        agent.critics_1 = critic_1_list
-        agent.critic_targets_1 = critic_target_1_list
-        agent.critics_2 = critic_2_list
-        agent.critic_targets_2 = critic_target_2_list
-        agent.actor_optimizers.optimizer = actor_optimizer_list
-        agent.critic_1_optimizers.optimizer = critic_1_optimizer_list
-        agent.critic_2_optimizers.optimizer = critic_2_optimizer_list
-
-        for attribute in agent.inspect_attributes().keys():
-            setattr(agent, attribute, checkpoint[attribute])
-
-        if accelerator is not None:
-            agent.wrap_models()
-        else:
-            agent.place_models_on_device(agent.device)
-            if agent.torch_compiler:
-                torch.set_float32_matmul_precision("high")
-                agent.recompile()
-
-        return agent

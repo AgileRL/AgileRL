@@ -14,6 +14,7 @@ from torch.nn import Module
 import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
 
+from agilerl.utils.evolvable_networks import is_image_space
 from agilerl.protocols import EvolvableAttributeType, OptimizerWrapper, EvolvableModule
 from agilerl.typing import (
     NumpyObsType,
@@ -219,6 +220,42 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
             for k, v in state_dict.items()
         ]
     )
+
+def concatenate_spaces(space_list: List[spaces.Space]) -> spaces.Space:
+    """Concatenates a list of spaces into a single space. If spaces correspond to images, 
+    we check that their shapes are the same and use the first space's shape as the shape of the
+    concatenated space.
+
+    :param spaces: List of spaces to concatenate
+    :type spaces: List[spaces.Space]
+    :return: Concatenated space
+    :rtype: spaces.Space
+    """
+    if all(isinstance(space, spaces.Box) for space in space_list):
+        # NOTE: For image spaces the concatenation is handled under-the-hood through the 
+        # specification of `n_agents` in EvolvableNetwork objects, whereby 3d convolutions 
+        # are used. This is why we enforce all image spaces to have the same shape.
+        if all(is_image_space(space) for space in space_list):
+            assert all(space.shape == space_list[0].shape for space in space_list), \
+                "AgileRL only supports multi-agent settings with the same shape for the image " \
+                "spaces of different agents."
+
+            return space_list[0]
+
+        low = np.concatenate([space.low for space in space_list], axis=0)
+        high = np.concatenate([space.high for space in space_list], axis=0)
+        return spaces.Box(low=low, high=high, dtype=space_list[0].dtype)
+
+    elif all(isinstance(space, spaces.Discrete) for space in space_list):
+        n = sum(space.n for space in space_list)
+        return spaces.Discrete(n)
+    
+    elif all(isinstance(space, spaces.MultiDiscrete) for space in space_list):
+        nvec = np.concatenate([space.nvec for space in spaces], axis=0)
+        return spaces.MultiDiscrete(nvec)
+    
+    else:
+        raise TypeError(f"Unsupported space types: {set(type(space) for space in spaces)}")
 
 def observation_space_channels_to_first(observation_space: Union[spaces.Box, spaces.Dict]) -> spaces.Box:
     """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].

@@ -17,9 +17,13 @@ from torch._dynamo import OptimizedModule
 
 from agilerl.algorithms.maddpg import MADDPG
 from agilerl.modules.custom_components import GumbelSoftmax
-from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.cnn import EvolvableCNN
+from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.utils import make_multi_agent_vect_envs
+from agilerl.utils.algo_utils import concatenate_spaces
+from agilerl.utils.evolvable_networks import get_default_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import generate_multi_agent_box_spaces, generate_multi_agent_discrete_spaces
 
@@ -67,14 +71,14 @@ class MultiAgentCNNActor(nn.Module):
         self.fc1 = nn.Linear(15200, 256)
         self.fc2 = nn.Linear(256, 2)
         self.relu = nn.ReLU()
-        self.mlp_output_activation = GumbelSoftmax()
+        self.output_activation = GumbelSoftmax()
 
     def forward(self, state_tensor):
         x = self.relu(self.conv1(state_tensor))
         x = self.relu(self.conv2(x))
         x = x.view(x.size(0), -1)
         x = self.relu(self.fc1(x))
-        x = self.mlp_output_activation(self.fc2(x))
+        x = self.output_activation(self.fc2(x))
 
         return x
 
@@ -104,7 +108,7 @@ class MultiAgentCNNCritic(nn.Module):
         return x
 
 
-class DummyEvolvableMLP(EvolvableMLP):
+class DummyContinuousQNetwork(ContinuousQNetwork):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -122,7 +126,7 @@ class DummyEvolvableMLP(EvolvableMLP):
         return DummyNoSync()
 
 
-class DummyEvolvableCNN(EvolvableCNN):
+class DummyDeterministicActor(DeterministicActor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -252,11 +256,9 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
 @pytest.mark.parametrize(
     "net_config, accelerator_flag, observation_spaces, compile_mode",
     [
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), None),
+        ({"hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), None),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -267,8 +269,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
         ),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -277,11 +277,9 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             None,
         ),
-        ({"arch": "mlp", "hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), "default"),
+        ({"hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), "default"),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -292,8 +290,6 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
         ),
         (
             {
-                "arch": "cnn",
-                "hidden_size": [8],
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
@@ -315,6 +311,7 @@ def test_initialize_maddpg_with_net_config(
         accelerator = Accelerator()
     else:
         accelerator = None
+
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         net_config=net_config,
@@ -324,35 +321,26 @@ def test_initialize_maddpg_with_net_config(
         device=device,
         torch_compiler=compile_mode,
     )
-    net_config.update({"mlp_output_activation": "Softmax"})
+    net_config.update({"output_activation": "Softmax"})
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
     assert maddpg.n_agents == len(agent_ids)
     assert maddpg.agent_ids == agent_ids
     for noise_vec in maddpg.expl_noise:
         assert torch.all(noise_vec == expl_noise)
-    assert maddpg.net_config == net_config, maddpg.net_config
     assert maddpg.batch_size == batch_size
-    assert maddpg.multi
     assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert maddpg.total_actions == sum(space.shape[0] for space in action_spaces)
     assert maddpg.scores == []
     assert maddpg.fitness == []
     assert maddpg.steps == [0]
-    # assert maddpg.actor_networks is None
-    # assert maddpg.critic_networks is None
-    if net_config["arch"] == "mlp":
-        evo_type = EvolvableMLP
-        assert maddpg.arch == "mlp"
-    else:
-        evo_type = EvolvableCNN
-        assert maddpg.arch == "cnn"
+
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in maddpg.actors)
         assert all(isinstance(critic, OptimizedModule) for critic in maddpg.critics)
     else:
-        assert all(isinstance(actor, evo_type) for actor in maddpg.actors)
-        assert all(isinstance(critic, evo_type) for critic in maddpg.critics)
+        assert all(isinstance(actor, DeterministicActor) for actor in maddpg.actors)
+        assert all(isinstance(critic, ContinuousQNetwork) for critic in maddpg.critics)
     if accelerator is None:
         assert all(
             isinstance(actor_optimizer, optim.Adam)
@@ -420,15 +408,13 @@ def test_initialize_maddpg_with_mlp_networks(
     else:
         assert all(isinstance(actor, MakeEvolvable) for actor in maddpg.actors)
         assert all(isinstance(critic, MakeEvolvable) for critic in maddpg.critics)
-    assert maddpg.net_config is None
-    assert maddpg.arch == "mlp"
+
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
     assert maddpg.discrete_actions is True
-    assert maddpg.multi
     assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
@@ -471,14 +457,13 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
     compile_mode,
 ):
     net_config = {
-        "arch": "mlp",
         "hidden_size": [64, 64],
         "min_hidden_layers": 1,
         "max_hidden_layers": 3,
         "min_mlp_nodes": 64,
         "max_mlp_nodes": 500,
-        "mlp_output_activation": "GumbelSoftmax",
-        "mlp_activation": "ReLU",
+        "output_activation": "GumbelSoftmax",
+        "activation": "ReLU",
     }
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
@@ -546,15 +531,13 @@ def test_initialize_maddpg_with_cnn_networks(
     else:
         assert all(isinstance(actor, MakeEvolvable) for actor in maddpg.actors)
         assert all(isinstance(critic, MakeEvolvable) for critic in maddpg.critics)
-    assert maddpg.net_config is None
-    assert maddpg.arch == "cnn"
+
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
     assert maddpg.discrete_actions is True
-    assert maddpg.multi
     assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
@@ -594,56 +577,52 @@ def test_initialize_maddpg_with_cnn_networks(
 def test_initialize_maddpg_with_evo_networks(
     observation_spaces, action_spaces, net, device, compile_mode, accelerator
 ):
-    if net == "mlp":
-        evo_actors = [
-            EvolvableMLP(
-                num_inputs=observation_spaces[x].shape[0],
-                num_outputs=action_spaces[x].n,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-                mlp_output_activation="Tanh",
-            )
-            for x in range(2)
-        ]
-        evo_critics = [
-            EvolvableMLP(
-                num_inputs=sum(observation_space.shape[0] for observation_space in observation_spaces)
-                + sum(space.n for space in action_spaces),
-                num_outputs=1,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-            )
-            for x in range(2)
-        ]
-    else:
-        evo_actors = [
-            EvolvableCNN(
-                input_shape=observation_spaces[0].shape,
-                num_outputs=action_spaces[0].n,
-                channel_size=[8, 8],
-                kernel_size=[2, 2],
-                stride_size=[1, 1],
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
+    
+    net_config = get_default_config(observation_spaces[0])
+    
+    # For image spaces we need to give a sample input tensor to build networks
+    critic_net_config = copy.deepcopy(net_config)
+    if len(observation_spaces[0].shape) == 3:
+        net_config["sample_input"] = torch.zeros(
+            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
+        ).unsqueeze(2)
+
+        critic_net_config['sample_input'] = torch.zeros(
+            (1, *observation_spaces[0].shape), dtype=torch.float32, device=device
+        ).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+
+    head_config = {
+        "output_activation": "Tanh",
+        "activation": "ReLU",
+        "hidden_size": [64, 64]
+        }
+
+    critic_head_config = copy.deepcopy(head_config)
+    critic_head_config.update({"output_activation": None})
+
+    evo_actors = [
+        DeterministicActor(
+                observation_spaces[x],
+                action_spaces[x],
+                encoder_config=net_config,
+                head_config=head_config,
                 n_agents=2,
-                mlp_output_activation="Tanh",
+                device=device,
             )
-            for _ in range(2)
-        ]
-        evo_critics = [
-            EvolvableCNN(
-                input_shape=observation_spaces[0].shape,
-                num_outputs=sum(space.n for space in action_spaces),
-                channel_size=[8, 8],
-                kernel_size=[2, 2],
-                stride_size=[1, 1],
-                hidden_size=[64, 64],
+        for x in range(2)
+    ]
+    evo_critics = [
+        ContinuousQNetwork(
+                observation_space=concatenate_spaces(observation_spaces),
+                action_space=concatenate_spaces(action_spaces),
+                encoder_config=critic_net_config,
+                head_config=critic_head_config,
                 n_agents=2,
-                critic=True,
-                mlp_activation="ReLU",
+                device=device
             )
-            for _ in range(2)
-        ]
+        for x in range(2)
+    ]
+
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -659,23 +638,19 @@ def test_initialize_maddpg_with_evo_networks(
         assert all(isinstance(critic, OptimizedModule) for critic in maddpg.critics)
     else:
         assert all(
-            isinstance(actor, (EvolvableMLP, EvolvableCNN)) for actor in maddpg.actors
+            isinstance(actor.encoder, (EvolvableMLP, EvolvableCNN)) for actor in maddpg.actors
         )
         assert all(
-            isinstance(critic, (EvolvableMLP, EvolvableCNN))
+            isinstance(critic.encoder, (EvolvableMLP, EvolvableCNN))
             for critic in maddpg.critics
         )
-    if net == "mlp":
-        assert maddpg.arch == "mlp"
-    else:
-        assert maddpg.arch == "cnn"
+
     assert maddpg.observation_spaces == observation_spaces
     assert maddpg.action_spaces == action_spaces
     assert maddpg.one_hot is False
     assert maddpg.n_agents == 2
     assert maddpg.agent_ids == ["agent_0", "agent_1"]
     assert maddpg.discrete_actions is True
-    assert maddpg.multi
     assert maddpg.total_state_dims == sum(state.shape[0] for state in observation_spaces)
     assert maddpg.total_actions == sum(space.n for space in action_spaces)
     assert maddpg.scores == []
@@ -841,7 +816,7 @@ def test_maddpg_get_action_mlp(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        net_config={"hidden_size": [64, 64]},
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -891,7 +866,7 @@ def test_maddpg_get_action_action_masking_exception(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        net_config={"hidden_size": [64, 64]},
         agent_ids=agent_ids,
         device=device,
     )
@@ -922,7 +897,7 @@ def test_maddpg_get_action_action_masking(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        net_config={"arch": "mlp", "hidden_size": [64, 64]},
+        net_config={"hidden_size": [64, 64]},
         agent_ids=agent_ids,
         device=device,
     )
@@ -948,8 +923,6 @@ def test_maddpg_get_action_cnn(
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [64, 64],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1020,12 +993,12 @@ def test_get_action_distributed(
         torch_compiler=compile_mode,
     )
     new_actors = [
-        DummyEvolvableMLP(
-            num_inputs=actor.num_inputs,
-            num_outputs=actor.num_outputs,
-            hidden_size=actor.hidden_size,
+        DummyDeterministicActor(
+            observation_space=actor.observation_space,
+            action_space=actor.action_space,
+            head_config=actor.actor_net.net_config,
             device=actor.device,
-            mlp_output_activation=actor.mlp_output_activation,
+            n_agents=actor.n_agents,
         )
         for actor in maddpg.actors
     ]
@@ -1073,8 +1046,6 @@ def test_maddpg_get_action_distributed_cnn(
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [64, 64],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1091,16 +1062,13 @@ def test_maddpg_get_action_distributed_cnn(
         torch_compiler=compile_mode,
     )
     new_actors = [
-        DummyEvolvableCNN(
-            input_shape=actor.input_shape,
-            num_outputs=actor.num_outputs,
-            channel_size=net_config["channel_size"],
-            kernel_size=net_config["kernel_size"],
-            stride_size=net_config["stride_size"],
-            hidden_size=net_config["hidden_size"],
-            mlp_output_activation=net_config["mlp_output_activation"],
+        DummyDeterministicActor(
+            observation_space=actor.observation_space,
+            action_space=actor.action_space,
+            encoder_config=net_config,
+            head_config=actor.actor_net.net_config,
+            device=actor.device,
             n_agents=actor.n_agents,
-            accelerator=accelerator,
         )
         for actor in maddpg.actors
     ]
@@ -1411,8 +1379,6 @@ def test_maddpg_learns_from_experiences_cnn(
 ):
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1507,8 +1473,6 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
     accelerator = Accelerator(device_placement=False)
     agent_ids = ["agent_0", "agent_1"]
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1640,8 +1604,6 @@ def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compil
     env_observation_spaces = generate_multi_agent_box_spaces(2, (32, 32, 3), low=0, high=255)
     agent_observation_spaces = generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1674,8 +1636,6 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mo
     env_observation_spaces = generate_multi_agent_box_spaces(2, (32, 32, 3), low=0, high=255)
     agent_observation_spaces = generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)
     net_config = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -1723,7 +1683,7 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     index = 0
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"hidden_size": [64, 64]}
     batch_size = 64
     lr_actor = 0.001
     lr_critic = 0.01
@@ -1774,7 +1734,6 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
     assert all(torch.equal(clone_expl_noise, expl_noise) for clone_expl_noise, expl_noise in zip(clone_agent.expl_noise, maddpg.expl_noise))
     assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
-    assert clone_agent.net_config == maddpg.net_config
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
     assert clone_agent.lr_critic == maddpg.lr_critic
@@ -1860,7 +1819,6 @@ def test_clone_after_learning(compile_mode):
     assert np.array_equal(clone_agent.expl_noise, maddpg.expl_noise)
     assert clone_agent.discrete_actions == maddpg.discrete_actions
     assert clone_agent.index == maddpg.index
-    assert clone_agent.net_config == maddpg.net_config
     assert clone_agent.batch_size == maddpg.batch_size
     assert clone_agent.lr_actor == maddpg.lr_actor
     assert clone_agent.lr_critic == maddpg.lr_critic
@@ -1908,7 +1866,7 @@ def test_clone_after_learning(compile_mode):
 def test_save_load_checkpoint_correct_data_and_format(
     tmpdir, device, accelerator, compile_mode
 ):
-    net_config = {"arch": "mlp", "hidden_size": [32, 32]}
+    net_config = {"hidden_size": [32, 32]}
     # Initialize the maddpg agent
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
@@ -1928,17 +1886,16 @@ def test_save_load_checkpoint_correct_data_and_format(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint
-    assert "actors_state_dict" in checkpoint
-    assert "actor_targets_init_dict" in checkpoint
-    assert "actor_targets_state_dict" in checkpoint
-    assert "actor_optimizers_state_dict" in checkpoint
-    assert "critics_init_dict" in checkpoint
-    assert "critics_state_dict" in checkpoint
-    assert "critic_targets_init_dict" in checkpoint
-    assert "critic_targets_state_dict" in checkpoint
-    assert "critic_optimizers_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actors_init_dict" in checkpoint['network_info']['modules']
+    assert "actors_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_optimizers_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1956,6 +1913,7 @@ def test_save_load_checkpoint_correct_data_and_format(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         agent_ids=["agent_0"],
+        net_config=net_config,
         torch_compiler=compile_mode,
         device=device,
         accelerator=accelerator,
@@ -1963,7 +1921,6 @@ def test_save_load_checkpoint_correct_data_and_format(
     loaded_maddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert loaded_maddpg.net_config == net_config
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in loaded_maddpg.actors)
         assert all(
@@ -1978,14 +1935,14 @@ def test_save_load_checkpoint_correct_data_and_format(
             for critic_target in loaded_maddpg.critic_targets
         )
     else:
-        assert all(isinstance(actor, EvolvableMLP) for actor in loaded_maddpg.actors)
+        assert all(isinstance(actor.encoder, EvolvableMLP) for actor in loaded_maddpg.actors)
         assert all(
-            isinstance(actor_target, EvolvableMLP)
+            isinstance(actor_target.encoder, EvolvableMLP)
             for actor_target in loaded_maddpg.actor_targets
         )
-        assert all(isinstance(critic, EvolvableMLP) for critic in loaded_maddpg.critics)
+        assert all(isinstance(critic.encoder, EvolvableMLP) for critic in loaded_maddpg.critics)
         assert all(
-            isinstance(critic_target, EvolvableMLP)
+            isinstance(critic_target.encoder, EvolvableMLP)
             for critic_target in loaded_maddpg.critic_targets
         )
     assert maddpg.lr_actor == 0.001
@@ -2026,8 +1983,6 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     tmpdir, device, accelerator, compile_mode
 ):
     net_config_cnn = {
-        "arch": "cnn",
-        "hidden_size": [8],
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
@@ -2052,17 +2007,16 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint
-    assert "actors_state_dict" in checkpoint
-    assert "actor_targets_init_dict" in checkpoint
-    assert "actor_targets_state_dict" in checkpoint
-    assert "actor_optimizers_state_dict" in checkpoint
-    assert "critics_init_dict" in checkpoint
-    assert "critics_state_dict" in checkpoint
-    assert "critic_targets_init_dict" in checkpoint
-    assert "critic_targets_state_dict" in checkpoint
-    assert "critic_optimizers_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actors_init_dict" in checkpoint['network_info']['modules']
+    assert "actors_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_optimizers_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -2080,6 +2034,7 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
         observation_spaces=generate_multi_agent_box_spaces(1, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_discrete_spaces(1, 2),
         agent_ids=["agent_0"],
+        net_config=net_config_cnn,
         torch_compiler=compile_mode,
         device=device,
         accelerator=accelerator,
@@ -2087,7 +2042,6 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     loaded_maddpg.load_checkpoint(checkpoint_path)
 
     # Check if properties and weights are loaded correctly
-    assert loaded_maddpg.net_config == net_config_cnn
     if compile_mode is not None and accelerator is None:
         assert all(isinstance(actor, OptimizedModule) for actor in loaded_maddpg.actors)
         assert all(
@@ -2102,14 +2056,14 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
             for critic_target in loaded_maddpg.critic_targets
         )
     else:
-        assert all(isinstance(actor, EvolvableCNN) for actor in loaded_maddpg.actors)
+        assert all(isinstance(actor.encoder, EvolvableCNN) for actor in loaded_maddpg.actors)
         assert all(
-            isinstance(actor_target, EvolvableCNN)
+            isinstance(actor_target.encoder, EvolvableCNN)
             for actor_target in loaded_maddpg.actor_targets
         )
-        assert all(isinstance(critic, EvolvableCNN) for critic in loaded_maddpg.critics)
+        assert all(isinstance(critic.encoder, EvolvableCNN) for critic in loaded_maddpg.critics)
         assert all(
-            isinstance(critic_target, EvolvableCNN)
+            isinstance(critic_target.encoder, EvolvableCNN)
             for critic_target in loaded_maddpg.critic_targets
         )
     assert maddpg.lr_actor == 0.001
@@ -2191,17 +2145,16 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_make_evo(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actors_init_dict" in checkpoint
-    assert "actors_state_dict" in checkpoint
-    assert "actor_targets_init_dict" in checkpoint
-    assert "actor_targets_state_dict" in checkpoint
-    assert "actor_optimizers_state_dict" in checkpoint
-    assert "critics_init_dict" in checkpoint
-    assert "critics_state_dict" in checkpoint
-    assert "critic_targets_init_dict" in checkpoint
-    assert "critic_targets_state_dict" in checkpoint
-    assert "critic_optimizers_state_dict" in checkpoint
-    assert "net_config" in checkpoint
+    assert "actors_init_dict" in checkpoint['network_info']['modules']
+    assert "actors_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "actor_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "actor_optimizers_state_dict" in checkpoint['network_info']['optimizers']
+    assert "critics_init_dict" in checkpoint['network_info']['modules']
+    assert "critics_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_init_dict" in checkpoint['network_info']['modules']
+    assert "critic_targets_state_dict" in checkpoint['network_info']['modules']
+    assert "critic_optimizers_state_dict" in checkpoint['network_info']['optimizers']
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -2309,26 +2262,26 @@ def test_action_scaling(compile_mode):
         agent_ids=["agent_0", "agent_1", "agent_2", "agent_3", "agent_4"],
         torch_compiler=compile_mode,
     )
-    maddpg.actors[0].mlp_output_activation = "Tanh"
+    maddpg.actors[0].output_activation = "Tanh"
     scaled_action = maddpg.scale_to_action_space(action, idx=0)
     assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3]))
 
-    maddpg.actors[1].mlp_output_activation = "Tanh"
+    maddpg.actors[1].output_activation = "Tanh"
     action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = maddpg.scale_to_action_space(action, idx=1)
     np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.2, -0.4, -0.6]))
 
-    maddpg.actors[2].mlp_output_activation = "Sigmoid"
+    maddpg.actors[2].output_activation = "Sigmoid"
     action = np.array([0.1, 0.2, 0.3, 0])
     scaled_action = maddpg.scale_to_action_space(action, idx=2)
     assert np.array_equal(scaled_action, np.array([0.1, 0.2, 0.3, 0]))
 
-    maddpg.actors[3].mlp_output_activation = "GumbelSoftmax"
+    maddpg.actors[3].output_activation = "GumbelSoftmax"
     action = np.array([0.1, 0.2, 0.3, 0])
     scaled_action = maddpg.scale_to_action_space(action, idx=3)
     assert np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, 0]))
 
-    maddpg.actors[4].mlp_output_activation = "Tanh"
+    maddpg.actors[4].output_activation = "Tanh"
     action = np.array([0.1, 0.2, 0.3, -0.1, -0.2, -0.3])
     scaled_action = maddpg.scale_to_action_space(action, idx=4)
     np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
@@ -2373,7 +2326,6 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     assert new_maddpg.agent_ids == maddpg.agent_ids
     assert new_maddpg.min_action == maddpg.min_action
     assert new_maddpg.max_action == maddpg.max_action
-    assert new_maddpg.net_config == maddpg.net_config
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
@@ -2402,10 +2354,10 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
             assert isinstance(new_critic, OptimizedModule)
             assert isinstance(new_critic_target, OptimizedModule)
         else:
-            assert isinstance(new_actor, EvolvableMLP)
-            assert isinstance(new_actor_target, EvolvableMLP)
-            assert isinstance(new_critic, EvolvableMLP)
-            assert isinstance(new_critic_target, EvolvableMLP)
+            assert isinstance(new_actor.encoder, EvolvableMLP)
+            assert isinstance(new_actor_target.encoder, EvolvableMLP)
+            assert isinstance(new_critic.encoder, EvolvableMLP)
+            assert isinstance(new_critic_target.encoder, EvolvableMLP)
 
         new_actor_sd = str(new_actor.state_dict())
         new_actor_target_sd = str(new_actor_target.state_dict())
@@ -2448,8 +2400,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
         action_spaces=generate_multi_agent_box_spaces(2, (1,)),
         agent_ids=["agent_a", "agent_b"],
         net_config={
-            "arch": "cnn",
-            "hidden_size": [8],
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
@@ -2474,7 +2424,6 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
     assert new_maddpg.agent_ids == maddpg.agent_ids
     assert new_maddpg.min_action == maddpg.min_action
     assert new_maddpg.max_action == maddpg.max_action
-    assert new_maddpg.net_config == maddpg.net_config
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
     for (
@@ -2502,10 +2451,10 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
             assert isinstance(new_critic, OptimizedModule)
             assert isinstance(new_critic_target, OptimizedModule)
         else:
-            assert isinstance(new_actor, EvolvableCNN)
-            assert isinstance(new_actor_target, EvolvableCNN)
-            assert isinstance(new_critic, EvolvableCNN)
-            assert isinstance(new_critic_target, EvolvableCNN)
+            assert isinstance(new_actor.encoder, EvolvableCNN)
+            assert isinstance(new_actor_target.encoder, EvolvableCNN)
+            assert isinstance(new_critic.encoder, EvolvableCNN)
+            assert isinstance(new_critic_target.encoder, EvolvableCNN)
 
         new_actor_sd = str(new_actor.state_dict())
         new_actor_target_sd = str(new_actor_target.state_dict())
@@ -2619,7 +2568,6 @@ def test_load_from_pretrained_networks(
     assert new_maddpg.agent_ids == maddpg.agent_ids
     assert new_maddpg.min_action == maddpg.min_action
     assert new_maddpg.max_action == maddpg.max_action
-    assert new_maddpg.net_config == maddpg.net_config
     assert new_maddpg.lr_actor == maddpg.lr_actor
     assert new_maddpg.lr_critic == maddpg.lr_critic
     for (

@@ -372,10 +372,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             latent_dim=latent_dim,
             device=device
             )
-        
-        if not isinstance(action_space, spaces.Box):
-            raise ValueError("ContinuousQNetwork only supports continuous action spaces (spaces.Box).")
-        
+
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
