@@ -6,7 +6,7 @@ Cartpole with Rainbow DQN
 In this tutorial, we will be training a single Rainbow-DQN agent (without HPO) to beat the
 Gymnasium classic control cartpole environment. AgileRL is a deep reinforcement learning
 library, focussed on improving the RL training process through evolutionary hyperparameter
-optimisation (HPO), which has resulted in upto 10x faster HPO compared to other popular deep RL
+optimisation (HPO), which has resulted in up to 10x faster HPO compared to other popular deep RL
 libraries. Check out the AgileRL github `repository <https://github.com/AgileRL/AgileRL/>`__ for
 more information about the library.
 
