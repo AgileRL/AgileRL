@@ -7,7 +7,7 @@ Lunar Lander with TD3
 In this tutorial, we will be training and optimising the hyperparameters of a population of TD3 agents
 to beat the Gymnasium continuous lunar lander environment. AgileRL is a deep reinforcement learning
 library, focussed on improving the RL training process through evolutionary hyperparameter
-optimisation (HPO), which has resulted in upto 10x faster HPO compared to other popular deep RL
+optimisation (HPO), which has resulted in up to 10x faster HPO compared to other popular deep RL
 libraries. Check out the AgileRL github `repository <https://github.com/AgileRL/AgileRL/>`__ for
 more information about the library.
 
