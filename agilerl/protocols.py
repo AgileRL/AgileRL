@@ -1,13 +1,12 @@
 from typing import (
     Any, Dict, List, 
-    Optional, Tuple, Protocol, Union, Iterable, Generator, Type,
+    Optional, Tuple, Protocol, Union, Iterable, Generator, Type, Callable,
     runtime_checkable
 )
 from enum import Enum
 from numpy.typing import ArrayLike
 from accelerate import Accelerator
 import torch
-import torch.nn as nn
 from torch.optim.optimizer import Optimizer
 
 NumpyObsType = Union[ArrayLike, Dict[str, ArrayLike], Tuple[ArrayLike, ...]]
@@ -36,6 +35,8 @@ class OptimizerWrapper(Protocol):
 class EvolvableModule(Protocol):
     init_dict: Dict[str, Any]
     device: DeviceType
+    layer_mutation_methods: List[str]
+    node_mutation_methods: List[str]
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         ...
@@ -60,11 +61,40 @@ EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]
 EvolvableAttributeDict = Dict[str, EvolvableAttributeType]
 
+@runtime_checkable
+class NetworkConfig(Protocol):
+    name: str
+    eval: bool
+    optimizer: Optional[str]
 
+@runtime_checkable
+class NetworkGroup(Protocol):
+    eval: EvolvableModule
+    shared: Optional[Union[EvolvableModule, List[EvolvableModule]]]
+    policy: bool
+    multiagent: bool
+
+@runtime_checkable
+class OptimizerConfig(Protocol):
+    name: str
+    networks: Union[str, List[str]]
+    optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
+    optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
+    multiagent: bool
+
+@runtime_checkable
+class MutationRegistry(Protocol):
+    groups: List[NetworkGroup]
+    optimizers: List[OptimizerConfig]
+    hooks: List[Callable]
+    def networks(self) -> List[NetworkConfig]:
+        ...
+    
 @runtime_checkable
 class EvolvableAlgorithm(Protocol):
     device: Union[str, torch.device]
     accelerator: Accelerator
+    registry: MutationRegistry
     learn_step: int
     algo: str
     mut: Optional[str]

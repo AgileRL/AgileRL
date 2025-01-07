@@ -163,8 +163,8 @@ class ILQL(nn.Module):
             min_layers=net_config["min_layers"],
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
-            device=self.device,
-        ).to(self.device)
+            device=self.device
+            )
         # lm policy
         self.actor = EvolvableGPT(
             n_layer=net_config["n_layer"],
@@ -179,8 +179,8 @@ class ILQL(nn.Module):
             min_layers=net_config["min_layers"],
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
-            device=self.device,
-        ).to(self.device)
+            device=self.device
+            )
         # lm target
         self.actor_target = EvolvableGPT(
             n_layer=net_config["n_layer"],
@@ -196,7 +196,7 @@ class ILQL(nn.Module):
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
             device=self.device,
-        ).to(self.device)
+            )
 
         self.copy_model_to_actor_target()
 
@@ -206,19 +206,19 @@ class ILQL(nn.Module):
             num_outputs=1,
             hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
             device=self.device,
-        ).to(self.device)
+        )
         self.q = EvolvableMLP(
             num_inputs=net_config["n_embd"],
             num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
             device=self.device,
-        ).to(self.device)
+        )
         self.target_q = EvolvableMLP(
             num_inputs=net_config["n_embd"],
             num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
             device=self.device,
-        ).to(self.device)
+        )
         self.target_q.load_state_dict(self.q.state_dict())
 
         if self.double_q:
@@ -227,13 +227,13 @@ class ILQL(nn.Module):
                 num_outputs=self.dataset.tokenizer.num_tokens(),
                 hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
                 device=self.device,
-            ).to(self.device)
+            )
             self.target_q2 = EvolvableMLP(
                 num_inputs=net_config["n_embd"],
                 num_outputs=self.dataset.tokenizer.num_tokens(),
                 hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
                 device=self.device,
-            ).to(self.device)
+            )
             self.target_q2.load_state_dict(self.q2.state_dict())
 
         self.pi = EvolvableMLP(
@@ -241,7 +241,7 @@ class ILQL(nn.Module):
             num_outputs=self.dataset.tokenizer.num_tokens(),
             hidden_size=[net_config["n_embd"] * 2, net_config["n_embd"] * 2],
             device=self.device,
-        ).to(self.device)
+        )
 
         self.optimizer = optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay
@@ -291,8 +291,8 @@ class ILQL(nn.Module):
             policy_kwargs = {}
         if prefix_embs is None:
             prefix_embs = torch.empty(
-                (tokens.shape[0], 0, self.net_config["n_embd"])
-            ).to(self.device)
+                (tokens.shape[0], 0, self.net_config["n_embd"]), device=self.device
+            )
             prefix_t = prefix_embs.shape[1]
         else:
             prefix_t = 0
@@ -435,8 +435,9 @@ class ILQL(nn.Module):
                     policy_hidden_states.shape[0],
                     policy_hidden_states.shape[1],
                     self.dataset.tokenizer.num_tokens(),
-                )
-            ).to(self.device)
+                ), 
+                device=self.device
+            )
         else:
             if detach_full_policy:
                 with torch.no_grad():
@@ -604,7 +605,7 @@ class ILQL(nn.Module):
             (
                 torch.max(
                     qs - data_qs.unsqueeze(-1) + margin,
-                    torch.tensor(0.0).to(self.device),
+                    torch.tensor(0.0, device=self.device),
                 )
                 ** 2
             ).sum(dim=-1)
@@ -857,9 +858,9 @@ class ILQL(nn.Module):
                         1,
                     ),
                     tokens.shape[1] - 1,
+                    device=self.device,
                 )
                 .long()
-                .to(self.device)
             )
             action_idxs = (
                 torch.full(
@@ -868,9 +869,9 @@ class ILQL(nn.Module):
                         1,
                     ),
                     tokens.shape[1] - 1,
+                    device=self.device,
                 )
                 .long()
-                .to(self.device)
             )
             trivial_value_query = True
         self_outputs = self(
@@ -886,10 +887,10 @@ class ILQL(nn.Module):
             target_kwargs,
         )
         model_outputs = self_outputs["model_outputs"]
-        weights = torch.zeros(self_outputs["logits"].shape).to(self.device)
+        weights = torch.zeros(self_outputs["logits"].shape, device=self.device)
         if include_advantage:
             if action_mask is None:
-                action_mask = torch.ones((tokens.shape[0],)).to(self.device)
+                action_mask = torch.ones((tokens.shape[0],), device=self.device)
             vs, qs = self_outputs["target_vs"], self_outputs["target_qs"]
             if not trivial_value_query:
                 vs = vs[:, :-1]

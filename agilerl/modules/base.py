@@ -55,6 +55,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         nn.Module.__init__(self)
         self._init_surface_methods()
         self.device = device
+        self._wrapped = None
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -75,6 +76,10 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     @property
     def activation(self) -> Optional[str]:
         return None
+    
+    @property
+    def wrapped(self) -> Optional["EvolvableModule"]:
+        return self._wrapped
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError(
@@ -114,6 +119,13 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                 return mut_method
             raise e
 
+    def get_output_dense(self) -> Optional[nn.Module]:
+        """Get the output dense layer of the network.
+
+        :return: The output dense layer.
+        :rtype: nn.Module
+        """
+        return
     
     @staticmethod
     def preserve_parameters(old_net: nn.Module, new_net: nn.Module) -> nn.Module:
@@ -209,6 +221,12 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         layers = [m for m in module.children()]
         for layer in layers:
             init_weights(layer)
+    
+    def make_unevolvable(self) -> None:
+        """Make the network unevolvable."""
+        self._layer_mutation_methods = []
+        self._node_mutation_methods = []
+        self._mutation_methods = []
 
     def modules(self) -> Dict[str, "EvolvableModule"]:
         """Returns the attributes related to the evolvable modules in the algorithm. Includes 
@@ -227,7 +245,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         evolvable_attrs = {}
         for attr in dir(self):
             obj = getattr(self, attr)
-            if is_evolvable(attr, obj):
+            if is_evolvable(attr, obj) and attr != "wrapped":
                 evolvable_attrs[attr] = obj
 
         return evolvable_attrs
@@ -273,6 +291,10 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                 else:
                     raise ValueError(f"Invalid mutation type: {method_type}")
         
+        if self.wrapped is not None:
+            layer_fns += self.wrapped.layer_mutation_methods
+            node_fns += self.wrapped.node_mutation_methods
+        
         extra_methods = layer_fns + node_fns
         self._mutation_methods += extra_methods
         self._layer_mutation_methods += layer_fns
@@ -286,6 +308,9 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         """
         def get_method_from_name(name: str) -> MutationMethod:
             if "." not in name:
+                if self.wrapped is not None:
+                    return getattr(self.wrapped, name)
+
                 return getattr(self, name)
 
             attr = name.split(".")[0]
@@ -343,7 +368,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             rng = np.random.default_rng()
 
         probs = self.get_mutation_probs(new_layer_prob)
-        return rng.choice(self.mutation_methods, p=probs, size=1)
+        return rng.choice(self.mutation_methods, p=probs, size=1)[0]
 
     def clone(self) -> "EvolvableModule":
         """Returns clone of neural net with identical parameters."""
@@ -355,6 +380,14 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
 
         return clone
     
+class EvolvableWrapper(EvolvableModule):
+    """Wrapper class for evolvable neural networks."""
+
+    def __init__(self, module: EvolvableModule) -> None:
+        super().__init__(module.device)
+        self._wrapped = module
+
+
 class ModuleDict(EvolvableModule, nn.ModuleDict):
     """Analogous to nn.ModuleDict, but allows for the recursive inheritance of the 
     mutation methods of underlying evolvable modules.

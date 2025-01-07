@@ -72,7 +72,7 @@ class QNetwork(EvolvableNetwork):
                 )
 
         self.num_actions = spaces.flatdim(action_space)
-        self.value_net = self.build_network_head(head_config)
+        self.head_net = self.build_network_head(head_config)
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -85,7 +85,7 @@ class QNetwork(EvolvableNetwork):
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.value_net.net_config,
+            "head_config": self.head_net.net_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -120,7 +120,7 @@ class QNetwork(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.encoder(obs)
-        return self.value_net(latent)
+        return self.head_net(latent)
     
     def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates the network with the same parameters as the current network.
@@ -129,14 +129,14 @@ class QNetwork(EvolvableNetwork):
         :type shrink_params: bool
         """
         super().recreate_network(shrink_params)
-        value_net = self.build_network_head(self.value_net.net_config)
+        value_net = self.build_network_head(self.head_net.net_config)
 
         # Preserve parameters of the network
         preserve_params_fn = (
             EvolvableModule.shrink_preserve_parameters if shrink_params 
             else EvolvableModule.preserve_parameters
         )
-        self.value_net = preserve_params_fn(self.value_net, value_net)
+        self.head_net = preserve_params_fn(self.head_net, value_net)
 
 
 class RainbowQNetwork(EvolvableNetwork):
@@ -212,12 +212,15 @@ class RainbowQNetwork(EvolvableNetwork):
         self.num_atoms = num_atoms
         self.support = support
 
-        self.value_net = self.build_network_head(
+        self.head_net = self.build_network_head(
             "value", num_outputs=self.num_atoms, net_config=head_config
             )
         self.advantage_net = self.build_network_head(
             "advantage", num_outputs=self.num_actions * self.num_atoms, net_config=head_config
             )
+
+        # We want the same mutations for both the value and advantage networks
+        self.advantage_net.make_unevolvable()
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -232,7 +235,7 @@ class RainbowQNetwork(EvolvableNetwork):
             "support": self.support,
             "num_atoms": self.num_atoms,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.value_net.net_config,
+            "head_config": self.head_net.net_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -272,7 +275,7 @@ class RainbowQNetwork(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.encoder(obs)
-        value: torch.Tensor = self.value_net(latent)
+        value: torch.Tensor = self.head_net(latent)
         advantage: torch.Tensor = self.advantage_net(latent)
         
         batch_size = value.size(0)
@@ -286,11 +289,8 @@ class RainbowQNetwork(EvolvableNetwork):
 
         x = F.softmax(x.view(-1, self.num_atoms), dim=-1)
         x = x.view(-1, self.num_actions, self.num_atoms).clamp(min=1e-3)
-        print(q)
         if q:
-            print("Q1 ", x.shape)
             x = torch.sum(x * self.support, dim=2)
-            print("Q2 ", x.shape)
 
         return x
 
@@ -306,12 +306,12 @@ class RainbowQNetwork(EvolvableNetwork):
         value_net = self.build_network_head(
             "value",
             num_outputs=self.num_atoms,
-            net_config=self.value_net.net_config
+            net_config=self.head_net.net_config
             )
         advantage_net = self.build_network_head(
             "advantage",
             num_outputs=self.num_actions * self.num_atoms,
-            net_config=self.advantage_net.net_config
+            net_config=self.head_net.net_config
             )
 
         # Preserve parameters of the network
@@ -319,7 +319,7 @@ class RainbowQNetwork(EvolvableNetwork):
             EvolvableModule.shrink_preserve_parameters if shrink_params 
             else EvolvableModule.preserve_parameters
         )
-        self.value_net = preserve_params_fn(self.value_net, value_net)
+        self.head_net = preserve_params_fn(self.head_net, value_net)
         self.advantage_net = preserve_params_fn(self.advantage_net, advantage_net)
 
 
@@ -382,7 +382,7 @@ class ContinuousQNetwork(EvolvableNetwork):
                 )
             
         self.num_actions = spaces.flatdim(action_space)
-        self.value_net = self.build_network_head(head_config)
+        self.head_net = self.build_network_head(head_config)
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -395,7 +395,7 @@ class ContinuousQNetwork(EvolvableNetwork):
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.value_net.net_config,
+            "head_config": self.head_net.net_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -430,7 +430,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         """
         x = self.encoder(obs)
         x = torch.cat([x, actions], dim=-1)
-        return self.value_net(x)
+        return self.head_net(x)
 
     def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates the network with the same parameters as the current network.
@@ -439,11 +439,11 @@ class ContinuousQNetwork(EvolvableNetwork):
         :type shrink_params: bool
         """
         super().recreate_network(shrink_params)
-        value_net = self.build_network_head(self.value_net.net_config)
+        value_net = self.build_network_head(self.head_net.net_config)
 
         # Preserve parameters of the network
         preserve_params_fn = (
             EvolvableModule.shrink_preserve_parameters if shrink_params 
             else EvolvableModule.preserve_parameters
         )
-        self.value_net = preserve_params_fn(self.value_net, value_net)
+        self.head_net = preserve_params_fn(self.head_net, value_net)

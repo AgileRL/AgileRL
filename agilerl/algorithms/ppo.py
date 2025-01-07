@@ -33,16 +33,12 @@ class PPO(RLAlgorithm):
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
     :type action_space: gym.spaces.Space
-    :param discrete_actions: Boolean flag to indicate a discrete action space
-    :type discrete_actions: bool, optional
-    :param max_action: Upper bound of the action space, defaults to 1
-    :type max_action: float, optional
-    :param min_action: Lower bound of the action space, defaults to -1
-    :type min_action: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param net_config: Network configuration, defaults to mlp with hidden size [64,64]
+    :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
+    :param head_config: Head network configuration, defaults to None
+    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -58,7 +54,7 @@ class PPO(RLAlgorithm):
     :param action_std_init: Initial action standard deviation, defaults to 0.6
     :type action_std_init: float, optional
     :param clip_coef: Surrogate clipping coefficient, defaults to 0.2
-    :type clip coef: float, optional
+    :type clip_coef: float, optional
     :param ent_coef: Entropy coefficient, defaults to 0.01
     :type ent_coef: float, optional
     :param vf_coef: Value function coefficient, defaults to 0.5
@@ -67,16 +63,22 @@ class PPO(RLAlgorithm):
     :type max_grad_norm: float, optional
     :param target_kl: Target KL divergence threshold, defaults to None
     :type target_kl: float, optional
+    :param normalize_images: Flag to normalize images, defaults to True
+    :type normalize_images: bool, optional
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: nn.Module, optional
+    :type actor_network: EvolvableModule, optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: nn.Module, optional
+    :type critic_network: EvolvableModule, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: accelerate.Accelerator(), optional
+    :type accelerator: Any, optional
+    :param compile: Flag to compile the model, defaults to True
+    :type compile: bool, optional
+    :param cudagraphs: Flag to use CUDA graphs, defaults to False
+    :type cudagraphs: bool, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

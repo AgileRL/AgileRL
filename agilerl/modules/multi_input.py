@@ -42,10 +42,6 @@ class EvolvableMultiInput(EvolvableModule):
         forward pass for the network, manipulating the observation dictionary as needed, and adding any 
         non-evolvable additional layers needed for their specific problem.
 
-    .. note::
-        The mutations are done on the basis of the allowed methods in the `EvolvableCNN` and `EvolvableMLP`
-        classes.
-
     :param observation_space: Dictionary or Tuple space of observations.
     :type observation_space: spaces.Dict or spaces.Tuple
     :param num_outputs: Dimension of the output tensor.
@@ -199,10 +195,6 @@ class EvolvableMultiInput(EvolvableModule):
         # Final dense layer to convert feature encodings to desired num_outputs
         self.final_dense = nn.Linear(features_dim, num_outputs, device=device)
         self.output = get_activation(output_activation)
-
-        # If we dont define an EvolvableMLP for vector spaces, we should signal this for Mutations
-        if not vector_space_mlp:
-            self.filter_mutation_methods("mlp")
     
     @property
     def net_config(self) -> Dict[str, Any]:

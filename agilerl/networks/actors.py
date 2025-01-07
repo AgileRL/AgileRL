@@ -8,9 +8,9 @@ from agilerl.typing import TorchObsType, ConfigType, DeviceType, ArrayOrTensor
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, SupportedEvolvable
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.base import EvolvableModule
+from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 
-class EvolvableDistribution(EvolvableModule):
+class EvolvableDistribution(EvolvableWrapper):
     """Wrapper to output a distribution over an action space for an evolvable module. It provides methods 
     to sample actions and compute log probabilities, relevant for many policy-gradient algorithms such as 
     PPO, A2C, TRPO.
@@ -20,16 +20,18 @@ class EvolvableDistribution(EvolvableModule):
     :param network: Network that outputs the logits of the distribution.
     :type network: EvolvableModule
     """
+    wrapped: SupportedEvolvable
+
     def __init__(
             self,
             action_space: spaces.Space,
             network: SupportedEvolvable,
             log_std_init: float = 0.0,
             device: DeviceType = "cpu"):
-        super().__init__(device)
+
+        super().__init__(network)
 
         self.action_space = action_space
-        self.actor_net = network
         self.log_std_init = log_std_init
         self.device = device
 
@@ -48,7 +50,7 @@ class EvolvableDistribution(EvolvableModule):
         :return: Configuration of the network.
         :rtype: ConfigType
         """
-        return self.actor_net.net_config
+        return self.wrapped.net_config
 
     def get_distribution(
             self,
@@ -94,7 +96,7 @@ class EvolvableDistribution(EvolvableModule):
         :return: Distribution over the action space.
         :rtype: Distribution
         """
-        logits = self.actor_net(latent)
+        logits = self.wrapped(latent)
 
         if action_mask is not None and isinstance(self.action_space, spaces.Discrete):
             action_mask = torch.as_tensor(action_mask, dtype=torch.bool, device=self.device).reshape(logits.shape)
@@ -111,7 +113,7 @@ class EvolvableDistribution(EvolvableModule):
         """
         return EvolvableDistribution(
             action_space=self.action_space,
-            network=self.actor_net.clone(),
+            network=self.wrapped.clone(),
             log_std_init=self.log_std_init,
             device=self.device
             )
@@ -185,7 +187,7 @@ class DeterministicActor(EvolvableNetwork):
         elif head_config["output_activation"] is None:
             head_config["output_activation"] = output_activation
         
-        self.actor_net = self.build_network_head(head_config)
+        self.head_net = self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
     @property
@@ -199,7 +201,7 @@ class DeterministicActor(EvolvableNetwork):
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.actor_net.net_config,
+            "head_config": self.head_net.net_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -230,7 +232,7 @@ class DeterministicActor(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.encoder(obs)
-        return self.actor_net(latent)
+        return self.head_net(latent)
 
     def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates the network with the same parameters as the current network.
@@ -239,14 +241,14 @@ class DeterministicActor(EvolvableNetwork):
         :type shrink_params: bool
         """
         super().recreate_network(shrink_params)
-        actor_net = self.build_network_head(self.actor_net.net_config)
+        actor_net = self.build_network_head(self.head_net.net_config)
 
         # Preserve parameters of the network
         preserve_params_fn = (
             EvolvableModule.shrink_preserve_parameters if shrink_params 
             else EvolvableModule.preserve_parameters
         )
-        self.actor_net = preserve_params_fn(self.actor_net, actor_net)
+        self.head_net = preserve_params_fn(self.head_net, actor_net)
 
 
 class StochasticActor(DeterministicActor):
@@ -297,8 +299,8 @@ class StochasticActor(DeterministicActor):
             device=device
             )
         
-        self.actor_net = EvolvableDistribution(
-            action_space, self.actor_net, log_std_init=log_std_init, device=device
+        self.head_net = EvolvableDistribution(
+            action_space, self.head_net, log_std_init=log_std_init, device=device
             )
         
     @property
@@ -312,8 +314,8 @@ class StochasticActor(DeterministicActor):
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.actor_net.actor_net.net_config,
-            "log_std_init": self.actor_net.log_std_init,
+            "head_config": self.head_net.wrapped.net_config,
+            "log_std_init": self.head_net.log_std_init,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -330,7 +332,7 @@ class StochasticActor(DeterministicActor):
         :rtype: Distribution
         """
         latent = self.encoder(obs)
-        return self.actor_net.forward(latent, action_mask)
+        return self.head_net.forward(latent, action_mask)
     
     def __call__(self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None) -> Distribution:
         """Calls the forward method.
@@ -350,7 +352,7 @@ class StochasticActor(DeterministicActor):
         """
         super().recreate_network(shrink_params)
 
-        actor_net = self.build_network_head(self.actor_net.actor_net.net_config)
+        actor_net = self.build_network_head(self.head_net.wrapped.net_config)
         actor_net = EvolvableDistribution(
             self.action_space, actor_net, device=self.device
             )
@@ -361,7 +363,7 @@ class StochasticActor(DeterministicActor):
             else EvolvableModule.preserve_parameters
         )
 
-        self.actor_net = preserve_params_fn(self.actor_net, actor_net)
+        self.head_net = preserve_params_fn(self.head_net, actor_net)
 
         
 

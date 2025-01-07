@@ -47,7 +47,6 @@ class EvolvableBERT(EvolvableModule):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     """
-    arch: str = "bert"
 
     def __init__(
         self,
@@ -68,9 +67,9 @@ class EvolvableBERT(EvolvableModule):
         max_encoder_layers: int = 12,
         max_decoder_layers: int = 12,
         device: str = "cpu",
-        arch: str = "bert"
+        name: str = "bert"
         ) -> None:
-        super().__init__(device, accelerator=None)
+        super().__init__(device)
 
         self.encoder_layers = encoder_layers
         self.decoder_layers = decoder_layers
@@ -82,7 +81,8 @@ class EvolvableBERT(EvolvableModule):
         self.d_model = d_model
         self.n_head = n_head
         self.dropout = dropout
-        self.activation = activation
+        self.name = name
+        self._activation = activation
         self.layer_norm_eps = layer_norm_eps
         self.batch_first = batch_first
         self.norm_first = norm_first
@@ -105,6 +105,14 @@ class EvolvableBERT(EvolvableModule):
         self.encoder_keys = list(self.encoder.keys())
         self.decoder_keys = list(self.decoder.keys())
 
+    @property
+    def activation(self) -> str:
+        return self._activation
+    
+    @activation.setter
+    def activation(self, activation: str) -> None:
+        self._activation = activation
+        
     def build_networks(self):
         """Creates and returns transformer neural network."""
         encoder_dict = OrderedDict()
@@ -112,7 +120,7 @@ class EvolvableBERT(EvolvableModule):
 
         # Create the encoder
         for n, dim_feedfwd in enumerate(self.encoder_layers):
-            encoder_dict[f"encoder_layer_{str(n)}"] = (
+            encoder_dict[f"{self.name}_encoder_layer_{str(n)}"] = (
                 nn.modules.TransformerEncoderLayer(
                     self.d_model,
                     self.n_head,
@@ -126,13 +134,13 @@ class EvolvableBERT(EvolvableModule):
                 )
             )
         if self.encoder_norm:
-            encoder_dict["encoder_norm_0"] = nn.modules.normalization.LayerNorm(
+            encoder_dict[f"{self.name}_encoder_norm_0"] = nn.modules.normalization.LayerNorm(
                 self.d_model, eps=self.layer_norm_eps, device=self.device
             )
 
         # Create the decoder
         for n, dim_feedfwd in enumerate(self.decoder_layers):
-            decoder_dict[f"decoder_layer_{str(n)}"] = (
+            decoder_dict[f"{self.name}_decoder_layer_{str(n)}"] = (
                 nn.modules.TransformerDecoderLayer(
                     self.d_model,
                     self.n_head,
@@ -146,7 +154,7 @@ class EvolvableBERT(EvolvableModule):
                 )
             )
         if self.decoder_norm:
-            decoder_dict["decoder_norm_0"] = nn.modules.normalization.LayerNorm(
+            decoder_dict[f"{self.name}_decoder_norm_0"] = nn.modules.normalization.LayerNorm(
                 self.d_model, eps=self.layer_norm_eps, device=self.device
             )
 
@@ -259,8 +267,8 @@ class EvolvableBERT(EvolvableModule):
     def encode(
         self,
         src: torch.Tensor,
-        src_mask: torch.Tensor = None,
-        src_key_padding_mask: torch.Tensor = None,
+        src_mask: Optional[torch.Tensor] = None,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
         is_causal: bool = False
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """Returns encoded transformer input.
@@ -342,10 +350,10 @@ class EvolvableBERT(EvolvableModule):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
-        tgt_mask: torch.Tensor = None,
-        memory_mask: torch.Tensor = None,
-        tgt_key_padding_mask: torch.Tensor = None,
-        memory_key_padding_mask: torch.Tensor = None,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
+        tgt_key_padding_mask: Optional[torch.Tensor] = None,
+        memory_key_padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """Returns decoded transformer input.
 

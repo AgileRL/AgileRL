@@ -63,7 +63,7 @@ class ValueFunction(EvolvableNetwork):
                     )
                 )
             
-        self.value_net = self.build_network_head(head_config)
+        self.head_net = self.build_network_head(head_config)
     
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -75,7 +75,7 @@ class ValueFunction(EvolvableNetwork):
         return {
             "observation_space": self.observation_space,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.value_net.net_config,
+            "head_config": self.head_net.net_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -89,7 +89,7 @@ class ValueFunction(EvolvableNetwork):
         :return: Output dense layer.
         :rtype: torch.nn.Linear
         """
-        return self.value_net.get_output_dense()
+        return self.head_net.get_output_dense()
     
     def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
         """Builds the head of the network.
@@ -113,7 +113,7 @@ class ValueFunction(EvolvableNetwork):
         :return: Output tensor.
         :rtype: torch.Tensor
         """
-        return self.value_net(self.encoder(x))
+        return self.head_net(self.encoder(x))
 
     def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates the network with the same parameters as the current network.
@@ -122,14 +122,14 @@ class ValueFunction(EvolvableNetwork):
         :type shrink_params: bool
         """
         super().recreate_network(shrink_params)
-        value_net = self.build_network_head(self.value_net.net_config)
+        value_net = self.build_network_head(self.head_net.net_config)
 
         # Preserve parameters of the network
         preserve_params_fn = (
             EvolvableModule.shrink_preserve_parameters if shrink_params 
             else EvolvableModule.preserve_parameters
         )
-        self.value_net = preserve_params_fn(self.value_net, value_net)
+        self.head_net = preserve_params_fn(self.head_net, value_net)
 
 
 class StochasticValueFunction(EvolvableNetwork):

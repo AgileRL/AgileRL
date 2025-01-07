@@ -280,6 +280,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         """Executes the hooks registered with the algorithm."""
         for hook in self.registry.hooks:
             getattr(self, hook)()
+    
+    def get_policy(self) -> EvolvableModule:
+        """Returns the policy network of the algorithm."""
+        for group in self.registry.groups:
+            if group.policy:
+                return getattr(self, group.eval)
+        
+        raise AttributeError("No policy network has been registered with the algorithm.")
 
     def recompile(self) -> None:
         """Recompiles the evolvable modules in the algorithm with the specified torch compiler."""

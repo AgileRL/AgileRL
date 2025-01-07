@@ -93,7 +93,7 @@ def get_architecture_mut_method(
 
     return mutation_method, mut_return_type
 
-def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Dict[str, OffspringType]:
+def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Tuple[Dict[str, OffspringType], ...]:
     """Get the offsprings of all of the evaluation modules in the individual.
     
     :param individual: The individual to inspect
@@ -105,14 +105,18 @@ def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Dict[str, Offs
     registry = individual.registry
 
     offspring_modules = {}
+    offspring_policy = {}
     for group in registry.groups:
         eval_module: OffspringType = getattr(individual, group.eval)
-        if isinstance(eval_module, list):
-            offspring_modules[group.eval] = [mod.clone() for mod in eval_module]
+
+        offspring = [mod.clone() for mod in eval_module] if isinstance(eval_module, list) else eval_module.clone()
+
+        if group.policy:
+            offspring_policy[group.eval] = offspring
         else:
-            offspring_modules[group.eval] = eval_module.clone()
+            offspring_modules[group.eval] = offspring
     
-    return offspring_modules
+    return offspring_policy, offspring_modules
 
 def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
     """Get the output layer of different types of offsprings for bandit algorithms. 
@@ -124,7 +128,7 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
     :return: The output layer of the offspring
     :rtype: nn.Module
     """
-    if isinstance(offspring, (EvolvableMLP, EvolvableCNN, MakeEvolvable)):
+    if isinstance(offspring, EvolvableModule):
         exp_layer = offspring.get_output_dense()
     else:
         raise ValueError(f"Bandit algorithm architecture {type(offspring)} not supported.")
@@ -763,37 +767,60 @@ class Mutations:
         :type individual: object
         """
         algo_cls = individual.__class__
-        offspring_evals = get_offspring_eval_modules(individual)
 
-        # get the offsprings from one of the groups to sample mutation method
-        sample_eval = list(offspring_evals.values())[0]
+        # Get the offspring evaluation modules
+        # We first extract and apply a mutation for the algo policy and then apply 
+        # the same mutation to the rest of the evaluation modules e.g. critics
+        policy, offspring_evals = get_offspring_eval_modules(individual)
+        policy_name, policy_offspring = list(policy.items())[0]
+
+        # Sample mutation method from policy network
         mut_method, ret_type = get_architecture_mut_method(
-            sample_eval, self.new_layer_prob, self.rng
+            policy_offspring, self.new_layer_prob, self.rng
             )
+        mut_dict = None
+        if ret_type != dict:
+            if isinstance(policy_offspring, list):
+                for net in policy_offspring:
+                    getattr(net, mut_method)()
+            else:
+                getattr(policy_offspring, mut_method)()
+        else:
+            if isinstance(policy_offspring, list):
+                mut_dict = []
+                for net in policy_offspring:
+                    mut_dict.append(getattr(net, mut_method)())
+            else:
+                mut_dict = getattr(policy_offspring, mut_method)()
+        
+        # Move to device if not using accelerator and set 
+        # mutated network back to individual
+        if self.accelerator is None:
+            if isinstance(policy_offspring, list):
+                setattr(individual, policy_name, [net.to(self.device) for net in policy_offspring])
+            else:
+                setattr(individual, policy_name, policy_offspring.to(self.device))
+        
+        if algo_cls in [NeuralTS, NeuralUCB]:
+            old_exp_layer = get_exp_layer(policy_offspring)
+            self._reinit_bandit_grads(individual, policy_offspring, old_exp_layer)
+        
+        # Apply the same mutation to the rest of the evaluation modules
         for name, offsprings in offspring_evals.items():
             # Apply mutation method differently for CNN and other arch types
-            # NOTE: Need to check the reason for this
-            if ret_type != dict: # if self.arch == "cnn":
+            if ret_type != dict:
                 if isinstance(offsprings, list):
                     for offspring in offsprings:
                         getattr(offspring, mut_method)()
                 else:
                     getattr(offsprings, mut_method)()
             else:
-                # NOTE: We want to randomly sample a mutation initiallly and then
-                # apply the same mutation to the rest of the offsprings
-                mut_dict = None 
+                # NOTE: Apply the same mutation as for policy
                 if isinstance(offsprings, list):
-                    for offspring in offsprings:
-                        if mut_dict is None:
-                            mut_dict = getattr(offspring, mut_method)()
-                        else:
-                            getattr(offspring, mut_method)(**mut_dict)
+                    for i, offspring in enumerate(offsprings):
+                        getattr(offspring, mut_method)(**mut_dict[i])
                 else:
-                    if mut_dict is None:
-                        mut_dict = getattr(offsprings, mut_method)()
-                    else:
-                        getattr(offsprings, mut_method)(**mut_dict)
+                    getattr(offsprings, mut_method)(**mut_dict)
 
             # Move to device if not using accelerator and set 
             # mutated network back to individual
@@ -828,7 +855,7 @@ class Mutations:
         :param old_exp_layer: Old linear layer
         :type old_exp_layer: nn.Module
         """
-        if isinstance(offspring_actor, (EvolvableMLP, EvolvableCNN, MakeEvolvable)):
+        if isinstance(offspring_actor, EvolvableModule):
             exp_layer = offspring_actor.get_output_dense()
         else:
             raise ValueError(f"Bandit algorithm architecture {type(offspring_actor)} not supported.")

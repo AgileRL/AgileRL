@@ -80,6 +80,13 @@ class EvolvableNetwork(EvolvableModule, ABC):
     as building blocks in ResNet, VGG, etc. An evolvable network automatically inspects the passed 
     observation space to determine the appropriate encoder to build through the AgileRL 
     evolvable modules, inheriting the mutation methods of any underlying evolvable module.
+
+    .. note::
+        Currently, evolvable networks should only have the encoder (which is automatically 
+        built from the observation space) and a 'head_net' attribute that processes the latent 
+        encodings into the desired number of outputs as evolvable components. E.g. in RainbowQNetwork 
+        we signal the advantage net as unevolvable and apply the same mutations to it as the 'value' 
+        net which is the network head in this case. Users should follow the same philosophy.
     
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space

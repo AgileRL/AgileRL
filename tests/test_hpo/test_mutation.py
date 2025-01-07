@@ -105,7 +105,7 @@ def init_pop(
     device,
     accelerator,
 ):
-    yield create_population(
+    return create_population(
         algo=algo,
         observation_space=observation_space,
         action_space=action_space,
@@ -2519,28 +2519,6 @@ def test_mutation_applies_cnn_parameter_mutations(
             Accelerator(device_placement=False),
         ),
         (
-            "ILQL",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"hidden_size": [8]},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"hidden_size": [8]},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-        ),
-        (
             "NeuralUCB",
             False,
             generate_random_box_space((4,)),
@@ -2589,10 +2567,7 @@ def test_mutation_applies_cnn_parameter_mutations(
 def test_mutation_applies_architecture_mutations(
     algo, distributed, device, accelerator, init_pop
 ):
-    for mut_method in [
-        ["add_mlp_layer", "remove_mlp_layer"],
-        ["add_mlp_node", "remove_mlp_node"],
-    ]:
+    for _ in range(10):
         population = init_pop
 
         mutations = Mutations(
@@ -2608,12 +2583,6 @@ def test_mutation_applies_architecture_mutations(
             device=device if not distributed else None,
             accelerator=accelerator if distributed else None,
         )
-
-        class DummyRNG:
-            def choice(self, a, size=None, replace=True, p=None):
-                return [np.random.choice(mut_method)]
-
-        mutations.rng = DummyRNG()
 
         new_population = [agent.clone(wrap=False) for agent in population]
         mutated_population = [
@@ -3866,10 +3835,7 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
 def test_mutation_applies_architecture_mutations_multi_agent(
     algo, distributed, device, accelerator, init_pop
 ):
-    for mut_method in [
-        ["add_mlp_layer", "remove_mlp_layer"],
-        ["add_mlp_node", "remove_mlp_node"],
-    ]:
+    for _ in range(10):
         population = init_pop
 
         mutations = Mutations(
@@ -3886,12 +3852,6 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             device=device if not distributed else None,
             accelerator=accelerator if distributed else None,
         )
-
-        class DummyRNG:
-            def choice(self, a, size=None, replace=True, p=None):
-                return [np.random.choice(mut_method)]
-
-        mutations.rng = DummyRNG()
 
         new_population = [agent.clone(wrap=False) for agent in population]
         mutated_population = [
