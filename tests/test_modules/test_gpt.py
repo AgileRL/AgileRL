@@ -82,28 +82,6 @@ def test_pretrained_model_loading():
     assert model.device == "cpu"
 
 
-# Returns nn.ReLU for activation name "ReLU".
-def test_returns_activation():
-    activation_functions = {
-        "Tanh": nn.Tanh,
-        "Identity": nn.Identity,
-        "ReLU": nn.ReLU,
-        "ELU": nn.ELU,
-        "Softsign": nn.Softsign,
-        "Sigmoid": nn.Sigmoid,
-        "Softplus": nn.Softplus,
-        "Softmax": nn.Softmax,
-        "LeakyReLU": nn.LeakyReLU,
-        "PReLU": nn.PReLU,
-        "GELU": NewGELU,
-    }
-
-    model = EvolvableGPT()
-    for activation in activation_functions.keys():
-        activation_function = model.get_activation(activation)
-        assert isinstance(activation_function, activation_functions[activation])
-
-
 # Configures optimizers for EvoGPT
 def test_configure_optimizers():
     weight_decay = 0.0
@@ -303,28 +281,6 @@ def test_causal_self_attention_forward():
 
 
 #### TESTING MLP CLASS ####
-# Returns nn.ReLU for activation name "ReLU".
-def test_returns_activation_mlp():
-    activation_functions = {
-        "Tanh": nn.Tanh,
-        "Identity": nn.Identity,
-        "ReLU": nn.ReLU,
-        "ELU": nn.ELU,
-        "Softsign": nn.Softsign,
-        "Sigmoid": nn.Sigmoid,
-        "Softplus": nn.Softplus,
-        "Softmax": nn.Softmax,
-        "LeakyReLU": nn.LeakyReLU,
-        "PReLU": nn.PReLU,
-        "GELU": NewGELU,
-    }
-
-    model = MLP(32, 0.1, 64)
-    for activation in activation_functions.keys():
-        activation_function = model.get_activation(activation)
-        assert isinstance(activation_function, activation_functions[activation])
-
-
 def test_forward_mlp():
     input_array = np.random.rand(1, 32)
     model = MLP(32, 0.1, 64)

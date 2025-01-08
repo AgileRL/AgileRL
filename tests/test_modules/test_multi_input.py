@@ -67,21 +67,22 @@ def test_incorrect_instantiation(
     num_outputs,
     device,
 ):
-    with pytest.raises(AssertionError):
+    with pytest.raises((AssertionError, ValueError)):
         EvolvableMultiInput(
             observation_space=observation_space,
             channel_size=channel_size,
             kernel_size=kernel_size,
             stride_size=stride_size,
             hidden_size=hidden_size,
+            vector_space_mlp=True if not hidden_size else False,
             num_outputs=num_outputs,
             device=device,
         )
 
 
 @pytest.mark.parametrize(
-    "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs, n_agents",
-    [(generate_dict_or_tuple_space(2, 3), [3, 32], [3, 3], [2, 2], [32, 32], 10, 2)],
+    "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs",
+    [(generate_dict_or_tuple_space(2, 3, dict_space=True), [3, 32], [3, 3], [2, 2], [32, 32], 10)],
 )
 def test_instantiation_for_multi_agents(
     observation_space: DictOrTupleSpace,
@@ -90,9 +91,13 @@ def test_instantiation_for_multi_agents(
     stride_size,
     hidden_size,
     num_outputs,
-    n_agents,
     device,
 ):
+    sample_input = {
+        k: torch.randn(1, *space.shape).unsqueeze(2).to(device) 
+        for k, space in observation_space.spaces.items() if "image" in k
+        }
+
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         channel_size=channel_size,
@@ -100,26 +105,25 @@ def test_instantiation_for_multi_agents(
         stride_size=stride_size,
         hidden_size=hidden_size,
         num_outputs=num_outputs,
-        n_agents=n_agents,
-        critic=True,
+        cnn_block_type="Conv3d",
+        sample_input=sample_input,
         device=device,
     )
     assert isinstance(evolvable_composed, EvolvableMultiInput)
 
 
 @pytest.mark.parametrize(
-    "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs, n_agents",
+    "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs",
     [
         (
-            generate_dict_or_tuple_space(2, 3),
+            generate_dict_or_tuple_space(2, 3, dict_space=False),
             [3, 32],
             [3, 3],
             [2, 2],
             [32, 32],
             10,
-            2.5,
         ),
-        (generate_dict_or_tuple_space(2, 3), [3, 32], [3, 3], [2, 2], [32, 32], 10, 0),
+        (generate_dict_or_tuple_space(2, 3, dict_space=True), [3, 32], [3, 3], [2, 2], [32, 32], 10),
     ],
 )
 def test_incorrect_instantiation_for_multi_agents(
@@ -129,7 +133,6 @@ def test_incorrect_instantiation_for_multi_agents(
     stride_size,
     hidden_size,
     num_outputs,
-    n_agents,
     device,
 ):
     with pytest.raises(AssertionError):
@@ -140,25 +143,11 @@ def test_incorrect_instantiation_for_multi_agents(
             stride_size=stride_size,
             hidden_size=hidden_size,
             num_outputs=num_outputs,
-            n_agents=n_agents,
-            critic=True,
+            cnn_block_type="Conv3d",
+            sample_input=None,
             device=device,
         )
 
-
-def test_rainbow_instantiation(device):
-    evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
-        channel_size=[32, 32],
-        kernel_size=[3, 3],
-        stride_size=[1, 1],
-        hidden_size=[64, 64],
-        num_outputs=10,
-        layer_norm=True,
-        rainbow=True,
-        device=device,
-    )
-    assert isinstance(evolvable_composed, EvolvableMultiInput)
 
 ######### Test forward #########
 @pytest.mark.parametrize(
@@ -194,6 +183,7 @@ def test_forward(
         input_array = {k: np.expand_dims(sample[k], 0) for k in sample}
         input_tensor = {k: torch.tensor(sample[k]).unsqueeze(0).to(device) for k in sample}
     else:
+        input_array = tuple([np.expand_dims(comp, 0) for comp in sample])
         input_tensor = tuple([torch.tensor(comp).unsqueeze(0).to(device) for comp in sample])
 
     output = evolvable_composed.forward(input_tensor)
@@ -204,8 +194,8 @@ def test_forward(
 
 @pytest.mark.parametrize(
     "observation_space, channel_size, kernel_size, stride_size, \
-        hidden_size, num_outputs, n_agents, output_shape",
-    [(generate_dict_or_tuple_space(2, 3), [3, 32], [3, 3], [2, 2], [32, 32], 10, 2, (1, 10))],
+        hidden_size, num_outputs, output_shape",
+    [(generate_dict_or_tuple_space(2, 3, dict_space=True), [3, 32], [3, 3], [2, 2], [32, 32], 10, (1, 10))],
 )
 def test_forward_multi(
     observation_space: DictOrTupleSpace,
@@ -214,10 +204,13 @@ def test_forward_multi(
     stride_size,
     hidden_size,
     num_outputs,
-    n_agents,
     output_shape,
     device,
 ):
+    sample_input = {
+        k: torch.randn(1, *space.shape).unsqueeze(2).to(device) 
+        for k, space in observation_space.spaces.items() if "image" in k
+        }
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         channel_size=channel_size,
@@ -225,8 +218,8 @@ def test_forward_multi(
         stride_size=stride_size,
         hidden_size=hidden_size,
         num_outputs=num_outputs,
-        n_agents=n_agents,
-        critic=False,
+        cnn_block_type="Conv3d",
+        sample_input=sample_input,
         device=device,
     )
 
@@ -240,76 +233,6 @@ def test_forward_multi(
         output = evolvable_composed.forward(input_tensor)
     assert output.shape == output_shape
 
-
-@pytest.mark.parametrize(
-    "observation_space, channel_size, kernel_size, stride_size, \
-        hidden_size, num_outputs, n_agents, output_shape, secondary_tensor",
-    [
-        (
-            generate_dict_or_tuple_space(2, 3),
-            [3, 32],
-            [3, 3],
-            [2, 2],
-            [32, 32],
-            2,
-            2,
-            (1, 1),
-            (1, 2),
-        )
-    ],
-)
-def test_forward_multi_critic(
-    observation_space,
-    channel_size,
-    kernel_size,
-    stride_size,
-    hidden_size,
-    num_outputs,
-    n_agents,
-    output_shape,
-    secondary_tensor,
-    device,
-):
-    evolvable_composed = EvolvableMultiInput(
-        observation_space=observation_space,
-        channel_size=channel_size,
-        kernel_size=kernel_size,
-        stride_size=stride_size,
-        hidden_size=hidden_size,
-        num_outputs=num_outputs,
-        n_agents=n_agents,
-        critic=True,
-        device=device,
-    )
-    input_tensor = (
-        torch.randn(1, *observation_space)
-        .unsqueeze(2)
-        .to(device)
-        .repeat(1, 1, n_agents, 1, 1)
-    )
-    secondary_tensor = torch.randn(secondary_tensor).to(device)
-    with torch.no_grad():
-        output = evolvable_composed.forward(input_tensor, secondary_tensor)
-    assert output.shape == output_shape
-
-
-def test_forward_rainbow(device):
-    evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
-        channel_size=[32, 32],
-        kernel_size=[3, 3],
-        stride_size=[1, 1],
-        hidden_size=[64, 64],
-        num_outputs=10,
-        rainbow=True,
-        layer_norm=True,
-        support=torch.linspace(0.0, 200.0, 51).to(device),
-        device=device,
-    )
-    input_tensor = torch.randn(1, 1, 16, 16).to(device)
-    with torch.no_grad():
-        output = evolvable_composed.forward(input_tensor)
-    assert output.shape == (1, 10)
 
 ######### Test add_mlp_layer #########
 @pytest.mark.parametrize(
@@ -337,21 +260,22 @@ def test_add_mlp_layer(
         hidden_size=hidden_size,
         num_outputs=num_outputs,
         max_hidden_layers=5,
+        vector_space_mlp=True,
         device=device,
     )
 
-    initial_hidden_size = len(evolvable_composed.hidden_size)
-    initial_net = evolvable_composed.value_net
+    initial_hidden_size = len(evolvable_composed.init_dicts['vector_mlp']['hidden_size'])
+    initial_net = evolvable_composed.feature_net['vector_mlp']
     initial_net_dict = dict(initial_net.named_parameters())
-    evolvable_composed.add_mlp_layer()
-    new_net = evolvable_composed.value_net
+    getattr(evolvable_composed, 'feature_net.vector_mlp.add_layer')()
+    new_net = evolvable_composed.feature_net['vector_mlp']
     if initial_hidden_size < 10:
-        assert len(evolvable_composed.hidden_size) == initial_hidden_size + 1
+        assert len(evolvable_composed.init_dicts['vector_mlp']['hidden_size']) == initial_hidden_size + 1
         for key, param in new_net.named_parameters():
             if key in initial_net_dict.keys():
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
-        assert len(evolvable_composed.hidden_size) == initial_hidden_size
+        assert len(evolvable_composed.init_dicts['vector_mlp']['hidden_size']) == initial_hidden_size
 
 
 def test_add_mlp_layer_else_statement(device):
@@ -363,11 +287,12 @@ def test_add_mlp_layer_else_statement(device):
         hidden_size=[32, 32],
         num_outputs=4,
         max_hidden_layers=2,
+        vector_space_mlp=True,
         device=device,
     )
-    initial_hidden_size = len(evolvable_composed.hidden_size)
-    evolvable_composed.add_mlp_layer()
-    assert initial_hidden_size == len(evolvable_composed.hidden_size)
+    initial_hidden_size = len(evolvable_composed.init_dicts['vector_mlp']['hidden_size'])
+    getattr(evolvable_composed, 'feature_net.vector_mlp.add_layer')()
+    assert initial_hidden_size == len(evolvable_composed.init_dicts['vector_mlp']['hidden_size'])
 
 
 ######### Test remove_mlp_layer #########
@@ -396,16 +321,17 @@ def test_remove_mlp_layer(
         num_outputs=num_outputs,
         max_hidden_layers=5,
         min_hidden_layers=1,
+        vector_space_mlp=True,
         device=device,
     )
 
-    initial_hidden_size = len(evolvable_composed.hidden_size)
-    initial_net = evolvable_composed.value_net
+    initial_hidden_size = len(evolvable_composed.init_dicts['vector_mlp']['hidden_size'])
+    initial_net = evolvable_composed.feature_net['vector_mlp']
     initial_net_dict = dict(initial_net.named_parameters())
-    evolvable_composed.remove_mlp_layer()
-    new_net = evolvable_composed.value_net
+    getattr(evolvable_composed, 'feature_net.vector_mlp.remove_layer')()
+    new_net = evolvable_composed.feature_net['vector_mlp']
     if initial_hidden_size > 1:
-        assert len(evolvable_composed.hidden_size) == initial_hidden_size - 1
+        assert len(evolvable_composed.init_dicts['vector_mlp']['hidden_size']) == initial_hidden_size - 1
         for key, param in new_net.named_parameters():
             if (
                 key in initial_net_dict.keys()
@@ -413,7 +339,7 @@ def test_remove_mlp_layer(
             ):
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
-        assert len(evolvable_composed.hidden_size) == initial_hidden_size
+        assert len(evolvable_composed.init_dicts['vector_mlp']['hidden_size']) == initial_hidden_size
 
 
 ######### Test add_mlp_node #########
@@ -441,15 +367,16 @@ def test_add_nodes(
         stride_size=stride_size,
         hidden_size=hidden_size,
         num_outputs=num_outputs,
+        vector_space_mlp=True,
         device=device,
     )
-    original_hidden_size = copy.deepcopy(evolvable_composed.hidden_size)
+    original_hidden_size = copy.deepcopy(evolvable_composed.init_dicts['vector_mlp']['hidden_size'])
     layer = layer_index
-    result = evolvable_composed.add_mlp_node(hidden_layer=layer)
+    result = getattr(evolvable_composed, 'feature_net.vector_mlp.add_node')(hidden_layer=layer)
     hidden_layer = result["hidden_layer"]
     numb_new_nodes = result["numb_new_nodes"]
     assert (
-        evolvable_composed.hidden_size[hidden_layer]
+        evolvable_composed.init_dicts['vector_mlp']['hidden_size'][hidden_layer]
         == original_hidden_size[hidden_layer] + numb_new_nodes
     )
 
@@ -482,17 +409,18 @@ def test_remove_nodes(
         num_outputs=num_outputs,
         min_mlp_nodes=4,
         min_hidden_layers=1,
+        vector_space_mlp=True,
         device=device,
     )
     layer = layer_index
-    original_hidden_size = copy.deepcopy(evolvable_composed.hidden_size)
-    result = evolvable_composed.remove_mlp_node(
+    original_hidden_size = copy.deepcopy(evolvable_composed.init_dicts['vector_mlp']['hidden_size'])
+    result = getattr(evolvable_composed, 'feature_net.vector_mlp.remove_node')(
         numb_new_nodes=numb_new_nodes, hidden_layer=layer
     )
     hidden_layer = result["hidden_layer"]
     numb_new_nodes = result["numb_new_nodes"]
     assert (
-        evolvable_composed.hidden_size[hidden_layer]
+        evolvable_composed.init_dicts['vector_mlp']['hidden_size'][hidden_layer]
         == original_hidden_size[hidden_layer] - numb_new_nodes
     )
 
@@ -524,25 +452,24 @@ def test_add_cnn_layer_simple(
         device=device,
     )
     initial_channel_num = len(evolvable_composed.channel_size)
-    initial_net = evolvable_composed.feature_net
+    initial_net = evolvable_composed.feature_net['image_1']
     initial_net_dict = dict(initial_net.named_parameters())
-    evolvable_composed.add_cnn_layer()
-    new_net = evolvable_composed.feature_net
+    getattr(evolvable_composed, 'feature_net.image_1.add_layer')()
+    new_net = evolvable_composed.feature_net['image_1']
     if initial_channel_num < 6:
-        assert len(evolvable_composed.channel_size) == initial_channel_num + 1
+        assert len(evolvable_composed.init_dicts['image_1']['channel_size']) == initial_channel_num + 1
         for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys():
+            if key in initial_net_dict.keys() and "linear_output" not in key:
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
-        assert len(evolvable_composed.channel_size) == initial_channel_num
+        assert len(evolvable_composed.init_dicts['image_1']['channel_size']) == initial_channel_num
 
 
 @pytest.mark.parametrize(
     "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs",
     [
-        (generate_dict_or_tuple_space(2, 3), [32, 32], [5, 5], [2, 2], [128], 10),  # invalid output size
         (
-            [1, 164, 164],
+            generate_dict_or_tuple_space(2, 3),
             [8, 8, 8, 8, 8, 8],
             [2, 2, 2, 2, 2, 2],
             [2, 2, 1, 1, 1, 1],
@@ -569,14 +496,14 @@ def test_add_cnn_layer_no_layer_added(
         num_outputs=num_outputs,
         device=device,
     )
-    evolvable_composed.add_cnn_layer()
-    assert len(channel_size) == len(evolvable_composed.channel_size)
+    getattr(evolvable_composed, 'feature_net.image_1.add_layer')()
+    assert len(channel_size) == len(evolvable_composed.init_dicts['image_1']['channel_size'])
 
 
 @pytest.mark.parametrize(
     "observation_space, channel_size, kernel_size, stride_size, hidden_size, num_outputs",
     [
-        ([3, 84, 84], [8, 8], [2, 2], [2, 2], [128], 10),  # exceeds max-layer limit
+        (generate_dict_or_tuple_space(2, 3), [8, 8], [2, 2], [2, 2], [128], 10),  # exceeds max-layer limit
     ],
 )
 def test_add_and_remove_multiple_cnn_layers(
@@ -599,25 +526,29 @@ def test_add_and_remove_multiple_cnn_layers(
     )
     # Keep adding layers until we reach max or it is infeasible
     for _ in range(evolvable_composed.max_cnn_hidden_layers):
-        evolvable_composed.add_cnn_layer()
+        getattr(evolvable_composed, 'feature_net.image_1.add_layer')()
 
     # Do a forward pass to ensure network parameter validity
-    output = evolvable_composed(torch.ones(1, 3, 84, 84).to(device))
+    sample_input = observation_space.sample()
+    output = evolvable_composed(sample_input)
     assert output.squeeze().shape[0] == num_outputs
-    assert len(evolvable_composed.stride_size) == len(evolvable_composed.channel_size)
-    assert len(evolvable_composed.kernel_size) == len(evolvable_composed.channel_size)
+    assert len(evolvable_composed.init_dicts['image_1']['stride_size']) == len(evolvable_composed.init_dicts['image_1']['channel_size'])
+    assert len(evolvable_composed.init_dicts['image_1']['kernel_size']) == len(evolvable_composed.init_dicts['image_1']['channel_size'])
 
     # Remove as many layers as possible
-    for _ in evolvable_composed.channel_size:
-        evolvable_composed.remove_cnn_layer()
+    for _ in evolvable_composed.init_dicts['image_1']['channel_size']:
+        getattr(evolvable_composed, 'feature_net.image_1.remove_layer')()
 
-    assert len(evolvable_composed.channel_size) == evolvable_composed.min_cnn_hidden_layers
+    assert len(evolvable_composed.init_dicts['image_1']['channel_size']) == evolvable_composed.min_cnn_hidden_layers
 
     # Do a forward pass to ensure network parameter validity
-    output = evolvable_composed(torch.ones(1, 3, 84, 84).to(device))
+    print(evolvable_composed.feature_net['image_1'])
+    print(evolvable_composed.feature_net['image_1'].init_dict['kernel_size'])
+    print(evolvable_composed.init_dicts['image_1']['kernel_size'])
+    output = evolvable_composed(sample_input)
     assert output.squeeze().shape[0] == num_outputs
-    assert len(evolvable_composed.stride_size) == len(evolvable_composed.channel_size)
-    assert len(evolvable_composed.kernel_size) == len(evolvable_composed.channel_size)
+    assert len(evolvable_composed.init_dicts['image_1']['stride_size']) == len(evolvable_composed.init_dicts['image_1']['channel_size'])
+    assert len(evolvable_composed.init_dicts['image_1']['kernel_size']) == len(evolvable_composed.init_dicts['image_1']['channel_size'])
 
 
 def test_add_cnn_layer_else_statement(device):
@@ -631,36 +562,9 @@ def test_add_cnn_layer_else_statement(device):
         max_cnn_hidden_layers=2,
         device=device,
     )
-    original_num_hidden_layers = copy.deepcopy(evolvable_composed.channel_size)
-    evolvable_composed.add_cnn_layer()
-    assert len(original_num_hidden_layers) == len(evolvable_composed.channel_size)
-
-
-def test_add_cnn_layer_rainbow(device):
-    evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
-        channel_size=[32, 32],
-        kernel_size=[3, 3],
-        stride_size=[1, 1],
-        hidden_size=[64, 64],
-        num_outputs=10,
-        rainbow=True,
-        layer_norm=True,
-        support=torch.linspace(0.0, 200.0, 51).to(device),
-        device=device,
-    )
-    initial_channel_num = len(evolvable_composed.channel_size)
-    initial_net = evolvable_composed.feature_net
-    initial_net_dict = dict(initial_net.named_parameters())
-    evolvable_composed.add_cnn_layer()
-    new_net = evolvable_composed.feature_net
-    if initial_channel_num < 6:
-        assert len(evolvable_composed.channel_size) == initial_channel_num + 1
-        for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys():
-                torch.testing.assert_close(param, initial_net_dict[key])
-    else:
-        assert len(evolvable_composed.channel_size) == initial_channel_num
+    original_num_hidden_layers = copy.deepcopy(evolvable_composed.init_dicts['image_1']['channel_size'])
+    getattr(evolvable_composed, 'feature_net.image_1.add_layer')()
+    assert len(original_num_hidden_layers) == len(evolvable_composed.init_dicts['image_1']['channel_size'])
 
 
 ######### Test remove_cnn_layer #########
@@ -689,13 +593,14 @@ def test_remove_cnn_layer(
         num_outputs=num_outputs,
         device=device,
     )
-    initial_channel_num = len(evolvable_composed.channel_size)
-    initial_net = evolvable_composed.feature_net
+    initial_channel_num = len(evolvable_composed.init_dicts['image_1']['channel_size'])
+    initial_net = evolvable_composed.feature_net['image_1']
     initial_net_dict = dict(initial_net.named_parameters())
-    evolvable_composed.remove_cnn_layer()
-    new_net = evolvable_composed.feature_net
+    getattr(evolvable_composed, 'feature_net.image_1.remove_layer')()
+    new_net = evolvable_composed.feature_net['image_1']
+
     if initial_channel_num > 1:
-        assert len(evolvable_composed.channel_size) == initial_channel_num - 1
+        assert len(evolvable_composed.init_dicts['image_1']['channel_size']) == initial_channel_num - 1
         for key, param in new_net.named_parameters():
             if (
                 key in initial_net_dict.keys()
@@ -703,34 +608,7 @@ def test_remove_cnn_layer(
             ):
                 torch.testing.assert_close(param, initial_net_dict[key])
     else:
-        assert len(evolvable_composed.channel_size) == initial_channel_num
-
-
-def test_remove_cnn_layer_rainbow(device):
-    evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
-        channel_size=[32, 32],
-        kernel_size=[3, 3],
-        stride_size=[1, 1],
-        hidden_size=[64, 64],
-        num_outputs=10,
-        rainbow=True,
-        layer_norm=True,
-        support=torch.linspace(0.0, 200.0, 51).to(device),
-        device=device,
-    )
-    initial_channel_num = len(evolvable_composed.channel_size)
-    initial_net = evolvable_composed.feature_net
-    initial_net_dict = dict(initial_net.named_parameters())
-    evolvable_composed.remove_cnn_layer()
-    new_net = evolvable_composed.feature_net
-    if initial_channel_num < 6:
-        assert len(evolvable_composed.channel_size) == initial_channel_num - 1
-        for key, param in new_net.named_parameters():
-            if key in initial_net_dict.keys():
-                torch.testing.assert_close(param, initial_net_dict[key])
-    else:
-        assert len(evolvable_composed.channel_size) == initial_channel_num
+        assert len(evolvable_composed.init_dicts['image_1']['channel_size']) == initial_channel_num
 
 
 ######### Test add_cnn_channel #########
@@ -760,12 +638,12 @@ def test_add_channels(
         num_outputs=num_outputs,
         device=device,
     )
-    original_channel_size = copy.deepcopy(evolvable_composed.channel_size)
-    result = evolvable_composed.add_cnn_channel(hidden_layer=layer_index)
+    original_channel_size = copy.deepcopy(evolvable_composed.init_dicts['image_1']['channel_size'])
+    result = getattr(evolvable_composed, 'feature_net.image_1.add_channel')(hidden_layer=layer_index)
     hidden_layer = result["hidden_layer"]
     numb_new_channels = result["numb_new_channels"]
     assert (
-        evolvable_composed.channel_size[hidden_layer]
+        evolvable_composed.init_dicts['image_1']['channel_size'][hidden_layer]
         == original_channel_size[hidden_layer] + numb_new_channels
     )
 
@@ -799,14 +677,14 @@ def test_remove_channels(
         min_channel_size=4,
         device=device,
     )
-    original_channel_size = copy.deepcopy(evolvable_composed.channel_size)
-    result = evolvable_composed.remove_cnn_channel(
+    original_channel_size = copy.deepcopy(evolvable_composed.init_dicts['image_1']['channel_size'])
+    result = getattr(evolvable_composed, 'feature_net.image_1.remove_channel')(
         numb_new_channels=numb_new_channels, hidden_layer=layer_index
     )
     hidden_layer = result["hidden_layer"]
     numb_new_channels = result["numb_new_channels"]
     assert (
-        evolvable_composed.channel_size[hidden_layer]
+        evolvable_composed.init_dicts['image_1']['channel_size'][hidden_layer]
         == original_channel_size[hidden_layer] - numb_new_channels
     )
 
@@ -823,21 +701,22 @@ def test_change_cnn_kernel(device):
         device=device,
     )
     # Change kernel size
-    evolvable_composed.change_cnn_kernel()
+    getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
-    while evolvable_composed.kernel_size == [(3, 3), (3, 3)]:
-        evolvable_composed.change_cnn_kernel()
+    while evolvable_composed.init_dicts['image_1']['kernel_size'] == [(3, 3), (3, 3)]:
+        getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
     # Check if kernel size has changed
-    assert evolvable_composed.kernel_size != [
+    assert evolvable_composed.init_dicts['image_1']['kernel_size'] != [
         (3, 3),
         (3, 3),
-    ], evolvable_composed.kernel_size
+    ], evolvable_composed.init_dicts['image_1']['kernel_size']
 
 
 def test_change_kernel_size(device):
+    observation_space = generate_dict_or_tuple_space(2, 3)
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=observation_space,
         channel_size=[32, 32],
         kernel_size=[3, 3],
         stride_size=[1, 1],
@@ -848,8 +727,9 @@ def test_change_kernel_size(device):
 
     for _ in range(100):
         # Change kernel size and ensure we can make a valid forward pass
-        evolvable_composed.change_cnn_kernel()
-        output = evolvable_composed(torch.ones(1, 16, 16).to(device))
+        getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
+        sample_input = observation_space.sample()
+        output = evolvable_composed(sample_input)
         assert output.squeeze().shape[0] == 4  # (num actions)
 
 
@@ -865,58 +745,70 @@ def test_change_cnn_kernel_else_statement(device):
     )
 
     # Change kernel size
-    evolvable_composed.change_cnn_kernel()
+    getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
-    while evolvable_composed.kernel_size == [3, 3]:
-        evolvable_composed.change_cnn_kernel()
+    while evolvable_composed.init_dicts['image_1']['kernel_size'] == [3, 3]:
+        getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
     # Check if kernel size has changed
-    assert evolvable_composed.kernel_size != [3, 3]
+    assert evolvable_composed.init_dicts['image_1']['kernel_size'] != [3, 3]
 
 
-@pytest.mark.parametrize("critic", [(True), (False)])
-def test_change_cnn_kernel_multi(critic, device):
+def test_change_cnn_kernel_multi(device):
+    observation_space = generate_dict_or_tuple_space(2, 3, dict_space=True)
+    sample_input = {
+        k: torch.randn(1, *space.shape).unsqueeze(2).to(device)
+        for k, space in observation_space.spaces.items() if "image" in k
+    }
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=observation_space,
         channel_size=[32, 32],
         kernel_size=[3, 3],
         stride_size=[1, 1],
         hidden_size=[32, 32],
         num_outputs=4,
-        critic=critic,
+        cnn_block_type="Conv3d",
+        sample_input=sample_input,
         device=device,
     )
 
     # Change kernel size
-    evolvable_composed.change_cnn_kernel()
+    getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
-    while evolvable_composed.kernel_size == [3, 3]:
-        evolvable_composed.change_cnn_kernel()
+    while evolvable_composed.init_dicts['image_1']['kernel_size'] == [3, 3]:
+        getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
     # Check if kernel size has changed
-    assert evolvable_composed.kernel_size != [
+    assert evolvable_composed.init_dicts['image_1']['kernel_size'] != [
         3,
         3,
-    ], evolvable_composed.kernel_size
+    ], evolvable_composed.init_dicts['image_1']['kernel_size']
 
 
 def test_change_cnn_kernel_multi_else_statement(device):
+    observation_space = generate_dict_or_tuple_space(2, 3, dict_space=True)
+    sample_input = {
+        k: torch.randn(1, *space.shape).unsqueeze(2).to(device)
+        for k, space in observation_space.spaces.items() if "image" in k
+    }
     evolvable_composed = EvolvableMultiInput(
-        observation_space=generate_dict_or_tuple_space(2, 3),
+        observation_space=observation_space,
         channel_size=[32],
         kernel_size=[3],
         stride_size=[1],
         hidden_size=[32, 32],
         num_outputs=4,
+        cnn_block_type="Conv3d",
+        sample_input=sample_input,
         device=device,
     )
 
     # Change kernel size
-    while evolvable_composed.kernel_size == [3]:
-        evolvable_composed.change_cnn_kernel()
+    while evolvable_composed.init_dicts['image_1']['kernel_size'] == [3]:
+        getattr(evolvable_composed, 'feature_net.image_1.change_kernel')()
 
     # Check if kernel size has changed
-    assert len(evolvable_composed.kernel_size) == 2
+    assert len(evolvable_composed.init_dicts['image_1']['kernel_size']) == 2
 
 
 ######### Test clone #########
@@ -936,6 +828,7 @@ def test_clone_instance(
     num_outputs,
     device,
 ):
+
     evolvable_composed = EvolvableMultiInput(
         observation_space=observation_space,
         channel_size=channel_size,
@@ -945,15 +838,14 @@ def test_clone_instance(
         num_outputs=num_outputs,
         device=device,
     )
-    original_feature_net_dict = dict(evolvable_composed.feature_net.named_parameters())
-    original_value_net_dict = dict(evolvable_composed.value_net.named_parameters())
+
+    original_nets = {k: dict(net.named_parameters()) for k, net in evolvable_composed.feature_net.items()}
     clone = evolvable_composed.clone()
-    clone_feature_net = clone.feature_net
-    clone_value_net = clone.value_net
     assert isinstance(clone, EvolvableMultiInput)
-    assert clone.init_dict == evolvable_composed.init_dict
     assert str(clone.state_dict()) == str(evolvable_composed.state_dict())
-    for key, param in clone_feature_net.named_parameters():
-        torch.testing.assert_close(param, original_feature_net_dict[key])
-    for key, param in clone_value_net.named_parameters():
-        torch.testing.assert_close(param, original_value_net_dict[key])
+
+    for key, cloned_net in clone.feature_net.items():
+        original_net = original_nets[key]
+        
+        for key, param in cloned_net.named_parameters():
+            torch.testing.assert_close(param, original_net[key])

@@ -150,7 +150,7 @@ class DQN(RLAlgorithm):
             self.wrap_models()
 
         self.criterion = nn.MSELoss()
-        
+
         if self.cudagraphs:
             # torch.compile and cuda graph optimizations
             self.update = torch.compile(self.update, mode=None)

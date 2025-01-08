@@ -623,7 +623,7 @@ class Mutations:
         if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
             individual.mut = "None"
             return individual
-        
+
         # Mutate network activation layer
         registry = individual.registry
         for network_group in registry.groups:
@@ -792,7 +792,7 @@ class Mutations:
                     mut_dict.append(getattr(net, mut_method)())
             else:
                 mut_dict = getattr(policy_offspring, mut_method)()
-        
+
         # Move to device if not using accelerator and set 
         # mutated network back to individual
         if self.accelerator is None:
@@ -800,11 +800,11 @@ class Mutations:
                 setattr(individual, policy_name, [net.to(self.device) for net in policy_offspring])
             else:
                 setattr(individual, policy_name, policy_offspring.to(self.device))
-        
+
         if algo_cls in [NeuralTS, NeuralUCB]:
             old_exp_layer = get_exp_layer(policy_offspring)
             self._reinit_bandit_grads(individual, policy_offspring, old_exp_layer)
-        
+
         # Apply the same mutation to the rest of the evaluation modules
         for name, offsprings in offspring_evals.items():
             # Apply mutation method differently for CNN and other arch types

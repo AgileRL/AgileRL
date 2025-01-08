@@ -46,9 +46,13 @@ def generate_dict_or_tuple_space(
         n_image: int,
         n_vector: int,
         image_shape: Tuple[int, ...] = (3, 128, 128),
-        vector_shape: Tuple[int] = (5,)
+        vector_shape: Tuple[int] = (5,),
+        dict_space: Optional[bool] = False
         ) -> Union[spaces.Dict, spaces.Tuple]:
-    dict_space = True if random.random() < 0.5 else False
+
+    if dict_space is None:
+        dict_space = True if random.random() < 0.5 else False
+    
     image_spaces = [generate_random_box_space(image_shape) for _ in range(n_image)]
     vector_spaces = [generate_random_box_space(vector_shape) for _ in range(n_vector)]
 

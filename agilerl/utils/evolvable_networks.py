@@ -32,13 +32,13 @@ def get_default_config(observation_space: spaces.Space) -> ConfigType:
         )
     elif is_image_space(observation_space):
         return CnnNetConfig(
-            channel_size=[16, 32],
+            channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
         )
     else:
         return MlpNetConfig(
-            hidden_size=[64],
+            hidden_size=[16, 16],
             output_activation=None
         )
 

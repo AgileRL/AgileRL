@@ -2,6 +2,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import torch
 
+from agilerl.typing import ArrayOrTensor
 from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import create_mlp
 
@@ -176,7 +177,7 @@ class EvolvableMLP(EvolvableModule):
         output_layer = self.get_output_dense()
         EvolvableModule.init_weights_gaussian(output_layer, std_coeff=output_coeff)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: ArrayOrTensor) -> torch.Tensor:
         """Returns output of neural network.
 
         :param x: Neural network input
@@ -185,6 +186,9 @@ class EvolvableMLP(EvolvableModule):
         :return: Neural network output
         :rtype: torch.Tensor
         """
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32, device=self.device)
+
         return self.model(x)
     
     def get_output_dense(self) -> torch.nn.Module:

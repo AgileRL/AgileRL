@@ -58,7 +58,7 @@ class ValueFunction(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[64],
+                    hidden_size=[16],
                     output_activation=None
                     )
                 )

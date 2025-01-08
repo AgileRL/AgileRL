@@ -30,7 +30,7 @@ from agilerl.utils.algo_utils import (
 __all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
-SelfRLAlgorithm = TypeVar("T", bound="RLAlgorithm")
+SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done 

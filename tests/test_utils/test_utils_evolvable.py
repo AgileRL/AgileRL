@@ -5,7 +5,7 @@ import torch.nn as nn
 from agilerl.utils.evolvable_networks import (
     get_activation,
     calc_max_kernel_sizes,
-    create_conv_block,
+    create_cnn,
     create_mlp
 )
 
@@ -74,14 +74,14 @@ def test_create_mlp(output_vanish, noisy):
         output_vanish=output_vanish,
         output_activation=None,
         noisy=noisy,
-        rainbow_feature_net=True
         )
     assert isinstance(net, nn.Module)
 
 ######### Test create_mlp and create_cnn########
 @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
 def test_create_cnn(noisy, output_vanish):
-    feature_net = create_conv_block(
+    feature_net = create_cnn(
+        "Conv2d",
         1,
         [32, 32], 
         [3, 3],
@@ -108,21 +108,20 @@ def test_create_cnn(noisy, output_vanish):
 
 @pytest.mark.parametrize("noisy, output_vanish", [(False, True), (True, False)])
 def test_create_cnn_multi(noisy, output_vanish):
-    feature_net = create_conv_block(
+    feature_net = create_cnn(
+        "Conv3d",
         1,
         [32, 32],
         [3, 3],
         [1, 1],
         "feature",
         layer_norm=True,
-        n_agents=2
         )
     head = create_mlp(
         10,
         4,
         [64, 64],
         output_activation=None,
-        rainbow_feature_net=True if noisy else False,
         noisy=noisy,
         name="value",
         output_vanish=output_vanish,

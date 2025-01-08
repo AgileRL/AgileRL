@@ -53,28 +53,6 @@ def test_evolvable_bert_init_no_e2e():
         assert isinstance(BERT.wpe, PositionalEncoding)
 
 
-# Returns nn.ReLU for activation name "ReLU".
-def test_returns_activation():
-    activation_functions = {
-        "Tanh": nn.Tanh,
-        "Identity": nn.Identity,
-        "ReLU": nn.ReLU,
-        "ELU": nn.ELU,
-        "Softsign": nn.Softsign,
-        "Sigmoid": nn.Sigmoid,
-        "Softplus": nn.Softplus,
-        "Softmax": nn.Softmax,
-        "LeakyReLU": nn.LeakyReLU,
-        "PReLU": nn.PReLU,
-        "GELU": nn.GELU,
-    }
-
-    model = EvolvableBERT([1], [1])
-    for activation in activation_functions.keys():
-        activation_function = model.get_activation(activation)
-        assert isinstance(activation_function, activation_functions[activation])
-
-
 def test_generate_square_subsequent_mask():
     model = EvolvableBERT([1], [1])
     mask = model.generate_square_subsequent_mask(2)

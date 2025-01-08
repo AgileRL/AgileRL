@@ -1,14 +1,14 @@
 from typing import Optional, Union, TypeVar, Dict, Any
 from dataclasses import asdict
 import copy
-from abc import ABC, abstractmethod
+from abc import ABC, ABCMeta, abstractmethod
 from gymnasium import spaces
 import numpy as np 
 import torch
 
 from agilerl.protocols import MutationType
 from agilerl.typing import DeviceType, TorchObsType, ConfigType
-from agilerl.modules.base import EvolvableModule, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, ModuleMeta, register_mutation_fn
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
@@ -73,8 +73,30 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
         "latent_dim" in net_config.keys()
     ), "Net config must contain latent_dim: int."
 
+class NetworkError(Exception):
+    """Exception raised for errors in the network."""
+    pass
 
-class EvolvableNetwork(EvolvableModule, ABC):
+class NetworkMeta(ModuleMeta):
+    """Metaclass for evolvable networks. Checks that the network has 
+    an encoder and a head_net (named as such)."""
+
+    def __call__(cls, *args, **kwargs):
+        instance: SelfEvolvableNetwork = super().__call__(*args, **kwargs)
+
+        # Check that the mutation methods of the network are correctly defined
+        # i.e. only contain underlying methods corresponding to the encoder and head_net
+        for mut_method in instance.mutation_methods:
+            if "." in mut_method:
+                attr =  mut_method.split(".")[0]
+                if attr not in ['encoder', 'head_net']:
+                    raise AttributeError(
+                        "Mutation methods in EvolvableNetwork's should only correspond to encoder or head_net."
+                        )
+
+        return instance
+
+class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
     """Base class for evolvable networks i.e. evolvable modules that are configured in 
     a specific way for a reinforcement learning algorithm - analogously to how CNNs are used 
     as building blocks in ResNet, VGG, etc. An evolvable network automatically inspects the passed 
@@ -194,31 +216,11 @@ class EvolvableNetwork(EvolvableModule, ABC):
         functions the first layer should have a depth corresponding to the number of agents 
         to receive a single output rather than `self.n_agents`
         """
-        kernel_sizes = net_config['kernel_size']
         if isinstance(observation_space, (spaces.Dict, spaces.Tuple)):
             net_config['cnn_block_type'] = "Conv3d"
         else:
             net_config['block_type'] = "Conv3d"
 
-        assert (
-            "sample_input" in net_config.keys(), 
-            "A sample input must be passed for multi-agent CNN-based networks."
-        )
-
-        # NOTE: If kernel sizes are passed as integers, we add a depth dimension of 
-        # 1 for all layers. Note that for e.g. value functions or Q networks 
-        # it is common for the first layer to have a depth corresponding to 
-        # the number of agents 
-        if isinstance(kernel_sizes[0], int):
-            net_config['kernel_size'] = [
-                (1, k_size, k_size) for k_size in kernel_sizes
-                ]
-            # We infer the depth of the first kernel from the shape of the sample input tensor
-            sample_input: torch.Tensor = net_config['sample_input']
-            net_config['kernel_size'][0] = (
-                sample_input.size(2), kernel_sizes[0], kernel_sizes[0]
-            )
-    
         return net_config
     
     def modules(self) -> Dict[str, SupportedEvolvable]:
@@ -354,7 +356,7 @@ class EvolvableNetwork(EvolvableModule, ABC):
         return clone
     
     def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreate the network.
+        """Recreate the encoder network.
         
         :param shrink_params: If True, shrink the parameters of the network, defaults to False
         :type shrink_params: bool, optional

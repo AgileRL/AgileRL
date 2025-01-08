@@ -1,4 +1,4 @@
-from typing import Union, Optional, Tuple, Dict, Any
+from typing import Union, Optional, Dict, Any
 from dataclasses import asdict
 import torch
 import torch.nn.functional as F
@@ -66,7 +66,7 @@ class QNetwork(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[64],
+                    hidden_size=[16],
                     output_activation=None
                     )
                 )
@@ -128,15 +128,16 @@ class QNetwork(EvolvableNetwork):
         :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
         :type shrink_params: bool
         """
-        super().recreate_network(shrink_params)
-        value_net = self.build_network_head(self.head_net.net_config)
+        super().recreate_network(shrink_params) # recreates encoder
+
+        head_net = self.build_network_head(self.head_net.net_config)
 
         # Preserve parameters of the network
         preserve_params_fn = (
             EvolvableModule.shrink_preserve_parameters if shrink_params 
             else EvolvableModule.preserve_parameters
         )
-        self.head_net = preserve_params_fn(self.head_net, value_net)
+        self.head_net = preserve_params_fn(self.head_net, head_net)
 
 
 class RainbowQNetwork(EvolvableNetwork):
@@ -200,7 +201,7 @@ class RainbowQNetwork(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[64, 64],
+                    hidden_size=[16],
                     noisy=True,
                     output_activation=None
                     )
@@ -376,7 +377,7 @@ class ContinuousQNetwork(EvolvableNetwork):
         if head_config is None:
             head_config = asdict(
                 MlpNetConfig(
-                    hidden_size=[64],
+                    hidden_size=[16],
                     output_activation=None
                     )
                 )

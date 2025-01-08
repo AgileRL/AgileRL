@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from agilerl.typing import KernelSizeType
+from agilerl.typing import KernelSizeType, ArrayOrTensor
 from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
 from agilerl.utils.evolvable_networks import (
     get_activation,
@@ -47,12 +47,27 @@ def _assert_correct_kernel_sizes(sizes: List[Tuple[int, ...]], block_type: Block
 class MutableKernelSizes:
     sizes: List[KernelSizeType]
     cnn_block_type: Literal["Conv2d", "Conv3d"]
+    sample_input: Optional[torch.Tensor]
 
     def __post_init__(self) -> None:
         tuple_sizes = False
         if isinstance(self.sizes[0], (tuple, list)):
             tuple_sizes = True
             _assert_correct_kernel_sizes(self.sizes, self.cnn_block_type)
+        elif self.cnn_block_type == "Conv3d":
+            # NOTE: If kernel sizes are passed as integers in multi-agent settings, we 
+            # add a depth dimension of 1 for all layers. Note that for e.g. value functions 
+            # or Q networks it is common for the first layer to have a depth corresponding 
+            # to the number of agents (since we stack the observations from all agents to 
+            # obtain the value)
+            sizes = [(1, k_size, k_size) for k_size in self.sizes]
+            
+            # We infer the depth of the first kernel from the shape of the sample input tensor
+            sizes[0] = (
+                self.sample_input.size(2), self.sizes[0], self.sizes[0]
+            )
+            self.sizes = sizes
+            tuple_sizes = True
 
         self.tuple_sizes = tuple_sizes
 
@@ -61,6 +76,9 @@ class MutableKernelSizes:
         if self.tuple_sizes:
             return [k_size[-1] for k_size in self.sizes]
         return self.sizes
+    
+    def __len__(self) -> int:
+        return len(self.sizes)
     
     def add_layer(self, other: int) -> None:
         if self.tuple_sizes:
@@ -204,16 +222,22 @@ class EvolvableCNN(EvolvableModule):
             min_channel_size < max_channel_size
         ), "'min_channel_size' must be less than 'max_channel_size'."
 
-        if block_type == "Conv3d":
+        if block_type == "Conv2d":
+            sample_input = (
+                torch.zeros(1, *input_shape, device=device) 
+                if sample_input is None else sample_input
+            )
+        elif block_type == "Conv3d":
             assert (
-                sample_input is not None, 
-                "Sample input must be provided for 3D convolutional networks."
+                sample_input is not None and len(sample_input.shape) == 5
+            ), "Sample input must be provided for 3D convolutional networks."
+        else:
+            raise ValueError(
+                f"Invalid block type: {block_type}. Must be either 'Conv2d' or 'Conv3d'."
             )
 
         self.input_shape = input_shape
         self.channel_size = channel_size
-        self.raw_kernel_size = kernel_size
-        self.kernel_size = MutableKernelSizes(kernel_size, block_type)
         self.stride_size = stride_size
         self.block_type = block_type
         self.num_outputs = num_outputs
@@ -227,22 +251,12 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.sample_input = sample_input
         self.name = name
-
-        if block_type == "Conv2d":
-            sample_input = (
-                torch.zeros(1, *input_shape, device=device) 
-                if sample_input is None else sample_input
-            )
-        else:
-            assert (
-                sample_input is not None,
-                "Sample input must be provided for 3D convolutional networks."
-            )
+        self.kernel_size = MutableKernelSizes(kernel_size, block_type, sample_input)
 
         self.model = self.create_cnn(
             in_channels=input_shape[0],
             channel_size=channel_size,
-            kernel_size=kernel_size,
+            kernel_size=self.kernel_size.sizes,
             stride_size=stride_size,
             sample_input=sample_input,
             name=self.name,
@@ -262,7 +276,7 @@ class EvolvableCNN(EvolvableModule):
             "input_shape": self.input_shape,
             "num_outputs": self.num_outputs,
             "channel_size": self.channel_size,
-            "kernel_size": self.raw_kernel_size,
+            "kernel_size": self.kernel_size.int_sizes,
             "stride_size": self.stride_size,
             "activation": self.activation,
             "block_type": self.block_type,
@@ -335,10 +349,10 @@ class EvolvableCNN(EvolvableModule):
         :type kernel_size: List[int]
         :param stride_size: A list of integers representing the stride size of each convolutional layer.
         :type stride_size: List[int]
+        :param sample_input: A sample input tensor.
+        :type sample_input: torch.Tensor
         :param name: The name of the CNN.
         :type name: str
-        :param features_dim: The dimension of the features output by the CNN. Defaults to None.
-        :type features_dim: Optional[int], optional
 
         :return: The created convolutional neural network.
         :rtype: nn.Sequential
@@ -357,7 +371,7 @@ class EvolvableCNN(EvolvableModule):
             device=self.device
         )
 
-        # Flatten image encodings and pass through a linear layer
+        # Flatten image encodings and pass through a final linear layer
         pre_flatten_output = nn.Sequential(net_dict)(sample_input)
         net_dict[f"{name}_flatten"] = nn.Flatten()
         with torch.no_grad():
@@ -379,7 +393,7 @@ class EvolvableCNN(EvolvableModule):
         """Resets noise of the model layers."""
         EvolvableModule.reset_noise(self.model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: ArrayOrTensor) -> torch.Tensor:
         """Returns output of neural network.
 
         :param x: Neural network input
@@ -388,9 +402,15 @@ class EvolvableCNN(EvolvableModule):
         :return: Output of the neural network
         :rtype: torch.Tensor
         """
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32, device=self.device)
+
         # Handle single-image input for 3D convolutions
         if self.block_type == "Conv3d" and len(x.shape) == 4:
             x = x.unsqueeze(2)
+        
+        if len(x.shape) == 3:
+            x = x.unsqueeze(0)
 
         return self.model(x)
 

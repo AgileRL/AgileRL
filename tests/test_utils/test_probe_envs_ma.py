@@ -582,7 +582,7 @@ def test_policy_q_learning_with_probe_env():
         "observation_spaces": [env.observation_space[agent] for agent in env.agents],
         "action_spaces": [env.action_space[agent] for agent in env.agents],
         "agent_ids": env.possible_agents,
-        "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
+        "net_config": {"hidden_size": [32, 32]},
         "batch_size": 256,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -606,7 +606,7 @@ def test_policy_q_learning_with_probe_env_mlp():
         "observation_spaces": [env.observation_space[agent] for agent in env.agents],
         "action_spaces": [env.action_space[agent] for agent in env.agents],
         "agent_ids": env.possible_agents,
-        "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
+        "net_config": {"hidden_size": [32, 32]},
         "batch_size": 256,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
@@ -631,8 +631,6 @@ def test_policy_q_learning_with_probe_env_cnn():
         "action_spaces": [env.action_space[agent] for agent in env.agents],
         "agent_ids": env.possible_agents,
         "net_config": {
-            "arch": "cnn",  # Network architecture
-            "hidden_size": [32],  # Network hidden size
             "channel_size": [3],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size

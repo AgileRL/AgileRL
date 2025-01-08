@@ -24,9 +24,18 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
     :return: Dictionary observation space.
     :rtype: spaces.Dict
     """
-    return spaces.Dict({
-        f"observation_{i}": space for i, space in enumerate(observation_space.spaces)
-    })
+    num_image = 0
+    num_vector = 0
+    dict_space = {}
+    for space in observation_space.spaces:
+        if is_image_space(space):
+            dict_space[f"image_{num_image}"] = space
+            num_image += 1
+        else:
+            dict_space[f"vector_{num_vector}"] = space
+            num_vector += 1
+
+    return spaces.Dict(dict_space)
 
 
 class EvolvableMultiInput(EvolvableModule):
@@ -57,7 +66,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param cnn_block_type: Type of convolutional block to use. Default is "Conv2d".
     :type cnn_block_type: Literal["Conv2d", "Conv3d"], optional
     :param sample_input: Sample input tensor for the CNN. Default is None.
-    :type sample_input: Optional[torch.Tensor], optional
+    :type sample_input: Optional[dict[str, torch.Tensor]], optional
     :param vector_space_mlp: Whether to use an MLP for the vector spaces. This is done by concatenating the 
         flattened observations and passing them through an `EvolvableMLP`. Default is False, whereby the 
         observations are concatenated directly to the feature encodings before the final MLP.
@@ -108,10 +117,10 @@ class EvolvableMultiInput(EvolvableModule):
             stride_size: List[int],
             latent_dim: int = 16,
             cnn_block_type: Literal["Conv2d", "Conv3d"] = "Conv2d",
-            sample_input: Optional[torch.Tensor] = None,
+            sample_input: Optional[Dict[str, torch.Tensor]] = None,
             vector_space_mlp: bool = False,
             hidden_size: Optional[List[int]] = None,
-            init_dicts: Dict[str, Dict[str, Any]] = {},
+            init_dicts: Optional[Dict[str, Dict[str, Any]]] = None,
             output_activation: Optional[str] = None,
             activation: str = "ReLU",
             min_hidden_layers: int = 1,
@@ -133,6 +142,7 @@ class EvolvableMultiInput(EvolvableModule):
         ):
         super().__init__(device)
 
+        assert num_outputs > 0, "Number of outputs must be greater than 0."
         assert (
             isinstance(observation_space, (spaces.Dict, spaces.Tuple)),
             "Observation space must be a Dict or Tuple space."
@@ -140,10 +150,20 @@ class EvolvableMultiInput(EvolvableModule):
 
         if isinstance(observation_space, spaces.Tuple):
             observation_space = tuple_to_dict_space(observation_space)
+            assert (
+                cnn_block_type == "Conv2d"
+                ), "For multi-input spaces in multi-agent environments, please convert to a dictionary " \
+                "space and specify the sample inputs for each corresponding image space in a dictionary too."
+        else:
+            if cnn_block_type == "Conv3d":
+                assert isinstance(sample_input, dict), "Sample input must be a dictionary in multi-agent settings."
 
         if vector_space_mlp:
             assert hidden_size is not None, "Hidden size must be specified for vector space MLP."
         
+        self._init_dicts = init_dicts if init_dicts is not None else {}
+        self._activation = activation
+
         self.observation_space = observation_space
         self.num_outputs = num_outputs
         self.name = name
@@ -170,8 +190,7 @@ class EvolvableMultiInput(EvolvableModule):
         self.latent_dim = latent_dim
         self.noisy = noisy
         self.noise_std = noise_std
-        self._init_dicts = init_dicts
-        self._activation = activation
+
         self.vector_spaces = [
             key for key, space in observation_space.spaces.items() 
             if not is_image_space(space)
@@ -275,7 +294,6 @@ class EvolvableMultiInput(EvolvableModule):
             "kernel_size": self.kernel_size,
             "stride_size": self.stride_size,
             "activation": self.activation,
-            "sample_input": self.sample_input,
             "block_type": self.cnn_block_type,
             "output_activation": self.activation,
             "min_hidden_layers": self.min_cnn_hidden_layers,
@@ -330,15 +348,16 @@ class EvolvableMultiInput(EvolvableModule):
         :return: Initialization dictionaries
         :rtype: Dict[str, Dict[str, Any]]
         """
-        if not self._init_dicts:
-            return {}
-
+        if not hasattr(self, 'feature_net'):
+            return self._init_dicts
+            
         reformatted_dicts = {}
-        for key, d in self._init_dicts.items():
-            d.pop("input_shape", None)
-            d.pop("num_inputs", None)
-            d['num_outputs'] = self.latent_dim
-            reformatted_dicts[key] = d
+        for key, net in self.feature_net.items():
+            init_dict = net.init_dict
+            init_dict.pop("input_shape", None)
+            init_dict.pop("num_inputs", None)
+            init_dict['num_outputs'] = self.latent_dim
+            reformatted_dicts[key] = init_dict
 
         return reformatted_dicts
     
@@ -379,14 +398,25 @@ class EvolvableMultiInput(EvolvableModule):
         for key, space in self.observation_space.spaces.items():
             if is_image_space(space):  # Use CNN if it's an image space
                 init_dict = copy.deepcopy(self.get_init_dict(key, default='cnn'))
+
+                if "sample_input" in init_dict:
+                    sample_input = init_dict.pop("sample_input")
+                else:
+                    sample_input = self.sample_input[key] if self.sample_input is not None else None
+
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
                     name=init_dict.pop("name", key),
+                    sample_input=sample_input,
                     **init_dict
                     )
 
                 self._init_dicts[key] = feature_extractor.init_dict
                 feature_net[key] = feature_extractor
+            elif isinstance(space, spaces.Box) and not len(space.shape) == 1:
+                raise ValueError(
+                    "Observation space with shape > 1 must be an image space. Shape is: {}".format(space.shape)
+                    )
 
         # Collect all vector space shapes for concatenation
         vector_input_dim = sum(
@@ -428,6 +458,10 @@ class EvolvableMultiInput(EvolvableModule):
         if isinstance(x, tuple):
             x = dict(zip(self.observation_space.spaces.keys(), x))
         
+        for key, obs in x.items():
+            if not isinstance(obs, torch.Tensor):
+                x[key] = torch.tensor(obs, device=self.device, dtype=torch.float32)
+        
         # Extract features from image spaces
         image_features = [
             self.feature_net[key](x[key]) for key in x.keys() if key in self.feature_net.keys()
@@ -440,6 +474,8 @@ class EvolvableMultiInput(EvolvableModule):
             # Flatten if necessary 
             if len(x[key].shape) > 2:
                 x[key] = x[key].flatten(start_dim=1)
+            elif len(x[key].shape) == 1:
+                x[key] = x[key].unsqueeze(0)
             
             vector_inputs.append(x[key])
 

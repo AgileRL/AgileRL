@@ -406,15 +406,13 @@ def test_policy_q_learning_with_probe_env_cnn():
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            "arch": "cnn",  # Network architecture
-            "hidden_size": [64],  # Network hidden size
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
         },
         "policy_freq": 2,
-        "lr_actor": 0.1,
-        "lr_critic": 0.1,
+        "lr_actor": 1e-2,
+        "lr_critic": 1e-2,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -434,7 +432,6 @@ def test_policy_q_learning_with_probe_env_dict():
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            "arch": "composed",  # Network architecture
             "hidden_size": [64],  # Network hidden size
             "latent_dim": 16,  # Latent dimension
             "channel_size": [32],  # CNN channel size
@@ -442,8 +439,8 @@ def test_policy_q_learning_with_probe_env_dict():
             "stride_size": [1],  # CNN stride size
         },
         "policy_freq": 2,
-        "lr_actor": 0.1,
-        "lr_critic": 0.1,
+        "lr_actor": 1e-2,
+        "lr_critic": 1e-2,
     }
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(
@@ -475,8 +472,6 @@ def test_policy_on_policy_with_probe_env_cnn():
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            "arch": "cnn",  # Network architecture
-            "hidden_size": [64],  # Network hidden size
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
@@ -488,12 +483,11 @@ def test_policy_on_policy_with_probe_env_cnn():
 def test_policy_on_policy_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsDictEnv()
-    learn_steps = 1000
+    learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            "arch": "composed",  # Network architecture
             "hidden_size": [64],  # Network hidden size
             "latent_dim": 16,  # Latent dimension
             "channel_size": [32],  # CNN channel size

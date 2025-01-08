@@ -181,7 +181,7 @@ class DeterministicActor(EvolvableNetwork):
 
         if head_config is None:
             head_config = MlpNetConfig(
-                hidden_size=[64],
+                hidden_size=[16],
                 output_activation=output_activation
             )
         elif head_config["output_activation"] is None:

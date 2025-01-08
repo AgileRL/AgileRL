@@ -996,7 +996,7 @@ def test_get_action_distributed(
         DummyDeterministicActor(
             observation_space=actor.observation_space,
             action_space=actor.action_space,
-            head_config=actor.actor_net.net_config,
+            head_config=actor.head_net.net_config,
             device=actor.device,
             n_agents=actor.n_agents,
         )
@@ -1066,7 +1066,7 @@ def test_maddpg_get_action_distributed_cnn(
             observation_space=actor.observation_space,
             action_space=actor.action_space,
             encoder_config=net_config,
-            head_config=actor.actor_net.net_config,
+            head_config=actor.head_net.net_config,
             device=actor.device,
             n_agents=actor.n_agents,
         )
