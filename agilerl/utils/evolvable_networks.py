@@ -15,7 +15,7 @@ from agilerl.modules.configs import MlpNetConfig, CnnNetConfig, MultiInputNetCon
 
 TupleorInt = Union[Tuple[int, ...], int]
 
-def get_default_config(observation_space: spaces.Space) -> ConfigType:
+def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
     
     :param observation_space: Observation space of the environment.
@@ -29,12 +29,14 @@ def get_default_config(observation_space: spaces.Space) -> ConfigType:
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
+            output_activation=None
         )
     elif is_image_space(observation_space):
         return CnnNetConfig(
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
+            output_activation=None
         )
     else:
         return MlpNetConfig(

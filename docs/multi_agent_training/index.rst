@@ -196,7 +196,6 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
         agent_ids=INIT_HP["AGENT_IDS"],
-        arch=NET_CONFIG["arch"],
         rand_seed=1,
         device=device,
     )
@@ -360,7 +359,6 @@ Alternatively, use a custom training loop. Combining all of the above:
         ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
         agent_ids=INIT_HP["AGENT_IDS"],
-        arch=NET_CONFIG["arch"],
         rand_seed=1,
         device=device,
     )

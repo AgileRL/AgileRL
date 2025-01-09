@@ -184,7 +184,7 @@ class DeterministicActor(EvolvableNetwork):
                 hidden_size=[16],
                 output_activation=output_activation
             )
-        elif head_config["output_activation"] is None:
+        elif head_config.get("output_activation", None) is None:
             head_config["output_activation"] = output_activation
         
         self.head_net = self.build_network_head(head_config)
@@ -314,7 +314,7 @@ class StochasticActor(DeterministicActor):
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.wrapped.net_config,
+            "head_config": self.head_net.net_config,
             "log_std_init": self.head_net.log_std_init,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
@@ -352,7 +352,7 @@ class StochasticActor(DeterministicActor):
         """
         super().recreate_network(shrink_params)
 
-        actor_net = self.build_network_head(self.head_net.wrapped.net_config)
+        actor_net = self.build_network_head(self.head_net.net_config)
         actor_net = EvolvableDistribution(
             self.action_space, actor_net, device=self.device
             )

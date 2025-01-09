@@ -149,8 +149,7 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size", "learn_step"],  # RL HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
+        mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )
@@ -269,8 +268,7 @@ Alternatively, use a custom on-policy training loop:
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size", "learn_step"],  # RL HPs to choose from
-        mutation_sd=0.1,  # Mutation strength
-        arch=NET_CONFIG["arch"],  # Network architecture
+        mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )

@@ -26,8 +26,6 @@ class RainbowDQN(RLAlgorithm):
     :type index: int, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
-    :param head_config: Head network configuration, defaults to None
-    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -72,7 +70,6 @@ class RainbowDQN(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -168,20 +165,24 @@ class RainbowDQN(RLAlgorithm):
             
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
         else:
+            net_config = {} if net_config is None else net_config
+            head_config: Optional[Dict[str, Any]] = net_config.get("head_config", None)
+
             head_config = MlpNetConfig(
                 hidden_size=[64] if head_config is None else head_config.get("hidden_size", [64]),
                 noise_std=self.noise_std,
                 noisy=True,
                 output_activation="ReLU"
             )
+            net_config["head_config"] = head_config
+
             create_actor = lambda: RainbowQNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
-                encoder_config=net_config,
-                head_config=head_config,
                 support=self.support,
                 num_atoms=self.num_atoms,
-                device=self.device
+                device=self.device,
+                **net_config
             )
 
             self.actor = create_actor()

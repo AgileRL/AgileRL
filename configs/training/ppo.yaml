@@ -26,7 +26,7 @@ INIT_HP:
     EVO_STEPS: 20_480          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -47,10 +47,18 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [64, 64]
-    mlp_activation: Tanh
-    min_hidden_layers: 1
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+        activation: Tanh
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+    
+    head_config:
+        hidden_size: [64]
+        activation: Tanh
+        min_hidden_layers: 1
+        max_hidden_layers: 2
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500

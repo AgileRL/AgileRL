@@ -32,8 +32,6 @@ class DQN(RLAlgorithm):
     :type index: int, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
-    :param head_config: Head configuration for the network, defaults to None
-    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr: Learning rate for optimizer, defaults to 1e-4
@@ -66,7 +64,6 @@ class DQN(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
         learn_step: int = 5,
@@ -126,12 +123,12 @@ class DQN(RLAlgorithm):
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
         else:
+            net_config = {} if net_config is None else net_config
             create_actor = lambda: QNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
-                encoder_config=net_config,
-                head_config=head_config,
-                device=self.device
+                device=self.device,
+                **net_config
             )
             self.actor = create_actor()
             self.actor_target = create_actor()

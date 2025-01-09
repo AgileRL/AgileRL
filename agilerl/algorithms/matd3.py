@@ -15,7 +15,7 @@ from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
-from agilerl.utils.evolvable_networks import get_default_config, is_image_space
+from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
 from agilerl.utils.algo_utils import key_in_nested_dict, make_safe_deepcopies, concatenate_spaces
 
 class MATD3(MultiAgentAlgorithm):
@@ -45,8 +45,6 @@ class MATD3(MultiAgentAlgorithm):
     :type policy_freq: int, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: Optional[Dict[str, Any]], optional
-    :param head_config: Head configuration for the network, defaults to None
-    :type head_config: Optional[Dict[str, Any]], optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 0.001
@@ -97,7 +95,6 @@ class MATD3(MultiAgentAlgorithm):
         index: int = 0,
         policy_freq: int = 2,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 0.001,
         lr_critic: float = 0.01,
@@ -209,6 +206,14 @@ class MATD3(MultiAgentAlgorithm):
             self.actors, self.critics_1, self.critics_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
             self.actor_targets, self.critic_targets_1, self.critic_targets_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
         else:
+            net_config = {} if net_config is None else net_config
+            critic_net_config = copy.deepcopy(net_config)
+
+            encoder_config = net_config.get("encoder_config", None)
+            critic_encoder_config = critic_net_config.get("encoder_config", None)
+            head_config = net_config.get("head_config", None)
+
+            # Determine actor output activation from action space
             output_activation = None if not self.discrete_actions else "GumbelSoftmax"
             if head_config is not None:
                 head_config["output_activation"] = output_activation
@@ -218,38 +223,42 @@ class MATD3(MultiAgentAlgorithm):
                 head_config = MlpNetConfig(hidden_size=[64], output_activation=output_activation)
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
-            if net_config is None:
-                net_config = get_default_config(observation_spaces[0]) if net_config is None else net_config
+            if encoder_config is None:
+                encoder_config = get_default_encoder_config(observation_spaces[0])
+                critic_encoder_config= get_default_encoder_config(observation_spaces[0])
             
             # For image spaces we need to give a sample input tensor to 
             # build networks with Conv3d blocks approproately
-            critic_net_config = copy.deepcopy(net_config)
             if self.is_image_space:
-                net_config["sample_input"] = torch.zeros(
+                encoder_config["sample_input"] = torch.zeros(
                     (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
                 ).unsqueeze(2)
     
-                critic_net_config['sample_input'] = torch.zeros(
+                critic_encoder_config['sample_input'] = torch.zeros(
                     (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
                 ).unsqueeze(2).repeat(1, 1, self.n_agents, 1, 1)
+
+            net_config['encoder_config'] = encoder_config
+            net_config['head_config'] = head_config
+
+            critic_net_config['encoder_config'] = critic_encoder_config
+            critic_net_config['head_config'] = critic_head_config
 
             create_actor = lambda idx: DeterministicActor(
                 self.observation_spaces[idx],
                 self.action_spaces[idx],
-                encoder_config=net_config,
-                head_config=head_config,
                 n_agents=self.n_agents,
-                device=self.device
+                device=self.device,
+                **net_config
             )
 
             # NOTE: Critic uses observations + actions of all agents to predict Q-value
             create_critic = lambda: ContinuousQNetwork(
                 observation_space=concatenate_spaces(observation_spaces),
                 action_space=concatenate_spaces(action_spaces),
-                encoder_config=critic_net_config,
-                head_config=critic_head_config,
                 n_agents=self.n_agents,
-                device=self.device
+                device=self.device,
+                **critic_net_config
             )
 
             self.actors = [create_actor(idx) for idx in range(self.n_agents)]

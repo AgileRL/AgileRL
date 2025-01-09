@@ -92,7 +92,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING, use_net=Fal
         min_batch_size=MUTATION_PARAMS["MIN_BATCH_SIZE"],
         max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         agent_ids=INIT_HP["AGENT_IDS"],
-        arch=NET_CONFIG["arch"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
         accelerator=accelerator,

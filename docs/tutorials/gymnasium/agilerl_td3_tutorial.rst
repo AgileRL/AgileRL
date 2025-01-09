@@ -249,7 +249,6 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         min_learn_step=MUT_P["MIN_LEARN_STEP"],
         max_learn_step=MUT_P["MAX_LEARN_STEP"],
         mutation_sd=MUT_P["MUT_SD"],
-        arch=net_config["arch"],
         rand_seed=MUT_P["RAND_SEED"],
         device=device,
     )

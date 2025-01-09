@@ -45,4 +45,10 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    hidden_size: [64, 64]
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+    
+    head_config:
+        hidden_size: [64]

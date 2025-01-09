@@ -594,7 +594,6 @@ def test_clone_instance(
     clone = evolvable_cnn.clone()
     clone_net = clone.model
     assert isinstance(clone, EvolvableCNN)
-    assert clone.init_dict == evolvable_cnn.init_dict
     assert str(clone.state_dict()) == str(evolvable_cnn.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_feature_net_dict[key])

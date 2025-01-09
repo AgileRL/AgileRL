@@ -1,7 +1,7 @@
 from typing import Optional, Union, TypeVar, Dict, Any
 from dataclasses import asdict
 import copy
-from abc import ABC, ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from gymnasium import spaces
 import numpy as np 
 import torch
@@ -12,7 +12,7 @@ from agilerl.modules.base import EvolvableModule, ModuleMeta, register_mutation_
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.utils.evolvable_networks import is_image_space, get_default_config
+from agilerl.utils.evolvable_networks import is_image_space, get_default_encoder_config
 
 SelfEvolvableNetwork = TypeVar("SelfEvolvableNetwork", bound="EvolvableNetwork")
 SupportedEvolvable = Union[EvolvableMLP, EvolvableCNN, EvolvableMultiInput]
@@ -90,15 +90,16 @@ class NetworkMeta(ModuleMeta):
             if "." in mut_method:
                 attr =  mut_method.split(".")[0]
                 if attr not in ['encoder', 'head_net']:
-                    raise AttributeError(
+                    raise NetworkError(
                         "Mutation methods in EvolvableNetwork's should only correspond to encoder or head_net."
                         )
 
         return instance
 
 class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
-    """Base class for evolvable networks i.e. evolvable modules that are configured in 
-    a specific way for a reinforcement learning algorithm - analogously to how CNNs are used 
+    """
+    Base class for evolvable networks, i.e., evolvable modules that are configured in 
+    a specific way for a reinforcement learning algorithm, similar to how CNNs are used 
     as building blocks in ResNet, VGG, etc. An evolvable network automatically inspects the passed 
     observation space to determine the appropriate encoder to build through the AgileRL 
     evolvable modules, inheriting the mutation methods of any underlying evolvable module.
@@ -106,22 +107,28 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
     .. note::
         Currently, evolvable networks should only have the encoder (which is automatically 
         built from the observation space) and a 'head_net' attribute that processes the latent 
-        encodings into the desired number of outputs as evolvable components. E.g. in RainbowQNetwork 
+        encodings into the desired number of outputs as evolvable components. For example, in RainbowQNetwork, 
         we signal the advantage net as unevolvable and apply the same mutations to it as the 'value' 
-        net which is the network head in this case. Users should follow the same philosophy.
-    
+        net, which is the network head in this case. Users should follow the same philosophy.
+
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
-    :param action_space: Action space of the environment
-    :type action_space: spaces.Space
-    :param net_config: Configuration of the network.
-    :type net_config: Dict[str, Any]
+    :param encoder_config: Configuration of the encoder. Defaults to None.
+    :type encoder_config: Optional[ConfigType]
+    :param action_space: Action space of the environment. Defaults to None.
+    :type action_space: Optional[spaces.Space]
+    :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
+    :type max_latent_dim: int
     :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to 
         single-agent environments.
     :type n_agents: Optional[int]
-    :param latent_dim: Dimension of the latent space representation.
+    :param encoder_mutations: If True, allow mutations to the encoder. Defaults to False.
+    :type encoder_mutations: bool
+    :param latent_dim: Dimension of the latent space representation. Defaults to 32.
     :type latent_dim: int
-    :param device: Device to use for the network.
+    :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     """
     def __init__(
@@ -138,7 +145,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         super().__init__(device)
 
         if encoder_config is None:
-            encoder_config = get_default_config(observation_space)
+            encoder_config = get_default_encoder_config(observation_space)
 
         # For multi-agent settings, we use a depth corresponding to that of the 
         # sample input for the kernel of the first layer of CNN-based networks
@@ -167,6 +174,10 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             encoder_config['output_activation'] = activation
 
         self.encoder = self._build_encoder(encoder_config)
+
+        # NOTE: We disable layer mutations for the encoder since this usually incurs 
+        # a lot of variance in the optimization process and makes learning unstable
+        self.encoder.disable_mutations(MutationType.LAYER)
     
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -222,7 +233,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             net_config['block_type'] = "Conv3d"
 
         return net_config
-    
+
     def modules(self) -> Dict[str, SupportedEvolvable]:
         """Modules of the network.
         

@@ -208,26 +208,30 @@ class PPO(RLAlgorithm):
             self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
 
         else:
+            net_config = {} if net_config is None else net_config
+            critic_net_config = copy.deepcopy(net_config)
+
+            head_config = net_config.get("head_config", None)
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None # Value function has no output activation
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
+            
+            critic_net_config["head_config"] = critic_head_config
 
             self.actor = StochasticActor(
                 observation_space,
                 action_space,
                 log_std_init=self.action_std_init,
-                encoder_config=net_config,
-                head_config=head_config,
-                device=device
+                device=device,
+                **net_config
             )
 
             self.critic = ValueFunction(
                 observation_space,
-                encoder_config=net_config,
-                head_config=critic_head_config,
-                device=device
+                device=device,
+                **critic_net_config
             )
 
         self.optimizer = OptimizerWrapper(
@@ -338,10 +342,8 @@ class PPO(RLAlgorithm):
         if action is None:
             action = action_dist.sample()
             return_tensors = False
-        elif self.accelerator is None:
-            action = action.to(self.device)
         else:
-            action = action.to(self.accelerator.device)
+            action = action.to(self.device)
 
         action_logprob = action_dist.log_prob(action)
 

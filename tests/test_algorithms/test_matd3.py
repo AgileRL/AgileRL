@@ -23,7 +23,7 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.utils.utils import make_multi_agent_vect_envs
 from agilerl.utils.algo_utils import concatenate_spaces
-from agilerl.utils.evolvable_networks import get_default_config
+from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.test_algorithms.test_maddpg import DummyMultiEnv
 from tests.helper_functions import (
@@ -595,7 +595,7 @@ def test_initialize_matd3_with_cnn_networks(
 def test_initialize_matd3_with_evo_networks(
     observation_spaces, action_spaces, net, device, compile_mode, accelerator
 ):
-    net_config = get_default_config(observation_spaces[0])
+    net_config = get_default_encoder_config(observation_spaces[0])
     
     # For image spaces we need to give a sample input tensor to build networks
     critic_net_config = copy.deepcopy(net_config)

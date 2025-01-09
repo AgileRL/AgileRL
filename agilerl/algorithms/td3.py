@@ -41,8 +41,6 @@ class TD3(RLAlgorithm):
     :type index: int, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
-    :param head_config: Head configuration for the network, defaults to None
-    :type head_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
     :type batch_size: int, optional
     :param lr_actor: Learning rate for actor optimizer, defaults to 1e-4
@@ -85,7 +83,6 @@ class TD3(RLAlgorithm):
         dt: float = 1e-2,
         index: int = 0,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 1e-4,
         lr_critic: float = 1e-3,
@@ -197,25 +194,28 @@ class TD3(RLAlgorithm):
             self.actor_target, self.critic_target_1, self.critic_target_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
 
         else:
+            net_config = {} if net_config is None else net_config
+            critic_net_config = copy.deepcopy(net_config)
+            head_config = net_config.get("head_config", None)
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
+            critic_net_config["head_config"] = critic_head_config
+
             create_actor = lambda: DeterministicActor(
                 observation_space=observation_space,
                 action_space=action_space,
-                encoder_config=net_config,
-                head_config=head_config,
-                device=device
+                device=device,
+                **net_config
             )
             create_critic = lambda: ContinuousQNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
-                encoder_config=net_config,
-                head_config=critic_head_config,
-                device=device
+                device=device,
+                **critic_net_config
             )
 
             self.actor = create_actor()

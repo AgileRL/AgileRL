@@ -108,7 +108,6 @@ if __name__ == "__main__":
         ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
         agent_ids=INIT_HP["AGENT_IDS"],
-        arch=NET_CONFIG["arch"],
         rand_seed=1,
         device=device,
     )

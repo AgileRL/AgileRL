@@ -221,7 +221,7 @@ class RainbowQNetwork(EvolvableNetwork):
             )
 
         # We want the same mutations for both the value and advantage networks
-        self.advantage_net.make_unevolvable()
+        self.advantage_net.disable_mutations()
 
     @property
     def init_dict(self) -> Dict[str, Any]:

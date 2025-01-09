@@ -54,11 +54,20 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 10
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [128, 128]
-    mlp_activation: ReLU
-    mlp_output_activation: ReLU
-    min_hidden_layers: 2
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [128]
+        activation: ReLU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+    
+    head_config:
+        hidden_size: [128]
+        activation: ReLU
+        output_activation: ReLU
+        min_hidden_layers: 1
+        max_hidden_layers: 2
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+

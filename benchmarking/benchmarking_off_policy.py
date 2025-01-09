@@ -66,32 +66,14 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     state_dim = RLAlgorithm.get_state_dim(observation_space)
     action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
-        # Currently set up for TD3
+        # Currently set up for DQN
         actor = EvolvableMLP(
             num_inputs=state_dim[0],
             num_outputs=action_dim,
-            output_vanish=False,
-            init_layers=False,
-            layer_norm=False,
-            num_atoms=51,
-            support=torch.linspace(-200, 200, 51).to(device),
-            rainbow=True,
-            device=device,
-            hidden_size=[128, 128],
-            mlp_activation="ReLU",
-            mlp_output_activation="ReLU",
+            hidden_size=[64, 64],
+            device=device
         )
-        NET_CONFIG = None
-        critic = [
-            EvolvableMLP(
-                num_inputs=state_dim[0] + action_dim,
-                num_outputs=1,
-                device=device,
-                hidden_size=[64, 64],
-                mlp_activation="ReLU",
-            )
-            for _ in range(2)
-        ]
+        critic = None
     else:
         actor = None
         critic = None

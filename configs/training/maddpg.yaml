@@ -50,13 +50,21 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 2048
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [64, 64]
-    min_hidden_layers: 1
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
-    mlp_output_activation: Sigmoid
-    mlp_activation: ReLU
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+        activation: ReLU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+    
+    head_config:
+        hidden_size: [64]
+        activation: ReLU
+        output_activation: Sigmoid
+        min_hidden_layers: 1
+        max_hidden_layers: 2
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
 
 DISTRIBUTED_TRAINING: false

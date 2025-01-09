@@ -11,7 +11,7 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.value_functions import ValueFunction
-from agilerl.utils.evolvable_networks import get_default_config
+from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
 
 
@@ -26,8 +26,6 @@ class NeuralUCB(RLAlgorithm):
     :type index: int, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
-    :param head_config: Head configuration for the network, defaults to None
-    :type head_config: dict, optional
     :param gamma: Positive scaling factor, defaults to 1.0
     :type gamma: float, optional
     :param lamb: Regularization parameter lambda, defaults to 1.0
@@ -60,7 +58,6 @@ class NeuralUCB(RLAlgorithm):
         action_space: spaces.Space,
         index: int = 0,
         net_config: Optional[Dict[str, Any]] = None,
-        head_config: Optional[Dict[str, Any]] = None,
         gamma: float = 1.0,
         lamb: float = 1.0,
         reg: float = 0.000625,
@@ -121,14 +118,19 @@ class NeuralUCB(RLAlgorithm):
             # Need to make deepcopies for target and detached networks
             self.actor = make_safe_deepcopies(actor_network)
         else:
-            net_config = get_default_config(observation_space) if net_config is None else net_config
-            net_config['layer_norm'] = False # Layer norm is not used in the original implementation
+            net_config = {} if net_config is None else net_config
+            encoder_config = (
+                get_default_encoder_config(observation_space) 
+                if net_config.get('encoder_config') is None else net_config['encoder_config']
+            )
+            encoder_config['layer_norm'] = False # Layer norm is not used in the original implementation
+
+            net_config['encoder_config'] = encoder_config
 
             self.actor = ValueFunction(
                 observation_space=observation_space,
-                encoder_config=net_config,
-                head_config=head_config,
-                device=self.device
+                device=self.device,
+                **net_config
             )
 
         self.optimizer = OptimizerWrapper(

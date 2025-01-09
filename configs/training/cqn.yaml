@@ -42,5 +42,11 @@ MUTATION_PARAMS:
     MAX_BATCH_SIZE: 1024
 
 NET_CONFIG:
-    arch: mlp
-    hidden_size: [64, 64]
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+    
+    head_config:
+        hidden_size: [64]
+

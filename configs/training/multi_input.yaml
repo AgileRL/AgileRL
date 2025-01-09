@@ -47,7 +47,6 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    arch: composed
     channel_size: [16, 16]
     kernel_size: [3, 3]
     stride_size: [1, 1]

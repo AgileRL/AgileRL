@@ -37,7 +37,6 @@ def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], Mu
     :rtype: Callable[[Callable], MutationMethod]
     """
     def decorator(func: Callable[[Any], Optional[Dict[str, Any]]]) -> MutationMethod:
-        f"""{func.__doc__}"""
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             return func(self, *args, **kwargs)
@@ -108,7 +107,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         raise NotImplementedError(
             "change_activation method must be implemented in order to set the activation function."
             )
-
 
     def __getattr__(self, name: str) -> Any:
         """Get attribute of the network. If the attribute is a mutation method, return the
@@ -233,11 +231,24 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         for layer in layers:
             init_weights(layer)
     
-    def make_unevolvable(self) -> None:
+    def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
         """Make the network unevolvable."""
-        self._layer_mutation_methods = []
-        self._node_mutation_methods = []
-        self._mutation_methods = []
+        if mut_type is None:
+            self._layer_mutation_methods = []
+            self._node_mutation_methods = []
+            self._mutation_methods = []
+        elif mut_type == MutationType.LAYER:
+            self._mutation_methods = [
+                method for method in self._mutation_methods if method not in self._layer_mutation_methods
+                ]
+            self._layer_mutation_methods = []
+        elif mut_type == MutationType.NODE:
+            self._mutation_methods = [
+                method for method in self._mutation_methods if method not in self._node_mutation_methods
+                ]
+            self._node_mutation_methods = []
+        else:
+            raise ValueError(f"Invalid mutation type: {mut_type}")
 
     def modules(self) -> Dict[str, "EvolvableModule"]:
         """Returns the attributes related to the evolvable modules in the algorithm. Includes 
@@ -268,7 +279,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                     node_methods.append(method.__name__)
         
         # Check mutation methods in superclasses
-        def check_base_methods(cls):
+        def check_base_methods(cls) -> None:
             for base in cls.__bases__:
                 if base is EvolvableModule:
                     return
@@ -352,6 +363,9 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         """
         num_layer_fns = len(self.layer_mutation_methods)
         num_node_fns = len(self.node_mutation_methods)
+
+        if num_layer_fns == 0 or num_node_fns == 0:
+            return [1 / len(self.mutation_methods) for _ in self.mutation_methods]
 
         probs = []
         for fn in self.get_mutation_methods().values():

@@ -132,6 +132,7 @@ class ValueFunction(EvolvableNetwork):
         self.head_net = preserve_params_fn(self.head_net, value_net)
 
 
+# TODO: Implement distributional value function
 class StochasticValueFunction(EvolvableNetwork):
     ...
 
