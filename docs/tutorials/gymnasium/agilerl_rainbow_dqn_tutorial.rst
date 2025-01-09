@@ -227,6 +227,18 @@ for both the tournament and mutation arguments.
         checkpoint_path="RainbowDQN.pt",
     )
 
+.. note::
+
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+
+   .. code-block:: python
+
+      def train_agent():
+          # ... training code
+
+      if __name__ == "__main__":
+          train_agent()
+
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we wanted to have more control over the training process, it is also possible to write our own custom
