@@ -169,11 +169,11 @@ def test_initialize_td3_with_cnn_accelerator():
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
     max_action = 1
     index = 0
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -465,11 +465,11 @@ def test_learns_from_experiences(min_action, max_action):
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
     action_space = generate_random_box_space(shape=(2,), low=min_action, high=max_action)
     batch_size = 64
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Create an instance of the td3 class
     td3 = TD3(
@@ -583,7 +583,7 @@ def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
     max_action = 1
-    net_config = {"hidden_size": [64, 64]}
+    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -690,11 +690,11 @@ def test_algorithm_test_loop_images():
 
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = TD3(
         observation_space=observation_space,
@@ -712,11 +712,11 @@ def test_algorithm_test_loop_images_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = TD3(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
@@ -1018,11 +1018,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Initialize the td3 agent
     td3 = TD3(
@@ -1275,10 +1275,10 @@ def test_initialize_td3_with_incorrect_actor_net():
     ],
 )
 def test_action_scaling_td3(action_array_vals, min_max, activation_func):
-    net_config = {
+    net_config = {"head_config": {
         "hidden_size": [64, 64],
         "output_activation": activation_func,
-    }
+    }}
     min_action, max_action = min_max
     if activation_func == "Tanh":
         min_activation_val, max_activation_val = -1, 1
@@ -1290,7 +1290,7 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(shape=(4,), low=min_action, high=max_action),
-        head_config=net_config,
+        net_config=net_config,
     )
     scaled_action = td3.scale_to_action_space(action)
     min_action = np.array(min_action) if isinstance(min_action, list) else min_action
@@ -1417,11 +1417,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        net_config={
+        net_config={"encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1],
-        },
+        }},
     )
 
     # Save the checkpoint to a file

@@ -123,7 +123,7 @@ class CQN(RLAlgorithm):
             create_actor = lambda: QNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
-                device=self.device
+                device=self.device,
                 **net_config
             )
             self.actor = create_actor()

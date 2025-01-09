@@ -405,11 +405,11 @@ def test_policy_q_learning_with_probe_env_cnn():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {
+        "net_config": {'encoder_config': {
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
-        },
+        }},
         "policy_freq": 2,
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
@@ -431,13 +431,13 @@ def test_policy_q_learning_with_probe_env_dict():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {
+        "net_config": {'encoder_config': {
             "hidden_size": [64],  # Network hidden size
             "latent_dim": 16,  # Latent dimension
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
-        },
+        }},
         "policy_freq": 2,
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
@@ -471,11 +471,11 @@ def test_policy_on_policy_with_probe_env_cnn():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {
+        "net_config": {'encoder_config': {
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
-        },
+        }},
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
@@ -487,13 +487,13 @@ def test_policy_on_policy_with_probe_env_dict():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {
+        "net_config": {'encoder_config': {
             "hidden_size": [64],  # Network hidden size
             "latent_dim": 16,  # Latent dimension
             "channel_size": [32],  # CNN channel size
             "kernel_size": [3],  # CNN kernel size
             "stride_size": [1],  # CNN stride size
-        },
+        }},
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)

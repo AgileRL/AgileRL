@@ -146,7 +146,7 @@ class SimpleCNN(nn.Module):
 def test_initializes_with_default_values():
     observation_space = generate_random_box_space(shape=(4,), low=0, high=1)
     action_space = generate_random_box_space(shape=(2,), low=-1, high=1)
-    net_config = {"hidden_size": [64, 64]}
+    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
 
     ppo = PPO(observation_space, action_space, net_config=net_config)
 
@@ -182,11 +182,11 @@ def test_initializes_with_default_values():
 def test_initialize_ppo_with_cnn_accelerator():
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
     action_space = generate_discrete_space(2)
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     batch_size = 64
     lr = 1e-4
     gamma = 0.99
@@ -424,11 +424,11 @@ def test_prepare_state_cnn_accelerator():
     accelerator = Accelerator()
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
     state = torch.rand(*observation_space.shape)
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     ppo = PPO(
         observation_space=observation_space,
         action_space=generate_discrete_space(2),
@@ -525,11 +525,11 @@ def test_learns_from_experiences():
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=1)
     action_space = generate_discrete_space(2)
     batch_size = 45
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     ppo = PPO(
         observation_space=observation_space,
@@ -581,10 +581,10 @@ def test_learns_from_experiences_continuous_accel():
     ppo = PPO(
         observation_space=observation_space,
         action_space=action_space,
-        net_config={
+        net_config={"encoder_config": {
             "hidden_size": [64, 64],
             "output_activation": "Tanh",
-        },
+        }},
         target_kl=target_kl,
         batch_size=batch_size,
         accelerator=accelerator,
@@ -658,11 +658,11 @@ def test_algorithm_test_loop_images():
 
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = PPO(
         observation_space=observation_space,
@@ -680,11 +680,11 @@ def test_algorithm_test_loop_images_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = PPO(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
@@ -910,11 +910,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Initialize the ppo agent
     ppo = PPO(
@@ -1122,11 +1122,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     ppo = PPO(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=1),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        net_config={
+        net_config={"encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
-        }
+        }}
     )
 
     # Save the checkpoint to a file

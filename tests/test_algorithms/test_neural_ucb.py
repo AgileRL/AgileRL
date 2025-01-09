@@ -115,11 +115,11 @@ def test_initialize_bandit_with_cnn_accelerator():
     observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
     index = 0
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     batch_size = 64
     lr = 1e-3
     learn_step = 5
@@ -387,11 +387,11 @@ def test_learning_cnn():
     observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
     batch_size = 64
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Create an instance of the NeuralUCB class
     bandit = NeuralUCB(
@@ -439,11 +439,11 @@ def test_algorithm_test_loop_images():
 
     env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = NeuralUCB(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
@@ -460,13 +460,13 @@ def test_algorithm_test_loop_images():
     [
         (
             spaces.Box(0, 1, shape=(3, 32, 32)),
-            {
+            {"encoder_config": {
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1]
-            },
+            }},
         ),
-        (spaces.Box(0, 1, shape=(4,)), {"hidden_size": [128]}),
+        (spaces.Box(0, 1, shape=(4,)), {"encoder_config": {"hidden_size": [128]}}),
     ],
 )
 def test_clone_returns_identical_agent(observation_space, net_config):
@@ -667,11 +667,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Initialize the NeuralUCB agent
     bandit = NeuralUCB(observation_space=spaces.Box(0, 1, shape=(3, 32, 32)), action_space=spaces.Discrete(2), net_config=net_config_cnn)
@@ -855,11 +855,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     bandit = NeuralUCB(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        net_config={
+        net_config={"encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
-        },
+        }},
     )
 
     # Save the checkpoint to a file

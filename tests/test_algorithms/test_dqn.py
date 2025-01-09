@@ -118,11 +118,11 @@ def test_initialize_dqn_with_cnn_accelerator():
     observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
     action_space=generate_discrete_space(2)
     index = 0
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
-    }
+    }}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -421,11 +421,11 @@ def test_handles_double_q_learning_cnn():
     action_space=generate_discrete_space(2)
     double = True
     batch_size = 64
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
-    }
+    }}
 
     # Create an instance of the DQN class
     dqn = DQN(
@@ -464,7 +464,7 @@ def test_handles_double_q_learning_cnn():
 def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,))
     action_space=generate_discrete_space(2)
-    net_config = {"hidden_size": [64, 64]}
+    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -542,11 +542,11 @@ def test_algorithm_test_loop_images():
 
     env = DummyEnv(observation_space=observation_space, vect=True)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
-    }
+    }}
 
     agent = DQN(
         observation_space=observation_space,
@@ -564,11 +564,11 @@ def test_algorithm_test_loop_images_unvectorized():
 
     env = DummyEnv(observation_space=observation_space, vect=False)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
-    }
+    }}
 
     agent = DQN(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
@@ -758,11 +758,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1]
-    }
+    }}
 
     # Initialize the DQN agent
     dqn = DQN(
@@ -948,11 +948,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     dqn = DQN(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_discrete_space(2),
-        net_config={
+        net_config={"encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
-        },
+        }},
     )
 
     # Save the checkpoint to a file

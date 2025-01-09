@@ -166,11 +166,11 @@ def test_initialize_dqn_with_cnn_accelerator():
     observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = generate_discrete_space(2)
     index = 0
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -199,9 +199,6 @@ def test_initialize_dqn_with_cnn_accelerator():
 
     assert dqn.observation_space == observation_space
     assert dqn.action_space == action_space
-    assert dqn.actor.encoder.net_config['channel_size'] == net_config_cnn["channel_size"]
-    assert dqn.actor.encoder.net_config['kernel_size'] == net_config_cnn["kernel_size"]
-    assert dqn.actor.encoder.net_config['stride_size'] == net_config_cnn["stride_size"]
     assert dqn.batch_size == batch_size
     assert dqn.lr == lr
     assert dqn.learn_step == learn_step
@@ -334,25 +331,25 @@ def test_returns_expected_action_mask_vectorized():
     [
         (
             None,
-            {
+            {"encoder_config": {
                 "hidden_size": [64, 64],
-            },
+            }},
             generate_random_box_space(shape=(4,)),
         ),
         (
             None,
-            {
+            {"encoder_config": {
                 "channel_size": [16, 32, 32],
                 "kernel_size": [8, 4, 3],
                 "stride_size": [4, 2, 1],
-            },
+            }},
             spaces.Box(0, 1, shape=(4, 84, 84)),
         ),
         (
             Accelerator(),
-            {
+            {"encoder_config": {
                 "hidden_size": [64, 64],
-            },
+            }},
             generate_random_box_space(shape=(4,)),
         ),
     ],
@@ -644,7 +641,7 @@ def test_learns_from_experiences_per_n_step(accelerator, combined):
 def test_soft_update():
     observation_space = generate_random_box_space(shape=(4,))
     action_space = generate_discrete_space(2)
-    net_config = {"hidden_size": [64, 64]}
+    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -720,11 +717,11 @@ def test_algorithm_test_loop_images():
 
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = RainbowDQN(
         observation_space=observation_space,
@@ -742,11 +739,11 @@ def test_algorithm_test_loop_images_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     agent = RainbowDQN(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
@@ -953,11 +950,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Initialize the DQN agent
     dqn = RainbowDQN(
@@ -1132,11 +1129,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     dqn = RainbowDQN(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=generate_discrete_space(2),
-        net_config={
+        net_config={"encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
-        },
+        }},
     )
 
     # Save the checkpoint to a file

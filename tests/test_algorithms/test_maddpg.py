@@ -256,44 +256,44 @@ def experiences(batch_size, observation_spaces, action_spaces, agent_ids, device
 @pytest.mark.parametrize(
     "net_config, accelerator_flag, observation_spaces, compile_mode",
     [
-        ({"hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), None),
+        ({"encoder_config": {"hidden_size": [64, 64]}}, False, generate_multi_agent_box_spaces(2, (4,)), None),
         (
-            {
+            {"encoder_config": {
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-            },
+            }},
             False,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             None,
         ),
         (
-            {
+            {"encoder_config": {
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-            },
+            }},
             True,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             None,
         ),
-        ({"hidden_size": [64, 64]}, False, generate_multi_agent_box_spaces(2, (4,)), "default"),
+        ({"encoder_config": {"hidden_size": [64, 64]}}, False, generate_multi_agent_box_spaces(2, (4,)), "default"),
         (
-            {
+            {"encoder_config": {
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-            },
+            }},
             False,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             "default",
         ),
         (
-            {
+            {"encoder_config": {
                 "channel_size": [3],
                 "kernel_size": [3],
                 "stride_size": [1],
-            },
+            }},
             True,
             generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
             "default",
@@ -456,7 +456,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
     device,
     compile_mode,
 ):
-    net_config = {
+    net_config = {"encoder_config": {
         "hidden_size": [64, 64],
         "min_hidden_layers": 1,
         "max_hidden_layers": 3,
@@ -464,7 +464,7 @@ def test_initialize_maddpg_with_mlp_networks_gumbel_softmax(
         "max_mlp_nodes": 500,
         "output_activation": "GumbelSoftmax",
         "activation": "ReLU",
-    }
+    }}
     maddpg = MADDPG(
         observation_spaces=observation_spaces,
         action_spaces=action_spaces,
@@ -600,14 +600,16 @@ def test_initialize_maddpg_with_evo_networks(
     critic_head_config = copy.deepcopy(head_config)
     critic_head_config.update({"output_activation": None})
 
+    net_config = {'encoder_config': net_config, 'head_config': head_config}
+    critic_net_config = {'encoder_config': critic_net_config, 'head_config': critic_head_config}
+
     evo_actors = [
         DeterministicActor(
                 observation_spaces[x],
                 action_spaces[x],
-                encoder_config=net_config,
-                head_config=head_config,
                 n_agents=2,
                 device=device,
+                **net_config
             )
         for x in range(2)
     ]
@@ -615,10 +617,9 @@ def test_initialize_maddpg_with_evo_networks(
         ContinuousQNetwork(
                 observation_space=concatenate_spaces(observation_spaces),
                 action_space=concatenate_spaces(action_spaces),
-                encoder_config=critic_net_config,
-                head_config=critic_head_config,
                 n_agents=2,
-                device=device
+                device=device,
+                **critic_net_config
             )
         for x in range(2)
     ]
@@ -816,7 +817,7 @@ def test_maddpg_get_action_mlp(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        net_config={"hidden_size": [64, 64]},
+        net_config={"encoder_config": {"hidden_size": [64, 64]}},
         agent_ids=agent_ids,
         device=device,
         torch_compiler=compile_mode,
@@ -866,7 +867,7 @@ def test_maddpg_get_action_action_masking_exception(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        net_config={"hidden_size": [64, 64]},
+        net_config={"encoder_config": {"hidden_size": [64, 64]}},
         agent_ids=agent_ids,
         device=device,
     )
@@ -897,7 +898,7 @@ def test_maddpg_get_action_action_masking(
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
-        net_config={"hidden_size": [64, 64]},
+        net_config={"encoder_config": {"hidden_size": [64, 64]}},
         agent_ids=agent_ids,
         device=device,
     )
@@ -922,11 +923,11 @@ def test_maddpg_get_action_cnn(
     training, observation_spaces, action_spaces, device, compile_mode
 ):
     agent_ids = ["agent_0", "agent_1"]
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
@@ -1045,11 +1046,11 @@ def test_maddpg_get_action_distributed_cnn(
 ):
     accelerator = Accelerator()
     agent_ids = ["agent_0", "agent_1"]
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     state = {
         agent: np.random.randn(*observation_spaces[idx].shape) for idx, agent in enumerate(agent_ids)
     }
@@ -1065,10 +1066,9 @@ def test_maddpg_get_action_distributed_cnn(
         DummyDeterministicActor(
             observation_space=actor.observation_space,
             action_space=actor.action_space,
-            encoder_config=net_config,
-            head_config=actor.head_net.net_config,
             device=actor.device,
             n_agents=actor.n_agents,
+            **net_config
         )
         for actor in maddpg.actors
     ]
@@ -1378,11 +1378,11 @@ def test_maddpg_learns_from_experiences_cnn(
     compile_mode,
 ):
     agent_ids = ["agent_0", "agent_1"]
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
@@ -1472,11 +1472,11 @@ def test_maddpg_learns_from_experiences_cnn_distributed(
 ):
     accelerator = Accelerator(device_placement=False)
     agent_ids = ["agent_0", "agent_1"]
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     maddpg = MADDPG(
         observation_spaces,
         action_spaces,
@@ -1603,11 +1603,11 @@ def test_maddpg_algorithm_test_loop(device, sum_score, compile_mode):
 def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compile_mode):
     env_observation_spaces = generate_multi_agent_box_spaces(2, (32, 32, 3), low=0, high=255)
     agent_observation_spaces = generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
     env = DummyMultiEnv(env_observation_spaces[0], action_spaces)
@@ -1635,11 +1635,11 @@ def test_maddpg_algorithm_test_loop_cnn_non_vectorized(device, sum_score, compil
 def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mode):
     env_observation_spaces = generate_multi_agent_box_spaces(2, (32, 32, 3), low=0, high=255)
     agent_observation_spaces = generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255)
-    net_config = {
+    net_config = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
     action_spaces = generate_multi_agent_discrete_spaces(2, 2)
     accelerator = None
     env = make_multi_agent_vect_envs(
@@ -1683,7 +1683,7 @@ def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mo
     agent_ids = ["agent_0", "agent_1"]
     expl_noise = 0.1
     index = 0
-    net_config = {"hidden_size": [64, 64]}
+    net_config = {"encoder_config": {"hidden_size": [64, 64]}}
     batch_size = 64
     lr_actor = 0.001
     lr_critic = 0.01
@@ -1866,7 +1866,7 @@ def test_clone_after_learning(compile_mode):
 def test_save_load_checkpoint_correct_data_and_format(
     tmpdir, device, accelerator, compile_mode
 ):
-    net_config = {"hidden_size": [32, 32]}
+    net_config = {"encoder_config": {"hidden_size": [32, 32]}}
     # Initialize the maddpg agent
     maddpg = MADDPG(
         observation_spaces=generate_multi_agent_box_spaces(1, (6,)),
@@ -1982,11 +1982,11 @@ def test_save_load_checkpoint_correct_data_and_format(
 def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     tmpdir, device, accelerator, compile_mode
 ):
-    net_config_cnn = {
+    net_config_cnn = {"encoder_config": {
         "channel_size": [16],
         "kernel_size": [3],
         "stride_size": [1],
-    }
+    }}
 
     # Initialize the maddpg agent
     maddpg = MADDPG(
@@ -2399,11 +2399,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
         observation_spaces=generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
         action_spaces=generate_multi_agent_box_spaces(2, (1,)),
         agent_ids=["agent_a", "agent_b"],
-        net_config={
+        net_config={"encoder_config": {
             "channel_size": [3],
             "kernel_size": [3],
             "stride_size": [1]
-        },
+        }},
         torch_compiler=compile_mode,
         accelerator=accelerator,
         device=device,
