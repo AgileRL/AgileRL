@@ -20,6 +20,7 @@ class MutationType(Enum):
 @runtime_checkable
 class MutationMethod(Protocol):
     _mutation_type: MutationType
+    _recreate_kwargs: Dict[str, Any]
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         ...
 

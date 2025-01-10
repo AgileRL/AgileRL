@@ -927,7 +927,7 @@ def test_recreate_nets_parameters_preserved(simple_mlp, device):
     # Modify the architecture
     evolvable_network.hidden_size += [evolvable_network.hidden_size[-1]]
 
-    evolvable_network.recreate_nets()
+    evolvable_network.recreate_network()
     new_feature_net = evolvable_network.feature_net
 
     for key, param in new_feature_net.named_parameters():
@@ -954,7 +954,7 @@ def test_recreate_nets_parameters_preserved_rainbow(simple_mlp, device):
     # Modify the architecture
     evolvable_network.hidden_size += [evolvable_network.hidden_size[-1]]
 
-    evolvable_network.recreate_nets()
+    evolvable_network.recreate_network()
     new_feature_net = evolvable_network.feature_net
     new_value_net = evolvable_network.value_net
     new_advantage_net = evolvable_network.advantage_net
@@ -985,7 +985,7 @@ def test_recreate_nets_parameters_shrink_preserved(device):
 
     # Modify the architecture
     evolvable_network.hidden_size = evolvable_network.hidden_size[:-1]
-    evolvable_network.recreate_nets(shrink_params=True)
+    evolvable_network.recreate_network(shrink_params=True)
     new_feature_net = evolvable_network.feature_net
 
     for key, param in new_feature_net.named_parameters():

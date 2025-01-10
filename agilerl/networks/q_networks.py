@@ -48,7 +48,7 @@ class QNetwork(EvolvableNetwork):
             latent_dim: int = 32,
             device: str = "cpu"
             ):
-        
+
         super().__init__(
             observation_space, 
             encoder_config=encoder_config,
@@ -72,7 +72,9 @@ class QNetwork(EvolvableNetwork):
                 )
 
         self.num_actions = spaces.flatdim(action_space)
-        self.head_net = self.build_network_head(head_config)
+
+        # Build value network
+        self.build_network_head(head_config)
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -93,21 +95,17 @@ class QNetwork(EvolvableNetwork):
             "device": self.device
             }
 
-    def build_network_head(self, net_config: Dict[str, Any]) -> EvolvableMLP:
+    def build_network_head(self, net_config: Dict[str, Any]) -> None:
         """Builds the head of the network based on the passed configuration.
         
         :param net_config: Configuration of the network head.
         :type net_config: Dict[str, Any]
-        
-        :return: Network head.
-        :rtype: EvolvableModule
         """
-        return EvolvableMLP(
+        self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
             num_outputs=self.num_actions,
-            device=self.device,
             name="value",
-            **net_config
+            net_config=net_config
             )
 
     def forward(self, obs: TorchObsType) -> torch.Tensor:
@@ -122,23 +120,23 @@ class QNetwork(EvolvableNetwork):
         latent = self.encoder(obs)
         return self.head_net(latent)
     
-    def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreates the network with the same parameters as the current network.
+    def recreate_network(self) -> None:
+        """Recreates the network"""
+        is_underlying = self.maybe_recreate_underlying()
 
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
-        super().recreate_network(shrink_params) # recreates encoder
+        # Latent dim mutation case -> need to recreate both encoder and head
+        if not is_underlying:
+            encoder = self._build_encoder(self.encoder.net_config)
+            head_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions,
+                name="value",
+                net_config=self.head_net.net_config
+            )
 
-        head_net = self.build_network_head(self.head_net.net_config)
-
-        # Preserve parameters of the network
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-        self.head_net = preserve_params_fn(self.head_net, head_net)
-
+            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
+    
 
 class RainbowQNetwork(EvolvableNetwork):
     """RainbowQNetwork is an extension of the QNetwork that incorporates the Rainbow DQN improvements 
@@ -183,7 +181,7 @@ class RainbowQNetwork(EvolvableNetwork):
             latent_dim: int = 32,
             device: str = "cpu"
             ):
-        
+
         super().__init__(
             observation_space, 
             encoder_config=encoder_config,
@@ -213,15 +211,8 @@ class RainbowQNetwork(EvolvableNetwork):
         self.num_atoms = num_atoms
         self.support = support
 
-        self.head_net = self.build_network_head(
-            "value", num_outputs=self.num_atoms, net_config=head_config
-            )
-        self.advantage_net = self.build_network_head(
-            "advantage", num_outputs=self.num_actions * self.num_atoms, net_config=head_config
-            )
-
-        # We want the same mutations for both the value and advantage networks
-        self.advantage_net.disable_mutations()
+        # Build value and advantage networks
+        self.build_network_head(head_config)
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -244,23 +235,28 @@ class RainbowQNetwork(EvolvableNetwork):
             "device": self.device
             }
     
-    def build_network_head(self, name: str, num_outputs: int, net_config: Dict[str, Any]) -> EvolvableMLP:
-        """Builds the head of the network based on the passed configuration.
+    def build_network_head(self, net_config: Dict[str, Any]) -> None:
+        """Builds the value and advantage heads of the network based on the passed configuration.
         
         :param net_config: Configuration of the network head.
         :type net_config: Dict[str, Any]
-
-        :return: Network head.
-        :rtype: Tuple[EvolvableModule, EvolvableModule]
         """
-        return EvolvableMLP(
+        self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=num_outputs,
-            device=self.device,
-            name=name,
-            **net_config
+            num_outputs=self.num_atoms,
+            name='value',
+            net_config=net_config
             )
         
+        self.advantage_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=self.num_actions * self.num_atoms,
+            name='advantage',
+            net_config=net_config
+            )
+        
+        # We want the same mutations for both the value and advantage networks
+        self.advantage_net.disable_mutations()
     
     def forward(self, obs: TorchObsType, q: bool = True, log: bool = False) -> torch.Tensor:
         """Forward pass of the Rainbow Q network.
@@ -295,33 +291,40 @@ class RainbowQNetwork(EvolvableNetwork):
 
         return x
 
-    def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreates the network with the same parameters as the current network.
+    def recreate_network(self) -> None:
+        """Recreates the network"""
+        is_underlying = self.maybe_recreate_underlying()
 
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
-        super().recreate_network(shrink_params)
-
-        # Build the network heads
-        value_net = self.build_network_head(
-            "value",
-            num_outputs=self.num_atoms,
-            net_config=self.head_net.net_config
-            )
-        advantage_net = self.build_network_head(
-            "advantage",
-            num_outputs=self.num_actions * self.num_atoms,
-            net_config=self.head_net.net_config
+        # Latent dim mutation case -> need to recreate both encoder and head
+        if not is_underlying:
+            encoder = self._build_encoder(self.encoder.net_config)
+            head_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions,
+                name="value",
+                net_config=self.head_net.net_config
             )
 
-        # Preserve parameters of the network
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-        self.head_net = preserve_params_fn(self.head_net, value_net)
-        self.advantage_net = preserve_params_fn(self.advantage_net, advantage_net)
+            advantage_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions * self.num_atoms,
+                name="advantage",
+                net_config=self.head_net.net_config
+            )
+
+            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
+            self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
+
+        # If mutation was on value network, we want to apply the same mutation to the advantage network
+        elif self.last_mutation_attr.split(".")[0] == "head_net":
+            advantage_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions * self.num_atoms,
+                name="advantage",
+                net_config=self.head_net.net_config
+            )
+            self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
 
 
 class ContinuousQNetwork(EvolvableNetwork):
@@ -383,7 +386,9 @@ class ContinuousQNetwork(EvolvableNetwork):
                 )
             
         self.num_actions = spaces.flatdim(action_space)
-        self.head_net = self.build_network_head(head_config)
+
+        # Build value network
+        self.build_network_head(head_config)
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -405,18 +410,17 @@ class ContinuousQNetwork(EvolvableNetwork):
             }
     
     
-    def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
+    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
 
         :param head_config: Configuration of the head.
         :type head_config: Optional[ConfigType]
         """
-        return EvolvableMLP(
+        self.head_net = self.create_mlp(
             num_inputs=self.latent_dim + self.num_actions,
             num_outputs=1,
-            device=self.device,
             name="value",
-            **head_config
+            net_config=net_config
         )
 
     def forward(self, obs: TorchObsType, actions: torch.Tensor) -> torch.Tensor:
@@ -433,18 +437,21 @@ class ContinuousQNetwork(EvolvableNetwork):
         x = torch.cat([x, actions], dim=-1)
         return self.head_net(x)
 
-    def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreates the network with the same parameters as the current network.
+    def recreate_network(self) -> None:
+        """Recreates the network"""
+        is_underlying = self.maybe_recreate_underlying()
 
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
-        super().recreate_network(shrink_params)
-        value_net = self.build_network_head(self.head_net.net_config)
+        # Latent dim mutation case -> need to recreate both encoder and head
+        print("Is underlying: ", is_underlying)
+        if not is_underlying:
+            encoder = self._build_encoder(self.encoder.net_config)
+            head_net = self.create_mlp(
+                num_inputs=self.latent_dim + self.num_actions,
+                num_outputs=1,
+                name="value",
+                net_config=self.head_net.net_config
+            )
 
-        # Preserve parameters of the network
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-        self.head_net = preserve_params_fn(self.head_net, value_net)
+            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
+    

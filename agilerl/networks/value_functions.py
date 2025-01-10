@@ -63,7 +63,8 @@ class ValueFunction(EvolvableNetwork):
                     )
                 )
             
-        self.head_net = self.build_network_head(head_config)
+        # Build the network head
+        self.build_network_head(head_config)
     
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -91,18 +92,17 @@ class ValueFunction(EvolvableNetwork):
         """
         return self.head_net.get_output_dense()
     
-    def build_network_head(self, head_config: Optional[ConfigType] = None) -> EvolvableMLP:
+    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
 
-        :param head_config: Configuration of the head.
-        :type head_config: Optional[ConfigType]
+        :param net_config: Configuration of the head.
+        :type net_config: Optional[ConfigType]
         """
-        return EvolvableMLP(
+        self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
             num_outputs=1,
-            device=self.device,
             name="value",
-            **head_config
+            net_config=net_config
         )
     
     def forward(self, x: TorchObsType) -> torch.Tensor:
@@ -115,21 +115,24 @@ class ValueFunction(EvolvableNetwork):
         """
         return self.head_net(self.encoder(x))
 
-    def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreates the network with the same parameters as the current network.
+    def recreate_network(self) -> None:
+        """Recreates the network"""
+        is_underlying = self.maybe_recreate_underlying()
 
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
-        super().recreate_network(shrink_params)
-        value_net = self.build_network_head(self.head_net.net_config)
+        # Latent dim mutation case -> need to recreate both encoder and head
+        if not is_underlying:
+            encoder = self._build_encoder(self.encoder.net_config)
+            head_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=1,
+                name="value",
+                net_config=self.head_net.net_config
+            )
 
-        # Preserve parameters of the network
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-        self.head_net = preserve_params_fn(self.head_net, value_net)
+            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
+    
+
 
 
 # TODO: Implement distributional value function

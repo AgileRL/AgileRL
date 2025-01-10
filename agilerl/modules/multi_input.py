@@ -1,4 +1,5 @@
 from typing import List, Optional, Dict, Any, Union, Literal, Tuple
+from collections import defaultdict
 import copy
 import numpy as np
 import torch
@@ -10,6 +11,7 @@ from agilerl.utils.evolvable_networks import is_image_space, get_activation
 from agilerl.modules.base import EvolvableModule, ModuleDict, register_mutation_fn, MutationType
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
+import re
 
 ModuleType = Union[EvolvableModule, nn.Module]
 SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP]
@@ -106,7 +108,7 @@ class EvolvableMultiInput(EvolvableModule):
     :param device: Device to use for the network. Default is "cpu".
     :type device: str, optional
     """
-    feature_net: Dict[str, SupportedEvolvableTypes]
+    feature_net: ModuleDict
 
     def __init__(
             self,
@@ -526,7 +528,6 @@ class EvolvableMultiInput(EvolvableModule):
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
-            self.recreate_network()
 
         return {"numb_new_nodes": numb_new_nodes}
 
@@ -545,19 +546,28 @@ class EvolvableMultiInput(EvolvableModule):
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes
-            self.recreate_network(shrink_params=True)
 
         return {"numb_new_nodes": numb_new_nodes}
     
-    def recreate_network(self, shrink_params: bool = False) -> None:
+    def recreate_network(self) -> None:
         """Recreates the network with the new latent dimension.
         
         :param shrink_params: Flag to indicate if the network should be recreated 
             with smaller parameters, defaults to False.
         :type shrink_params: bool, optional
         """
-        feature_net = self.build_feature_extractor()
+        # Only want to recreate the underlying mutated EvolvableModule
+        if self.last_mutation_attr is not None and 'feature_net' in self.last_mutation_attr:
+            mutated_key = re.search(r'\.?feature_net\.(\w+)\.', self.last_mutation_attr).group(1)
+            recreate_dict = self.last_mutation._recreate_kwargs
+            self.feature_net.recreate_network(mutated_key, recreate_dict)
+            return
 
+        feature_net = self.build_feature_extractor()
+        self.feature_net = EvolvableModule.preserve_parameters(
+            old_net=self.feature_net, new_net=feature_net
+            )
+        
         # Collect all vector space shapes for concatenation
         vector_input_dim = sum(
             [spaces.flatdim(self.observation_space.spaces[key]) for key in self.vector_spaces]
@@ -572,12 +582,8 @@ class EvolvableMultiInput(EvolvableModule):
         features_dim = image_features_dim + vector_features_dim
 
         final_dense = nn.Linear(features_dim, self.num_outputs, device=self.device)
+        self.final_dense = EvolvableModule.preserve_parameters(
+            old_net=self.final_dense, new_net=final_dense
+            )
 
-        # Copy parameters from old model to new model
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
 
-        self.feature_net = preserve_params_fn(old_net=self.feature_net, new_net=feature_net)
-        self.final_dense = preserve_params_fn(old_net=self.final_dense, new_net=final_dense)

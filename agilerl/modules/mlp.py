@@ -219,7 +219,6 @@ class EvolvableMLP(EvolvableModule):
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
-            self.recreate_network()
         else:
             self.add_node()
 
@@ -228,7 +227,6 @@ class EvolvableMLP(EvolvableModule):
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
-            self.recreate_network(shrink_params=True)
         else:
             self.add_node()
 
@@ -257,7 +255,6 @@ class EvolvableMLP(EvolvableModule):
             self.hidden_size[hidden_layer] + numb_new_nodes <= self.max_mlp_nodes
         ):  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
-            self.recreate_network()
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
@@ -285,11 +282,10 @@ class EvolvableMLP(EvolvableModule):
         # HARD LIMIT
         if self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes:
             self.hidden_size[hidden_layer] -= numb_new_nodes
-            self.recreate_network(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    def recreate_network(self, shrink_params: bool = False) -> None:
+    def recreate_network(self) -> None:
         """Recreates neural networks, shrinking parameters if necessary.
         
         :param shrink_params: Shrink parameters of neural networks, defaults to False
@@ -311,7 +307,4 @@ class EvolvableMLP(EvolvableModule):
             name=self.name
         )
 
-        preserve_params_fn = (
-            self.shrink_preserve_parameters if shrink_params else self.preserve_parameters
-        )
-        self.model = preserve_params_fn(old_net=self.model, new_net=model)
+        self.model = EvolvableModule.preserve_parameters(old_net=self.model, new_net=model)

@@ -603,7 +603,6 @@ class EvolvableGPT(EvolvableModule):
         """Adds a block layer to transformer."""
         if self.n_layer < self.max_layers:
             self.n_layer += 1
-            self.recreate_nets()
         # else:
         #     self.add_node()
 
@@ -612,7 +611,6 @@ class EvolvableGPT(EvolvableModule):
         """Removes a block layer from transformer."""
         if self.n_layer > self.min_layers:
             self.n_layer -= 1
-            self.recreate_shrunk_nets()
         # else:
         #     self.add_node()
 
@@ -626,7 +624,7 @@ class EvolvableGPT(EvolvableModule):
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
         self.dim_feedfwd += numb_new_nodes
-        self.recreate_nets()
+
         return {"numb_new_nodes": numb_new_nodes}
 
     @register_mutation_fn(MutationType.NODE)
@@ -638,23 +636,18 @@ class EvolvableGPT(EvolvableModule):
         """
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([32, 64, 128], 1)[0]
+
         self.dim_feedfwd -= numb_new_nodes
-        self.recreate_shrunk_nets()
+
         return {"numb_new_nodes": numb_new_nodes}
 
-    def recreate_nets(self):
+    def recreate_network(self) -> None:
         """Recreates neural network."""
         new_transformer = self.build_networks()
-        self.transformer = self.preserve_parameters(
-            old_net=self.transformer, new_net=new_transformer
-        )
 
-    def recreate_shrunk_nets(self):
-        """Recreates shrunk neural network."""
-        new_transformer = self.build_networks()
-        self.transformer = self.shrink_preserve_parameters(
+        self.transformer = EvolvableModule.preserve_parameters(
             old_net=self.transformer, new_net=new_transformer
-        )
+            )
 
 class LayerNorm(nn.Module):
     """

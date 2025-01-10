@@ -554,6 +554,7 @@ class Mutations:
 
             setattr(individual, opt_config.name, offspring_opt)
 
+    # TODO: Generalize this based on argument specification
     def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with RL hyperparameter mutation.
 
@@ -778,28 +779,9 @@ class Mutations:
         mut_method, ret_type = get_architecture_mut_method(
             policy_offspring, self.new_layer_prob, self.rng
             )
-        mut_dict = None
-        if ret_type != dict:
-            if isinstance(policy_offspring, list):
-                for net in policy_offspring:
-                    getattr(net, mut_method)()
-            else:
-                getattr(policy_offspring, mut_method)()
-        else:
-            if isinstance(policy_offspring, list):
-                mut_dict = []
-                for net in policy_offspring:
-                    mut_dict.append(getattr(net, mut_method)())
-            else:
-                mut_dict = getattr(policy_offspring, mut_method)()
 
-        # Move to device if not using accelerator and set 
-        # mutated network back to individual
-        if self.accelerator is None:
-            if isinstance(policy_offspring, list):
-                setattr(individual, policy_name, [net.to(self.device) for net in policy_offspring])
-            else:
-                setattr(individual, policy_name, policy_offspring.to(self.device))
+        mut_dict = self._apply_arch_mutation(policy_offspring, mut_method, ret_type)
+        self.to_device_and_set_individual(individual, policy_name, policy_offspring)
 
         if algo_cls in [NeuralTS, NeuralUCB]:
             old_exp_layer = get_exp_layer(policy_offspring)
@@ -807,30 +789,8 @@ class Mutations:
 
         # Apply the same mutation to the rest of the evaluation modules
         for name, offsprings in offspring_evals.items():
-            # Apply mutation method differently for CNN and other arch types
-            if ret_type != dict:
-                if isinstance(offsprings, list):
-                    for offspring in offsprings:
-                        getattr(offspring, mut_method)()
-                else:
-                    getattr(offsprings, mut_method)()
-            else:
-                # NOTE: Apply the same mutation as for policy
-                if isinstance(offsprings, list):
-                    for i, offspring in enumerate(offsprings):
-                        getattr(offspring, mut_method)(**mut_dict[i])
-                else:
-                    getattr(offsprings, mut_method)(**mut_dict)
-
-            # Move to device if not using accelerator and set 
-            # mutated network back to individual
-            if self.accelerator is None:
-                if isinstance(offsprings, list):
-                    setattr(individual, name, [offspring.to(self.device) for offspring in offsprings])
-                else:
-                    setattr(individual, name, offsprings.to(self.device))
-            else:
-                setattr(individual, name, offsprings)
+            self._apply_arch_mutation(offsprings, mut_method, ret_type, mut_dict)
+            self.to_device_and_set_individual(individual, name, offsprings)
 
             # Reinitialize bandit gradients after architecture mutation
             if algo_cls in [NeuralTS, NeuralUCB]:
@@ -840,6 +800,66 @@ class Mutations:
         self.reinit_opt(individual)  # Reinitialise optimizer
         individual.mut = "arch"
         return individual
+
+    def _apply_arch_mutation(
+        self, 
+        networks: OffspringType, 
+        mut_method: str, 
+        ret_type: Type, 
+        applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
+    ) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
+        """Applies the mutation method to networks and returns mutation data if needed.
+        
+        :param networks: The networks to apply the mutation to
+        :type networks: OffspringType
+        :param mut_method: The mutation method to apply
+        :type mut_method: str
+        :param ret_type: The return type of the mutation method
+        :type ret_type: Type
+        :param mut_dict: The mutation dictionary, defaults to None
+        :type mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
+        :return: The mutation dictionary if ret_type is dict, otherwise None
+        :rtype: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]
+        """
+        if applied_mut_dict is None:
+            applied_mut_dict = [{}] * len(networks) if isinstance(networks, list) else {}
+
+        mut_dict = None
+        if ret_type != dict:
+            if isinstance(networks, list):
+                for net in networks:
+                    getattr(net, mut_method)()
+            else:
+                getattr(networks, mut_method)()
+        else:
+            if isinstance(networks, list):
+                mut_dict = []
+                for i, net in enumerate(networks):
+                    mut_dict.append(getattr(net, mut_method)(**applied_mut_dict[i]))
+            else:
+                mut_dict = getattr(networks, mut_method)(**applied_mut_dict)
+        
+        return mut_dict
+
+    def to_device_and_set_individual(
+        self, 
+        individual: EvolvableAlgorithm, 
+        name: str, 
+        networks: OffspringType
+    ) -> None:
+        """Moves networks to the device and assigns them back to the individual.
+        
+        :param individual: The individual to assign the networks to
+        :type individual: EvolvableAlgorithm
+        :param name: The name of the attribute to assign the networks to
+        :type name: str
+        :param networks: The networks to move to the device
+        :type networks: OffspringType
+        """
+        if self.accelerator is None:
+            setattr(individual, name, self.to_device(networks))
+        else:
+            setattr(individual, name, networks)
 
     def _reinit_bandit_grads(
             self,

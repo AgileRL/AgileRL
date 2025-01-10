@@ -131,6 +131,8 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
     :param device: Device to use for the network. Defaults to "cpu".
     :type device: DeviceType
     """
+    encoder: SupportedEvolvable
+
     def __init__(
             self,
             observation_space: spaces.Space,
@@ -215,6 +217,13 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         :rtype: torch.Tensor
         """
         raise NotImplementedError
+    
+    @abstractmethod
+    def build_network_head(self, *args, **kwargs) -> None:
+        """Build the head of the network."""
+        raise NotImplementedError(
+            "Method build_network_head must be implemented in EvolvableNetwork objects."
+        )
 
     @staticmethod
     def modify_multi_agent_config(
@@ -233,6 +242,35 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             net_config['block_type'] = "Conv3d"
 
         return net_config
+    
+    def create_mlp(
+            self,
+            num_inputs: int,
+            num_outputs: int,
+            name: str,
+            net_config: Dict[str, Any]
+            ) -> EvolvableMLP:
+        """Builds the head of the network based on the passed configuration.
+        
+        :param num_inputs: Number of inputs to the network head.
+        :type num_inputs: int
+        :param num_outputs: Number of outputs of the network head.
+        :type num_outputs: int
+        :param name: Name of the network head.
+        :type name: str
+        :param net_config: Configuration of the network head.
+        :type net_config: Dict[str, Any]
+        
+        :return: Network head.
+        :rtype: EvolvableMLP
+        """
+        return EvolvableMLP(
+            num_inputs=num_inputs,
+            num_outputs=num_outputs,
+            device=self.device,
+            name=name,
+            **net_config
+            )
 
     def modules(self) -> Dict[str, SupportedEvolvable]:
         """Modules of the network.
@@ -286,7 +324,6 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
 
         if self.latent_dim + numb_new_nodes < self.max_latent_dim:
             self.latent_dim += numb_new_nodes
-            self.recreate_network()
 
         return {"numb_new_nodes": numb_new_nodes}
 
@@ -305,7 +342,6 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
 
         if self.latent_dim - numb_new_nodes > self.min_latent_dim:
             self.latent_dim -= numb_new_nodes
-            self.recreate_network(shrink_params=True)
 
         return {"numb_new_nodes": numb_new_nodes}
     
@@ -347,7 +383,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             )
 
         return encoder
-
+    
     def clone(self) -> SelfEvolvableNetwork:
         """Clone the network.
         
@@ -366,15 +402,21 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             
         return clone
     
-    def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreate the encoder network.
+    def maybe_recreate_underlying(self) -> bool:
+        """Checks if the previous mutation was on an underlying evolvable module and 
+        recreates it if necessary. Returns True if an underlying module was recreated, 
+        False otherwise.
         
-        :param shrink_params: If True, shrink the parameters of the network, defaults to False
-        :type shrink_params: bool, optional
+        :return: True if an underlying module was recreated, False otherwise.
+        :rtype: bool
         """
-        encoder = self._build_encoder(self.encoder_config)
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-        self.encoder = preserve_params_fn(self.encoder, encoder)
+        if self.last_mutation_attr is not None and "." in self.last_mutation_attr:
+            mutated_attr = self.last_mutation_attr.split(".")[0]
+            recreation_kwargs = self.last_mutation._recreate_kwargs
+            mutated_net: SupportedEvolvable = getattr(self, mutated_attr)
+            mutated_net.recreate_network(**recreation_kwargs)
+            setattr(self, mutated_attr, mutated_net)
+            return True
+        
+        return False
+        

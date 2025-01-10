@@ -187,7 +187,7 @@ class DeterministicActor(EvolvableNetwork):
         elif head_config.get("output_activation", None) is None:
             head_config["output_activation"] = output_activation
         
-        self.head_net = self.build_network_head(head_config)
+        self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
     @property
@@ -209,18 +209,17 @@ class DeterministicActor(EvolvableNetwork):
             "device": self.device
             }
     
-    def build_network_head(self, head_config: Optional[ConfigType] = None) -> SupportedEvolvable:
+    def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
 
-        :param head_config: Configuration of the head.
-        :type head_config: Optional[ConfigType]
+        :param net_config: Configuration of the head.
+        :type net_config: Optional[ConfigType]
         """
-        return EvolvableMLP(
+        self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
             num_outputs=spaces.flatdim(self.action_space),
-            device=self.device,
             name="actor",
-            **head_config
+            net_config=net_config
         )
     
     def forward(self, obs: TorchObsType) -> torch.Tensor:
@@ -234,21 +233,22 @@ class DeterministicActor(EvolvableNetwork):
         latent = self.encoder(obs)
         return self.head_net(latent)
 
-    def recreate_network(self, shrink_params: bool = False) -> None:
-        """Recreates the network with the same parameters as the current network.
+    def recreate_network(self) -> None:
+        """Recreates the network"""
+        is_underlying = self.maybe_recreate_underlying()
 
-        :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
-        :type shrink_params: bool
-        """
-        super().recreate_network(shrink_params)
-        actor_net = self.build_network_head(self.head_net.net_config)
+        # Latent dim mutation case -> need to recreate both encoder and head
+        if not is_underlying:
+            encoder = self._build_encoder(self.encoder.net_config)
+            head_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=spaces.flatdim(self.action_space),
+                name="actor",
+                net_config=self.head_net.net_config
+            )
 
-        # Preserve parameters of the network
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-        self.head_net = preserve_params_fn(self.head_net, actor_net)
+            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
 
 
 class StochasticActor(DeterministicActor):
@@ -272,6 +272,8 @@ class StochasticActor(DeterministicActor):
     :param device: Device to use for the network.
     :type device: str
     """
+
+    head_net: EvolvableDistribution
 
     def __init__(
             self,
@@ -344,26 +346,17 @@ class StochasticActor(DeterministicActor):
         """
         return self.forward(obs, action_mask)
     
-    def recreate_network(self, shrink_params: bool = False) -> None:
+    def recreate_network(self) -> None:
         """Recreates the network with the same parameters as the current network.
 
         :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
         :type shrink_params: bool
         """
-        super().recreate_network(shrink_params)
+        super().recreate_network()
 
-        actor_net = self.build_network_head(self.head_net.net_config)
-        actor_net = EvolvableDistribution(
-            self.action_space, actor_net, device=self.device
+        self.head_net = EvolvableDistribution(
+            self.action_space, self.head_net, device=self.device
             )
-
-        # Preserve parameters of the network
-        preserve_params_fn = (
-            EvolvableModule.shrink_preserve_parameters if shrink_params 
-            else EvolvableModule.preserve_parameters
-        )
-
-        self.head_net = preserve_params_fn(self.head_net, actor_net)
 
         
 

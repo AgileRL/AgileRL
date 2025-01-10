@@ -526,7 +526,6 @@ class EvolvableBERT(EvolvableModule):
         """Adds an encoder layer to transformer."""
         if len(self.encoder_layers) < self.max_encoder_layers:
             self.encoder_layers += [self.encoder_layers[-1]]
-            self.recreate_nets()
         # else:
         #     self.add_node()
 
@@ -535,7 +534,6 @@ class EvolvableBERT(EvolvableModule):
         """Adds a decoder layer to transformer."""
         if len(self.decoder_layers) < self.max_decoder_layers:
             self.decoder_layers += [self.decoder_layers[-1]]
-            self.recreate_nets()
         # else:
         #     self.add_node()
 
@@ -544,7 +542,6 @@ class EvolvableBERT(EvolvableModule):
         """Removes an encoder layer from transformer."""
         if len(self.encoder_layers) > 1:
             self.encoder_layers = self.encoder_layers[:-1]
-            self.recreate_shrunk_nets()
         # else:
         #     self.add_node()
 
@@ -553,7 +550,6 @@ class EvolvableBERT(EvolvableModule):
         """Removes a decoder layer from transformer."""
         if len(self.decoder_layers) > 1:
             self.decoder_layers = self.decoder_layers[:-1]
-            self.recreate_shrunk_nets()
         # else:
         #     self.add_node()
 
@@ -586,7 +582,7 @@ class EvolvableBERT(EvolvableModule):
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
 
             self.decoder_layers[hidden_layer] += numb_new_nodes
-        self.recreate_nets()
+
         return {
             "hidden_layer": hidden_layer,
             "numb_new_nodes": numb_new_nodes,
@@ -622,33 +618,23 @@ class EvolvableBERT(EvolvableModule):
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
             if self.decoder_layers[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
                 self.decoder_layers[hidden_layer] -= numb_new_nodes
-        self.recreate_shrunk_nets()
         return {
             "hidden_layer": hidden_layer,
             "numb_new_nodes": numb_new_nodes,
             "network": network,
         }
 
-    def recreate_nets(self):
-        """Recreates neural networks."""
+    def recreate_network(self) -> None:
+        """Recreates neural network."""
         new_encoder, new_decoder = self.build_networks()
-        new_encoder = self.preserve_parameters(
-            old_net=self.encoder, new_net=new_encoder
-        )
-        new_decoder = self.preserve_parameters(
-            old_net=self.decoder, new_net=new_decoder
-        )
-        self.encoder, self.decoder = new_encoder, new_decoder
 
-    def recreate_shrunk_nets(self):
-        """Recreates shrunk neural networks."""
-        new_encoder, new_decoder = self.build_networks()
-        new_encoder = self.shrink_preserve_parameters(
+        new_encoder = EvolvableModule.preserve_parameters(
             old_net=self.encoder, new_net=new_encoder
-        )
-        new_decoder = self.shrink_preserve_parameters(
+            )
+        new_decoder = EvolvableModule.preserve_parameters(
             old_net=self.decoder, new_net=new_decoder
-        )
+            )
+
         self.encoder, self.decoder = new_encoder, new_decoder
 
 def _canonical_mask(

@@ -130,6 +130,7 @@ class MutableKernelSizes:
         max_kernels = self.calc_max_kernel_sizes(
             channel_size, stride_size, input_shape
         )
+        print("Before change:", self.sizes)
         new_kernel_size = np.random.randint(1, max_kernels[hidden_layer] + 1)
         if self.tuple_sizes:
             if self.cnn_block_type == "Conv2d":
@@ -140,6 +141,7 @@ class MutableKernelSizes:
         else:
             self.sizes[hidden_layer] = np.random.randint(1, max_kernels[hidden_layer] + 1)
 
+        print("After change:", self.sizes)
 
 class EvolvableCNN(EvolvableModule):
     """
@@ -302,6 +304,41 @@ class EvolvableCNN(EvolvableModule):
         """Sets the activation function of the network."""
         self._activation = activation
 
+    @staticmethod
+    def shrink_preserve_parameters(old_net: nn.Module, new_net: nn.Module) -> nn.Module:
+        """Returns shrunk new neural network with copied parameters from old network.
+
+        :param old_net: Old neural network
+        :type old_net: nn.Module
+        :param new_net: New neural network
+        :type new_net: nn.Module
+        :return: Shrunk new neural network with copied parameters
+        :rtype: nn.Module
+        """
+        old_net_dict = dict(old_net.named_parameters())
+
+        for key, param in new_net.named_parameters():
+            if key in old_net_dict.keys():
+                old_param = old_net_dict[key]
+                old_size = old_param.data.size()
+                new_size = param.data.size()
+
+                if old_size == new_size:
+                    param.data = old_param.data
+                elif "norm" not in key:
+                    min_0 = min(old_size[0], new_size[0])
+                    if len(param.data.size()) == 1:
+                        param.data[:min_0] = old_param.data[:min_0]
+
+                    # NOTE: We specifically implement this method to only maintain spatial 
+                    # information in convolutional layers when reducing kernel / channel 
+                    # sizes within a layer.
+                    else:
+                        min_1 = min(old_size[1], new_size[1])
+                        param.data[:min_0, :min_1] = old_net_dict[key].data[:min_0, :min_1]
+
+        return new_net
+
     def init_weights_gaussian(self, std_coeff: float = 4) -> None:
         """Initialise weights of linear layer using Gaussian distribution."""
         # Output layer is initialised with std_coeff=2
@@ -431,18 +468,16 @@ class EvolvableCNN(EvolvableModule):
             self.stride_size = self.stride_size + [
                 np.random.randint(1, self.stride_size[-1] + 1)
             ]
-            self.recreate_network()
         else:
             self.add_channel()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @register_mutation_fn(MutationType.LAYER, shrink_params=True)
     def remove_layer(self) -> None:
         """Removes a hidden layer from convolutional neural network."""
         if len(self.channel_size) > self.min_hidden_layers:
             self.channel_size = self.channel_size[:-1]
             self.kernel_size.remove_layer()
             self.stride_size = self.stride_size[:-1]
-            self.recreate_network(shrink_params=True)
         else:
             self.add_channel()
 
@@ -454,7 +489,6 @@ class EvolvableCNN(EvolvableModule):
             self.kernel_size.change_kernel_size(
                 hidden_layer, self.channel_size, self.stride_size, self.input_shape
                 )
-            self.recreate_network()
         else:
             self.add_layer()
 
@@ -489,7 +523,7 @@ class EvolvableCNN(EvolvableModule):
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
-    @register_mutation_fn(MutationType.NODE)
+    @register_mutation_fn(MutationType.NODE, shrink_params=True)
     def remove_channel(
             self,
             hidden_layer: Optional[int] = None,
@@ -542,6 +576,6 @@ class EvolvableCNN(EvolvableModule):
 
         # Copy parameters from old model to new model
         preserve_params_fn = (
-            self.shrink_preserve_parameters if shrink_params else self.preserve_parameters
+            self.shrink_preserve_parameters if shrink_params else EvolvableModule.preserve_parameters
         )
         self.model = preserve_params_fn(old_net=self.model, new_net=model)

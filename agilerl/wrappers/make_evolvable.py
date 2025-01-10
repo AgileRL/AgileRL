@@ -11,6 +11,7 @@ from accelerate import Accelerator
 from agilerl.typing import ArrayOrTensor
 from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
 from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.cnn import EvolvableCNN
 from agilerl.utils.evolvable_networks import (
     get_activation,
     get_normalization,
@@ -840,10 +841,9 @@ class MakeEvolvable(EvolvableModule):
             self.mlp_output_activation = activation
 
         self.mlp_activation = activation
-        self.recreate_nets()
 
     @register_mutation_fn(MutationType.LAYER)
-    def add_mlp_layer(self):
+    def add_mlp_layer(self) -> None:
         """Adds a hidden layer to value network."""
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
@@ -854,12 +854,11 @@ class MakeEvolvable(EvolvableModule):
                 self.mlp_layer_info["activation_layers"][
                     len(self.hidden_size)
                 ] = self.mlp_output_activation
-            self.recreate_nets()
         else:
             self.add_mlp_node()
 
     @register_mutation_fn(MutationType.LAYER)
-    def remove_mlp_layer(self):
+    def remove_mlp_layer(self) -> None:
         """Removes a hidden layer from value network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
@@ -888,12 +887,15 @@ class MakeEvolvable(EvolvableModule):
             ):
                 self.mlp_layer_info["norm_layers"].pop(len(self.hidden_size))
 
-            self.recreate_nets(shrink_params=True)
         else:
             self.add_mlp_node()
 
     @register_mutation_fn(MutationType.NODE)
-    def add_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
+    def add_mlp_node(
+            self,
+            hidden_layer: Optional[int] = None,
+            numb_new_nodes: Optional[int] = None
+            ) -> Dict[str, int]:
         """Adds nodes to hidden layer of value network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -913,12 +915,14 @@ class MakeEvolvable(EvolvableModule):
         ):  # HARD LIMIT
             self.hidden_size[hidden_layer] += numb_new_nodes
 
-            self.recreate_nets()
-
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     @register_mutation_fn(MutationType.NODE)
-    def remove_mlp_node(self, hidden_layer=None, numb_new_nodes=None):
+    def remove_mlp_node(
+            self,
+            hidden_layer: Optional[int] = None,
+            numb_new_nodes: Optional[int] = None
+            ) -> Dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -937,12 +941,11 @@ class MakeEvolvable(EvolvableModule):
             self.hidden_size[hidden_layer] - numb_new_nodes > self.min_mlp_nodes
         ):  # HARD LIMIT
             self.hidden_size[hidden_layer] -= numb_new_nodes
-            self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     @register_mutation_fn(MutationType.LAYER)
-    def add_cnn_layer(self):
+    def add_cnn_layer(self) -> None:
         """Adds a hidden layer to convolutional neural network."""
         max_kernels = self.calc_max_kernel_sizes()
         stride_size_ranges = self.calc_stride_size_ranges()
@@ -970,12 +973,11 @@ class MakeEvolvable(EvolvableModule):
                 len(self.channel_size) - 1
             ] = "ReLU"
 
-            self.recreate_nets()
         else:
             self.add_cnn_channel()
 
     @register_mutation_fn(MutationType.LAYER)
-    def remove_cnn_layer(self):
+    def remove_cnn_layer(self) -> None:
         """Removes a hidden layer from the convolutional neural network."""
         stride_size_ranges = self.calc_stride_size_ranges()
         if len(self.channel_size) > self.min_cnn_hidden_layers:
@@ -1015,12 +1017,11 @@ class MakeEvolvable(EvolvableModule):
             ):
                 self.cnn_layer_info["norm_layers"].pop(len(self.channel_size))
 
-            self.recreate_nets()
         else:
             self.add_cnn_channel()
 
     @register_mutation_fn(MutationType.NODE)
-    def change_cnn_kernel(self):
+    def change_cnn_kernel(self) -> None:
         """Randomly alters convolution kernel of random CNN layer."""
         max_kernels = self.calc_max_kernel_sizes()
         # if self.cnn_layer_info["conv_layer_type"] == "Conv3d":
@@ -1034,12 +1035,15 @@ class MakeEvolvable(EvolvableModule):
                 for idx, i in enumerate(kernel_size_values)
             )
             self.kernel_size[hidden_layer] = kernel_size_values
-            self.recreate_nets()
         else:
             self.add_cnn_layer()
 
     @register_mutation_fn(MutationType.NODE)
-    def add_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
+    def add_cnn_channel(
+            self,
+            hidden_layer: Optional[int] = None,
+            numb_new_channels: Optional[int] = None
+            ) -> Dict[str, int]:
         """Adds channel to hidden layer of Convolutional Neural Network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1059,12 +1063,14 @@ class MakeEvolvable(EvolvableModule):
         ):  # HARD LIMIT
             self.channel_size[hidden_layer] += numb_new_channels
 
-            self.recreate_nets()
-
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
-    @register_mutation_fn(MutationType.NODE)
-    def remove_cnn_channel(self, hidden_layer=None, numb_new_channels=None):
+    @register_mutation_fn(MutationType.NODE, shrink_params=True)
+    def remove_cnn_channel(
+            self,
+            hidden_layer: Optional[int] = None,
+            numb_new_channels: Optional[int] = None
+            ) -> Dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1083,8 +1089,6 @@ class MakeEvolvable(EvolvableModule):
             self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size
         ):  # HARD LIMIT
             self.channel_size[hidden_layer] -= numb_new_channels
-
-            self.recreate_nets(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
@@ -1207,7 +1211,7 @@ class MakeEvolvable(EvolvableModule):
 
         return stride_range_list
 
-    def recreate_nets(self, shrink_params: bool = False) -> None:
+    def recreate_network(self, shrink_params: bool = False) -> None:
         """Recreates neural networks.
 
         :param shrink_params: Boolean flag to shrink parameters
@@ -1215,30 +1219,23 @@ class MakeEvolvable(EvolvableModule):
         """
         new_feature_net, new_value_net, new_advantage_net = self.build_networks()
 
-        if shrink_params:
-            if self.value_net is not None:
-                new_value_net = self.shrink_preserve_parameters(
-                    old_net=self.value_net, new_net=new_value_net
-                )
-            if self.advantage_net is not None:
-                new_advantage_net = self.shrink_preserve_parameters(
-                    old_net=self.advantage_net, new_net=new_advantage_net
-                )
-            new_feature_net = self.shrink_preserve_parameters(
-                old_net=self.feature_net, new_net=new_feature_net
+        preserve_params_fn = (
+            EvolvableCNN.shrink_preserve_parameters
+            if shrink_params
+            else EvolvableModule.preserve_parameters
+        )
+
+        if self.value_net is not None:
+            new_value_net = preserve_params_fn(
+                old_net=self.value_net, new_net=new_value_net
             )
-        else:
-            if self.value_net is not None:
-                new_value_net = self.preserve_parameters(
-                    old_net=self.value_net, new_net=new_value_net
-                )
-            if self.advantage_net is not None:
-                new_advantage_net = self.preserve_parameters(
-                    old_net=self.advantage_net, new_net=new_advantage_net
-                )
-            new_feature_net = self.preserve_parameters(
-                old_net=self.feature_net, new_net=new_feature_net
+        if self.advantage_net is not None:
+            new_advantage_net = preserve_params_fn(
+                old_net=self.advantage_net, new_net=new_advantage_net
             )
+        new_feature_net = preserve_params_fn(
+            old_net=self.feature_net, new_net=new_feature_net
+        )
 
         self.feature_net, self.value_net, self.advantage_net = (
             new_feature_net,

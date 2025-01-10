@@ -1,7 +1,8 @@
 from typing import Any, Dict, List, Callable, Optional, TypeVar, Iterable, Tuple
 import copy
+import inspect
 from functools import wraps
-from abc import ABC, ABCMeta
+from abc import ABC, ABCMeta, abstractmethod
 from numpy.random import Generator
 import numpy as np
 import torch
@@ -28,7 +29,7 @@ def is_evolvable(attr: str, obj: Any) -> bool:
         and not attr.startswith("_") and not attr.endswith("_")
     )
 
-def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], MutationMethod]:
+def register_mutation_fn(mutation_type: MutationType, **recreate_kwargs) -> Callable[[Callable], MutationMethod]:
     """Decorator to register a method as a mutation function of a specific type.
     
     :param mutation_type: The type of mutation function.
@@ -43,9 +44,49 @@ def register_mutation_fn(mutation_type: MutationType) -> Callable[[Callable], Mu
 
         # Explicitly set the mutation type attribute on the wrapper function
         wrapper._mutation_type = mutation_type
+        wrapper._recreate_kwargs = recreate_kwargs
         return wrapper
     
     return decorator
+
+def mutation_wrapper(
+        mod: SelfEvolvableModule,
+        mut_method: MutationMethod,
+        mut_attr: str
+        ) -> MutationMethod:
+    """Wrapper function to apply a mutation method and recreate the network.
+
+    :param mod: The evolvable module.
+    :type mod: SelfEvolvableModule
+    :param mut_method: The mutation method.
+    :type mut_method: MutationMethod
+    :param mut_attr: The mutation attribute.
+    :type mut_attr: str
+
+    :return: The wrapped mutation method.
+    :rtype: MutationMethod
+    """
+    @wraps(mut_method)
+    def wrapped(*args, **kwargs):
+        result = mut_method(*args, **kwargs)
+        print(mut_attr)
+        mod.last_mutation = mut_method
+        mod.last_mutation_attr = mut_attr
+
+        # Inspect the keyword arguments of `recreate_network` and match with 
+        # the specified kwargs in the called mutation method
+        if mut_method._recreate_kwargs:
+            recreation_kwargs = inspect.signature(mod.recreate_network).parameters
+            rec_kwargs = {
+                k: v for k, v in mut_method._recreate_kwargs.items() if k in recreation_kwargs
+                }
+        else:
+            rec_kwargs = {}
+
+        mod.recreate_network(**rec_kwargs)
+        return result
+
+    return wrapped
 
 class _ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance 
@@ -68,6 +109,8 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         nn.Module.__init__(self)
         self._init_surface_methods()
         self.device = device
+        self._last_mutation = None
+        self._last_mutation_attr = None
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -88,6 +131,30 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     @property
     def activation(self) -> Optional[str]:
         return None
+    
+    @property
+    def last_mutation(self) -> Optional[MutationMethod]:
+        return self._last_mutation
+    
+    @last_mutation.setter
+    def last_mutation(self, value: MutationMethod) -> None:
+        self._last_mutation = value
+
+    @property
+    def last_mutation_attr(self) -> Optional[str]:
+        return self._last_mutation_attr
+    
+    @last_mutation_attr.setter
+    def last_mutation_attr(self, value: str) -> None:
+        self._last_mutation_attr = value
+
+    @abstractmethod
+    def recreate_network(self, **kwargs) -> None:
+        """Recreate the network after a mutation has been applied."""
+        raise NotImplementedError(
+            "An EvolvableModule must implement the recreate_network method, which is called after " \
+            "a mutation has been applied."
+            )
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError(
@@ -107,6 +174,25 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         raise NotImplementedError(
             "change_activation method must be implemented in order to set the activation function."
             )
+    
+    def __getattribute__(self, name: str) -> Any:
+        """Get attribute of the network. This handles the case where a mutation method is trying to be 
+        fetched from the top-most class of the network (i.e. not an underlying module).
+
+        :param name: The name of the attribute.
+        :type name: str
+        :return: The attribute of the network.
+        :rtype: Any
+        """
+        attr = super().__getattribute__(name)
+
+        if not callable(attr):
+            return attr
+
+        return (
+            mutation_wrapper(self, attr, name) 
+            if isinstance(attr, MutationMethod) else attr
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Get attribute of the network. If the attribute is a mutation method, return the
@@ -119,11 +205,17 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         :rtype: Any
         """
         try:
-            return super().__getattr__(name)
+            attr = super().__getattr__(name)
+            return (
+                mutation_wrapper(self, attr, name) 
+                if isinstance(attr, MutationMethod) else attr
+                )
+            
         except AttributeError as e:
             mut_method = self.get_mutation_methods().get(name)
             if mut_method is not None:
                 return mut_method
+
             raise e
 
     def get_output_dense(self) -> Optional[nn.Module]:
@@ -157,41 +249,10 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
                 if old_size == new_size:
                     # If the sizes are the same, just copy the parameter
                     param.data = old_param.data
-                else:
-                    if "norm" not in key:
-                        # Create a slicing index to handle tensors with varying sizes
-                        slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size, new_size))
-                        param.data[slice_index] = old_param.data[slice_index]
-
-        return new_net
-
-    @staticmethod
-    def shrink_preserve_parameters(old_net: nn.Module, new_net: nn.Module) -> nn.Module:
-        """Returns shrunk new neural network with copied parameters from old network.
-
-        :param old_net: Old neural network
-        :type old_net: nn.Module
-        :param new_net: New neural network
-        :type new_net: nn.Module
-        :return: Shrunk new neural network with copied parameters
-        :rtype: nn.Module
-        """
-        old_net_dict = dict(old_net.named_parameters())
-
-        for key, param in new_net.named_parameters():
-            if key in old_net_dict.keys():
-                if old_net_dict[key].data.size() == param.data.size():
-                    param.data = old_net_dict[key].data
-                else:
-                    if "norm" not in key:
-                        old_size = old_net_dict[key].data.size()
-                        new_size = param.data.size()
-                        min_0 = min(old_size[0], new_size[0])
-                        if len(param.data.size()) == 1:
-                            param.data[:min_0] = old_net_dict[key].data[:min_0]
-                        else:
-                            min_1 = min(old_size[1], new_size[1])
-                            param.data[:min_0, :min_1] = old_net_dict[key].data[:min_0, :min_1]
+                elif "norm" not in key:
+                    # Create a slicing index to handle tensors with varying sizes
+                    slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size, new_size))
+                    param.data[slice_index] = old_param.data[slice_index]
 
         return new_net
 
@@ -336,6 +397,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
 
             attr = name.split(".")[0]
             method = ".".join(name.split(".")[1:])
+
             return getattr(getattr(self, attr), method)
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
@@ -471,6 +533,13 @@ class EvolvableWrapper(EvolvableModule):
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
 
+    def recreate_network(self, **kwargs) -> None:
+        """Recreate the network after a mutation has been applied.
+        
+        :param shrink_params: Whether to shrink the network parameters.
+        :type shrink_params: bool
+        """
+        return self.wrapped.recreate_network(**kwargs)
 
 class ModuleDict(EvolvableModule, nn.ModuleDict):
     """Analogous to nn.ModuleDict, but allows for the recursive inheritance of the 
@@ -496,6 +565,9 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
             f"{name}.{method}" for name, module in self.items() 
             for method in module.node_mutation_methods
         ]
+    
+    def __getitem__(self, key: str) -> EvolvableModule:
+        return super().__getitem__(key)
 
     def values(self) -> Iterable[EvolvableModule]:
         return super().values()
@@ -519,3 +591,10 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
     
+    def recreate_network(self, key: str, kwargs: Dict[str, Any]) -> None:
+        """Recreate the network after a mutation has been applied.
+        
+        :param kwargs: The keyword arguments for recreating the network.
+        :type kwargs: Dict[str, Dict[str, Any]]
+        """
+        self[key].recreate_network(**kwargs)
