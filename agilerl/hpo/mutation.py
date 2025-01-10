@@ -779,7 +779,7 @@ class Mutations:
         mut_method, ret_type = get_architecture_mut_method(
             policy_offspring, self.new_layer_prob, self.rng
             )
-
+        print(mut_method)
         mut_dict = self._apply_arch_mutation(policy_offspring, mut_method, ret_type)
         self.to_device_and_set_individual(individual, policy_name, policy_offspring)
 

@@ -129,4 +129,4 @@ if __name__ == "__main__":
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

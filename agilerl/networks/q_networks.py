@@ -122,21 +122,17 @@ class QNetwork(EvolvableNetwork):
     
     def recreate_network(self) -> None:
         """Recreates the network"""
-        is_underlying = self.maybe_recreate_underlying()
+        encoder = self._build_encoder(self.encoder.net_config)
+        head_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=self.num_actions,
+            name="value",
+            net_config=self.head_net.net_config
+        )
 
-        # Latent dim mutation case -> need to recreate both encoder and head
-        if not is_underlying:
-            encoder = self._build_encoder(self.encoder.net_config)
-            head_net = self.create_mlp(
-                num_inputs=self.latent_dim,
-                num_outputs=self.num_actions,
-                name="value",
-                net_config=self.head_net.net_config
-            )
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
 
-            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
-            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
-    
 
 class RainbowQNetwork(EvolvableNetwork):
     """RainbowQNetwork is an extension of the QNetwork that incorporates the Rainbow DQN improvements 
@@ -214,6 +210,9 @@ class RainbowQNetwork(EvolvableNetwork):
         # Build value and advantage networks
         self.build_network_head(head_config)
 
+        # Register mutation hook
+        self.register_mutation_hook(self._recreate_advantage_from_value)
+
     @property
     def init_dict(self) -> Dict[str, Any]:
         """Initializes the configuration of the Rainbow Q network.
@@ -290,42 +289,39 @@ class RainbowQNetwork(EvolvableNetwork):
             x = torch.sum(x * self.support, dim=2)
 
         return x
+    
+    def _recreate_advantage_from_value(self) -> None:
+        """Recreates the advantage network using the net_config of the value network 
+        after a mutation on the value network."""
+        if self.last_mutation_attr.split(".")[0] == "head_net":
+            advantage_net = self.create_mlp(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions * self.num_atoms,
+                name="advantage",
+                net_config=self.head_net.net_config
+            )
+            self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
 
     def recreate_network(self) -> None:
         """Recreates the network"""
-        is_underlying = self.maybe_recreate_underlying()
+        encoder = self._build_encoder(self.encoder.net_config)
+        head_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=self.num_actions,
+            name="value",
+            net_config=self.head_net.net_config
+        )
 
-        # Latent dim mutation case -> need to recreate both encoder and head
-        if not is_underlying:
-            encoder = self._build_encoder(self.encoder.net_config)
-            head_net = self.create_mlp(
-                num_inputs=self.latent_dim,
-                num_outputs=self.num_actions,
-                name="value",
-                net_config=self.head_net.net_config
-            )
+        advantage_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=self.num_actions * self.num_atoms,
+            name="advantage",
+            net_config=self.head_net.net_config
+        )
 
-            advantage_net = self.create_mlp(
-                num_inputs=self.latent_dim,
-                num_outputs=self.num_actions * self.num_atoms,
-                name="advantage",
-                net_config=self.head_net.net_config
-            )
-
-            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
-            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
-            self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
-
-        # If mutation was on value network, we want to apply the same mutation to the advantage network
-        elif self.last_mutation_attr.split(".")[0] == "head_net":
-            advantage_net = self.create_mlp(
-                num_inputs=self.latent_dim,
-                num_outputs=self.num_actions * self.num_atoms,
-                name="advantage",
-                net_config=self.head_net.net_config
-            )
-            self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
-
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
+        self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
 
 class ContinuousQNetwork(EvolvableNetwork):
     """ContinuousQNetwork is an extension of the QNetwork that is used for continuous action spaces.
@@ -439,19 +435,14 @@ class ContinuousQNetwork(EvolvableNetwork):
 
     def recreate_network(self) -> None:
         """Recreates the network"""
-        is_underlying = self.maybe_recreate_underlying()
+        encoder = self._build_encoder(self.encoder.net_config)
+        head_net = self.create_mlp(
+            num_inputs=self.latent_dim + self.num_actions,
+            num_outputs=1,
+            name="value",
+            net_config=self.head_net.net_config
+        )
 
-        # Latent dim mutation case -> need to recreate both encoder and head
-        print("Is underlying: ", is_underlying)
-        if not is_underlying:
-            encoder = self._build_encoder(self.encoder.net_config)
-            head_net = self.create_mlp(
-                num_inputs=self.latent_dim + self.num_actions,
-                num_outputs=1,
-                name="value",
-                net_config=self.head_net.net_config
-            )
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
 
-            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
-            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
-    

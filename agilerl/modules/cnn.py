@@ -130,7 +130,6 @@ class MutableKernelSizes:
         max_kernels = self.calc_max_kernel_sizes(
             channel_size, stride_size, input_shape
         )
-        print("Before change:", self.sizes)
         new_kernel_size = np.random.randint(1, max_kernels[hidden_layer] + 1)
         if self.tuple_sizes:
             if self.cnn_block_type == "Conv2d":
@@ -140,8 +139,6 @@ class MutableKernelSizes:
                 self.sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
         else:
             self.sizes[hidden_layer] = np.random.randint(1, max_kernels[hidden_layer] + 1)
-
-        print("After change:", self.sizes)
 
 class EvolvableCNN(EvolvableModule):
     """

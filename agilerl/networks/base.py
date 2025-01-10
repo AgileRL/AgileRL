@@ -401,22 +401,5 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
                 clone_module.load_state_dict(module.state_dict())
             
         return clone
-    
-    def maybe_recreate_underlying(self) -> bool:
-        """Checks if the previous mutation was on an underlying evolvable module and 
-        recreates it if necessary. Returns True if an underlying module was recreated, 
-        False otherwise.
-        
-        :return: True if an underlying module was recreated, False otherwise.
-        :rtype: bool
-        """
-        if self.last_mutation_attr is not None and "." in self.last_mutation_attr:
-            mutated_attr = self.last_mutation_attr.split(".")[0]
-            recreation_kwargs = self.last_mutation._recreate_kwargs
-            mutated_net: SupportedEvolvable = getattr(self, mutated_attr)
-            mutated_net.recreate_network(**recreation_kwargs)
-            setattr(self, mutated_attr, mutated_net)
-            return True
-        
-        return False
+
         

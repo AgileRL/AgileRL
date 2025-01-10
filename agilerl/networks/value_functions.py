@@ -117,22 +117,16 @@ class ValueFunction(EvolvableNetwork):
 
     def recreate_network(self) -> None:
         """Recreates the network"""
-        is_underlying = self.maybe_recreate_underlying()
+        encoder = self._build_encoder(self.encoder.net_config)
+        head_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=1,
+            name="value",
+            net_config=self.head_net.net_config
+        )
 
-        # Latent dim mutation case -> need to recreate both encoder and head
-        if not is_underlying:
-            encoder = self._build_encoder(self.encoder.net_config)
-            head_net = self.create_mlp(
-                num_inputs=self.latent_dim,
-                num_outputs=1,
-                name="value",
-                net_config=self.head_net.net_config
-            )
-
-            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
-            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
-    
-
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
 
 
 # TODO: Implement distributional value function

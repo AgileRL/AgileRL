@@ -49,12 +49,11 @@ def register_mutation_fn(mutation_type: MutationType, **recreate_kwargs) -> Call
     
     return decorator
 
-def mutation_wrapper(
+def _recreation_hook(
         mod: SelfEvolvableModule,
-        mut_method: MutationMethod,
-        mut_attr: str
+        mut_method: MutationMethod
         ) -> MutationMethod:
-    """Wrapper function to apply a mutation method and recreate the network.
+    """Wrapper function to apply a mutation method and recreate the network afterwards.
 
     :param mod: The evolvable module.
     :type mod: SelfEvolvableModule
@@ -69,9 +68,6 @@ def mutation_wrapper(
     @wraps(mut_method)
     def wrapped(*args, **kwargs):
         result = mut_method(*args, **kwargs)
-        print(mut_attr)
-        mod.last_mutation = mut_method
-        mod.last_mutation_attr = mut_attr
 
         # Inspect the keyword arguments of `recreate_network` and match with 
         # the specified kwargs in the called mutation method
@@ -111,6 +107,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         self.device = device
         self._last_mutation = None
         self._last_mutation_attr = None
+        self._mutation_hook = None
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -190,7 +187,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             return attr
 
         return (
-            mutation_wrapper(self, attr, name) 
+            _recreation_hook(self, attr) 
             if isinstance(attr, MutationMethod) else attr
         )
 
@@ -204,17 +201,32 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         :return: The attribute of the network.
         :rtype: Any
         """
+        def _mutation_hook(mut_method: MutationMethod) -> MutationMethod:
+            @wraps(mut_method)
+            def wrapped(*args, **kwargs):
+                result = mut_method(*args, **kwargs)
+                self.last_mutation = mut_method
+                self.last_mutation_attr = name
+
+                # If user specified a mutation hook, call it
+                if self._mutation_hook is not None:
+                    self._mutation_hook()
+
+                return result
+            
+            return wrapped
+
         try:
             attr = super().__getattr__(name)
             return (
-                mutation_wrapper(self, attr, name) 
+                _recreation_hook(self, attr) 
                 if isinstance(attr, MutationMethod) else attr
                 )
             
         except AttributeError as e:
             mut_method = self.get_mutation_methods().get(name)
             if mut_method is not None:
-                return mut_method
+                return _mutation_hook(mut_method)
 
             raise e
 
@@ -291,6 +303,15 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         layers = [m for m in module.children()]
         for layer in layers:
             init_weights(layer)
+    
+    def register_mutation_hook(self, hook: Callable) -> None:
+        """Register a hook to be called after a mutation has been applied to an 
+        underlying evolvable module. The hook function should not take any arguments.
+        
+        :param hook: The hook function.
+        :type hook: Callable
+        """
+        self._mutation_hook = hook
     
     def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
         """Make the network unevolvable."""
