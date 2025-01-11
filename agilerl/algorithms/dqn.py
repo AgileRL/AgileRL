@@ -286,8 +286,10 @@ class DQN:
             )
 
         if self.double:  # Double Q-learning
-            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
-            q_target = self.actor(next_states).gather(dim=1, index=q_idx).detach()
+            q_idx = self.actor(next_states).argmax(dim=1).unsqueeze(1)
+            q_target = (
+                self.actor_target(next_states).gather(dim=1, index=q_idx).detach()
+            )
         else:
             q_target = (
                 self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
