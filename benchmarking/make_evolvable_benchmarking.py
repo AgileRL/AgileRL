@@ -176,10 +176,6 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
                 field_names=field_names,
                 device=device,
             )
-        if NET_CONFIG is None:
-            arch = actor.arch
-        else:
-            arch = NET_CONFIG["arch"]
 
     else:
         ####
@@ -256,10 +252,6 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
             agent_ids=INIT_HP["AGENT_IDS"],
             device=device,
         )
-        if NET_CONFIG is None:
-            arch = actor[0].arch
-        else:
-            arch = NET_CONFIG["arch"]
 
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
@@ -283,7 +275,6 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
         max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
-        arch=arch,
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )

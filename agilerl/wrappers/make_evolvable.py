@@ -10,7 +10,7 @@ from accelerate import Accelerator
 
 from agilerl.typing import ArrayOrTensor
 from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
-from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.utils.evolvable_networks import (
     get_activation,
@@ -825,7 +825,7 @@ class MakeEvolvable(EvolvableModule):
 
         return init_dict
     
-    @register_mutation_fn(MutationType.ACTIVATION)
+    @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
 
@@ -842,7 +842,7 @@ class MakeEvolvable(EvolvableModule):
 
         self.mlp_activation = activation
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_mlp_layer(self) -> None:
         """Adds a hidden layer to value network."""
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
@@ -857,7 +857,7 @@ class MakeEvolvable(EvolvableModule):
         else:
             self.add_mlp_node()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def remove_mlp_layer(self) -> None:
         """Removes a hidden layer from value network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
@@ -890,7 +890,7 @@ class MakeEvolvable(EvolvableModule):
         else:
             self.add_mlp_node()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_mlp_node(
             self,
             hidden_layer: Optional[int] = None,
@@ -917,7 +917,7 @@ class MakeEvolvable(EvolvableModule):
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def remove_mlp_node(
             self,
             hidden_layer: Optional[int] = None,
@@ -944,7 +944,7 @@ class MakeEvolvable(EvolvableModule):
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_cnn_layer(self) -> None:
         """Adds a hidden layer to convolutional neural network."""
         max_kernels = self.calc_max_kernel_sizes()
@@ -976,7 +976,7 @@ class MakeEvolvable(EvolvableModule):
         else:
             self.add_cnn_channel()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def remove_cnn_layer(self) -> None:
         """Removes a hidden layer from the convolutional neural network."""
         stride_size_ranges = self.calc_stride_size_ranges()
@@ -1020,7 +1020,7 @@ class MakeEvolvable(EvolvableModule):
         else:
             self.add_cnn_channel()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def change_cnn_kernel(self) -> None:
         """Randomly alters convolution kernel of random CNN layer."""
         max_kernels = self.calc_max_kernel_sizes()
@@ -1038,7 +1038,7 @@ class MakeEvolvable(EvolvableModule):
         else:
             self.add_cnn_layer()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_cnn_channel(
             self,
             hidden_layer: Optional[int] = None,
@@ -1065,7 +1065,7 @@ class MakeEvolvable(EvolvableModule):
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
-    @register_mutation_fn(MutationType.NODE, shrink_params=True)
+    @mutation(MutationType.NODE, shrink_params=True)
     def remove_cnn_channel(
             self,
             hidden_layer: Optional[int] = None,

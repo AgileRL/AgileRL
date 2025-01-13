@@ -8,7 +8,7 @@ import torch
 
 from agilerl.protocols import MutationType
 from agilerl.typing import DeviceType, TorchObsType, ConfigType
-from agilerl.modules.base import EvolvableModule, ModuleMeta, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, ModuleMeta, mutation
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
@@ -108,7 +108,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         Currently, evolvable networks should only have the encoder (which is automatically 
         built from the observation space) and a 'head_net' attribute that processes the latent 
         encodings into the desired number of outputs as evolvable components. For example, in RainbowQNetwork, 
-        we signal the advantage net as unevolvable and apply the same mutations to it as the 'value' 
+        we disable mutations for the advantage net and apply the same mutations to it as the 'value' 
         net, which is the network head in this case. Users should follow the same philosophy.
 
     :param observation_space: Observation space of the environment.
@@ -309,7 +309,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
             _output = False if attr == "encoder" else output
             module.change_activation(activation, output=_output)
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
         """Add a latent node to the network.
 
@@ -327,7 +327,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
 
         return {"numb_new_nodes": numb_new_nodes}
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def remove_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
         """Remove a latent node from the network.
 

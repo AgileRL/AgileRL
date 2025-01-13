@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from agilerl.typing import ArrayOrTensor
-from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.utils.evolvable_networks import create_mlp
 
 class EvolvableMLP(EvolvableModule):
@@ -195,7 +195,7 @@ class EvolvableMLP(EvolvableModule):
         """Returns output layer of neural network."""
         return getattr(self.model, f"{self.name}_linear_layer_output")
 
-    @register_mutation_fn(MutationType.ACTIVATION)
+    @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
 
@@ -213,7 +213,7 @@ class EvolvableMLP(EvolvableModule):
         self.activation = activation
         self.recreate_network()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
         """Adds a hidden layer to neural network."""
         # add layer to hyper params
@@ -222,7 +222,7 @@ class EvolvableMLP(EvolvableModule):
         else:
             self.add_node()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
         """Removes a hidden layer from neural network."""
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
@@ -230,7 +230,7 @@ class EvolvableMLP(EvolvableModule):
         else:
             self.add_node()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_node(
         self,
         hidden_layer: Optional[int] = None,
@@ -258,7 +258,7 @@ class EvolvableMLP(EvolvableModule):
 
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def remove_node(
         self,
         hidden_layer: Optional[int] = None,

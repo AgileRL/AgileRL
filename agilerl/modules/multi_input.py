@@ -8,7 +8,7 @@ from gymnasium import spaces
 
 from agilerl.typing import ArrayOrTensor
 from agilerl.utils.evolvable_networks import is_image_space, get_activation
-from agilerl.modules.base import EvolvableModule, ModuleDict, register_mutation_fn, MutationType
+from agilerl.modules.base import EvolvableModule, ModuleDict, mutation, MutationType
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 import re
@@ -494,7 +494,7 @@ class EvolvableMultiInput(EvolvableModule):
         features = torch.cat([image_features, vector_features], dim=1)
         return self.output(self.final_dense(features))
 
-    @register_mutation_fn(MutationType.ACTIVATION)
+    @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
 
@@ -513,7 +513,7 @@ class EvolvableMultiInput(EvolvableModule):
         if output:
             self.output = get_activation(activation)
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
         """Add a latent node to the network.
 
@@ -531,7 +531,7 @@ class EvolvableMultiInput(EvolvableModule):
 
         return {"numb_new_nodes": numb_new_nodes}
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def remove_latent_node(self, numb_new_nodes: Optional[int] = None) -> Dict[str, Any]:
         """Remove a latent node from the network.
 
@@ -556,13 +556,6 @@ class EvolvableMultiInput(EvolvableModule):
             with smaller parameters, defaults to False.
         :type shrink_params: bool, optional
         """
-        # Only want to recreate the underlying mutated EvolvableModule
-        if self.last_mutation_attr is not None and 'feature_net' in self.last_mutation_attr:
-            mutated_key = re.search(r'\.?feature_net\.(\w+)\.', self.last_mutation_attr).group(1)
-            recreate_dict = self.last_mutation._recreate_kwargs
-            self.feature_net.recreate_network(mutated_key, recreate_dict)
-            return
-
         feature_net = self.build_feature_extractor()
         self.feature_net = EvolvableModule.preserve_parameters(
             old_net=self.feature_net, new_net=feature_net

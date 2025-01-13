@@ -5,6 +5,7 @@ from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.networks.actors import EvolvableDistribution
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.algo_utils import observation_space_channels_to_first
 from agilerl.utils.utils import (
@@ -60,21 +61,26 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     state_dim = RLAlgorithm.get_state_dim(observation_space)
     action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
-        actor = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            device=device,
-            hidden_size=[64, 64],
-            mlp_activation="Tanh",
-            mlp_output_activation="Tanh",
+        # For PPO
+        actor = EvolvableDistribution(
+            action_space=action_space,
+            network=EvolvableMLP(
+                num_inputs=state_dim[0],
+                num_outputs=action_dim,
+                device=device,
+                hidden_size=[64, 64],
+                activation="Tanh",
+                output_activation="Tanh",
+            ),
+            device=device
         )
-        NET_CONFIG = None
+
         critic = EvolvableMLP(
-            num_inputs=state_dim[0] + action_dim,
+            num_inputs=state_dim[0],
             num_outputs=1,
             device=device,
             hidden_size=[64, 64],
-            mlp_activation="Tanh",
+            activation="Tanh",
         )
     else:
         actor = None
@@ -127,4 +133,4 @@ if __name__ == "__main__":
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
     NET_CONFIG = ppo_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

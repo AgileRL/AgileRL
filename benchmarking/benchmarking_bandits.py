@@ -73,7 +73,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             num_outputs=1,
             layer_norm=False,
             device=device,
-            arch="mlp",
             hidden_size=[128],
         )
         NET_CONFIG = None

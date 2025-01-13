@@ -173,8 +173,6 @@ class Mutations:
     :type max_batch_size: int, optional
     :param agents_id: List of agent ID's for multi-agent algorithms
     :type agents_id: list[str]
-    :param arch: Network architecture type. 'mlp' or 'cnn', defaults to 'mlp'
-    :type arch: str, optional
     :param mutate_elite: Mutate elite member of population, defaults to True
     :type mutate_elite: bool, optional
     :param rand_seed: Random seed for repeatability, defaults to None
@@ -204,7 +202,6 @@ class Mutations:
         min_batch_size: int = 8,
         max_batch_size: int = 1024,
         agent_ids: Optional[List[str]] = None,
-        arch: str = "mlp",
         mutate_elite: bool = True,
         rand_seed: Optional[int] = None,
         device: str = "cpu",
@@ -306,6 +303,7 @@ class Mutations:
         # Relative probabilities of mutation
         self.no_mut = no_mutation  # No mutation
         self.architecture_mut = architecture  # Architecture mutation
+
         # New layer mutation (type of architecture mutation)
         self.new_layer_prob = new_layer_prob
         self.parameters_mut = parameters  # Network parameters mutation

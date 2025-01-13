@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from agilerl.typing import KernelSizeType, ArrayOrTensor
-from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.utils.evolvable_networks import (
     get_activation,
     calc_max_kernel_sizes,
@@ -448,7 +448,7 @@ class EvolvableCNN(EvolvableModule):
 
         return self.model(x)
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
         """Adds a hidden layer to convolutional neural network."""
         max_kernels = self.kernel_size.calc_max_kernel_sizes(
@@ -468,7 +468,7 @@ class EvolvableCNN(EvolvableModule):
         else:
             self.add_channel()
 
-    @register_mutation_fn(MutationType.LAYER, shrink_params=True)
+    @mutation(MutationType.LAYER, shrink_params=True)
     def remove_layer(self) -> None:
         """Removes a hidden layer from convolutional neural network."""
         if len(self.channel_size) > self.min_hidden_layers:
@@ -478,7 +478,7 @@ class EvolvableCNN(EvolvableModule):
         else:
             self.add_channel()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def change_kernel(self) -> None:
         """Randomly alters convolution kernel of random CNN layer."""
         if len(self.channel_size) > 1:
@@ -489,7 +489,7 @@ class EvolvableCNN(EvolvableModule):
         else:
             self.add_layer()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_channel(
             self,
             hidden_layer: Optional[int] = None,
@@ -516,11 +516,10 @@ class EvolvableCNN(EvolvableModule):
         # HARD LIMIT
         if self.channel_size[hidden_layer] + numb_new_channels <= self.max_channel_size:
             self.channel_size[hidden_layer] += numb_new_channels
-            self.recreate_network()
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 
-    @register_mutation_fn(MutationType.NODE, shrink_params=True)
+    @mutation(MutationType.NODE, shrink_params=True)
     def remove_channel(
             self,
             hidden_layer: Optional[int] = None,
@@ -546,7 +545,6 @@ class EvolvableCNN(EvolvableModule):
         # HARD LIMIT
         if self.channel_size[hidden_layer] - numb_new_channels > self.min_channel_size:
             self.channel_size[hidden_layer] -= numb_new_channels
-            self.recreate_network(shrink_params=True)
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
 

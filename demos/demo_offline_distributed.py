@@ -32,10 +32,9 @@ if __name__ == "__main__":
         print("===== AgileRL Offline Distributed Demo =====")
     accelerator.wait_for_everyone()
 
-    NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
+    NET_CONFIG = {"encoder_config": {
         "hidden_size": [32, 32],  # Actor hidden size
-    }
+    }}
 
     INIT_HP = {
         "DOUBLE": True,  # Use double Q-learning

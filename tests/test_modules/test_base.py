@@ -1,11 +1,11 @@
 import pytest
 from unittest.mock import MagicMock
-from agilerl.modules.base import EvolvableModule, is_evolvable, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, is_evolvable, mutation
 from agilerl.protocols import MutationType
 from torch import nn
 
 def test_register_mutation_fn():
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def dummy_mutation(self):
         return {"mutation": "dummy"}
 
@@ -25,7 +25,7 @@ def test_evolvable_module_initialization():
 
 def test_evolvable_module_get_mutation_methods():
     class DummyEvolvableModule(EvolvableModule):
-        @register_mutation_fn(MutationType.NODE)
+        @mutation(MutationType.NODE)
         def dummy_mutation(self):
             return {"mutation": "dummy"}
 
@@ -55,7 +55,7 @@ def test_evolvable_module_clone():
 
 def test_evolvable_module_make_unevolvable():
     class DummyEvolvableModule(EvolvableModule):
-        @register_mutation_fn(MutationType.NODE)
+        @mutation(MutationType.NODE)
         def dummy_mutation(self):
             return {"mutation": "dummy"}
 
@@ -73,7 +73,7 @@ def test_evolvable_module_make_unevolvable():
 
 def test_evolvable_module_sample_mutation_method():
     class DummyEvolvableModule(EvolvableModule):
-        @register_mutation_fn(MutationType.NODE)
+        @mutation(MutationType.NODE)
         def dummy_mutation(self):
             return {"mutation": "dummy"}
 
@@ -90,7 +90,7 @@ def test_evolvable_module_sample_mutation_method():
 
 def test_inherited_evolvable_module_mutation_methods():
     class BaseEvolvableModule(EvolvableModule):
-        @register_mutation_fn(MutationType.NODE)
+        @mutation(MutationType.NODE)
         def base_mutation(self):
             return {"mutation": "base"}
 
@@ -101,7 +101,7 @@ def test_inherited_evolvable_module_mutation_methods():
             pass
 
     class InheritedEvolvableModule(BaseEvolvableModule):
-        @register_mutation_fn(MutationType.LAYER)
+        @mutation(MutationType.LAYER)
         def inherited_mutation(self):
             return {"mutation": "inherited"}
 
@@ -120,7 +120,7 @@ def test_inherited_evolvable_module_mutation_methods():
 
 def test_evolvable_module_with_evolvable_attributes():
     class AttributeEvolvableModule(EvolvableModule):
-        @register_mutation_fn(MutationType.NODE)
+        @mutation(MutationType.NODE)
         def attribute_mutation(self):
             return {"mutation": "attribute"}
 

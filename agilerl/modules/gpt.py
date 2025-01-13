@@ -10,7 +10,7 @@ from accelerate import Accelerator
 
 from agilerl.typing import DeviceType
 from agilerl.modules.custom_components import NewGELU
-from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.mlp import EvolvableMLP
 
 class EvolvableGPT(EvolvableModule):
@@ -598,7 +598,7 @@ class EvolvableGPT(EvolvableModule):
         }
         return init_dict
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_layer(self):
         """Adds a block layer to transformer."""
         if self.n_layer < self.max_layers:
@@ -606,7 +606,7 @@ class EvolvableGPT(EvolvableModule):
         # else:
         #     self.add_node()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def remove_layer(self):
         """Removes a block layer from transformer."""
         if self.n_layer > self.min_layers:
@@ -614,7 +614,7 @@ class EvolvableGPT(EvolvableModule):
         # else:
         #     self.add_node()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_node(self, numb_new_nodes=None):
         """Adds nodes to hidden layers of transformer.
 
@@ -627,7 +627,7 @@ class EvolvableGPT(EvolvableModule):
 
         return {"numb_new_nodes": numb_new_nodes}
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def remove_node(self, numb_new_nodes=None):
         """Removes nodes from hidden layers of transformer.
 

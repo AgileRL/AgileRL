@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Callable, Optional, TypeVar, Iterable, Tuple
+from typing import Any, Dict, List, Callable, Optional, TypeVar, Type, Iterable, Tuple
 import copy
 import inspect
 from functools import wraps
@@ -29,7 +29,7 @@ def is_evolvable(attr: str, obj: Any) -> bool:
         and not attr.startswith("_") and not attr.endswith("_")
     )
 
-def register_mutation_fn(mutation_type: MutationType, **recreate_kwargs) -> Callable[[Callable], MutationMethod]:
+def mutation(mutation_type: MutationType, **recreate_kwargs) -> Callable[[Callable], MutationMethod]:
     """Decorator to register a method as a mutation function of a specific type.
     
     :param mutation_type: The type of mutation function.
@@ -44,54 +44,101 @@ def register_mutation_fn(mutation_type: MutationType, **recreate_kwargs) -> Call
 
         # Explicitly set the mutation type attribute on the wrapper function
         wrapper._mutation_type = mutation_type
+
+        # Each mutation method might want to call different arguments when recreating the network
         wrapper._recreate_kwargs = recreate_kwargs
         return wrapper
     
     return decorator
 
-def _recreation_hook(
-        mod: SelfEvolvableModule,
-        mut_method: MutationMethod
-        ) -> MutationMethod:
-    """Wrapper function to apply a mutation method and recreate the network afterwards.
 
-    :param mod: The evolvable module.
-    :type mod: SelfEvolvableModule
-    :param mut_method: The mutation method.
-    :type mut_method: MutationMethod
-    :param mut_attr: The mutation attribute.
-    :type mut_attr: str
-
-    :return: The wrapped mutation method.
-    :rtype: MutationMethod
+class MutationContext:
+    """Tracks nested mutation method calls. This allows us to automatically call a modules 
+    `recreate_network` method after the outermost mutation method has been called. It handles 
+    cases where we fall back on another mutation method when a limit has been reached e.g. in 
+    EvolvableMLP's `add_layer` method, after the maximum number of layers has been reached we 
+    instead call `add_node`. In cases like this, we want to avoid redundant recreations of the 
+    network.
+    
+    :param module: The evolvable module.
+    :type module: EvolvableModule
+    :param method: The mutation method.
+    :type method: MutationMethod
+    :param attribute: The mutation attribute.
+    :type attribute: str
     """
-    @wraps(mut_method)
+
+    def __init__(self, module: 'EvolvableModule', method: MutationMethod, attribute: str):
+        self.module = module
+        self.method = method
+        self.method_name = attribute
+    
+    def __enter__(self):
+        self.module._mutation_depth += 1
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.module._mutation_depth -= 1
+        
+        # Only recreate after outermost mutation within module where mutation was defined
+        if self.module._mutation_depth == 0:
+            if "." not in self.method_name:
+                # Inspect the keyword arguments of `recreate_network` and match with 
+                # the specified kwargs in the called mutation method
+                if self.method._recreate_kwargs:
+                    recreation_kwargs = inspect.signature(self.module.recreate_network).parameters
+                    rec_kwargs = {
+                        k: v for k, v in self.method._recreate_kwargs.items() if k in recreation_kwargs
+                        }
+                else:
+                    rec_kwargs = {}
+
+                self.module.recreate_network(**rec_kwargs)
+
+            # Set last mutation attributes and apply user-specified hook
+            self.module.last_mutation = self.method
+            self.module.last_mutation_attr = self.method_name
+
+            if self.module._mutation_hook is not None:
+                self.module._mutation_hook()
+
+def _mutation_wrapper(
+        module: 'EvolvableModule',
+        method: MutationMethod,
+        attribute: str
+        ) -> Callable:
+    """Wraps mutation methods to use context manager.
+    
+    :param module: The evolvable module.
+    :type module: EvolvableModule
+    :param method: The mutation method.
+    :type method: MutationMethod
+    :param attribute: The mutation attribute.
+    :type attribute: str
+    
+    :return: The wrapped mutation method.
+    :rtype: Callable
+    """
+    @wraps(method) 
     def wrapped(*args, **kwargs):
-        result = mut_method(*args, **kwargs)
-
-        # Inspect the keyword arguments of `recreate_network` and match with 
-        # the specified kwargs in the called mutation method
-        if mut_method._recreate_kwargs:
-            recreation_kwargs = inspect.signature(mod.recreate_network).parameters
-            rec_kwargs = {
-                k: v for k, v in mut_method._recreate_kwargs.items() if k in recreation_kwargs
-                }
-        else:
-            rec_kwargs = {}
-
-        mod.recreate_network(**rec_kwargs)
-        return result
+        with MutationContext(module, method, attribute):
+            return method(*args, **kwargs)
 
     return wrapped
 
 class _ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance 
     and its superclasses."""
+
     def __call__(cls, *args, **kwargs):
         instance: SelfEvolvableModule = super().__call__(*args, **kwargs)
 
         # Parse and log mutation methods from the instance
         instance._init_underlying_methods()
+
+        # Wrap mutation methods to use context manager
+        for name, method in instance.get_mutation_methods().items():
+            setattr(instance, name, _mutation_wrapper(instance, method, name))
 
         return instance
 
@@ -99,15 +146,21 @@ class ModuleMeta(_ModuleMeta, ABCMeta):
     pass
 
 class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
-    """Base class for evolvable neural networks."""
+    """Base class for evolvable neural networks.
+    
+    :param device: The device to run the network on.
+    :type device: str
+    """
 
     def __init__(self, device: str) -> None:
         nn.Module.__init__(self)
         self._init_surface_methods()
         self.device = device
+
         self._last_mutation = None
         self._last_mutation_attr = None
         self._mutation_hook = None
+        self._mutation_depth = 0
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -171,25 +224,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         raise NotImplementedError(
             "change_activation method must be implemented in order to set the activation function."
             )
-    
-    def __getattribute__(self, name: str) -> Any:
-        """Get attribute of the network. This handles the case where a mutation method is trying to be 
-        fetched from the top-most class of the network (i.e. not an underlying module).
-
-        :param name: The name of the attribute.
-        :type name: str
-        :return: The attribute of the network.
-        :rtype: Any
-        """
-        attr = super().__getattribute__(name)
-
-        if not callable(attr):
-            return attr
-
-        return (
-            _recreation_hook(self, attr) 
-            if isinstance(attr, MutationMethod) else attr
-        )
 
     def __getattr__(self, name: str) -> Any:
         """Get attribute of the network. If the attribute is a mutation method, return the
@@ -201,33 +235,13 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         :return: The attribute of the network.
         :rtype: Any
         """
-        def _mutation_hook(mut_method: MutationMethod) -> MutationMethod:
-            @wraps(mut_method)
-            def wrapped(*args, **kwargs):
-                result = mut_method(*args, **kwargs)
-                self.last_mutation = mut_method
-                self.last_mutation_attr = name
-
-                # If user specified a mutation hook, call it
-                if self._mutation_hook is not None:
-                    self._mutation_hook()
-
-                return result
-            
-            return wrapped
-
         try:
             attr = super().__getattr__(name)
-            return (
-                _recreation_hook(self, attr) 
-                if isinstance(attr, MutationMethod) else attr
-                )
-            
+            return attr
         except AttributeError as e:
             mut_method = self.get_mutation_methods().get(name)
             if mut_method is not None:
-                return _mutation_hook(mut_method)
-
+                return mut_method
             raise e
 
     def get_output_dense(self) -> Optional[nn.Module]:

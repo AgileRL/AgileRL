@@ -8,7 +8,7 @@ INIT_HP:
     CHANNELS_LAST: false
     NUM_ENVS: 16               # No. parallel environments for training
     BATCH_SIZE: 64             # Batch size
-    CUDAGRAPHS: false           # Cudagraph optimizations
+    CUDAGRAPHS: true           # Cudagraph optimizations
     LR: 0.001                  # Learning rate
     MAX_STEPS: 1_000_000       # Max no. steps
     TARGET_SCORE: 200.         # Early training stop at avg score of last 100 episodes

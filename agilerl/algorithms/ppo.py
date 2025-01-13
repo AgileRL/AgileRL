@@ -192,10 +192,6 @@ class PPO(RLAlgorithm):
         self.cudagraphs = cudagraphs
 
         if actor_network is not None and critic_network is not None:
-            assert type(actor_network) is type(
-                critic_network
-            ), "'actor_network' and 'critic_network' must be the same type."
-
             if not isinstance(actor_network, nn.Module) and not isinstance(critic_network, nn.Module):
                 raise TypeError(
                     f"Passed actor/critic networks are of type {type(actor_network)}, but must be of type nn.Module."

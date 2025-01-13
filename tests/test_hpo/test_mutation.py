@@ -143,7 +143,6 @@ def test_constructor_initializes_attributes():
     min_batch_size = 8
     max_batch_size = 1024
     agent_ids = None
-    arch = "mlp"
     mutate_elite = True
     rand_seed = 12345
     device = "cpu"
@@ -167,7 +166,6 @@ def test_constructor_initializes_attributes():
         min_batch_size,
         max_batch_size,
         agent_ids,
-        arch,
         mutate_elite,
         rand_seed,
         device,
@@ -1820,7 +1818,6 @@ def test_mutation_applies_cnn_activation_mutations(
         0,
         ["batch_size", "lr", "learn_step"],
         0.1,
-        arch="cnn",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -2366,7 +2363,6 @@ def test_mutation_applies_cnn_parameter_mutations(
         0,
         ["batch_size", "lr", "learn_step"],
         0.5,
-        arch="cnn",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -2890,7 +2886,6 @@ def test_mutation_applies_cnn_architecture_mutations(
         0,
         ["batch_size", "lr", "learn_step"],
         0.5,
-        arch="cnn",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -2985,7 +2980,6 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         0,
         ["batch_size", "lr", "learn_step"],
         0.5,
-        arch="bert",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -3578,7 +3572,6 @@ def test_mutation_applies_cnn_activation_mutations_multi_agent(
         ["batch_size", "lr", "learn_step"],
         0.1,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        arch="cnn",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -3766,7 +3759,6 @@ def test_mutation_applies_cnn_parameter_mutations_multi_agent(
         ["batch_size", "lr", "learn_step"],
         0.5,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        arch="cnn",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -3950,7 +3942,6 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         ["batch_size", "lr", "learn_step"],
         0.5,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        arch="cnn",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )
@@ -4098,7 +4089,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         0,
         ["batch_size", "lr", "learn_step"],
         0.5,
-        arch="bert",
         device=device if not distributed else None,
         accelerator=accelerator if distributed else None,
     )

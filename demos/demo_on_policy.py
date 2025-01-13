@@ -22,10 +22,9 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
+    NET_CONFIG = {"encoder_config": {
         "hidden_size": [32, 32],  # Actor hidden size
-    }
+    }}
 
     INIT_HP = {
         "POP_SIZE": 6,  # Population size

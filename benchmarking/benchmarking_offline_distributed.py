@@ -139,9 +139,8 @@ if __name__ == "__main__":
         "RAND_SEED": 1,  # Random seed
     }
 
-    NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
+    NET_CONFIG = {"encoder_config": {
         "hidden_size": [32, 32],  # Actor hidden size
-    }
+    }}
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

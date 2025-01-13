@@ -103,7 +103,6 @@ if __name__ == "__main__":
         rl_hp=0.2,  # Learning HP mutation
         rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength
-        arch="mlp",  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
     )

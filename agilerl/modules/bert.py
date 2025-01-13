@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from agilerl.modules.base import EvolvableModule, MutationType, register_mutation_fn
+from agilerl.modules.base import EvolvableModule, MutationType, mutation
 
 class EvolvableBERT(EvolvableModule):
     """The Evolvable BERT class.
@@ -421,67 +421,45 @@ class EvolvableBERT(EvolvableModule):
         :type src_key_padding_mask_for_layers: torch.Tensor
         """
         convert_to_nested = False
-        if isinstance(first_layer, torch.nn.TransformerEncoderLayer):
-            if first_layer.norm_first:
-                if first_layer.training:
-                    if first_layer.self_attn.batch_first:
-                        if first_layer.self_attn._qkv_same_embed_dim:
-                            if first_layer.norm1.eps == first_layer.norm2.eps:
-                                if src.dim() == 3:
-                                    if src_key_padding_mask is not None:
-                                        if torch._nested_tensor_from_mask_left_aligned(
-                                            src, src_key_padding_mask.logical_not()
-                                        ):
-                                            if not output.is_nested:
-                                                if mask is None:
-                                                    if (
-                                                        first_layer.self_attn.num_heads
-                                                        % 2
-                                                        != 1
-                                                    ):
-                                                        if (
-                                                            not torch.is_autocast_enabled()
-                                                        ):
-                                                            tensor_args = (
-                                                                src,
-                                                                first_layer.self_attn.in_proj_weight,
-                                                                first_layer.self_attn.in_proj_bias,
-                                                                first_layer.self_attn.out_proj.weight,
-                                                                first_layer.self_attn.out_proj.bias,
-                                                                first_layer.norm1.weight,
-                                                                first_layer.norm1.bias,
-                                                                first_layer.norm2.weight,
-                                                                first_layer.norm2.bias,
-                                                                first_layer.linear1.weight,
-                                                                first_layer.linear1.bias,
-                                                                first_layer.linear2.weight,
-                                                                first_layer.linear2.bias,
-                                                            )
+        if (
+            isinstance(first_layer, torch.nn.TransformerEncoderLayer)
+            and first_layer.norm_first
+            and first_layer.training
+            and first_layer.self_attn.batch_first
+            and first_layer.self_attn._qkv_same_embed_dim
+            and first_layer.norm1.eps == first_layer.norm2.eps
+            and src.dim() == 3
+            and src_key_padding_mask is not None
+            and torch._nested_tensor_from_mask_left_aligned(src, src_key_padding_mask.logical_not())
+            and not output.is_nested
+            and mask is None
+            and first_layer.self_attn.num_heads % 2 != 1
+            and not torch.is_autocast_enabled()
+        ):
+            tensor_args = (
+            src,
+            first_layer.self_attn.in_proj_weight,
+            first_layer.self_attn.in_proj_bias,
+            first_layer.self_attn.out_proj.weight,
+            first_layer.self_attn.out_proj.bias,
+            first_layer.norm1.weight,
+            first_layer.norm1.bias,
+            first_layer.norm2.weight,
+            first_layer.norm2.bias,
+            first_layer.linear1.weight,
+            first_layer.linear1.bias,
+            first_layer.linear2.weight,
+            first_layer.linear2.bias,
+            )
 
-                                                            if (
-                                                                src.is_cuda
-                                                                or "cpu"
-                                                                in str(src.device)
-                                                            ):
-                                                                if torch.is_grad_enabled() and any(
-                                                                    x.requires_grad
-                                                                    for x in tensor_args
-                                                                ):
-                                                                    if (
-                                                                        src_key_padding_mask
-                                                                        is not None
-                                                                    ):
-                                                                        convert_to_nested = (
-                                                                            True
-                                                                        )
-                                                                        output = torch._nested_tensor_from_mask(
-                                                                            output,
-                                                                            src_key_padding_mask.logical_not(),
-                                                                            mask_check=False,
-                                                                        )
-                                                                        src_key_padding_mask_for_layers = (
-                                                                            None
-                                                                        )
+            if (src.is_cuda or "cpu" in str(src.device)) and torch.is_grad_enabled() and any(
+            x.requires_grad for x in tensor_args
+            ):
+                convert_to_nested = True
+                output = torch._nested_tensor_from_mask(
+                    output, src_key_padding_mask.logical_not(), mask_check=False
+                )
+                src_key_padding_mask_for_layers = None
 
         return output, convert_to_nested, src_key_padding_mask_for_layers
 
@@ -521,7 +499,7 @@ class EvolvableBERT(EvolvableModule):
         }
         return init_dict
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_encoder_layer(self):
         """Adds an encoder layer to transformer."""
         if len(self.encoder_layers) < self.max_encoder_layers:
@@ -529,7 +507,7 @@ class EvolvableBERT(EvolvableModule):
         # else:
         #     self.add_node()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def add_decoder_layer(self):
         """Adds a decoder layer to transformer."""
         if len(self.decoder_layers) < self.max_decoder_layers:
@@ -537,7 +515,7 @@ class EvolvableBERT(EvolvableModule):
         # else:
         #     self.add_node()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def remove_encoder_layer(self):
         """Removes an encoder layer from transformer."""
         if len(self.encoder_layers) > 1:
@@ -545,7 +523,7 @@ class EvolvableBERT(EvolvableModule):
         # else:
         #     self.add_node()
 
-    @register_mutation_fn(MutationType.LAYER)
+    @mutation(MutationType.LAYER)
     def remove_decoder_layer(self):
         """Removes a decoder layer from transformer."""
         if len(self.decoder_layers) > 1:
@@ -553,7 +531,7 @@ class EvolvableBERT(EvolvableModule):
         # else:
         #     self.add_node()
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def add_node(self, network=None, hidden_layer=None, numb_new_nodes=None):
         """Adds nodes to hidden layer of encoder/decoder.
 
@@ -589,7 +567,7 @@ class EvolvableBERT(EvolvableModule):
             "network": network,
         }
 
-    @register_mutation_fn(MutationType.NODE)
+    @mutation(MutationType.NODE)
     def remove_node(self, network=None, hidden_layer=None, numb_new_nodes=None):
         """Removes nodes from hidden layer of encoder/decoder.
 

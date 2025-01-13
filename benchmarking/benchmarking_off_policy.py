@@ -23,6 +23,7 @@ from agilerl.utils.utils import (
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
