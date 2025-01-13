@@ -230,7 +230,7 @@ class DQN(RLAlgorithm):
         masked_policy_actions = torch.argmax(masked_q_values, dim=-1)
 
         # actions_random = torch.randint_like(actions, n_act)
-        use_policy = torch.rand(masked_policy_actions.shape, device=q_values.device).gt(epsilon)
+        use_policy = torch.empty(masked_policy_actions.shape, device=q_values.device).uniform_().gt(epsilon)
 
         # Recompute actions with masking
         actions = torch.where(use_policy, masked_policy_actions, masked_random_actions)

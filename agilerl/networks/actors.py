@@ -2,12 +2,11 @@ from typing import Optional, Dict, Any
 import numpy as np
 import torch
 from gymnasium import spaces
-from torch.distributions import Distribution, Categorical, Normal, Bernoulli, MultivariateNormal
+from torch.distributions import Distribution, Categorical, Normal, Bernoulli
 
 from agilerl.typing import TorchObsType, ConfigType, DeviceType, ArrayOrTensor
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.base import EvolvableNetwork, SupportedEvolvable
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule, EvolvableWrapper
 
 class EvolvableDistribution(EvolvableWrapper):

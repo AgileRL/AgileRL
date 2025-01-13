@@ -397,7 +397,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         self._mutation_methods = (
             self._layer_mutation_methods + self._node_mutation_methods
         )
-    
+
     def _init_underlying_methods(self) -> None:
         # After module has been initialized, we can identify 
         # any additional methods of underlying EvolvableModule attributes

@@ -7,7 +7,6 @@ from gymnasium import spaces
 from agilerl.typing import TorchObsType, ConfigType
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.base import EvolvableModule
 
 DiscreteSpace = Union[spaces.Discrete, spaces.MultiDiscrete]
