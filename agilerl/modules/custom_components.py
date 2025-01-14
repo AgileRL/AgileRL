@@ -69,6 +69,9 @@ class NoisyLinear(nn.Module):
 
         self.reset_parameters()
         self.reset_noise()
+    
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(in_features={self.in_features}, out_features={self.out_features})"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Returns output of neural network.

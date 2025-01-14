@@ -67,7 +67,7 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         if isinstance(self.action_space, spaces.Box):
             assert log_std is not None, "log_std must be provided for continuous action spaces."
-            std = torch.ones_like(logits) * torch.exp(log_std)
+            std = torch.ones_like(logits) * log_std.exp()
             return Normal(loc=logits, scale=std)
 
         elif isinstance(self.action_space, spaces.Discrete):
@@ -155,7 +155,7 @@ class DeterministicActor(EvolvableNetwork):
             latent_dim: int = 32,
             device: str = "cpu"
             ):
-        
+
         super().__init__(
             observation_space, 
             encoder_config=encoder_config,
@@ -166,7 +166,7 @@ class DeterministicActor(EvolvableNetwork):
             latent_dim=latent_dim,
             device=device
             )
-        
+
         self.min_action = action_space.low if isinstance(action_space, spaces.Box) else None
         self.max_action = action_space.high if isinstance(action_space, spaces.Box) else None
 
@@ -296,6 +296,7 @@ class StochasticActor(DeterministicActor):
             device=device
             )
         
+        self.log_std_init = log_std_init
         self.head_net = EvolvableDistribution(
             action_space, self.head_net, log_std_init=log_std_init, device=device
             )
@@ -347,12 +348,20 @@ class StochasticActor(DeterministicActor):
         :param shrink_params: Whether to shrink the parameters of the network. Defaults to False.
         :type shrink_params: bool
         """
-        super().recreate_network()
+        encoder = self._build_encoder(self.encoder.net_config)
+        head_net = self.create_mlp(
+            num_inputs=self.latent_dim,
+            num_outputs=spaces.flatdim(self.action_space),
+            name="actor",
+            net_config=self.head_net.net_config
+        )
 
-        self.head_net = EvolvableDistribution(
-            self.action_space, self.head_net, device=self.device
+        head_net = EvolvableDistribution(
+            self.action_space, head_net, log_std_init=self.log_std_init, device=self.device
             )
-
         
+        self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+        self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
+
 
 

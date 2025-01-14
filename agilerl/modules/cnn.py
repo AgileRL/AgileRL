@@ -489,7 +489,7 @@ class EvolvableCNN(EvolvableModule):
                 np.random.randint(1, self.stride_size[-1] + 1)
             ]
         else:
-            self.add_channel()
+            return self.add_channel()
 
     @mutation(MutationType.LAYER, shrink_params=True)
     def remove_layer(self) -> None:
@@ -499,7 +499,7 @@ class EvolvableCNN(EvolvableModule):
             self.kernel_size.remove_layer()
             self.stride_size = self.stride_size[:-1]
         else:
-            self.add_channel()
+            return self.add_channel()
 
     @mutation(MutationType.NODE)
     def change_kernel(
@@ -525,7 +525,7 @@ class EvolvableCNN(EvolvableModule):
                 hidden_layer, self.channel_size, self.stride_size, self.input_shape, kernel_size
                 )
         else:
-            self.add_layer()
+            return self.add_layer()
 
         return {"hidden_layer": hidden_layer, "kernel_size": new_kernel_size}
 

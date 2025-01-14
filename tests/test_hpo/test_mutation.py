@@ -93,6 +93,37 @@ SHARED_INIT_HP_MA = {
     "DT": 0.01,
 }
 
+def check_equal_params_ind(before_ind, mutated_ind):
+    before_dict = dict(before_ind.named_parameters())
+    after_dict = mutated_ind.named_parameters()
+    for key, param in after_dict:
+        if key in before_dict:
+            old_param = before_dict[key]
+            old_size = old_param.data.size()
+            new_size = param.data.size()
+            if old_size == new_size:
+                # If the sizes are the same, just copy the parameter
+                param.data = old_param.data
+            elif "norm" not in key:
+                # Create a slicing index to handle tensors with varying sizes
+                slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size[:2], new_size[:2]))
+                assert (
+                    torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index]))), \
+                    f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+
+def assert_equal_state_dict(before_pop, mutated_pop):
+    not_eq = []
+    for before_ind, mutated in zip(before_pop, mutated_pop):
+        before_modules = before_ind.evolvable_attributes(networks_only=True).values()
+        mutated_modules = mutated.evolvable_attributes(networks_only=True).values()
+        for before_mod, mutated_mod in zip(before_modules, mutated_modules):
+            if isinstance(before_mod, list):
+                for before, mutated in zip(before_mod, mutated_mod):
+                    check_equal_params_ind(before, mutated)
+            else:
+                check_equal_params_ind(before_mod, mutated_mod)
+    
+    assert not not_eq, f"Parameters not equal: {not_eq}"
 
 @pytest.fixture
 def init_pop(
@@ -2591,6 +2622,8 @@ def test_mutation_applies_architecture_mutations(
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
             assert old.index == individual.index
+        
+        assert_equal_state_dict(population, mutated_population)
 
 
 # The mutation method applies CNN architecture mutations to the population and returns the mutated population.
@@ -2899,6 +2932,8 @@ def test_mutation_applies_cnn_architecture_mutations(
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index
+    
+    assert_equal_state_dict(population, mutated_population)
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
@@ -2993,9 +3028,9 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     for individual in population:
 
 
-        individual.actor = EvolvableBERT([12], [12])
+        individual.actor = EvolvableBERT([12], [12], device=device)
         individual.actor_target = copy.deepcopy(individual.actor)
-        individual.critic = EvolvableBERT([12], [12])
+        individual.critic = EvolvableBERT([12], [12], device=device)
         individual.critic_target = copy.deepcopy(individual.critic)
 
         individual.actor_optimizer = OptimizerWrapper(
@@ -3023,6 +3058,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index
+    
+    # assert_equal_state_dict(population, mutated_population)
 
 
 #### Multi-agent algorithm mutations ####
@@ -3856,6 +3893,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             # Due to randomness and constraints on size, sometimes architectures are not different
             # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
             assert old.index == individual.index
+        
+        assert_equal_state_dict(population, mutated_population)
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
@@ -3955,6 +3994,8 @@ def test_mutation_applies_cnn_architecture_mutations_multi_agent(
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
         assert old.index == individual.index
+    
+    assert_equal_state_dict(population, mutated_population)
 
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
@@ -4142,10 +4183,10 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         if algo == "MADDPG":
             print(adam_critics)
 
-        individual.actors = [EvolvableBERT([12], [12])]
+        individual.actors = [EvolvableBERT([12], [12], device=device)]
         individual.actor_targets = copy.deepcopy(individual.actors)
         if algo == "MADDPG":
-            individual.critics = [EvolvableBERT([12], [12])]
+            individual.critics = [EvolvableBERT([12], [12], device=device)]
             individual.critic_targets = copy.deepcopy(individual.critics)
 
 
@@ -4165,9 +4206,9 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
             )
 
         else:
-            individual.critics_1 = [EvolvableBERT([12], [12])]
+            individual.critics_1 = [EvolvableBERT([12], [12], device=device)]
             individual.critic_targets_1 = copy.deepcopy(individual.critics_1)
-            individual.critics_2 = [EvolvableBERT([12], [12])]
+            individual.critics_2 = [EvolvableBERT([12], [12], device=device)]
             individual.critic_targets_2 = copy.deepcopy(individual.critics_2)
             individual.actor_optimizers = OptimizerWrapper(
                 torch.optim.Adam,
@@ -4203,6 +4244,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         # Due to randomness and constraints on size, sometimes architectures are not different
         # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
         assert old.index == individual.index
+    
+    # assert_equal_state_dict(population, mutated_population)
 
 
 @pytest.mark.parametrize(

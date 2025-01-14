@@ -99,8 +99,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
 
-    print(agent_pop[0].actor)
-
     trained_pop, pop_fitnesses = train_on_policy(
         env,
         INIT_HP["ENV_NAME"],
@@ -133,4 +131,4 @@ if __name__ == "__main__":
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
     NET_CONFIG = ppo_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

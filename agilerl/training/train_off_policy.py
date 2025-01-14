@@ -288,6 +288,7 @@ def train_off_policy(
                         agent.scores.append(scores[idx])
                         scores[idx] = 0
                         reset_noise_indices.append(idx)
+
                 if agent.algo in ["DDPG", "TD3"]:
                     agent.reset_action_noise(reset_noise_indices)
 

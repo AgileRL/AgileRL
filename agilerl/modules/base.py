@@ -75,33 +75,52 @@ class MutationContext:
     
     def __enter__(self):
         self.module._mutation_depth += 1
-        print("Entering mutation context, setting last mutation {}".format(self.method_name))
         self.module.last_mutation = self.method
         self.module.last_mutation_attr = self.method_name
         return self
 
-    # TODO: Keep track of method that was finally applied and set as `last_mutation_attr`
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.module._mutation_depth -= 1
         
-        # Only recreate after outermost mutation within module where mutation was defined
         if self.module._mutation_depth == 0:
-            if "." not in self.method_name:
-                # Inspect the keyword arguments of `recreate_network` and match with 
-                # the specified kwargs in the called mutation method
-                if self.method._recreate_kwargs:
-                    recreation_kwargs = inspect.signature(self.module.recreate_network).parameters
-                    rec_kwargs = {
-                        k: v for k, v in self.method._recreate_kwargs.items() if k in recreation_kwargs
+            # Check recursively for nested mutations to update last_mutation_attr
+            final_mutation_attr = self._resolve_final_mutation_attr()
+            self.module.last_mutation_attr = final_mutation_attr
+
+            if final_mutation_attr is not None:
+                self.module.last_mutation = getattr(self.module, final_mutation_attr)
+            
+                if "." not in final_mutation_attr and not isinstance(self.module, EvolvableWrapper):
+                    if self.method._recreate_kwargs:
+                        recreation_kwargs = inspect.signature(self.module.recreate_network).parameters
+                        rec_kwargs = {
+                            k: v for k, v in self.method._recreate_kwargs.items() if k in recreation_kwargs
                         }
-                else:
-                    rec_kwargs = {}
+                    else:
+                        rec_kwargs = {}
 
-                self.module.recreate_network(**rec_kwargs)
+                    self.module.recreate_network(**rec_kwargs)
 
-            # Apply user-specified hook after mutation (if specified)
             if self.module._mutation_hook is not None:
                 self.module._mutation_hook()
+
+    def _resolve_final_mutation_attr(self) -> str:
+        """Recursively resolve the final mutation attribute."""
+        if self.module.last_mutation_attr is not None and "." in self.module.last_mutation_attr:
+            parts = self.module.last_mutation_attr.split(".")
+            mutated_module = self.module
+            for part in parts[:-1]:
+                mutated_module: SelfEvolvableModule = getattr(mutated_module, part)
+
+            if mutated_module.last_mutation_attr is None:
+                return 
+
+            return ".".join(parts[:-1] + [mutated_module.last_mutation_attr])
+
+        elif isinstance(self.module, EvolvableWrapper):
+            return self.module.wrapped.last_mutation_attr
+
+        return self.module.last_mutation_attr
 
 def _mutation_wrapper(
         module: 'EvolvableModule',
@@ -120,11 +139,17 @@ def _mutation_wrapper(
     :return: The wrapped mutation method.
     :rtype: Callable
     """
+
     @wraps(method) 
     def wrapped(*args, **kwargs):
         with MutationContext(module, method, attribute):
-            return method(*args, **kwargs)
+            if attribute not in module.mutation_methods:
+                module.last_mutation_attr = None
+                module.last_mutation = None
+                return
 
+            return method(*args, **kwargs)
+            
     return wrapped
 
 class _ModuleMeta(type):
@@ -199,13 +224,13 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     def last_mutation_attr(self, value: str) -> None:
         self._last_mutation_attr = value
 
-    @abstractmethod
     def recreate_network(self, **kwargs) -> None:
         """Recreate the network after a mutation has been applied."""
-        raise NotImplementedError(
-            "An EvolvableModule must implement the recreate_network method, which is called after " \
-            "a mutation has been applied."
-            )
+        if any("." not in method for method in self.mutation_methods):
+            raise NotImplementedError(
+                "An EvolvableModule must implement the recreate_network method whenever it includes " \
+                "unique mutation methods."
+                )
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError(
@@ -386,7 +411,12 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         self._mutation_hook = hook
     
     def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
-        """Make the network unevolvable."""
+        """Disable all or some mutation methods from the evolvable module. It recursively 
+        disables the mutation methods of underlying evolvable modules as well.
+        
+        :param mut_type: The type of mutation method to disable.
+        :type mut_type: Optional[MutationType]
+        """
         if mut_type is None:
             self._layer_mutation_methods = []
             self._node_mutation_methods = []
@@ -405,6 +435,10 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             self._node_mutation_methods = []
         else:
             raise ValueError(f"Invalid mutation type: {mut_type}")
+
+        # Recursively disable mutations in underlying evolvable modules
+        for module in self.modules().values():
+            module.disable_mutations(mut_type)
 
     def modules(self) -> Dict[str, "EvolvableModule"]:
         """Returns the attributes related to the evolvable modules in the algorithm. 
@@ -573,13 +607,6 @@ class EvolvableWrapper(EvolvableModule):
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
 
-    def recreate_network(self, **kwargs) -> None:
-        """Recreate the network after a mutation has been applied.
-        
-        :param shrink_params: Whether to shrink the network parameters.
-        :type shrink_params: bool
-        """
-        return self.wrapped.recreate_network(**kwargs)
 
 class ModuleDict(EvolvableModule, nn.ModuleDict):
     """Analogous to nn.ModuleDict, but allows for the recursive inheritance of the 
@@ -630,11 +657,3 @@ class ModuleDict(EvolvableModule, nn.ModuleDict):
             return getattr(self[key], method)
 
         return {name: get_method_from_name(name) for name in self.mutation_methods}
-    
-    def recreate_network(self, key: str, kwargs: Dict[str, Any]) -> None:
-        """Recreate the network after a mutation has been applied.
-        
-        :param kwargs: The keyword arguments for recreating the network.
-        :type kwargs: Dict[str, Dict[str, Any]]
-        """
-        self[key].recreate_network(**kwargs)

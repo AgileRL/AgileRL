@@ -292,13 +292,15 @@ class RainbowQNetwork(EvolvableNetwork):
     def _recreate_advantage_from_value(self) -> None:
         """Recreates the advantage network using the net_config of the value network 
         after a mutation on the value network."""
-        if self.last_mutation_attr.split(".")[0] == "head_net":
+        if self.last_mutation_attr is not None and self.last_mutation_attr.split(".")[0] == "head_net":
             advantage_net = self.create_mlp(
                 num_inputs=self.latent_dim,
                 num_outputs=self.num_actions * self.num_atoms,
                 name="advantage",
                 net_config=self.head_net.net_config
             )
+            advantage_net.disable_mutations()
+
             self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
 
     def recreate_network(self) -> None:
@@ -306,7 +308,7 @@ class RainbowQNetwork(EvolvableNetwork):
         encoder = self._build_encoder(self.encoder.net_config)
         head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=self.num_actions,
+            num_outputs=self.num_atoms,
             name="value",
             net_config=self.head_net.net_config
         )
@@ -317,6 +319,7 @@ class RainbowQNetwork(EvolvableNetwork):
             name="advantage",
             net_config=self.head_net.net_config
         )
+        advantage_net.disable_mutations()
 
         self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 

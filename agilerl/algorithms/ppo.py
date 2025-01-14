@@ -94,7 +94,7 @@ class PPO(RLAlgorithm):
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         mut: Optional[str] = None,
-        action_std_init: float = 0.6,
+        action_std_init: float = 0.0,
         clip_coef: float = 0.2,
         ent_coef: float = 0.01,
         vf_coef: float = 0.5,
@@ -327,10 +327,9 @@ class PPO(RLAlgorithm):
             with torch.no_grad():
                 action_dist = self.actor(state, action_mask=action_mask)
                 state_values = self.critic(state).squeeze(-1)
-            
+        else:
             self.actor.train()
             self.critic.train()
-        else:
             action_dist = self.actor(state, action_mask=action_mask)
             state_values = self.critic(state).squeeze(-1)
 
@@ -342,11 +341,6 @@ class PPO(RLAlgorithm):
             action = action.to(self.device)
 
         action_logprob = action_dist.log_prob(action)
-
-        # Sum log probs across action dimensions (assumed independent)
-        if not self.discrete_actions:
-            action_logprob = action_logprob.sum(dim=1)
-
         dist_entropy = action_dist.entropy()
 
         if return_tensors:

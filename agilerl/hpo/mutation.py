@@ -438,7 +438,7 @@ class Mutations:
 
         return compiled_modules if not single_offspring else compiled_modules[0]
 
-    def mutation(self, population: PopulationType, pre_training_mut: bool=False) -> PopulationType:
+    def mutation(self, population: PopulationType, pre_training_mut: bool = False) -> PopulationType:
         """Returns mutated population.
 
         :param population: Population of agents
@@ -446,8 +446,7 @@ class Mutations:
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
         """
-        # Create lists of possible mutation functions and their respective
-        # relative probabilities
+        # Create lists of possible mutation functions and their respective relative probabilities
         mutation_options = self.pretraining_mut_options if pre_training_mut else self.mut_options
         mutation_proba = self.pretraining_mut_proba if pre_training_mut else self.mut_proba
 
@@ -742,8 +741,6 @@ class Mutations:
         :param individual: Individual agent from population
         :type individual: object
         """
-        algo_cls = individual.__class__
-
         # Get the offspring evaluation modules
         # We first extract and apply a mutation for the algo policy and then apply 
         # the same mutation to the rest of the evaluation modules e.g. critics
@@ -755,12 +752,10 @@ class Mutations:
             policy_offspring, self.new_layer_prob, self.rng
             )
 
-        print(f"Mutating {policy_name} with method {mut_method}")
         applied_mutations, mut_dict = self._apply_arch_mutation(policy_offspring, mut_method)
-        print(applied_mutations)
         self.to_device_and_set_individual(individual, policy_name, policy_offspring)
 
-        if algo_cls in [NeuralTS, NeuralUCB]:
+        if isinstance(individual, (NeuralTS, NeuralUCB)):
             old_exp_layer = get_exp_layer(policy_offspring)
             self._reinit_bandit_grads(individual, policy_offspring, old_exp_layer)
 
@@ -770,7 +765,7 @@ class Mutations:
             self.to_device_and_set_individual(individual, name, offsprings)
 
             # Reinitialize bandit gradients after architecture mutation
-            if algo_cls in [NeuralTS, NeuralUCB]:
+            if isinstance(individual, (NeuralTS, NeuralUCB)):
                 old_exp_layer = get_exp_layer(offsprings)
                 self._reinit_bandit_grads(individual, offsprings, old_exp_layer)
 
@@ -781,7 +776,7 @@ class Mutations:
     def _apply_arch_mutation(
         self, 
         networks: OffspringType, 
-        mut_method: Union[str, List[str]], 
+        mut_method: Union[Optional[str], List[Optional[str]]], 
         applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
     ) -> Tuple[Union[str, List[str]], MutationReturnType]:
         """Applies the mutation method to networks and returns mutation data if needed.
@@ -803,17 +798,31 @@ class Mutations:
 
         mut_dict = None
         if isinstance(networks, list):
-            if isinstance(mut_method, str):
+            if isinstance(mut_method, str) or mut_method is None:
                 mut_method = [mut_method] * len(networks)
 
             mut_dict = []
             applied_muts = []
             for i, net in enumerate(networks):
+                _to_apply = mut_method[i]
+                if _to_apply is None:
+                    mut_dict.append({})
+                    applied_muts.append(None)
+                    net.last_mutation_attr = None
+                    net.last_mutation = None
+                    continue
+
                 mut_return = getattr(net, mut_method[i])(**applied_mut_dict[i])
                 mut_dict.append(mut_return if mut_return is not None else {})
                 applied_muts.append(net.last_mutation_attr)
         else:
-            mut_dict = getattr(networks, mut_method)(**applied_mut_dict)
+            if mut_method is None:
+                mut_dict = {}
+                networks.last_mutation_attr = None
+                networks.last_mutation = None
+            else:
+                mut_dict = getattr(networks, mut_method)(**applied_mut_dict)
+
             mut_dict = mut_dict if mut_dict is not None else {}
             applied_muts = networks.last_mutation_attr
     

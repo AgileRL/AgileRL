@@ -9,6 +9,29 @@ import torch.nn as nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 
+def check_equal_params_ind(before_ind, mutated_ind):
+    before_dict = dict(before_ind.named_parameters())
+    after_dict = mutated_ind.named_parameters()
+    _not_eq = []
+    for key, param in after_dict:
+        if key in before_dict:
+            old_param = before_dict[key]
+            old_size = old_param.data.size()
+            new_size = param.data.size()
+            if old_size == new_size:
+                # If the sizes are the same, just copy the parameter
+                param.data = old_param.data
+            elif "norm" not in key:
+                # Create a slicing index to handle tensors with varying sizes
+                slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size[:2], new_size[:2]))
+                # assert (
+                #     torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index]))), \
+                #     f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+                if not torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index])):
+                    _not_eq.append(key)
+    
+    print(_not_eq)
+
 class EvolvableBERT(EvolvableModule):
     """The Evolvable BERT class.
 
@@ -532,7 +555,12 @@ class EvolvableBERT(EvolvableModule):
         #     self.add_node()
 
     @mutation(MutationType.NODE)
-    def add_node(self, network=None, hidden_layer=None, numb_new_nodes=None):
+    def add_node(
+        self, 
+        network: Optional[str] = None, 
+        hidden_layer: Optional[int] = None, 
+        numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Adds nodes to hidden layer of encoder/decoder.
 
         :param network: Network to add node to, 'encoder' or 'decoder', defaults to None
@@ -541,11 +569,16 @@ class EvolvableBERT(EvolvableModule):
         :type hidden_layer: int, optional
         :param numb_new_nodes: Number of nodes to add to hidden layer, defaults to None
         :type numb_new_nodes: int, optional
+
+        :return: Dictionary containing hidden layer, number of new nodes and network
+        :rtype: Dict[str, Any]
         """
         if network is None:
             network = np.random.choice(["encoder", "decoder"], 1)[0]
+
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+
         if network == "encoder":
             if hidden_layer is None:
                 hidden_layer = np.random.randint(0, len(self.encoder_layers), 1)[0]
@@ -568,23 +601,34 @@ class EvolvableBERT(EvolvableModule):
         }
 
     @mutation(MutationType.NODE)
-    def remove_node(self, network=None, hidden_layer=None, numb_new_nodes=None):
+    def remove_node(
+        self, 
+        network: Optional[str] = None, 
+        hidden_layer: Optional[int] = None, 
+        numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Removes nodes from hidden layer of encoder/decoder.
 
         :param network: Network to remove node from, 'encoder' or 'decoder', defaults to None
-        :type network: str, optional
+        :type network: Optional[str], optional
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
-        :type hidden_layer: int, optional
+        :type hidden_layer: Optional[int], optional
         :param numb_new_nodes: Number of nodes to remove from hidden layer, defaults to None
-        :type numb_new_nodes: int, optional
+        :type numb_new_nodes: Optional[int], optional
+
+        :return: Dictionary containing hidden layer, number of removed nodes and network
+        :rtype: Dict[str, Any]
         """
         if network is None:
             network = np.random.choice(["encoder", "decoder"], 1)[0]
+
         if numb_new_nodes is None:
             numb_new_nodes = np.random.choice([16, 32, 64], 1)[0]
+
         if network == "encoder":
             if hidden_layer is None:
                 hidden_layer = np.random.randint(0, len(self.encoder_layers), 1)[0]
+
             else:
                 hidden_layer = min(hidden_layer, len(self.encoder_layers) - 1)
             if self.encoder_layers[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
@@ -594,8 +638,10 @@ class EvolvableBERT(EvolvableModule):
                 hidden_layer = np.random.randint(0, len(self.decoder_layers), 1)[0]
             else:
                 hidden_layer = min(hidden_layer, len(self.decoder_layers) - 1)
+
             if self.decoder_layers[hidden_layer] - numb_new_nodes > 64:  # HARD LIMIT
                 self.decoder_layers[hidden_layer] -= numb_new_nodes
+
         return {
             "hidden_layer": hidden_layer,
             "numb_new_nodes": numb_new_nodes,
@@ -609,11 +655,12 @@ class EvolvableBERT(EvolvableModule):
         new_encoder = EvolvableModule.preserve_parameters(
             old_net=self.encoder, new_net=new_encoder
             )
-        new_decoder = EvolvableModule.preserve_parameters(
+        self.decoder = EvolvableModule.preserve_parameters(
             old_net=self.decoder, new_net=new_decoder
             )
-
-        self.encoder, self.decoder = new_encoder, new_decoder
+        
+        self.encoder = new_encoder
+        self.decoder = new_decoder
 
 def _canonical_mask(
     mask: Optional[torch.Tensor], 
