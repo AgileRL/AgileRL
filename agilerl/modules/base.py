@@ -75,8 +75,12 @@ class MutationContext:
     
     def __enter__(self):
         self.module._mutation_depth += 1
+        print("Entering mutation context, setting last mutation {}".format(self.method_name))
+        self.module.last_mutation = self.method
+        self.module.last_mutation_attr = self.method_name
         return self
-        
+
+    # TODO: Keep track of method that was finally applied and set as `last_mutation_attr`
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.module._mutation_depth -= 1
         
@@ -95,10 +99,7 @@ class MutationContext:
 
                 self.module.recreate_network(**rec_kwargs)
 
-            # Set last mutation attributes and apply user-specified hook
-            self.module.last_mutation = self.method
-            self.module.last_mutation_attr = self.method_name
-
+            # Apply user-specified hook after mutation (if specified)
             if self.module._mutation_hook is not None:
                 self.module._mutation_hook()
 
@@ -317,51 +318,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         layers = [m for m in module.children()]
         for layer in layers:
             init_weights(layer)
-    
-    def register_mutation_hook(self, hook: Callable) -> None:
-        """Register a hook to be called after a mutation has been applied to an 
-        underlying evolvable module. The hook function should not take any arguments.
-        
-        :param hook: The hook function.
-        :type hook: Callable
-        """
-        self._mutation_hook = hook
-    
-    def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
-        """Make the network unevolvable."""
-        if mut_type is None:
-            self._layer_mutation_methods = []
-            self._node_mutation_methods = []
-            self._mutation_methods = []
-        elif mut_type == MutationType.LAYER:
-            self._mutation_methods = [
-                method for method in self._mutation_methods if method not in self._layer_mutation_methods
-                ]
-            self._layer_mutation_methods = []
-        elif mut_type == MutationType.NODE:
-            self._mutation_methods = [
-                method for method in self._mutation_methods if method not in self._node_mutation_methods
-                ]
-            self._node_mutation_methods = []
-        else:
-            raise ValueError(f"Invalid mutation type: {mut_type}")
-
-    def modules(self) -> Dict[str, "EvolvableModule"]:
-        """Returns the attributes related to the evolvable modules in the algorithm. Includes 
-        attributes that are either evolvable modules or a list of evolvable modules, as well 
-        as the optimizers associated with the networks.
-
-        :return: A dictionary of network attributes.
-        :rtype: dict[str, Any]
-        """
-        # Inspect evolvable
-        evolvable_attrs = {}
-        for attr in dir(self):
-            obj = getattr(self, attr)
-            if is_evolvable(attr, obj):
-                evolvable_attrs[attr] = obj
-
-        return evolvable_attrs
 
     def _init_surface_methods(self) -> None:
         # Check mutation methods in class
@@ -419,6 +375,53 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         self._mutation_methods += all_methods
         self._layer_mutation_methods += layer_fns
         self._node_mutation_methods += node_fns
+
+    def register_mutation_hook(self, hook: Callable) -> None:
+        """Register a hook to be called after a mutation has been applied to an 
+        underlying evolvable module. The hook function should not take any arguments.
+        
+        :param hook: The hook function.
+        :type hook: Callable
+        """
+        self._mutation_hook = hook
+    
+    def disable_mutations(self, mut_type: Optional[MutationType] = None) -> None:
+        """Make the network unevolvable."""
+        if mut_type is None:
+            self._layer_mutation_methods = []
+            self._node_mutation_methods = []
+            self._mutation_methods = []
+        elif mut_type == MutationType.LAYER:
+            self._mutation_methods = [
+                method for method in self._mutation_methods 
+                if method not in self._layer_mutation_methods
+                ]
+            self._layer_mutation_methods = []
+        elif mut_type == MutationType.NODE:
+            self._mutation_methods = [
+                method for method in self._mutation_methods 
+                if method not in self._node_mutation_methods
+                ]
+            self._node_mutation_methods = []
+        else:
+            raise ValueError(f"Invalid mutation type: {mut_type}")
+
+    def modules(self) -> Dict[str, "EvolvableModule"]:
+        """Returns the attributes related to the evolvable modules in the algorithm. 
+        Includes attributes that are either evolvable modules or a list of evolvable 
+        modules, as well as the optimizers associated with the networks.
+
+        :return: A dictionary of network attributes.
+        :rtype: dict[str, Any]
+        """
+        # Inspect evolvable
+        evolvable_attrs = {}
+        for attr in dir(self):
+            obj = getattr(self, attr)
+            if is_evolvable(attr, obj):
+                evolvable_attrs[attr] = obj
+
+        return evolvable_attrs
 
     def get_mutation_methods(self) -> Dict[str, MutationMethod]:
         """Get all mutation methods for the network.
@@ -496,8 +499,10 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         clone = self.__class__(**copy.deepcopy(self.init_dict))
 
         # Load state dict if the network has been trained
-        if self.state_dict():
+        try:
             clone.load_state_dict(self.state_dict())
+        except RuntimeError:
+            pass
 
         return clone
     

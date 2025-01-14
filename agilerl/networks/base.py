@@ -384,22 +384,22 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
 
         return encoder
     
-    def clone(self) -> SelfEvolvableNetwork:
-        """Clone the network.
+    # def clone(self) -> SelfEvolvableNetwork:
+    #     """Clone the network.
         
-        :return: Cloned network.
-        :rtype: SelfEvolvableNetwork
-        """
-        clone = self.__class__(**copy.deepcopy(self.init_dict))
+    #     :return: Cloned network.
+    #     :rtype: SelfEvolvableNetwork
+    #     """
+    #     clone = self.__class__(**copy.deepcopy(self.init_dict))
 
-        # Load state dicts of underlying evolvable modules
-        for attr, module in self.modules().items():
-            clone_module: EvolvableModule = getattr(clone, attr)
+    #     # Load state dicts of underlying evolvable modules
+    #     for attr, module in self.modules().items():
+    #         clone_module: EvolvableModule = getattr(clone, attr)
 
-            # NOTE: Sometimes e.g. target networks have empty state dicts (when detached)
-            if module.state_dict():
-                clone_module.load_state_dict(module.state_dict())
+    #         # NOTE: Sometimes e.g. target networks have empty state dicts (when detached)
+    #         if module.state_dict():
+    #             clone_module.load_state_dict(module.state_dict())
             
-        return clone
+    #     return clone
 
         

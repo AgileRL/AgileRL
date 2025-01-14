@@ -143,4 +143,4 @@ data/wordle.zip
 wandb/
 
 # Refactoring changes
-demo.ipynb
+# demo.ipynb

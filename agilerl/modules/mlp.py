@@ -220,7 +220,7 @@ class EvolvableMLP(EvolvableModule):
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
             self.hidden_size += [self.hidden_size[-1]]
         else:
-            self.add_node()
+            return self.add_node()
 
     @mutation(MutationType.LAYER)
     def remove_layer(self) -> None:
@@ -228,7 +228,7 @@ class EvolvableMLP(EvolvableModule):
         if len(self.hidden_size) > self.min_hidden_layers:  # HARD LIMIT
             self.hidden_size = self.hidden_size[:-1]
         else:
-            self.add_node()
+            return self.add_node()
 
     @mutation(MutationType.NODE)
     def add_node(

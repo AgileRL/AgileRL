@@ -120,17 +120,38 @@ class MutableKernelSizes:
             hidden_layer: int,
             channel_size: List[int],
             stride_size: List[int], 
-            input_shape: Tuple[int]
-            ) -> None:
+            input_shape: Tuple[int],
+            kernel_size: Optional[Union[int, Tuple[int, ...]]] = None
+            ) -> int:
         """Randomly alters convolution kernel of random CNN layer.
 
         :param hidden_layer: Depth of hidden layer to change kernel size of.
         :type hidden_layer: int
+        :param channel_size: Number of channels in each convolutional layer.
+        :type channel_size: List[int]
+        :param stride_size: Stride size of each convolutional layer.
+        :type stride_size: List[int]
+        :param input_shape: Input shape.
+        :type input_shape: Tuple[int]
+        :param kernel_size: Kernel size to change to, defaults to None
+        :type kernel_size: int, optional
+
+        :return: New kernel size
+        :rtype: int
         """
-        max_kernels = self.calc_max_kernel_sizes(
-            channel_size, stride_size, input_shape
-        )
-        new_kernel_size = np.random.randint(1, max_kernels[hidden_layer] + 1)
+        if kernel_size is not None:
+            if self.tuple_sizes:
+                assert isinstance(kernel_size, tuple), "Kernel size must be a tuple."
+            else:
+                assert isinstance(kernel_size, int), "Kernel size must be an integer."
+
+            new_kernel_size = kernel_size
+        else:
+            max_kernels = self.calc_max_kernel_sizes(
+                channel_size, stride_size, input_shape
+            )
+            new_kernel_size = np.random.randint(1, max_kernels[hidden_layer] + 1)
+
         if self.tuple_sizes:
             if self.cnn_block_type == "Conv2d":
                 self.sizes[hidden_layer] = (new_kernel_size, new_kernel_size)
@@ -138,7 +159,9 @@ class MutableKernelSizes:
                 depth = self.sizes[hidden_layer][0]
                 self.sizes[hidden_layer] = (depth, new_kernel_size, new_kernel_size)
         else:
-            self.sizes[hidden_layer] = np.random.randint(1, max_kernels[hidden_layer] + 1)
+            self.sizes[hidden_layer] = new_kernel_size
+        
+        return new_kernel_size
 
 class EvolvableCNN(EvolvableModule):
     """
@@ -479,15 +502,32 @@ class EvolvableCNN(EvolvableModule):
             self.add_channel()
 
     @mutation(MutationType.NODE)
-    def change_kernel(self) -> None:
-        """Randomly alters convolution kernel of random CNN layer."""
+    def change_kernel(
+        self,
+        kernel_size: Optional[int] = None,
+        hidden_layer: Optional[int] = None
+        ) -> Dict[str, Union[int, None]]:
+        """Randomly alters convolution kernel of random CNN layer.
+        
+        :param kernel_size: Kernel size to change to, defaults to None
+        :type kernel_size: int, optional
+        :param hidden_layer: Depth of hidden layer to change kernel size of, defaults to None
+        :type hidden_layer: int, optional
+        
+        :return: Dictionary containing the hidden layer and kernel size
+        :rtype: Dict[str, Union[int, None]]
+        """
         if len(self.channel_size) > 1:
-            hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
-            self.kernel_size.change_kernel_size(
-                hidden_layer, self.channel_size, self.stride_size, self.input_shape
+            if hidden_layer is None:
+                hidden_layer = np.random.randint(1, min(4, len(self.channel_size)), 1)[0]
+
+            new_kernel_size = self.kernel_size.change_kernel_size(
+                hidden_layer, self.channel_size, self.stride_size, self.input_shape, kernel_size
                 )
         else:
             self.add_layer()
+
+        return {"hidden_layer": hidden_layer, "kernel_size": new_kernel_size}
 
     @mutation(MutationType.NODE)
     def add_channel(

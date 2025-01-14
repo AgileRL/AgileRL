@@ -14,9 +14,6 @@ from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.modules.mlp import EvolvableMLP
-from agilerl.modules.cnn import EvolvableCNN
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import remove_compile_prefix
 
@@ -27,29 +24,8 @@ AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
 PopulationType = List[EvolvableAlgorithm]
 ModuleType = Union[OptimizedModule, EvolvableModule]
 OffspringType = Union[List[EvolvableModule], EvolvableModule]
+MutationReturnType = Union[Dict[str, Any], List[Dict[str, Any]]]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
-
-def get_return_type(method: Callable) -> Any:
-    """Get the return type of a method if annotated, otherwise return None.
-    
-    :param method: Method to inspect
-    :type method: Callable
-    :return: Return type of method
-    :rtype: Any
-    """
-    try:
-        signature = inspect.signature(method)
-        return_type = signature.return_annotation
-        if return_type is inspect.Signature.empty:
-            return None  # No return type specified
-        
-        if hasattr(return_type, "__origin__"):
-            return return_type.__origin__  # Return type is a type hint
-        
-        return return_type  # Return type is a class or type
-    except ValueError as e:
-        print(f"Error inspecting {method}: {e}")
-        return None
 
 def set_global_seed(seed: Optional[int]) -> None:
     """Set the global seed for random number generators.
@@ -71,7 +47,7 @@ def get_architecture_mut_method(
         eval: OffspringType,
         new_layer_prob: float,
         rng: Generator
-        ) -> Tuple[str, Type]:
+        ) -> str:
     """Get the mutation method and its return type of the individual.
     
     :param individual: The individual to inspect
@@ -80,18 +56,19 @@ def get_architecture_mut_method(
     :type new_layer_prob: float
     :param rng: Random number generator
     :type rng: Generator
-    :return: The mutation methods name and its return type
-    :rtype: Tuple[str, Type]
+    :return: The mutation methods name
+    :rtype: str
     """ 
     # All of the offsprings should be the same EvolvableModule type, so we can 
     # just sample the mutation method from the first offspring
     if isinstance(eval, list):
+        assert all(isinstance(offspring, eval[0].__class__) for offspring in eval), \
+            "All offspring should be of the same type."
+
         eval = eval[0]
 
-    mutation_method = eval.sample_mutation_method(new_layer_prob, rng)
-    mut_return_type = get_return_type(getattr(eval, mutation_method))
+    return  eval.sample_mutation_method(new_layer_prob, rng)
 
-    return mutation_method, mut_return_type
 
 def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Tuple[Dict[str, OffspringType], ...]:
     """Get the offsprings of all of the evaluation modules in the individual.
@@ -774,11 +751,13 @@ class Mutations:
         policy_name, policy_offspring = list(policy.items())[0]
 
         # Sample mutation method from policy network
-        mut_method, ret_type = get_architecture_mut_method(
+        mut_method = get_architecture_mut_method(
             policy_offspring, self.new_layer_prob, self.rng
             )
 
-        mut_dict = self._apply_arch_mutation(policy_offspring, mut_method, ret_type)
+        print(f"Mutating {policy_name} with method {mut_method}")
+        applied_mutations, mut_dict = self._apply_arch_mutation(policy_offspring, mut_method)
+        print(applied_mutations)
         self.to_device_and_set_individual(individual, policy_name, policy_offspring)
 
         if algo_cls in [NeuralTS, NeuralUCB]:
@@ -787,7 +766,7 @@ class Mutations:
 
         # Apply the same mutation to the rest of the evaluation modules
         for name, offsprings in offspring_evals.items():
-            self._apply_arch_mutation(offsprings, mut_method, ret_type, mut_dict)
+            self._apply_arch_mutation(offsprings, applied_mutations, mut_dict)
             self.to_device_and_set_individual(individual, name, offsprings)
 
             # Reinitialize bandit gradients after architecture mutation
@@ -802,10 +781,9 @@ class Mutations:
     def _apply_arch_mutation(
         self, 
         networks: OffspringType, 
-        mut_method: str, 
-        ret_type: Type, 
+        mut_method: Union[str, List[str]], 
         applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
-    ) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
+    ) -> Tuple[Union[str, List[str]], MutationReturnType]:
         """Applies the mutation method to networks and returns mutation data if needed.
         
         :param networks: The networks to apply the mutation to
@@ -816,28 +794,30 @@ class Mutations:
         :type ret_type: Type
         :param mut_dict: The mutation dictionary, defaults to None
         :type mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
-        :return: The mutation dictionary if ret_type is dict, otherwise None
-        :rtype: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]
+
+        :return: The mutation method name and the mutation dictionary
+        :rtype: Tuple[Union[str, List[str]], MutationReturnType]
         """
         if applied_mut_dict is None:
             applied_mut_dict = [{}] * len(networks) if isinstance(networks, list) else {}
 
         mut_dict = None
-        if ret_type != dict:
-            if isinstance(networks, list):
-                for net in networks:
-                    getattr(net, mut_method)()
-            else:
-                getattr(networks, mut_method)()
+        if isinstance(networks, list):
+            if isinstance(mut_method, str):
+                mut_method = [mut_method] * len(networks)
+
+            mut_dict = []
+            applied_muts = []
+            for i, net in enumerate(networks):
+                mut_return = getattr(net, mut_method[i])(**applied_mut_dict[i])
+                mut_dict.append(mut_return if mut_return is not None else {})
+                applied_muts.append(net.last_mutation_attr)
         else:
-            if isinstance(networks, list):
-                mut_dict = []
-                for i, net in enumerate(networks):
-                    mut_dict.append(getattr(net, mut_method)(**applied_mut_dict[i]))
-            else:
-                mut_dict = getattr(networks, mut_method)(**applied_mut_dict)
-        
-        return mut_dict
+            mut_dict = getattr(networks, mut_method)(**applied_mut_dict)
+            mut_dict = mut_dict if mut_dict is not None else {}
+            applied_muts = networks.last_mutation_attr
+    
+        return applied_muts, mut_dict
 
     def to_device_and_set_individual(
         self, 
