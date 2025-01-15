@@ -31,6 +31,7 @@ class OptimizerWrapper:
             network_names: Optional[List[str]] = None,
             multiagent: bool = False
             ) -> None:
+
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs
         self.multiagent = multiagent

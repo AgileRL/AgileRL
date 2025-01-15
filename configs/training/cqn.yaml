@@ -23,6 +23,8 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     WANDB: true                # Log with Weights and Biases
+    LEARNING_DELAY: 1000       # Steps before learning
+
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -38,6 +40,8 @@ MUTATION_PARAMS:
     # Define max and min limits for mutating RL hyperparams
     MIN_LR: 0.0001
     MAX_LR: 0.01
+    MIN_LEARN_STEP: 1
+    MAX_LEARN_STEP: 10
     MIN_BATCH_SIZE: 8
     MAX_BATCH_SIZE: 1024
 

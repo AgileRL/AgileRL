@@ -148,6 +148,7 @@ def train_multi_agent(
             init_hyperparams=INIT_HP,
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
+            project="AgileRLMultiAgent",
             accelerator=accelerator
         )
 

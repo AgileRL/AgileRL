@@ -491,7 +491,8 @@ def init_wandb(
         init_hyperparams: Optional[Dict[str, Any]] = None,
         mutation_hyperparams: Optional[Dict[str, Any]] = None,
         wandb_api_key: Optional[str] = None,
-        accelerator: Optional[Accelerator] = None
+        accelerator: Optional[Accelerator] = None,
+        project: str = "AgileRL",
     ) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
@@ -524,7 +525,7 @@ def init_wandb(
         if accelerator.is_main_process:
             wandb.init(
                 # set the wandb project where this run will be logged
-                project="AgileRL",
+                project=project,
                 name="{}-EvoHPO-{}-{}".format(
                     env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
                 ),
@@ -535,7 +536,7 @@ def init_wandb(
     else:
         wandb.init(
             # set the wandb project where this run will be logged
-            project="AgileRL",
+            project=project,
             name="{}-EvoHPO-{}-{}".format(
                 env_name, algo, datetime.now().strftime("%m%d%Y%H%M%S")
             ),

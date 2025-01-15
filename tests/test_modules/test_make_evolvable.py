@@ -182,14 +182,14 @@ def test_instantiation_with_rainbow():
     (feature_activation_0): ReLU()
   )
   (value_net): Sequential(
-    (value_linear_layer_0): NoisyLinear()
+    (value_linear_layer_0): NoisyLinear(in_features=128, out_features=8)
     (value_activation_0): ReLU()
-    (value_linear_layer_output): NoisyLinear()
+    (value_linear_layer_output): NoisyLinear(in_features=8, out_features=51)
   )
   (advantage_net): Sequential(
-    (advantage_linear_layer_0): NoisyLinear()
+    (advantage_linear_layer_0): NoisyLinear(in_features=128, out_features=8)
     (advantage_activation_0): ReLU()
-    (advantage_linear_layer_output): NoisyLinear()
+    (advantage_linear_layer_output): NoisyLinear(in_features=8, out_features=102)
   )
 )"""
     )

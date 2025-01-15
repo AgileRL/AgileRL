@@ -36,7 +36,7 @@ class BanditEnv:
     :type features: Pandas DataFrame
     """
 
-    def __init__(self, features, targets):
+    def __init__(self, features: pd.DataFrame, targets: pd.DataFrame) -> None:
         self.arms = int(targets.nunique()[0])
         self.context_dim = (len(np.array(features.loc[0])) * self.arms,)
 

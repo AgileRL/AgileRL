@@ -1,5 +1,7 @@
 import torch
+import pandas as pd
 import yaml
+from gymnasium import spaces
 from ucimlrepo import fetch_ucirepo
 
 from agilerl.components.replay_buffer import ReplayBuffer
@@ -27,8 +29,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
     # Fetch data
     dataset = fetch_ucirepo(id=INIT_HP["UCI_REPO_ID"])
-    features = dataset.data.features
-    targets = dataset.data.targets
+    features: pd.DataFrame = dataset.data.features
+    targets: pd.DataFrame = dataset.data.targets
 
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
@@ -81,8 +83,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        state_dim=context_dim,
-        action_dim=action_dim,
+        observation_space=spaces.Box(low=features.values.min(), high=features.values.max()),
+        action_space=spaces.Discrete(env.arms),
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         actor_network=actor,

@@ -143,7 +143,8 @@ def train_bandits(
             init_hyperparams=INIT_HP,
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
-            accelerator=accelerator
+            accelerator=accelerator,
+            project="AgileRL-Bandits"
         )
 
     save_path = (

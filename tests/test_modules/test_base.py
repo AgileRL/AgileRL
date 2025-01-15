@@ -85,7 +85,6 @@ def test_evolvable_module_sample_mutation_method():
 
     module = DummyEvolvableModule(device="cpu")
     sampled_method = module.sample_mutation_method(new_layer_prob=0.5)
-    print(sampled_method)
     assert sampled_method == "dummy_mutation"
 
 def test_inherited_evolvable_module_mutation_methods():

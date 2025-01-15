@@ -372,7 +372,7 @@ class Mutations:
         
         return module_cls(**init_dict)
 
-    def reinit_from_mutated(self, offspring: OffspringType) -> OffspringType:
+    def reinit_from_mutated(self, offspring: OffspringType, remove_compile_prefix: bool = False) -> OffspringType:
         """Reinitialize the mutated offspring with their state dictionary.
         
         :param offspring: The offspring to reinitialize
@@ -389,7 +389,7 @@ class Mutations:
 
             # Load eval state dicts into shared networks                        
             state_dicts = [offspring.state_dict() for offspring in offspring]
-            self.load_state_dicts(ind_shared, state_dicts)
+            self.load_state_dicts(ind_shared, state_dicts, remove_compile_prefix)
         else:
             ind_shared = self.reinit_module(
                 offspring,
@@ -400,20 +400,23 @@ class Mutations:
         return ind_shared
         
 
-    def load_state_dicts(self, modules: List[ModuleType], state_dicts: List[Dict[str, Any]]) -> None:
+    def load_state_dicts(
+            self, modules: List[ModuleType],
+            state_dicts: List[Dict[str, Any]],
+            remove_prefix: bool = False
+            ) -> None:
         """Load the state dictionary into the module.
         
         :param module: The module to load the state dictionary into
         :type module: ModuleType
-        
         :param state_dict: The state dictionary to load
         :type state_dict: Dict[str, Any]
+        :param remove_prefix: Boolean flag indicating if the compile prefix should be removed, defaults to False
+        :type remove_prefix: bool, optional
         """
         for module, state_dict in zip(modules, state_dicts):
-            if hasattr(module, "torch_compiler") and module.torch_compiler is not None:
-                module.load_state_dict(remove_compile_prefix(state_dict))
-            else:
-                module.load_state_dict(state_dict)
+            state_dict = remove_compile_prefix(state_dict) if remove_prefix else state_dict
+            module.load_state_dict(state_dict)
 
     def compile_modules(self, modules: OffspringType, compiler: str) -> OffspringType:
         """Compile the modules using the given compiler.
@@ -469,7 +472,9 @@ class Mutations:
             individual = mutation(individual)
 
             # Recompile modules if applicable
+            compiled_individual = False
             if hasattr(individual, "torch_compiler") and individual.torch_compiler:
+                compiled_individual = True
                 individual.recompile()
             
             # Reinitiliaze shared networks to mutated evaluation networks
@@ -480,7 +485,7 @@ class Mutations:
 
                         # Reinitialize shared with frozen weights due to 
                         # potential mutation in architecture
-                        ind_shared = self.reinit_from_mutated(eval_offspring)
+                        ind_shared = self.reinit_from_mutated(eval_offspring, remove_compile_prefix=compiled_individual)
 
                         if self.accelerator is None:
                             ind_shared = self.to_device(ind_shared)
@@ -524,6 +529,7 @@ class Mutations:
                 networks=opt_nets,
                 optimizer_kwargs=opt.optimizer_kwargs,
                 network_names=opt.network_names,
+                multiagent=opt.multiagent,
             )
 
             setattr(individual, opt_config.name, offspring_opt)
