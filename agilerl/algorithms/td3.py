@@ -60,9 +60,9 @@ class TD3(RLAlgorithm):
     :param policy_freq: Frequency of critic network updates compared to policy network, defaults to 2
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: EvolvableModule, optional
+    :type actor_network: nn.Module, optional
     :param critic_networks: List of two custom critic networks (one for each of TD3's two critics), defaults to None
-    :type critic_networks: list[EvolvableModule], optional
+    :type critic_networks: list[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -92,8 +92,8 @@ class TD3(RLAlgorithm):
         normalize_images: bool = True,
         mut: Optional[str] = None,
         policy_freq: int = 2,
-        actor_network: Optional[EvolvableModule] = None,
-        critic_networks: Optional[list[EvolvableModule]] = None,
+        actor_network: Optional[nn.Module] = None,
+        critic_networks: Optional[list[nn.Module]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -173,23 +173,27 @@ class TD3(RLAlgorithm):
 
             assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
 
-            if not (
-                isinstance(actor_network, nn.Module)
-                and isinstance(critic_networks[0], nn.Module)
-                and isinstance(critic_networks[0], nn.Module)
-            ):
+            if not isinstance(actor_network, nn.Module):
                 raise TypeError(
-                    f"Passed actor/critic networks are of type {type(actor_network)}, but must be of type nn.Module."
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type nn.Module."
+                )
+            elif not isinstance(critic_networks[0], nn.Module):
+                raise TypeError(
+                    f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type nn.Module."
+                )
+            elif not isinstance(critic_networks[1], nn.Module):
+                raise TypeError(
+                    f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type nn.Module."
                      )
             elif not (
                 isinstance(actor_network, EvolvableModule)
                 and isinstance(critic_networks[0], EvolvableModule)
-                and isinstance(critic_networks[0], EvolvableModule)
+                and isinstance(critic_networks[1], EvolvableModule)
             ):
                 warnings.warn(
                     f"Passed networks are not EvolvableModule's - architecture mutations will be disabled."
                 )
-            
+
             self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
             self.actor_target, self.critic_target_1, self.critic_target_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
 

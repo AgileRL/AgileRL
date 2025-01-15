@@ -66,9 +66,9 @@ class MADDPG(MultiAgentAlgorithm):
     :param normalize_images: Normalize image observations, defaults to True
     :type normalize_images: bool, optional
     :param actor_networks: List of custom actor networks, defaults to None
-    :type actor_networks: list[EvolvableModule], optional
+    :type actor_networks: list[nn.Module], optional
     :param critic_networks: List of custom critic networks, defaults to None
-    :type critic_networks: list[EvolvableModule], optional
+    :type critic_networks: list[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -78,10 +78,10 @@ class MADDPG(MultiAgentAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
-    actors: List[Union[EvolvableModule, DeterministicActor]]
-    actor_targets: List[Union[EvolvableModule, DeterministicActor]]
-    critics: List[Union[EvolvableModule, ContinuousQNetwork]]
-    critic_targets: List[Union[EvolvableModule, ContinuousQNetwork]]
+    actors: List[Union[nn.Module, DeterministicActor]]
+    actor_targets: List[Union[nn.Module, DeterministicActor]]
+    critics: List[Union[nn.Module, ContinuousQNetwork]]
+    critic_targets: List[Union[nn.Module, ContinuousQNetwork]]
 
     def __init__(
         self,
@@ -104,8 +104,8 @@ class MADDPG(MultiAgentAlgorithm):
         tau: float = 0.01,
         mut: Optional[str] = None,
         normalize_images: bool = True,
-        actor_networks: Optional[List[EvolvableModule]] = None,
-        critic_networks: Optional[List[EvolvableModule]] = None,
+        actor_networks: Optional[List[nn.Module]] = None,
+        critic_networks: Optional[List[nn.Module]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -194,13 +194,13 @@ class MADDPG(MultiAgentAlgorithm):
                 len({type(net) for net in critic_networks}) == 1
             ), "'critic_networks' must all be the same type"
 
-            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
-                raise ValueError(
-                    "All actor networks must be instances of EvolvableModule"
+            if not all(isinstance(net, nn.Module) for net in actor_networks):
+                raise TypeError(
+                    "All actor networks must be instances of nn.Module"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks):
-                raise ValueError(
-                    "All critic networks must be instances of EvolvableModule"
+            if not all(isinstance(net, nn.Module) for net in critic_networks):
+                raise TypeError(
+                    "All critic networks must be instances of nn.Module"
                 )
             self.actors, self.critics = make_safe_deepcopies(actor_networks, critic_networks)
             self.actor_targets, self.critic_targets = make_safe_deepcopies(actor_networks, critic_networks)

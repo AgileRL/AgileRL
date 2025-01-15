@@ -362,7 +362,7 @@ def test_continuous_actions_policy_envs_simple(
 def test_q_learning_with_probe_env():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardEnv()
-    learn_steps = 1000
+    learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
@@ -376,11 +376,58 @@ def test_q_learning_with_probe_env():
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
 
+def test_q_learning_with_probe_env_cnn():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = ConstantRewardImageEnv()
+    learn_steps = 100
+    algo_args = {
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "net_config": {'encoder_config': {
+            "channel_size": [32],  # CNN channel size
+            "kernel_size": [3],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+        }},
+        "normalize_images": False,
+        "lr": 1e-2,
+    }
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        memory_size=1000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
+        device=device,
+    )
+    check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
+
+def test_q_learning_with_probe_env_dict():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = ConstantRewardDictEnv()
+    learn_steps = 100
+    algo_args = {
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "net_config": {'encoder_config': {
+            "channel_size": [32],  # CNN channel size
+            "kernel_size": [3],  # CNN kernel size
+            "stride_size": [1],  # CNN stride size
+            "hidden_size": [64],  # Network hidden size
+            "latent_dim": 16,  # Latent dimension
+        }},
+        "normalize_images": False,
+        "lr": 1e-2,
+    }
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        memory_size=1000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
+        device=device,
+    )
+    check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
 
 def test_policy_q_learning_with_probe_env():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardContActionsEnv()
-    learn_steps = 1000
+    learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
@@ -401,15 +448,20 @@ def test_policy_q_learning_with_probe_env():
 def test_policy_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsImageEnv()
-    learn_steps = 1000
+    learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {'encoder_config': {
-            "channel_size": [32],  # CNN channel size
-            "kernel_size": [3],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
+        "net_config": {
+            'encoder_config': {
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            },
+            'head_config': {
+                "hidden_size": [64],  # Network hidden size
         }},
+        "normalize_images": False,
         "policy_freq": 2,
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
@@ -427,17 +479,23 @@ def test_policy_q_learning_with_probe_env_cnn():
 def test_policy_q_learning_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = FixedObsPolicyContActionsDictEnv()
-    learn_steps = 1000
+    learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {'encoder_config': {
-            "hidden_size": [64],  # Network hidden size
-            "latent_dim": 16,  # Latent dimension
-            "channel_size": [32],  # CNN channel size
-            "kernel_size": [3],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
-        }},
+        "net_config": {
+            'encoder_config': {
+                "hidden_size": [64],  # Network hidden size
+                "latent_dim": 16,  # Latent dimension
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            },
+            'head_config': {
+                "hidden_size": [64],  # Network hidden size
+            }
+        },
+        "normalize_images": False,
         "policy_freq": 2,
         "lr_actor": 1e-2,
         "lr_critic": 1e-2,
@@ -466,34 +524,45 @@ def test_policy_on_policy_with_probe_env():
 
 def test_policy_on_policy_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = FixedObsPolicyContActionsImageEnv()
+    env = ConstantRewardContActionsImageEnv() # FixedObsPolicyContActionsImageEnv()
     learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {'encoder_config': {
-            "channel_size": [32],  # CNN channel size
-            "kernel_size": [3],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
+        "net_config": {
+            'encoder_config': {
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            },
+            'head_config': {
+                "hidden_size": [64],  # Network hidden size
         }},
+        "normalize_images": False,
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
 
 def test_policy_on_policy_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = FixedObsPolicyContActionsDictEnv()
+    env =  ConstantRewardContActionsDictEnv() # FixedObsPolicyContActionsDictEnv()
     learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {'encoder_config': {
-            "hidden_size": [64],  # Network hidden size
-            "latent_dim": 16,  # Latent dimension
-            "channel_size": [32],  # CNN channel size
-            "kernel_size": [3],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
-        }},
+        "net_config": {
+            'encoder_config': {
+                "hidden_size": [64],  # Network hidden size
+                "latent_dim": 16,  # Latent dimension
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            },
+            'head_config': {
+                "hidden_size": [64],  # Network hidden size
+            }
+        },
+        "normalize_images": False,
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)

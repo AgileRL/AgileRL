@@ -67,9 +67,9 @@ class PPO(RLAlgorithm):
     :param update_epochs: Number of policy update epochs, defaults to 4
     :type update_epochs: int, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: EvolvableModule, optional
+    :type actor_network: nn.Module, optional
     :param critic_network: Custom critic network, defaults to None
-    :type critic_network: EvolvableModule, optional
+    :type critic_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -102,8 +102,8 @@ class PPO(RLAlgorithm):
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_network: Optional[EvolvableModule] = None,
-        critic_network: Optional[EvolvableModule] = None,
+        actor_network: Optional[nn.Module] = None,
+        critic_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         compile: bool = True,
@@ -192,15 +192,20 @@ class PPO(RLAlgorithm):
         self.cudagraphs = cudagraphs
 
         if actor_network is not None and critic_network is not None:
-            if not isinstance(actor_network, nn.Module) and not isinstance(critic_network, nn.Module):
+            if not isinstance(actor_network, nn.Module):
                 raise TypeError(
-                    f"Passed actor/critic networks are of type {type(actor_network)}, but must be of type nn.Module."
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type nn.Module."
                      )
+            elif not isinstance(critic_network, nn.Module):
+                raise TypeError(
+                    f"Passed critic network is of type {type(critic_network)}, but must be of type nn.Module."
+                )
             elif not isinstance(actor_network, EvolvableModule) and not isinstance(critic_network, EvolvableModule):
                 warnings.warn(
                     f"Passed networks are not EvolvableModule's - architecture mutations will be disabled."
                 )
             
+            print(actor_network)
             self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
 
         else:
@@ -332,6 +337,11 @@ class PPO(RLAlgorithm):
             self.critic.train()
             action_dist = self.actor(state, action_mask=action_mask)
             state_values = self.critic(state).squeeze(-1)
+        
+        if not isinstance(action_dist, torch.distributions.Distribution):
+            raise ValueError(
+                f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
+            )
 
         return_tensors = True
         if action is None:
@@ -341,6 +351,10 @@ class PPO(RLAlgorithm):
             action = action.to(self.device)
 
         action_logprob = action_dist.log_prob(action)
+
+        if len(action_logprob.shape) > 1:
+            action_logprob = action_logprob.sum(dim=1)
+        
         dist_entropy = action_dist.entropy()
 
         if return_tensors:
@@ -453,6 +467,8 @@ class PPO(RLAlgorithm):
                         grad=True
                     )
 
+                    print("log_prob", log_prob.shape)
+                    print("batch_log_probs", batch_log_probs.shape)
                     logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
 

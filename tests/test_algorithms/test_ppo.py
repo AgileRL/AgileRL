@@ -159,7 +159,7 @@ def test_initializes_with_default_values():
     assert ppo.gamma == 0.99
     assert ppo.gae_lambda == 0.95
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -278,7 +278,7 @@ def test_initialize_ppo_with_actor_network(
     assert ppo.gamma == 0.99
     assert ppo.gae_lambda == 0.95
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -351,7 +351,7 @@ def test_initialize_ppo_with_actor_network_evo_net(observation_space, net_type):
     assert ppo.gamma == 0.99
     assert ppo.gae_lambda == 0.95
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -395,7 +395,7 @@ def test_initialize_ppo_with_actor_network_no_critic(
     action_space = generate_discrete_space(2)
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         ppo = PPO(
             observation_space,
             action_space,
@@ -896,7 +896,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -968,7 +968,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5
@@ -1056,7 +1056,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert ppo.batch_size == 64
     assert ppo.gamma == 0.99
     assert ppo.mut is None
-    assert ppo.action_std_init == 0.6
+    assert ppo.action_std_init == 0.0
     assert ppo.clip_coef == 0.2
     assert ppo.ent_coef == 0.01
     assert ppo.vf_coef == 0.5

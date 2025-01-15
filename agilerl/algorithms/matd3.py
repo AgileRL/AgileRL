@@ -74,12 +74,12 @@ class MATD3(MultiAgentAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
-    actors: List[Union[EvolvableModule, DeterministicActor]]
-    actor_targets: List[Union[EvolvableModule, DeterministicActor]]
-    critics_1: List[Union[EvolvableModule, ContinuousQNetwork]]
-    critic_targets_1: List[Union[EvolvableModule, ContinuousQNetwork]]
-    critics_2: List[Union[EvolvableModule, ContinuousQNetwork]]
-    critic_targets_2: List[Union[EvolvableModule, ContinuousQNetwork]]
+    actors: List[Union[nn.Module, DeterministicActor]]
+    actor_targets: List[Union[nn.Module, DeterministicActor]]
+    critics_1: List[Union[nn.Module, ContinuousQNetwork]]
+    critic_targets_1: List[Union[nn.Module, ContinuousQNetwork]]
+    critics_2: List[Union[nn.Module, ContinuousQNetwork]]
+    critic_targets_2: List[Union[nn.Module, ContinuousQNetwork]]
 
     def __init__(
         self,
@@ -103,8 +103,8 @@ class MATD3(MultiAgentAlgorithm):
         tau: float = 0.01,
         normalize_images: bool = True,
         mut: Optional[str] = None,
-        actor_networks: Optional[List[EvolvableModule]] = None,
-        critic_networks: Optional[List[List[EvolvableModule]]] = None,
+        actor_networks: Optional[List[nn.Module]] = None,
+        critic_networks: Optional[List[List[nn.Module]]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         torch_compiler: Optional[str] = None,
@@ -191,17 +191,17 @@ class MATD3(MultiAgentAlgorithm):
                 len({type(net) for net in critic_networks}) == 1
             ), "'critic_networks' must all be the same type"
 
-            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
-                raise ValueError(
-                    "All actor networks must be instances of EvolvableModule"
+            if not all(isinstance(net, nn.Module) for net in actor_networks):
+                raise TypeError(
+                    "All actor networks must be instances of nn.Module"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks[0]):
-                raise ValueError(
-                    "All critic networks must be instances of EvolvableModule"
+            if not all(isinstance(net, nn.Module) for net in critic_networks[0]):
+                raise TypeError(
+                    "All critic networks must be instances of nn.Module"
                 )
-            if not all(isinstance(net, EvolvableModule) for net in critic_networks[1]):
-                raise ValueError(
-                    "All critic networks must be instances of EvolvableModule"
+            if not all(isinstance(net, nn.Module) for net in critic_networks[1]):
+                raise TypeError(
+                    "All critic networks must be instances of nn.Module"
                 )
             self.actors, self.critics_1, self.critics_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
             self.actor_targets, self.critic_targets_1, self.critic_targets_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])

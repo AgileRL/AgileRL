@@ -35,7 +35,7 @@ MUTATION_PARAMS:
     # Learning HPs to choose from
     RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
-    RAND_SEED: 0                          # Random seed
+    RAND_SEED: 42                          # Random seed
     # Define max and min limits for mutating RL hyperparams
     MIN_LR: 0.0000625
     MAX_LR: 0.01

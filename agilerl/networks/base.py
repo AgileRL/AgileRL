@@ -91,7 +91,9 @@ class NetworkMeta(ModuleMeta):
                 attr =  mut_method.split(".")[0]
                 if attr not in ['encoder', 'head_net']:
                     raise NetworkError(
-                        "Mutation methods in EvolvableNetwork's should only correspond to encoder or head_net."
+                        "Mutation methods of underlying modules in EvolvableNetwork's should only correspond " \
+                        "to the encoder or head_net. This is done for robustness to ensure that analogous mutations " \
+                        "can be applied between different networks. "
                         )
 
         return instance

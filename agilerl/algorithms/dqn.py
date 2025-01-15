@@ -47,7 +47,7 @@ class DQN(RLAlgorithm):
     :param double: Use double Q-learning, defaults to False
     :type double: bool, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: EvolvableModule, optional
+    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -71,7 +71,8 @@ class DQN(RLAlgorithm):
         tau: float = 1e-3,
         mut: Optional[str] = None,
         double: bool = False,
-        actor_network: Optional[EvolvableModule] = None,
+        normalize_images: bool = True,
+        actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         cudagraphs: bool = False,
@@ -84,6 +85,7 @@ class DQN(RLAlgorithm):
             learn_step=learn_step,
             device=device,
             accelerator=accelerator,
+            normalize_images=normalize_images,
             name="DQN"
         )
 
@@ -197,7 +199,13 @@ class DQN(RLAlgorithm):
         if action_mask is not None:
             action_mask = torch.as_tensor(action_mask, device=device)
         else:
-            action_mask = torch.ones((torch_obs.shape[0], self.action_dim), device=device)
+            if isinstance(torch_obs, dict):
+                sample = next(iter(torch_obs.values()))
+                batch_size = sample.size(0)
+            else:
+                batch_size = torch_obs.size(0)
+
+            action_mask = torch.ones((batch_size, self.action_dim), device=device)
     
         return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 

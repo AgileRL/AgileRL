@@ -128,7 +128,7 @@ class ConstantRewardContActionsDictEnv(gym.Env):
             )
         self.action_space = spaces.Box(0.0, 1.0, (1,))
         self.sample_obs = [{"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))}]
-        self.sample_actions = [{"action": np.array([[1.0]])}]
+        self.sample_actions = [np.array([[1.0]])]
         self.q_values = [[1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
@@ -856,14 +856,16 @@ def check_q_learning_with_probe_env(
             state, _ = env.reset()
 
     # Learn from experiences
-    for _ in trange(learn_steps):
+    for i in trange(learn_steps):
         experiences = memory.sample(agent.batch_size)
         # Learn according to agent's RL algorithm
-        agent.learn(experiences)
-
+        loss = agent.learn(experiences)
+        if i < 20:
+            print("Loss = ", loss)
+    
     for sample_obs, q_values in zip(env.sample_obs, env.q_values):
         predicted_q_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
-        assert np.allclose(q_values, predicted_q_values, atol=0.15), f"{q_values} != {predicted_q_values}"
+        assert np.allclose(q_values, predicted_q_values, atol=0.1), f"{q_values} != {predicted_q_values}"
 
 
 def check_policy_q_learning_with_probe_env(
@@ -890,7 +892,9 @@ def check_policy_q_learning_with_probe_env(
     for i in trange(learn_steps):
         experiences = memory.sample(agent.batch_size)
         # Learn according to agent's RL algorithm
-        agent.learn(experiences)
+        loss = agent.learn(experiences)
+        if i < 20:
+            print("Loss = ", loss)
 
     for sample_obs, sample_action, q_values, policy_values in zip(
         env.sample_obs, env.sample_actions, env.q_values, env.policy_values
@@ -910,7 +914,7 @@ def check_policy_q_learning_with_probe_env(
             predicted_policy_values = agent.actor(sample_obs).detach().cpu().numpy()[0]
 
             # print("pol", policy_values, predicted_policy_values)
-            assert np.allclose(policy_values, predicted_policy_values, atol=0.15), f"{policy_values} != {predicted_policy_values}"
+            assert np.allclose(policy_values, predicted_policy_values, atol=0.1), f"{policy_values} != {predicted_policy_values}"
 
 
 def check_policy_on_policy_with_probe_env(
@@ -920,7 +924,7 @@ def check_policy_on_policy_with_probe_env(
 
     agent = algo_class(**algo_args, device=device)
 
-    for _ in trange(learn_steps):
+    for i in trange(learn_steps):
         state, _ = env.reset()
         states = []
         actions = []
@@ -930,7 +934,7 @@ def check_policy_on_policy_with_probe_env(
         values = []
         truncs = []
 
-        for _ in range(100):
+        for j in range(100):
             if isinstance(state, dict):
                 state = {k: np.expand_dims(v, 0) for k, v in state.items()}
             else:
@@ -964,7 +968,9 @@ def check_policy_on_policy_with_probe_env(
             values,
             next_state,
         )
-        agent.learn(experiences)
+        loss = agent.learn(experiences)
+        if i < 20:
+            print("Loss = ", loss)
 
     for sample_obs, v_values in zip(env.sample_obs, env.v_values):
         if isinstance(sample_obs, dict):
@@ -976,7 +982,7 @@ def check_policy_on_policy_with_probe_env(
             predicted_v_values = agent.critic(state).detach().cpu().numpy()[0]
             # print("---")
             # print("v", v_values, predicted_v_values)
-            assert np.allclose(v_values, predicted_v_values, atol=0.15), f"{v_values} != {predicted_v_values}"
+            assert np.allclose(v_values, predicted_v_values, atol=0.1), f"{v_values} != {predicted_v_values}"
 
     if hasattr(env, "sample_actions"):
         for sample_action, policy_values in zip(env.sample_actions, env.policy_values):
@@ -986,7 +992,7 @@ def check_policy_on_policy_with_probe_env(
                     agent.actor(state).sample().detach().cpu().numpy()[0]
                 )
                 # print("pol", policy_values, predicted_policy_values)
-                assert np.allclose(policy_values, predicted_policy_values, atol=0.15), f"{policy_values} != {predicted_policy_values}"
+                assert np.allclose(policy_values, predicted_policy_values, atol=0.1), f"{policy_values} != {predicted_policy_values}"
 
 
 # if __name__ == "__main__":

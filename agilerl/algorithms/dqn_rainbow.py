@@ -1,16 +1,18 @@
 from typing import Optional, Dict, Any
+import warnings
 import numpy as np
 import torch
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
+import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.typing import ArrayLike, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
-from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
+from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
@@ -55,7 +57,7 @@ class RainbowDQN(RLAlgorithm):
     :param combined_reward: Boolean flag indicating whether to use combined 1-step and n-step reward, defaults to False
     :type combined_reward: bool, optional
     :param actor_network: Custom actor network, defaults to None
-    :type actor_network: EvolvableModule, optional
+    :type actor_network: nn.Module, optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
@@ -85,7 +87,7 @@ class RainbowDQN(RLAlgorithm):
         mut: Optional[str] = None,
         normalize_images: bool = True,
         combined_reward: bool = False,
-        actor_network: Optional[EvolvableModule] = None,
+        actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -158,9 +160,13 @@ class RainbowDQN(RLAlgorithm):
                 actor_network.num_atoms = self.num_atoms
                 actor_network = MakeEvolvable(**actor_network.init_dict)
                 actor_network.load_state_dict(actor_network.state_dict())
-            elif not isinstance(actor_network, RainbowQNetwork):
+            elif not isinstance(actor_network, nn.Module):
                 raise TypeError(
                     f"'actor_network' argument is of type {type(actor_network)}, but must be of type MakeEvolvable or RainbowQNetwork."
+                )
+            elif not isinstance(actor_network, EvolvableModule):
+                warnings.warn(
+                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
                 )
             
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
@@ -337,10 +343,8 @@ class RainbowDQN(RLAlgorithm):
                     n_dones,
                 ) = experiences
                 if self.accelerator is not None:
-                    states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
                     rewards = rewards.to(self.accelerator.device)
-                    next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
                     n_states = n_states.to(self.accelerator.device)
@@ -358,13 +362,13 @@ class RainbowDQN(RLAlgorithm):
                     weights,
                     idxs,
                 ) = experiences
+
                 if self.accelerator is not None:
-                    states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
                     rewards = rewards.to(self.accelerator.device)
-                    next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     weights = weights.to(self.accelerator.device)
+
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
                     states, actions, rewards, next_states, dones, self.gamma
@@ -396,10 +400,8 @@ class RainbowDQN(RLAlgorithm):
                     n_dones,
                 ) = experiences
                 if self.accelerator is not None:
-                    states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
                     rewards = rewards.to(self.accelerator.device)
-                    next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
                     n_states = n_states.to(self.accelerator.device)
                     n_actions = n_actions.to(self.accelerator.device)
@@ -415,11 +417,10 @@ class RainbowDQN(RLAlgorithm):
                     dones,
                 ) = experiences
                 if self.accelerator is not None:
-                    states = states.to(self.accelerator.device)
                     actions = actions.to(self.accelerator.device)
                     rewards = rewards.to(self.accelerator.device)
-                    next_states = next_states.to(self.accelerator.device)
                     dones = dones.to(self.accelerator.device)
+
                 idxs = None
             new_priorities = None
 
