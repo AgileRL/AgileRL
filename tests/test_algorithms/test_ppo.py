@@ -507,6 +507,34 @@ def test_returns_expected_action(
         for act in action:
             assert isinstance(act, np.float32)
 
+def test_ppo_optimizer_parameters():
+    observation_space = spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32)
+    action_space = spaces.Discrete(2)
+    ppo = PPO(observation_space, action_space)
+
+    # Store initial parameters
+    initial_params = {name: param.clone() for name, param in ppo.actor.named_parameters()}
+
+    # Perform a dummy optimization step
+    dummy_input = torch.randn(1, 4)
+    dummy_action = torch.tensor([0])
+    dummy_log_prob = torch.tensor([1.0])
+
+    dist = ppo.actor(dummy_input)
+    loss = (dummy_log_prob - dist.log_prob(dummy_action)) ** 2
+    loss = loss.mean()
+    ppo.optimizer.zero_grad()
+    loss.backward()
+    ppo.optimizer.step()
+
+    # Check if parameters have changed
+    not_updated = []
+    for name, param in ppo.actor.named_parameters():
+        if torch.equal(initial_params[name], param):
+            not_updated.append(name)
+    
+    assert not not_updated, f"The following parameters werent updated:\n{not_updated}"
+
 
 @pytest.mark.parametrize(
     "observation_space, action_space, accelerator",

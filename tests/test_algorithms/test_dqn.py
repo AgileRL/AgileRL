@@ -340,6 +340,33 @@ def test_returns_expected_action_mask_vectorized():
 
     assert np.array_equal(action, [1, 0])
 
+def test_dqn_optimizer_parameters():
+    observation_space = spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32)
+    action_space = spaces.Discrete(2)
+    dqn = DQN(observation_space, action_space)
+
+    # Store initial parameters
+    initial_params = {name: param.clone() for name, param in dqn.actor.named_parameters()}
+
+    # Perform a dummy optimization step
+    dummy_input = torch.randn(1, 4)
+    dummy_return = torch.tensor([1.0])
+
+    q_eval = dqn.actor(dummy_input)
+    loss = (dummy_return - q_eval) ** 2
+    loss = loss.mean()
+    dqn.optimizer.zero_grad()
+    loss.backward()
+    dqn.optimizer.step()
+
+    # Check if parameters have changed
+    not_updated = []
+    for name, param in dqn.actor.named_parameters():
+        if torch.equal(initial_params[name], param):
+            not_updated.append(name)
+    
+    assert not not_updated, f"The following parameters werent updated:\n{not_updated}"
+
 
 # learns from experiences and updates network parameters
 def test_learns_from_experiences():
