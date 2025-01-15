@@ -205,7 +205,6 @@ class PPO(RLAlgorithm):
                     f"Passed networks are not EvolvableModule's - architecture mutations will be disabled."
                 )
             
-            print(actor_network)
             self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
 
         else:
@@ -467,8 +466,6 @@ class PPO(RLAlgorithm):
                         grad=True
                     )
 
-                    print("log_prob", log_prob.shape)
-                    print("batch_log_probs", batch_log_probs.shape)
                     logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
 
@@ -513,8 +510,20 @@ class PPO(RLAlgorithm):
                     else:
                         loss.backward()
 
+                    # Store parameters before step
+                    params_before = {name: param.clone() for name, param in self.actor.named_parameters()}
+
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     self.optimizer.step()
+
+                    # Check if parameters have changed
+                    for name, param in self.actor.named_parameters():
+                        if not torch.equal(params_before[name], param):
+                            print(f"Parameter {name} was updated.")
+                        else:
+                            print(f"Parameter {name} was NOT updated.")
+
+                    raise ValueError("Stop here")
 
                     mean_loss += loss.item()
 

@@ -131,4 +131,4 @@ if __name__ == "__main__":
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
     NET_CONFIG = ppo_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
