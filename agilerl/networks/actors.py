@@ -53,13 +53,13 @@ class EvolvableDistribution(EvolvableWrapper):
 
     def get_distribution(
             self,
-            logits: torch.Tensor,
+            probs: torch.Tensor,
             log_std: Optional[torch.Tensor] = None
             ) -> Distribution:
         """Get the distribution over the action space given an observation.
 
-        :param logits: Logits output by the network.
-        :type logits: torch.Tensor
+        :param probs: Logits output by the network.
+        :type probs: torch.Tensor
         :param log_std: Log standard deviation of the action distribution. Defaults to None.
         :type log_std: Optional[torch.Tensor]
         :return: Distribution over the action space.
@@ -67,20 +67,20 @@ class EvolvableDistribution(EvolvableWrapper):
         """
         if isinstance(self.action_space, spaces.Box):
             assert log_std is not None, "log_std must be provided for continuous action spaces."
-            std = torch.ones_like(logits) * log_std.exp()
-            return Normal(loc=logits, scale=std)
+            std = torch.ones_like(probs) * log_std.exp()
+            return Normal(loc=probs, scale=std)
 
         elif isinstance(self.action_space, spaces.Discrete):
-            return Categorical(logits=logits)
+            return Categorical(probs=probs)
 
         elif isinstance(self.action_space, spaces.MultiDiscrete):
             return[
-                Categorical(logits=split) 
-                for split in torch.split(logits, list(self.action_space.nvec), dim=1)
+                Categorical(probs=split) 
+                for split in torch.split(probs, list(self.action_space.nvec), dim=1)
                 ]
 
         elif isinstance(self.action_space, spaces.MultiBinary):
-            return Bernoulli(logits=logits)
+            return Bernoulli(probs=probs)
 
         else:
             raise NotImplementedError(f"Action space {self.action_space} not supported.")

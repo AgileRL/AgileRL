@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
+from torch.distributions import Categorical, MultivariateNormal
 
 from agilerl.typing import ExperiencesType, GymEnvType, ArrayOrTensor, ArrayLike
 from agilerl.modules.configs import MlpNetConfig
@@ -120,6 +121,14 @@ class PPO(RLAlgorithm):
             normalize_images=normalize_images,
             name="PPO"
             )
+        
+        # For continuous action spaces
+        if not self.discrete_actions:
+            self.action_var = torch.full((self.action_dim,), action_std_init**2)
+            if self.accelerator is None:
+                self.action_var = self.action_var.to(self.device)
+            else:
+                self.action_var = self.action_var.to(self.accelerator.device)
 
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
@@ -327,12 +336,12 @@ class PPO(RLAlgorithm):
             self.actor.eval()
             self.critic.eval()
             with torch.no_grad():
-                action_dist = self.actor(state, action_mask=action_mask)
+                action_dist = self.actor(state)
                 state_values = self.critic(state).squeeze(-1)
         else:
             self.actor.train()
             self.critic.train()
-            action_dist = self.actor(state, action_mask=action_mask)
+            action_dist = self.actor(state)
             state_values = self.critic(state).squeeze(-1)
         
         if not isinstance(action_dist, torch.distributions.Distribution):
@@ -348,10 +357,6 @@ class PPO(RLAlgorithm):
             action = action.to(self.device)
 
         action_logprob = action_dist.log_prob(action)
-
-        if len(action_logprob.shape) > 1:
-            action_logprob = action_logprob.sum(dim=1)
-        
         dist_entropy = action_dist.entropy()
 
         if return_tensors:
@@ -391,9 +396,6 @@ class PPO(RLAlgorithm):
         :type noise_clip: float, optional
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
-
-        :return: Mean loss of actor and critic networks
-        :rtype: float
         """
         (
             states,
@@ -446,8 +448,8 @@ class PPO(RLAlgorithm):
             log_probs,
             advantages,
             returns,
-            values
-        ) = experiences
+            values,
+        ) = experiences 
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)

@@ -62,17 +62,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
         # For PPO
-        actor = EvolvableDistribution(
-            action_space=action_space,
-            network=EvolvableMLP(
+        actor = EvolvableMLP(
                 num_inputs=state_dim[0],
                 num_outputs=action_dim,
                 device=device,
                 hidden_size=[64, 64],
                 activation="Tanh",
-                output_activation="Tanh",
-            ),
-            device=device
+                output_activation="Softmax",
         )
 
         critic = EvolvableMLP(
