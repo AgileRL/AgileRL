@@ -26,7 +26,7 @@ INIT_HP:
     EVO_STEPS: 20_480          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: true                # Log with Weights and Biases
+    WANDB: false                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

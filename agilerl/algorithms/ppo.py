@@ -307,7 +307,6 @@ class PPO(RLAlgorithm):
         action: Optional[torch.Tensor] = None,
         grad: bool = False,
         action_mask: Optional[np.ndarray] = None,
-        preprocess_obs: bool = True,
     ) -> Tuple[Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns the next action to take in the environment.
 
@@ -322,8 +321,7 @@ class PPO(RLAlgorithm):
         :param preprocess_obs: Flag to preprocess observations, defaults to True
         :type preprocess_obs: bool, optional
         """
-        if preprocess_obs:
-            state = self.preprocess_observation(state)
+        state = self.preprocess_observation(state)
 
         if not grad:
             self.actor.eval()
@@ -442,31 +440,31 @@ class PPO(RLAlgorithm):
         # Move experiences to algo device
         experiences = self.to_device(*experiences)
 
+        (
+            states,
+            actions,
+            log_probs,
+            advantages,
+            returns,
+            values
+        ) = experiences
+
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
         clipfracs = []
         mean_loss = 0
-        for _ in range(self.update_epochs):
+        for epoch in range(self.update_epochs):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
-                (
-                    batch_states, 
-                    batch_actions, 
-                    batch_log_probs, 
-                    batch_advantages, 
-                    batch_returns, 
-                    batch_values
-                 ) = get_experiences_samples(minibatch_idxs, *experiences)
-
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(
-                        state=batch_states,
-                        action=batch_actions,
-                        grad=True
+                        state=states[minibatch_idxs],
+                        action=actions[minibatch_idxs],
+                        grad=True,
                     )
 
-                    logratio = log_prob - batch_log_probs
+                    logratio = log_prob - log_probs[minibatch_idxs]
                     ratio = logratio.exp()
 
                     with torch.no_grad():
@@ -475,7 +473,7 @@ class PPO(RLAlgorithm):
                             ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
                         ]
 
-                    minibatch_advs = batch_advantages
+                    minibatch_advs = advantages[minibatch_idxs]
                     minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
                         minibatch_advs.std() + 1e-8
                     )
@@ -489,15 +487,13 @@ class PPO(RLAlgorithm):
 
                     # Value loss
                     value = value.view(-1)
-                    v_loss_unclipped = (value - batch_returns) ** 2
-                    v_clipped = batch_values + torch.clamp(
-                        value - batch_values, -self.clip_coef, self.clip_coef
+                    v_loss_unclipped = (value - returns[minibatch_idxs]) ** 2
+                    v_clipped = values[minibatch_idxs] + torch.clamp(
+                        value - values[minibatch_idxs], -self.clip_coef, self.clip_coef
                     )
-
-                    v_loss_clipped = (v_clipped - batch_returns) ** 2
+                    v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
-
                     entropy_loss = entropy.mean()
                     loss = (
                         pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
@@ -509,21 +505,8 @@ class PPO(RLAlgorithm):
                         self.accelerator.backward(loss)
                     else:
                         loss.backward()
-
-                    # Store parameters before step
-                    params_before = {name: param.clone() for name, param in self.actor.named_parameters()}
-
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     self.optimizer.step()
-
-                    # Check if parameters have changed
-                    for name, param in self.actor.named_parameters():
-                        if not torch.equal(params_before[name], param):
-                            print(f"Parameter {name} was updated.")
-                        else:
-                            print(f"Parameter {name} was NOT updated.")
-
-                    raise ValueError("Stop here")
 
                     mean_loss += loss.item()
 
