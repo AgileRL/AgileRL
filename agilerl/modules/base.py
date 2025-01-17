@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Callable, Optional, TypeVar, Type, Iterable,
 import copy
 import inspect
 from functools import wraps
-from abc import ABC, ABCMeta, abstractmethod
+from abc import ABC, ABCMeta
 from numpy.random import Generator
 import numpy as np
 import torch

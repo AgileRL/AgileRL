@@ -8,6 +8,8 @@ from agilerl.typing import TorchObsType, ConfigType
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.modules.base import EvolvableModule
+from agilerl.networks.custom_modules import RainbowMLP
+from agilerl.utils.evolvable_networks import is_image_space
 
 DiscreteSpace = Union[spaces.Discrete, spaces.MultiDiscrete]
 
@@ -168,6 +170,7 @@ class RainbowQNetwork(EvolvableNetwork):
             action_space: DiscreteSpace,
             support: torch.Tensor,
             num_atoms: int = 51,
+            noise_std: float = 0.5,
             encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
             min_latent_dim: int = 8,
@@ -176,6 +179,18 @@ class RainbowQNetwork(EvolvableNetwork):
             latent_dim: int = 32,
             device: str = "cpu"
             ):
+
+        if isinstance(observation_space, spaces.Box) and not is_image_space(observation_space):
+            if encoder_config is None:
+                encoder_config = asdict(
+                    MlpNetConfig(
+                        hidden_size=[16]
+                        )
+                    )
+
+            encoder_config['noise_std'] = noise_std
+            encoder_config['output_activation'] = encoder_config['activation']
+            encoder_config['output_vanish'] = False
 
         super().__init__(
             observation_space, 
@@ -195,22 +210,24 @@ class RainbowQNetwork(EvolvableNetwork):
             head_config = asdict(
                 MlpNetConfig(
                     hidden_size=[16],
-                    noisy=True,
-                    output_activation=None
+                    output_activation=None,
+                    noise_std=noise_std
                     )
                 )
         elif isinstance(head_config, NetConfig):
             head_config = asdict(head_config)
+            head_config['noise_std'] = noise_std
+
+        if head_config.get("noisy", None) is not None:
+            head_config.pop("noisy")
 
         self.num_actions = spaces.flatdim(action_space)
         self.num_atoms = num_atoms
         self.support = support
+        self.noise_std = noise_std
 
         # Build value and advantage networks
         self.build_network_head(head_config)
-
-        # Register mutation hook
-        self.register_mutation_hook(self._recreate_advantage_from_value)
 
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -219,13 +236,16 @@ class RainbowQNetwork(EvolvableNetwork):
         :return: Configuration of the Rainbow Q network.
         :rtype: Dict[str, Any]
         """
+        head_config = self.head_net.net_config
+        head_config.pop("num_atoms")
+        head_config.pop("support")
         return {
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "support": self.support,
             "num_atoms": self.num_atoms,
             "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.net_config,
+            "head_config": head_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,
@@ -239,22 +259,13 @@ class RainbowQNetwork(EvolvableNetwork):
         :param net_config: Configuration of the network head.
         :type net_config: Dict[str, Any]
         """
-        self.head_net = self.create_mlp(
+        self.head_net = RainbowMLP(
             num_inputs=self.latent_dim,
-            num_outputs=self.num_atoms,
-            name='value',
-            net_config=net_config
-            )
-        
-        self.advantage_net = self.create_mlp(
-            num_inputs=self.latent_dim,
-            num_outputs=self.num_actions * self.num_atoms,
-            name='advantage',
-            net_config=net_config
-            )
-        
-        # We want the same mutations for both the value and advantage networks
-        self.advantage_net.disable_mutations()
+            num_outputs=self.num_actions,
+            num_atoms=self.num_atoms,
+            support=self.support,
+            **net_config
+        )
     
     def forward(self, obs: TorchObsType, q: bool = True, log: bool = False) -> torch.Tensor:
         """Forward pass of the Rainbow Q network.
@@ -270,60 +281,22 @@ class RainbowQNetwork(EvolvableNetwork):
         :rtype: torch.Tensor
         """
         latent = self.encoder(obs)
-        value: torch.Tensor = self.head_net(latent)
-        advantage: torch.Tensor = self.advantage_net(latent)
-        
-        batch_size = value.size(0)
-        value = value.view(batch_size, 1, self.num_atoms)
-        advantage = advantage.view(batch_size, self.num_actions, self.num_atoms)
-
-        x = value + advantage - advantage.mean(1, keepdim=True)
-        if log:
-            x = F.log_softmax(x.view(-1, self.num_atoms), dim=-1)
-            return x.view(-1, self.num_actions, self.num_atoms)
-
-        x = F.softmax(x.view(-1, self.num_atoms), dim=-1)
-        x = x.view(-1, self.num_actions, self.num_atoms).clamp(min=1e-3)
-        if q:
-            x = torch.sum(x * self.support, dim=2)
-
-        return x
-    
-    def _recreate_advantage_from_value(self) -> None:
-        """Recreates the advantage network using the net_config of the value network 
-        after a mutation on the value network."""
-        if self.last_mutation_attr is not None and self.last_mutation_attr.split(".")[0] == "head_net":
-            advantage_net = self.create_mlp(
-                num_inputs=self.latent_dim,
-                num_outputs=self.num_actions * self.num_atoms,
-                name="advantage",
-                net_config=self.head_net.net_config
-            )
-            advantage_net.disable_mutations()
-
-            self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
+        return self.head_net(latent, q=q, log=log)
 
     def recreate_network(self) -> None:
         """Recreates the network"""
         encoder = self._build_encoder(self.encoder.net_config)
-        head_net = self.create_mlp(
-            num_inputs=self.latent_dim,
-            num_outputs=self.num_atoms,
-            name="value",
-            net_config=self.head_net.net_config
-        )
 
-        advantage_net = self.create_mlp(
+        head_net = RainbowMLP(
             num_inputs=self.latent_dim,
-            num_outputs=self.num_actions * self.num_atoms,
-            name="advantage",
-            net_config=self.head_net.net_config
+            num_outputs=self.num_actions,
+            num_atoms=self.num_atoms,
+            support=self.support,
+            **self.head_net.net_config
         )
-        advantage_net.disable_mutations()
 
         self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
-        self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
 
 class ContinuousQNetwork(EvolvableNetwork):
     """ContinuousQNetwork is an extension of the QNetwork that is used for continuous action spaces.

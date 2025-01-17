@@ -4,7 +4,7 @@ import yaml
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.networks.custom_modules import RainbowMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.algo_utils import observation_space_channels_to_first
 from agilerl.utils.utils import (
@@ -24,9 +24,9 @@ from agilerl.components.replay_buffer import (
 # import sys
 # sys.path.append('../')
 
-
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
@@ -109,7 +109,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     state_dim = RLAlgorithm.get_state_dim(observation_space)
     action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
-        actor = EvolvableMLP(
+        actor = RainbowMLP(
             num_inputs=state_dim[0],
             num_outputs=action_dim,
             output_vanish=False,
@@ -117,14 +117,11 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             layer_norm=False,
             num_atoms=51,
             support=torch.linspace(-200, 200, 51).to(device),
-            rainbow=True,
             device=device,
             hidden_size=[128, 128],
-            mlp_activation="ReLU",
-            mlp_output_activation="ReLU",
+            activation="ReLU",
+            output_activation="ReLU",
         )
-        NET_CONFIG = None
-
     else:
         actor = None
 

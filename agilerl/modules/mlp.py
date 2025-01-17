@@ -128,7 +128,9 @@ class EvolvableMLP(EvolvableModule):
             "device",
             "name"
         ]:
-            net_config.pop(attr)
+            if attr in net_config:
+                net_config.pop(attr)
+
         return net_config
 
     @property
@@ -288,7 +290,7 @@ class EvolvableMLP(EvolvableModule):
         return {"hidden_layer": hidden_layer, "numb_new_nodes": numb_new_nodes}
 
     def recreate_network(self) -> None:
-        """Recreates neural networks, shrinking parameters if necessary.
+        """Recreates neural networks.
         
         :param shrink_params: Shrink parameters of neural networks, defaults to False
         :type shrink_params: bool, optional

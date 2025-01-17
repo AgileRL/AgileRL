@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Tuple, Dict, Any
 import warnings
 import numpy as np
 import torch
@@ -7,7 +7,7 @@ from torch.nn.utils import clip_grad_norm_
 import torch.nn as nn
 from gymnasium import spaces
 
-from agilerl.typing import ArrayLike, GymEnvType
+from agilerl.typing import ArrayLike, GymEnvType, ExperiencesType, TorchObsType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import NetworkGroup
@@ -145,12 +145,8 @@ class RainbowDQN(RLAlgorithm):
         self.combined_reward = combined_reward
         self.noise_std = noise_std
 
-        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms)
+        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms, device=self.device)
         self.delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
-        if self.accelerator is None:
-            self.support = self.support.to(self.device)
-        else:
-            self.support = self.support.to(self.accelerator.device)
 
         if actor_network is not None:
             if isinstance(actor_network, MakeEvolvable):
@@ -187,6 +183,7 @@ class RainbowDQN(RLAlgorithm):
                 action_space=action_space,
                 support=self.support,
                 num_atoms=self.num_atoms,
+                noise_std=self.noise_std,
                 device=self.device,
                 **net_config
             )
@@ -255,7 +252,32 @@ class RainbowDQN(RLAlgorithm):
 
         return action
 
-    def _dqn_loss(self, states, actions, rewards, next_states, dones, gamma):
+    def _dqn_loss(
+        self,
+        states: TorchObsType,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        next_states: torch.Tensor,
+        dones: torch.Tensor,
+        gamma: float
+    ) -> torch.Tensor:
+        """Calculates the DQN loss.
+
+        :param states: Batch of current states
+        :type states: torch.Tensor
+        :param actions: Batch of actions taken
+        :type actions: torch.Tensor
+        :param rewards: Batch of rewards received
+        :type rewards: torch.Tensor
+        :param next_states: Batch of next states
+        :type next_states: torch.Tensor
+        :param dones: Batch of done flags indicating episode termination
+        :type dones: torch.Tensor
+        :param gamma: Discount factor
+        :type gamma: float
+        :return: Element-wise loss
+        :rtype: torch.Tensor
+        """
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)
 
@@ -316,7 +338,12 @@ class RainbowDQN(RLAlgorithm):
         elementwise_loss = -(proj_dist * log_p).sum(1)
         return elementwise_loss
 
-    def learn(self, experiences, n_step=False, per=False):
+    def learn(
+            self,
+            experiences: ExperiencesType,
+            n_step: bool = False,
+            per: bool = False
+            ) -> Tuple[float, Optional[ArrayLike], Optional[ArrayLike]]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -325,7 +352,11 @@ class RainbowDQN(RLAlgorithm):
         :type n_step: bool, optional
         :param per: Use prioritized experience replay buffer, defaults to True
         :type per: bool, optional
+
+        :return: Tuple of loss, indices, and new priorities
+        :rtype: Tuple[float, numpy.ndarray, numpy.ndarray]
         """
+        experiences = self.to_device(*experiences)
         if per:
             if n_step:
                 (
@@ -342,16 +373,6 @@ class RainbowDQN(RLAlgorithm):
                     n_next_states,
                     n_dones,
                 ) = experiences
-                if self.accelerator is not None:
-                    actions = actions.to(self.accelerator.device)
-                    rewards = rewards.to(self.accelerator.device)
-                    dones = dones.to(self.accelerator.device)
-                    weights = weights.to(self.accelerator.device)
-                    n_states = n_states.to(self.accelerator.device)
-                    n_actions = n_actions.to(self.accelerator.device)
-                    n_rewards = n_rewards.to(self.accelerator.device)
-                    n_next_states = n_next_states.to(self.accelerator.device)
-                    n_dones = n_dones.to(self.accelerator.device)
             else:
                 (
                     states,
@@ -362,12 +383,6 @@ class RainbowDQN(RLAlgorithm):
                     weights,
                     idxs,
                 ) = experiences
-
-                if self.accelerator is not None:
-                    actions = actions.to(self.accelerator.device)
-                    rewards = rewards.to(self.accelerator.device)
-                    dones = dones.to(self.accelerator.device)
-                    weights = weights.to(self.accelerator.device)
 
             if self.combined_reward or not n_step:
                 elementwise_loss = self._dqn_loss(
@@ -399,15 +414,6 @@ class RainbowDQN(RLAlgorithm):
                     n_next_states,
                     n_dones,
                 ) = experiences
-                if self.accelerator is not None:
-                    actions = actions.to(self.accelerator.device)
-                    rewards = rewards.to(self.accelerator.device)
-                    dones = dones.to(self.accelerator.device)
-                    n_states = n_states.to(self.accelerator.device)
-                    n_actions = n_actions.to(self.accelerator.device)
-                    n_rewards = n_rewards.to(self.accelerator.device)
-                    n_next_states = n_next_states.to(self.accelerator.device)
-                    n_dones = n_dones.to(self.accelerator.device)
             else:
                 (
                     states,
@@ -416,12 +422,10 @@ class RainbowDQN(RLAlgorithm):
                     next_states,
                     dones,
                 ) = experiences
-                if self.accelerator is not None:
-                    actions = actions.to(self.accelerator.device)
-                    rewards = rewards.to(self.accelerator.device)
-                    dones = dones.to(self.accelerator.device)
 
+            if not n_step:
                 idxs = None
+
             new_priorities = None
 
             if self.combined_reward or not n_step:
@@ -445,6 +449,7 @@ class RainbowDQN(RLAlgorithm):
             self.accelerator.backward(loss)
         else:
             loss.backward()
+
         clip_grad_norm_(self.actor.parameters(), 10.0)
         self.optimizer.step()
 
