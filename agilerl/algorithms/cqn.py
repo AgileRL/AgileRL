@@ -87,7 +87,7 @@ class CQN:
         assert lr > 0, "Learning rate must be greater than zero."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
-        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(tau, float), "Tau must be a float."
         assert tau > 0, "Tau must be greater than zero."
         assert isinstance(
