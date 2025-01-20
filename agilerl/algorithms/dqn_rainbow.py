@@ -156,13 +156,9 @@ class RainbowDQN(RLAlgorithm):
                 actor_network.num_atoms = self.num_atoms
                 actor_network = MakeEvolvable(**actor_network.init_dict)
                 actor_network.load_state_dict(actor_network.state_dict())
-            elif not isinstance(actor_network, nn.Module):
-                raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type MakeEvolvable or RainbowQNetwork."
-                )
             elif not isinstance(actor_network, EvolvableModule):
-                warnings.warn(
-                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
+                raise TypeError(
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
             
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)

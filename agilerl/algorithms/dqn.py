@@ -113,14 +113,10 @@ class DQN(RLAlgorithm):
         self.capturable = cudagraphs
 
         if actor_network is not None:
-            if not isinstance(actor_network, nn.Module):
+            if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                      )
-            elif not isinstance(actor_network, EvolvableModule):
-                warnings.warn(
-                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
-                )
 
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
@@ -297,10 +293,9 @@ class DQN(RLAlgorithm):
         :type state: list[torch.Tensor[float]]
         """
         states, actions, rewards, next_states, dones = experiences
-        if self.accelerator is not None:
-            actions = actions.to(self.accelerator.device)
-            rewards = rewards.to(self.accelerator.device)
-            dones = dones.to(self.accelerator.device)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        dones = dones.to(self.device)
 
         states = self.preprocess_observation(states)
         next_states = self.preprocess_observation(next_states)

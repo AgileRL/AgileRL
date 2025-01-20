@@ -814,7 +814,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         self.action_space = action_space
         self.normalize_images = normalize_images
 
-        # TODO: This is a bit of a temporary hack to support legacy code
+        # TODO: Temporary hack to support legacy code
         self.state_dim = self.get_state_dim(observation_space)
         self.action_dim = self.get_action_dim(action_space)
         self.discrete_actions = isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete))

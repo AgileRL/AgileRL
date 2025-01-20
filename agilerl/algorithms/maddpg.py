@@ -194,13 +194,13 @@ class MADDPG(MultiAgentAlgorithm):
                 len({type(net) for net in critic_networks}) == 1
             ), "'critic_networks' must all be the same type"
 
-            if not all(isinstance(net, nn.Module) for net in actor_networks):
+            if not all(isinstance(net, EvolvableModule) for net in actor_networks):
                 raise TypeError(
-                    "All actor networks must be instances of nn.Module"
+                    "All actor networks must be instances of EvolvableModule"
                 )
-            if not all(isinstance(net, nn.Module) for net in critic_networks):
+            if not all(isinstance(net, EvolvableModule) for net in critic_networks):
                 raise TypeError(
-                    "All critic networks must be instances of nn.Module"
+                    "All critic networks must be instances of EvolvableModule"
                 )
             self.actors, self.critics = make_safe_deepcopies(actor_networks, critic_networks)
             self.actor_targets, self.critic_targets = make_safe_deepcopies(actor_networks, critic_networks)

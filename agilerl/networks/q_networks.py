@@ -236,16 +236,13 @@ class RainbowQNetwork(EvolvableNetwork):
         :return: Configuration of the Rainbow Q network.
         :rtype: Dict[str, Any]
         """
-        head_config = self.head_net.net_config
-        head_config.pop("num_atoms")
-        head_config.pop("support")
         return {
             "observation_space": self.observation_space,
             "action_space": self.action_space,
             "support": self.support,
             "num_atoms": self.num_atoms,
             "encoder_config": self.encoder.net_config,
-            "head_config": head_config,
+            "head_config": self.head_net.net_config,
             "min_latent_dim": self.min_latent_dim,
             "max_latent_dim": self.max_latent_dim,
             "n_agents": self.n_agents,

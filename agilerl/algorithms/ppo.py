@@ -201,17 +201,13 @@ class PPO(RLAlgorithm):
         self.cudagraphs = cudagraphs
 
         if actor_network is not None and critic_network is not None:
-            if not isinstance(actor_network, nn.Module):
+            if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type nn.Module."
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                      )
-            elif not isinstance(critic_network, nn.Module):
+            if not isinstance(critic_network, EvolvableModule):
                 raise TypeError(
-                    f"Passed critic network is of type {type(critic_network)}, but must be of type nn.Module."
-                )
-            elif not isinstance(actor_network, EvolvableModule) and not isinstance(critic_network, EvolvableModule):
-                warnings.warn(
-                    f"Passed networks are not EvolvableModule's - architecture mutations will be disabled."
+                    f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule."
                 )
             
             self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)

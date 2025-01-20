@@ -40,16 +40,6 @@ Example
   env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
 
   max_action = float(env.single_action_space.high[0])
-  try:
-      state_dim = env.single_observation_space.n          # Discrete observation space
-      one_hot = True                                      # Requires one-hot encoding
-  except:
-      state_dim = env.single_observation_space.shape      # Continuous observation space
-      one_hot = False                                     # Does not require one-hot encoding
-  try:
-      action_dim = env.single_action_space.n              # Discrete action space
-  except:
-      action_dim = env.single_action_space.shape[0]       # Continuous action space
 
   channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
 

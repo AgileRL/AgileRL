@@ -7,6 +7,44 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.evolvable_networks import create_mlp
 
 class RainbowMLP(EvolvableMLP):
+    """RainbowMLP is a multi-layer perceptron network that is used in the Rainbow DQN algorithm.
+
+    :param num_inputs: Number of input features.
+    :type num_inputs: int
+    :param num_outputs: Number of output features.
+    :type num_outputs: int
+    :param hidden_size: List of hidden layer sizes.
+    :type hidden_size: List[int]
+    :param num_atoms: Number of atoms in the distribution.
+    :type num_atoms: int
+    :param support: Support of the distribution.
+    :type support: torch.Tensor
+    :param noise_std: Standard deviation of the noise. Defaults to 0.5.
+    :type noise_std: float, optional
+    :param activation: Activation layer, defaults to 'ReLU'
+    :type activation: str, optional
+    :param output_activation: Output activation layer, defaults to None
+    :type output_activation: str, optional
+    :param min_hidden_layers: Minimum number of hidden layers the network will shrink down to, defaults to 1
+    :type min_hidden_layers: int, optional
+    :param max_hidden_layers: Maximum number of hidden layers the network will expand to, defaults to 3
+    :type max_hidden_layers: int, optional
+    :param min_mlp_nodes: Minimum number of nodes a layer can have within the network, defaults to 64
+    :type min_mlp_nodes: int, optional
+    :param max_mlp_nodes: Maximum number of nodes a layer can have within the network, defaults to 500
+    :type max_mlp_nodes: int, optional
+    :param layer_norm: Normalization between layers, defaults to True
+    :type layer_norm: bool, optional
+    :param output_vanish: Vanish output by multiplying by 0.1, defaults to True
+    :type output_vanish: bool, optional
+    :param init_layers: Initialise network layers, defaults to True
+    :type init_layers: bool, optional
+    :param new_gelu: Use new GELU activation function, defaults to False
+    :type new_gelu: bool, optional
+    :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
+    :type device: str, optional
+    """
+
     def __init__(
             self,
             num_inputs: int,
@@ -15,7 +53,8 @@ class RainbowMLP(EvolvableMLP):
             num_atoms: int,
             support: torch.Tensor,
             noise_std: float = 0.5,
-            **kwargs) -> None:
+            **kwargs
+            ) -> None:
 
         super().__init__(
             num_inputs, num_atoms, hidden_size, 
@@ -41,6 +80,13 @@ class RainbowMLP(EvolvableMLP):
             new_gelu=self.new_gelu,
             name="advantage"
         )
+
+    @property
+    def net_config(self) -> Dict[str, Any]:
+        net_config = super().net_config.copy()
+        net_config.pop("num_atoms")
+        net_config.pop("support")
+        return net_config
     
     @property
     def init_dict(self) -> Dict[str, Any]:
@@ -83,7 +129,7 @@ class RainbowMLP(EvolvableMLP):
             x = torch.sum(x * self.support, dim=2)
 
         return x
-    
+
     def recreate_network(self) -> None:
         """Recreates the network with the same parameters."""
         # Recreate value net with the same parameters
@@ -105,4 +151,6 @@ class RainbowMLP(EvolvableMLP):
             name="advantage"
         )
 
-        self.advantage_net = EvolvableModule.preserve_parameters(self.advantage_net, advantage_net)
+        self.advantage_net = EvolvableModule.preserve_parameters(
+            self.advantage_net, advantage_net
+            )

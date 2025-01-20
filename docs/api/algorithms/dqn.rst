@@ -37,16 +37,6 @@ Example
   # Create environment and Experience Replay Buffer
   num_envs = 8
   env = make_vect_envs('LunarLander-v2', num_envs=num_envs
-  try:
-      state_dim = env.single_observation_space.n          # Discrete observation space
-      one_hot = True                                      # Requires one-hot encoding
-  except:
-      state_dim = env.single_observation_space.shape      # Continuous observation space
-      one_hot = False                                     # Does not require one-hot encoding
-  try:
-      action_dim = env.single_action_space.n              # Discrete action space
-  except:
-      action_dim = env.single_action_space.shape[0]       # Continuous action space
 
   channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
 

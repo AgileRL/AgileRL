@@ -56,7 +56,7 @@ class EvolvableModule(Protocol):
     def clone(self) -> "EvolvableModule":
         ...
 
-EvolvableNetworkType = Union[EvolvableModule, Iterable[EvolvableModule]]
+EvolvableNetworkType = Union[EvolvableModule, List[EvolvableModule]]
 OptimizerType = Union[Optimizer, Iterable[Optimizer], OptimizerWrapper]
 EvolvableAttributeType = Union[EvolvableNetworkType, OptimizerType]
 EvolvableNetworkDict = Dict[str, EvolvableNetworkType]

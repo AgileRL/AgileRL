@@ -107,14 +107,10 @@ class CQN(RLAlgorithm):
         self.double = double
 
         if actor_network is not None:
-            if not isinstance(actor_network, nn.Module):
+            if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type nn.Module."
+                    f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                      )
-            elif not isinstance(actor_network, EvolvableModule):
-                warnings.warn(
-                    f"'actor_network' is not an EvolvableModule - architecture mutations will be disabled."
-                )
 
             # Need to make deepcopies for target and detached networks
             self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)

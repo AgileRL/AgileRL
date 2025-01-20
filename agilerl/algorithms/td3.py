@@ -173,26 +173,18 @@ class TD3(RLAlgorithm):
 
             assert len(critic_networks) == 2, "TD3 requires exactly 2 critic networks."
 
-            if not isinstance(actor_network, nn.Module):
+            if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
-                    f"Passed actor network is of type {type(actor_network)}, but must be of type nn.Module."
+                    f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
-            elif not isinstance(critic_networks[0], nn.Module):
+            elif not isinstance(critic_networks[0], EvolvableModule):
                 raise TypeError(
-                    f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type nn.Module."
+                    f"Passed critic network at index 0 is of type {type(critic_networks[0])}, but must be of type EvolvableModule."
                 )
-            elif not isinstance(critic_networks[1], nn.Module):
+            elif not isinstance(critic_networks[1], EvolvableModule):
                 raise TypeError(
-                    f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type nn.Module."
+                    f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type EvolvableModule."
                      )
-            elif not (
-                isinstance(actor_network, EvolvableModule)
-                and isinstance(critic_networks[0], EvolvableModule)
-                and isinstance(critic_networks[1], EvolvableModule)
-            ):
-                warnings.warn(
-                    f"Passed networks are not EvolvableModule's - architecture mutations will be disabled."
-                )
 
             self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
             self.actor_target, self.critic_target_1, self.critic_target_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
