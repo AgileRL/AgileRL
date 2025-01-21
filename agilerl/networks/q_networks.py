@@ -191,6 +191,7 @@ class RainbowQNetwork(EvolvableNetwork):
             encoder_config['noise_std'] = noise_std
             encoder_config['output_activation'] = encoder_config['activation']
             encoder_config['output_vanish'] = False
+            encoder_config['init_layers'] = False
 
         super().__init__(
             observation_space, 
@@ -220,6 +221,9 @@ class RainbowQNetwork(EvolvableNetwork):
 
         if head_config.get("noisy", None) is not None:
             head_config.pop("noisy")
+        
+        if head_config.get("init_layers", None) is not None:
+            head_config.pop("init_layers")
 
         self.num_actions = spaces.flatdim(action_space)
         self.num_atoms = num_atoms
@@ -261,6 +265,7 @@ class RainbowQNetwork(EvolvableNetwork):
             num_outputs=self.num_actions,
             num_atoms=self.num_atoms,
             support=self.support,
+            device=self.device,
             **net_config
         )
     

@@ -15,7 +15,7 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
 from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
 
 
@@ -40,6 +40,8 @@ class DDPG(RLAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to None
     :type net_config: Optional[Dict[str, Any]], optional
     :param head_config: Head configuration, defaults to None
@@ -85,6 +87,7 @@ class DDPG(RLAlgorithm):
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 1e-4,
@@ -101,17 +104,28 @@ class DDPG(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
     ) -> None:
+
+        if hp_config is None:
+            hp_config = HyperparameterConfig(
+                lr_actor = RLParameter(min=1e-4, max=1e-2),
+                lr_critic = RLParameter(min=1e-4, max=1e-2),
+                batch_size = RLParameter(min=8, max=512, dtype=int),
+                learn_step = RLParameter(min=1, max=16, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+            )
+
         super().__init__(
             observation_space,
             action_space,
             index=index,
-            learn_step=learn_step,
+            hp_config=hp_config,
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
             name="DDPG"
         )
 
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(action_space, spaces.Box), "DDPG only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
@@ -146,6 +160,7 @@ class DDPG(RLAlgorithm):
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
+        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.wrap = wrap

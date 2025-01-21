@@ -10,7 +10,7 @@ from gymnasium import spaces
 from agilerl.typing import NumpyObsType, ArrayDict, InfosDict, TensorDict, ExperiencesType, ArrayLike, GymEnvType
 from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
@@ -45,6 +45,8 @@ class MADDPG(MultiAgentAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
     :param head_config: Head configuration for actors and critics network, defaults to None
@@ -95,6 +97,7 @@ class MADDPG(MultiAgentAlgorithm):
         theta: float = 0.15,
         dt: float = 1e-2,
         index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr_actor: float = 0.001,
@@ -111,12 +114,21 @@ class MADDPG(MultiAgentAlgorithm):
         torch_compiler: Optional[str] = None,
         wrap: bool = True,
     ):
+        
+        if hp_config is None:
+            hp_config = HyperparameterConfig(
+                lr_actor = RLParameter(min=1e-4, max=1e-2),
+                lr_critic = RLParameter(min=1e-4, max=1e-2),
+                batch_size = RLParameter(min=8, max=2048, dtype=int),
+                learn_step = RLParameter(min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+            )
+
         super().__init__(
             observation_spaces,
             action_spaces,
             agent_ids,
             index=index,
-            learn_step=learn_step,
+            hp_config=hp_config,
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
@@ -124,6 +136,8 @@ class MADDPG(MultiAgentAlgorithm):
             name="MADDPG",
         )
 
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr_actor, float), "Actor learning rate must be a float."
@@ -152,6 +166,7 @@ class MADDPG(MultiAgentAlgorithm):
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
+        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mut

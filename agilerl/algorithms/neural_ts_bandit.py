@@ -8,7 +8,7 @@ from gymnasium import spaces
 from agilerl.typing import NumpyObsType, ArrayLike, ExperiencesType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.cnn import EvolvableCNN
@@ -30,6 +30,8 @@ class NeuralTS(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
     :param gamma: Positive scaling factor, defaults to 1.0
@@ -63,6 +65,7 @@ class NeuralTS(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
         gamma: float = 1.0,
         lamb: float = 1.0,
@@ -77,17 +80,26 @@ class NeuralTS(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
     ):
+        if hp_config is None:
+            hp_config = HyperparameterConfig(
+                lr = RLParameter(min=6.25e-5, max=1e-2),
+                batch_size = RLParameter(min=8, max=512, dtype=int),
+                learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+            )
+
         super().__init__(
             observation_space,
             action_space,
             index=index,
-            learn_step=learn_step,
+            hp_config=hp_config,
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
             name="NeuralTS",
             )
 
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(
             gamma, (float, int)
         ), "Scaling factor must be a float or integer."
@@ -107,6 +119,7 @@ class NeuralTS(RLAlgorithm):
         ), "Wrap models flag must be boolean value True or False."
 
         self.gamma = gamma
+        self.learn_step = learn_step
         self.lamb = lamb
         self.reg = reg
         self.batch_size = batch_size

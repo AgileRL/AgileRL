@@ -8,12 +8,11 @@ import numpy as np
 from tensordict import TensorDict
 from numpy.typing import ArrayLike
 import torch
-from torch.optim import Optimizer
 from torch._dynamo import OptimizedModule
 import dill
 
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import MutationRegistry, NetworkGroup, OptimizerConfig
+from agilerl.algorithms.core.registry import MutationRegistry, NetworkGroup, OptimizerConfig, HyperparameterConfig
 from agilerl.protocols import EvolvableModule, EvolvableAttributeType, EvolvableAttributeDict
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, GymSpaceType, DeviceType
 from agilerl.utils.algo_utils import (
@@ -67,16 +66,14 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def __init__(
             self,
             index: int,
-            learn_step: int = 2048,
+            hp_config: Optional[HyperparameterConfig] = None,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
             torch_compiler: Optional[Any] = None,
             name: Optional[str] = None,
             ) -> None:
 
-        assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(index, int), "Agent index must be an integer."
-        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(device, (str, torch.device)), "Device must be a string."
         assert isinstance(name, (type(None), str)), "Name must be a string."
         assert (
@@ -95,7 +92,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
         self.torch_compiler = torch_compiler
-        self.learn_step = learn_step
         self.algo = name if name is not None else self.__class__.__name__
 
         self._mut = None
@@ -103,7 +99,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         self.scores = []
         self.fitness = []
         self.steps = [0]
-        self.registry = MutationRegistry()
+        self.registry = MutationRegistry(hp_config)
 
     @property
     def index(self) -> int:
@@ -797,7 +793,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             observation_space: spaces.Space,
             action_space: spaces.Space,
             index: int,
-            learn_step: int = 2048,
+            hp_config: Optional[HyperparameterConfig] = None,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
             torch_compiler: Optional[Any] = None,
@@ -805,7 +801,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
             name: Optional[str] = None,
             ) -> None:
 
-        super().__init__(index, learn_step, device, accelerator, torch_compiler, name)
+        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
         assert isinstance(observation_space, spaces.Space), "Observation space must be an instance of gym.spaces.Space."
         assert isinstance(action_space, spaces.Space), "Action space must be an instance of gym.spaces.Space."
@@ -894,7 +890,7 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             action_spaces: Iterable[spaces.Space],
             agent_ids: Iterable[int],
             index: int,
-            learn_step: int = 2048,
+            hp_config: Optional[HyperparameterConfig] = None,
             device: Union[str, torch.device] = "cpu",
             accelerator: Optional[Accelerator] = None,
             torch_compiler: Optional[Any] = None,
@@ -902,7 +898,7 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             name: Optional[str] = None,
             ) -> None:
 
-        super().__init__(index, learn_step, device, accelerator, torch_compiler, name)
+        super().__init__(index, hp_config, device, accelerator, torch_compiler, name)
 
         assert isinstance(
             agent_ids, (tuple, list)

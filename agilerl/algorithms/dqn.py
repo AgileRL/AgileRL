@@ -13,7 +13,7 @@ from tensordict.nn import CudaGraphModule
 from agilerl.typing import TorchObsType, ExperiencesType, NumpyObsType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
 from agilerl.networks.q_networks import QNetwork
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
@@ -30,6 +30,8 @@ class DQN(RLAlgorithm):
     :type action_space: gymnasium.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
@@ -63,6 +65,7 @@ class DQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
@@ -78,17 +81,27 @@ class DQN(RLAlgorithm):
         cudagraphs: bool = False,
         wrap: bool = True,
     ):
+
+        if hp_config is None:
+            hp_config = HyperparameterConfig(
+                lr = RLParameter(min=6.25e-5, max=1e-2),
+                batch_size = RLParameter(min=8, max=512, dtype=int),
+                learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+            )
+
         super().__init__(
             observation_space,
             action_space,
             index=index,
-            learn_step=learn_step,
+            hp_config=hp_config,
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
             name="DQN"
         )
 
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
@@ -105,6 +118,7 @@ class DQN(RLAlgorithm):
 
         self.batch_size = batch_size
         self.lr = lr
+        self.learn_step = learn_step
         self.gamma = gamma
         self.tau = tau
         self.mut = mut

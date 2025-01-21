@@ -1,4 +1,5 @@
-from typing import Optional, List, Dict, Union, Type, Any, Callable
+from typing import Optional, List, Dict, Union, Type, Any, Callable, Tuple
+from numbers import Number
 import inspect
 from dataclasses import dataclass, field
 from torch.optim import Optimizer
@@ -79,7 +80,62 @@ class OptimizerConfig:
             return [name_to_cls[cls_name] for cls_name in self.optimizer_cls]
         
         return name_to_cls[self.optimizer_cls]
+    
+@dataclass
+class RLParameter:
+    min: float
+    max: float
+    shrink_factor: float = 0.8
+    grow_factor: float = 1.2
+    dtype: Union[Type[float], Type[int]] = float
+    value: Optional[Number] = field(default=None, init=False)
 
+    def mutate(self) -> Number:
+        """Mutate the hyperparameter value by either growing or shrinking it.
+
+        :return: The mutated hyperparameter value.
+        :rtype: Number
+        """
+        assert self.value is not None, "Hyperparameter value is not set"
+
+        # Equal probability of growing or shrinking 
+        if torch.rand(1).item() < 0.5:
+            if self.value * self.shrink_factor > self.min:
+                self.value *= self.shrink_factor
+            else:
+                self.value = self.min
+        else:
+            if self.value * self.grow_factor < self.max:
+                self.value *= self.grow_factor
+            else:
+                self.value = self.max
+
+        return self.dtype(self.value)
+
+class HyperparameterConfig:
+    """Stores the RL hyperparameters that will be mutated during training. For each
+    hyperparameter, we store the name of the attribute where the hyperparameter is 
+    stored, and the range of values that the hyperparameter can take."""
+
+    def __init__(self, **kwargs: Dict[str, RLParameter]):
+        self.config = kwargs
+        for key, value in kwargs.items():
+            if not isinstance(value, RLParameter):
+                raise ValueError("Expected RLParameter object for hyperparameter configuration.")
+
+            setattr(self, key, value)
+    
+    def items(self) -> Dict[str, Any]:
+        return self.config.items()
+    
+    def sample(self) -> Tuple[str, RLParameter]:
+        """Sample a hyperparameter from the configuration.
+
+        :return: The name of the hyperparameter and its configuration.
+        :rtype: Tuple[str, RLHyperparameter]
+        """
+        key = torch.randperm(len(self.config))[0]
+        return list(self.config.keys())[key], list(self.config.values())[key]
 
 @dataclass
 class NetworkGroup:
@@ -185,7 +241,12 @@ def make_network_group(
 class MutationRegistry:
     """Registry for storing the evolvable modules and optimizers of an `EvolvableAlgorithm`
     in a structured way to be interpreted by a `Mutations` object when performing evolutionary 
-    hyperparameter optimization."""
+    hyperparameter optimization.
+    
+    :param hp_config: The hyperparameter configuration of the algorithm.
+    :type hp_config: HyperparameterConfig"""
+
+    hp_config: HyperparameterConfig
 
     def __post_init__(self):
         self.groups: List[NetworkGroup] = []

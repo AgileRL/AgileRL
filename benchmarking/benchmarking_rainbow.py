@@ -25,8 +25,8 @@ from agilerl.components.replay_buffer import (
 # sys.path.append('../')
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 
@@ -112,9 +112,8 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         actor = RainbowMLP(
             num_inputs=state_dim[0],
             num_outputs=action_dim,
-            output_vanish=False,
-            init_layers=False,
-            layer_norm=False,
+            output_vanish=True,
+            layer_norm=True,
             num_atoms=51,
             support=torch.linspace(-200, 200, 51).to(device),
             device=device,
@@ -156,7 +155,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
-        mutation=mutations,
+        # mutation=mutations,
         wb=INIT_HP["WANDB"],
         save_elite=True,
         elite_path="elite_rainbow.pt",
@@ -176,4 +175,4 @@ if __name__ == "__main__":
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
     NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)

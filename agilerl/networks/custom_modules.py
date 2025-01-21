@@ -57,8 +57,14 @@ class RainbowMLP(EvolvableMLP):
             ) -> None:
 
         super().__init__(
-            num_inputs, num_atoms, hidden_size, 
-            noisy=True, noise_std=noise_std, name="value", **kwargs
+            num_inputs,
+            num_atoms,
+            hidden_size, 
+            noisy=True,
+            init_layers=False,
+            noise_std=noise_std,
+            name="value",
+            **kwargs
             )
 
         self.num_atoms = num_atoms
@@ -95,6 +101,7 @@ class RainbowMLP(EvolvableMLP):
         mlp_dict['num_outputs'] = self.num_actions
         mlp_dict["support"] = self.support
         mlp_dict.pop("noisy")
+        mlp_dict.pop("init_layers")
         mlp_dict.pop("name")
         return mlp_dict
 

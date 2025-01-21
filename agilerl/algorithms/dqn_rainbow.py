@@ -10,12 +10,13 @@ from gymnasium import spaces
 from agilerl.typing import ArrayLike, GymEnvType, ExperiencesType, TorchObsType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup
+from agilerl.algorithms.core.registry import NetworkGroup, RLParameter, HyperparameterConfig
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import RainbowQNetwork
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+
 
 class RainbowDQN(RLAlgorithm):
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -26,6 +27,8 @@ class RainbowDQN(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
     :param batch_size: Size of batched sample from replay buffer for learning, defaults to 64
@@ -71,6 +74,7 @@ class RainbowDQN(RLAlgorithm):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         index: int = 0,
+        hp_config: Optional[HyperparameterConfig] = None,
         net_config: Optional[Dict[str, Any]] = None,
         batch_size: int = 64,
         lr: float = 1e-4,
@@ -92,17 +96,28 @@ class RainbowDQN(RLAlgorithm):
         accelerator: Optional[Any] = None,
         wrap: bool = True,
     ):
+        if hp_config is None:
+            hp_config = HyperparameterConfig(
+                lr = RLParameter(min=6.25e-5, max=1e-3),
+                batch_size = RLParameter(min=8, max=512, dtype=int),
+                learn_step = RLParameter(
+                    min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+                    )
+            )
+
         super().__init__(
             observation_space,
             action_space,
             index=index,
-            learn_step=learn_step,
+            hp_config=hp_config,
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
             name="Rainbow DQN"
         )
 
+        assert learn_step >= 1, "Learn step must be greater than or equal to one."
+        assert isinstance(learn_step, int), "Learn step rate must be an integer."
         assert isinstance(batch_size, int), "Batch size must be an integer."
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
@@ -132,6 +147,7 @@ class RainbowDQN(RLAlgorithm):
         ), "Wrap models flag must be boolean value True or False."
 
         self.batch_size = batch_size
+        self.learn_step = learn_step
         self.lr = lr
         self.gamma = gamma
         self.tau = tau
@@ -169,7 +185,6 @@ class RainbowDQN(RLAlgorithm):
             head_config = MlpNetConfig(
                 hidden_size=[64] if head_config is None else head_config.get("hidden_size", [64]),
                 noise_std=self.noise_std,
-                noisy=True,
                 output_activation="ReLU"
             )
             net_config["head_config"] = head_config
