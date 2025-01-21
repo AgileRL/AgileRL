@@ -28,6 +28,7 @@ class MutationMethod(Protocol):
 class OptimizerWrapper(Protocol):
     optimizer: Union[Optimizer, Iterable[Optimizer]]
     optimizer_cls: Union[Type[Optimizer], Iterable[Type[Optimizer]]]
+    lr: Callable[[], float]
     optimizer_kwargs: Dict[str, Any]
     multiagent: bool
     
@@ -79,9 +80,13 @@ class NetworkGroup(Protocol):
 class OptimizerConfig(Protocol):
     name: str
     networks: Union[str, List[str]]
+    lr: str
     optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
     optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
     multiagent: bool
+
+    def get_optimizer_cls(self) -> Union[Type[Optimizer], List[Type[Optimizer]]]:
+        ...
 
 @runtime_checkable
 class MutationRegistry(Protocol):
@@ -96,8 +101,6 @@ class EvolvableAlgorithm(Protocol):
     device: Union[str, torch.device]
     accelerator: Accelerator
     registry: MutationRegistry
-    learn_step: int
-    algo: str
     mut: Optional[str]
     index: int
     scores: List[float]

@@ -5,11 +5,10 @@ import torch
 import yaml
 from accelerate import Accelerator
 
-from agilerl.algorithms.core.base import MultiAgentAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.utils.algo_utils import observation_space_channels_to_first
 from agilerl.utils.utils import (
@@ -83,18 +82,28 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
-        max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
-        min_batch_size=MUTATION_PARAMS["MIN_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
         agent_ids=INIT_HP["AGENT_IDS"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
         accelerator=accelerator,
+    )
+
+    hp_config = HyperparameterConfig(
+        lr_actor = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
+        lr_critic = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
+        batch_size = RLParameter(
+            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
+            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
+            dtype=int
+            ),
+        learn_step = RLParameter(
+            min=MUTATION_PARAMS['MIN_LEARN_STEP'],
+            max=MUTATION_PARAMS['MAX_LEARN_STEP'],
+            dtype=int,
+            grow_factor=1.5,
+            shrink_factor=0.75
+            )
     )
 
     agent_pop = create_population(
@@ -103,6 +112,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
         action_space=action_spaces,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         actor_network=None,
         critic_network=None,
         population_size=INIT_HP["POP_SIZE"],

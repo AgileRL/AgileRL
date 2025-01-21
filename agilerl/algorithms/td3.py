@@ -39,7 +39,7 @@ class TD3(RLAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
@@ -100,21 +100,12 @@ class TD3(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-    ):
-
-        if hp_config is None:
-            hp_config = HyperparameterConfig(
-                lr_actor = RLParameter(min=1e-4, max=1e-2),
-                lr_critic = RLParameter(min=1e-4, max=1e-2),
-                batch_size = RLParameter(min=8, max=512, dtype=int),
-                learn_step = RLParameter(min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75)
-            )
-
+        ) -> None:
         super().__init__(
             observation_space,
             action_space,
             index=index,
-            learn_step=learn_step,
+            hp_config=hp_config,
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
@@ -244,19 +235,19 @@ class TD3(RLAlgorithm):
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
-            optimizer_kwargs={"lr": self.lr_actor}
+            lr=self.lr_actor
         )
 
         self.critic_1_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_1,
-            optimizer_kwargs={"lr": self.lr_critic}
+            lr=self.lr_critic
         )
 
         self.critic_2_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic_2,
-            optimizer_kwargs={"lr": self.lr_critic}
+            lr=self.lr_critic
         )
 
         if self.accelerator is not None and wrap:

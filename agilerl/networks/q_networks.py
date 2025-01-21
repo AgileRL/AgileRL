@@ -28,6 +28,10 @@ class QNetwork(EvolvableNetwork):
     :type encoder_config: ConfigType
     :param head_config: Configuration of the network MLP head.
     :type head_config: Optional[ConfigType]
+    :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
+    :type min_latent_dim: int
+    :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
+    :type max_latent_dim: int
     :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to 
         single-agent environments.
     :type n_agents: Optional[int]
@@ -189,7 +193,7 @@ class RainbowQNetwork(EvolvableNetwork):
                     )
 
             encoder_config['noise_std'] = noise_std
-            encoder_config['output_activation'] = encoder_config['activation']
+            encoder_config['output_activation'] = encoder_config.get("activation", "ReLU")
             encoder_config['output_vanish'] = False
             encoder_config['init_layers'] = False
 

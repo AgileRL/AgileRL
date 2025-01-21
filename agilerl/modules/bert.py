@@ -9,29 +9,6 @@ import torch.nn as nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 
-def check_equal_params_ind(before_ind, mutated_ind):
-    before_dict = dict(before_ind.named_parameters())
-    after_dict = mutated_ind.named_parameters()
-    _not_eq = []
-    for key, param in after_dict:
-        if key in before_dict:
-            old_param = before_dict[key]
-            old_size = old_param.data.size()
-            new_size = param.data.size()
-            if old_size == new_size:
-                # If the sizes are the same, just copy the parameter
-                param.data = old_param.data
-            elif "norm" not in key:
-                # Create a slicing index to handle tensors with varying sizes
-                slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size[:2], new_size[:2]))
-                # assert (
-                #     torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index]))), \
-                #     f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
-                if not torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index])):
-                    _not_eq.append(key)
-    
-    print(_not_eq)
-
 class EvolvableBERT(EvolvableModule):
     """The Evolvable BERT class.
 

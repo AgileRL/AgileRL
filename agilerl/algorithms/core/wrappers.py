@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Union, Optional
+from typing import Any, Dict, List, Union, Optional, Callable
 import inspect
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -18,6 +18,8 @@ class OptimizerWrapper:
     :type optimizer_cls: Type[torch.optim.Optimizer]
     :param networks: The list of networks that the optimizer will update.
     :type networks: List[EvolvableModule]
+    :param lr: The learning rate of the optimizer.
+    :type lr: float
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
     :type optimizer_kwargs: Dict[str, Any]
     """
@@ -27,13 +29,16 @@ class OptimizerWrapper:
             self,
             optimizer_cls: _Optimizer,
             networks: _Module,
-            optimizer_kwargs: Dict[str, Any],
+            lr: float,
+            optimizer_kwargs: Optional[Dict[str, Any]] = None,
             network_names: Optional[List[str]] = None,
+            lr_name: Optional[str] = None,
             multiagent: bool = False
             ) -> None:
 
         self.optimizer_cls = optimizer_cls
-        self.optimizer_kwargs = optimizer_kwargs
+        self.optimizer_kwargs = optimizer_kwargs if optimizer_kwargs is not None else {}
+        self.lr = lr
         self.multiagent = multiagent
 
         if isinstance(networks, nn.Module):
@@ -49,10 +54,13 @@ class OptimizerWrapper:
         # NOTE: This should be passed when reintializing the optimizer
         # when mutating an individual.
         if network_names is not None:
+            assert lr_name is not None, "Learning rate attribute name must be passed."
             self.network_names = network_names
+            self.lr_name = lr_name
         else:
             parent_container = self._infer_parent_container()
             self.network_names = self._infer_network_attr_names(parent_container)
+            self.lr_name = self._infer_lr_name(parent_container)
 
         assert self.network_names, "No networks found in the parent container."
 
@@ -65,8 +73,8 @@ class OptimizerWrapper:
             self.optimizer = []
             for i, net in enumerate(self.networks):
                 optimizer = optimizer_cls[i] if isinstance(optimizer_cls, list) else optimizer_cls
-                kwargs = optimizer_kwargs[i] if isinstance(optimizer_kwargs, list) else optimizer_kwargs
-                self.optimizer.append(optimizer(net.parameters(), **kwargs))
+                kwargs = optimizer_kwargs[i] if isinstance(self.optimizer_kwargs, list) else self.optimizer_kwargs
+                self.optimizer.append(optimizer(net.parameters(), lr=self.lr, **kwargs))
 
         # Single-agent algorithms with multiple networks for a single optimizer
         elif multiple_networks and multiple_attrs:
@@ -79,8 +87,8 @@ class OptimizerWrapper:
             # Initialize a single optimizer from the combination of network parameters
             opt_args = []
             for i, net in enumerate(self.networks):
-                kwargs = optimizer_kwargs[i] if isinstance(optimizer_kwargs, list) else optimizer_kwargs
-                opt_args.append({"params": net.parameters(), **kwargs})
+                kwargs = optimizer_kwargs[i] if isinstance(self.optimizer_kwargs, list) else self.optimizer_kwargs
+                opt_args.append({"params": net.parameters(), "lr": self.lr, **kwargs})
 
             self.optimizer = optimizer_cls(opt_args)
 
@@ -89,10 +97,10 @@ class OptimizerWrapper:
             assert isinstance(optimizer_cls, type), (
                 "Expected a single optimizer class for a single network."
             )
-            assert isinstance(optimizer_kwargs, dict), (
+            assert isinstance(self.optimizer_kwargs, dict), (
                 "Expected a single dictionary of optimizer keyword arguments."
             )
-            self.optimizer = optimizer_cls(self.networks[0].parameters(), **optimizer_kwargs)
+            self.optimizer = optimizer_cls(self.networks[0].parameters(), lr=self.lr, **self.optimizer_kwargs)
     
     def __getitem__(self, index: int) -> Optimizer:
         try: 
@@ -136,6 +144,20 @@ class OptimizerWrapper:
             attr_name for attr_name, attr_value in vars(container).items()
             if _match_condition(attr_value)
         ]
+    
+    def _infer_lr_name(self, container: Any) -> str:
+        """
+        Infer the learning rate attribute name from the parent container.
+
+        :return: The learning rate attribute name
+        """
+        def _match_condition(attr_value: Any) -> bool:
+            return self.lr is attr_value
+
+        return [
+            attr_name for attr_name, attr_value in vars(container).items()
+            if _match_condition(attr_value)
+        ][0]
     
 
     def load_state_dict(self, state_dict: StateDict) -> None:

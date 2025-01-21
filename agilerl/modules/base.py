@@ -152,6 +152,7 @@ def _mutation_wrapper(
             
     return wrapped
 
+# TODO: There's definitely a simpler way of doing this
 class _ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance 
     and its superclasses."""

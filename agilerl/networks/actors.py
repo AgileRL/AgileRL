@@ -99,8 +99,7 @@ class EvolvableDistribution(EvolvableWrapper):
 
         if action_mask is not None and isinstance(self.action_space, spaces.Discrete):
             action_mask = torch.as_tensor(action_mask, dtype=torch.bool, device=self.device).reshape(logits.shape)
-            HUGE_NEG = torch.tensor(-1e8, dtype=logits.dtype, device=self.device)
-            logits = torch.where(action_mask, logits, HUGE_NEG)
+            logits = torch.where(action_mask, logits, torch.tensor(0.0, dtype=logits.dtype, device=self.device))
 
         return self.get_distribution(logits, self.log_std)
     

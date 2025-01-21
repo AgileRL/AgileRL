@@ -10,6 +10,7 @@ from accelerate import Accelerator
 from torch._dynamo.eval_frame import OptimizedModule
 from numpy.random import Generator
 
+from agilerl.protocols import OptimizerConfig
 from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.core import EvolvableAlgorithm
@@ -169,15 +170,8 @@ class Mutations:
         parameters: float,
         activation: float,
         rl_hp: float,
-        rl_hp_selection: List[str] = ["lr", "batch_size", "learn_step"],
         mutation_sd: float = 0.1,
         activation_selection: List[str] = ["ReLU", "ELU", "GELU"],
-        min_lr: float = 0.0001,
-        max_lr: float = 0.01,
-        min_learn_step: int = 1,
-        max_learn_step: int = 120,
-        min_batch_size: int = 8,
-        max_batch_size: int = 1024,
         agent_ids: Optional[List[str]] = None,
         mutate_elite: bool = True,
         rand_seed: Optional[int] = None,
@@ -223,47 +217,12 @@ class Mutations:
         assert (
             rl_hp >= 0
         ), "Probability of reinforcement learning hyperparameter mutation must be greater than or equal to zero."
-        if rl_hp > 0:
-            assert isinstance(
-                rl_hp_selection, list
-            ), "Reinforcement learning hyperparameter mutation options must be a list."
-            assert (
-                len(rl_hp_selection) >= 0
-            ), "Reinforcement learning hyperparameter mutation options list must contain at least one option."
         assert (
             mutation_sd >= 0
         ), "Mutation strength must be greater than or equal to zero."
         assert isinstance(
             mutation_sd, (float, int)
         ), "Mutation strength must be a float or integer."
-        assert isinstance(min_lr, float), "Minimum learning rate must be a float."
-        assert min_lr > 0, "Minimum learning rate must be greater than zero."
-        assert isinstance(max_lr, float), "Maximum learning rate must be a float."
-        assert max_lr > 0, "Maximum learning rate must be greater than zero."
-        assert isinstance(
-            min_learn_step, int
-        ), "Minimum learn step rate must be an integer."
-        assert (
-            min_learn_step >= 1
-        ), "Minimum learn step must be greater than or equal to one."
-        assert isinstance(
-            max_learn_step, int
-        ), "Maximum learn step rate must be an integer."
-        assert (
-            max_learn_step >= 1
-        ), "Maximum learn step must be greater than or equal to one."
-        assert isinstance(
-            min_batch_size, int
-        ), "Minimum batch size rate must be an integer."
-        assert (
-            min_batch_size >= 1
-        ), "Minimum batch size must be greater than or equal to one."
-        assert isinstance(
-            max_batch_size, int
-        ), "Maximum batch size rate must be an integer."
-        assert (
-            max_batch_size >= 1
-        ), "Maximum batch size must be greater than or equal to one."
         assert isinstance(
             mutate_elite, bool
         ), "Mutate elite must be boolean value True or False."
@@ -287,18 +246,11 @@ class Mutations:
         self.activation_mut = activation  # Activation layer mutation
         self.rl_hp_mut = rl_hp  # Learning HP mutation
         self.activation_selection = activation_selection  # Learning HPs to choose from
-        self.rl_hp_selection = rl_hp_selection  # Learning HPs to choose from
         self.mutation_sd = mutation_sd  # Mutation strength
         self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
         self.agent_ids = agent_ids
-        self.min_batch_size = min_batch_size
-        self.max_batch_size = max_batch_size
-        self.min_lr = min_lr
-        self.max_lr = max_lr
-        self.min_learn_step = min_learn_step
-        self.max_learn_step = max_learn_step
 
         self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(pretraining=True)
         self.mut_options, self.mut_proba = self.get_mutations_options()
@@ -355,6 +307,26 @@ class Mutations:
             return [offspring.to(self.device) for offspring in offsprings]
         else:
             return offsprings.to(self.device)
+
+    def to_device_and_set_individual(
+        self, 
+        individual: EvolvableAlgorithm, 
+        name: str, 
+        networks: OffspringType
+    ) -> None:
+        """Moves networks to the device and assigns them back to the individual.
+        
+        :param individual: The individual to assign the networks to
+        :type individual: EvolvableAlgorithm
+        :param name: The name of the attribute to assign the networks to
+        :type name: str
+        :param networks: The networks to move to the device
+        :type networks: OffspringType
+        """
+        if self.accelerator is None:
+            setattr(individual, name, self.to_device(networks))
+        else:
+            setattr(individual, name, networks)
     
     def reinit_module(self, module: EvolvableModule, init_dict: Dict[str, Any]) -> EvolvableModule:
         """Reinitialize the module with the given initialization dictionary.
@@ -503,15 +475,14 @@ class Mutations:
 
         return mutated_population
 
-    def reinit_opt(self, individual: EvolvableAlgorithm) -> None:
+    def reinit_opt(self, individual: EvolvableAlgorithm, optimizer: Optional[OptimizerConfig] = None) -> None:
         """Reinitialize the optimizers of an individual.
-        
+
         :param individual: The individual to reinitialize the optimizers for
         :type individual: EvolvableAlgorithm
         """
-        optimizer_configs = individual.registry.optimizers
-        for opt_config in optimizer_configs:
-            opt: OptimizerWrapper = getattr(individual, opt_config.name)
+        def _reinit_individual(config: OptimizerConfig) -> None:
+            opt: OptimizerWrapper = getattr(individual, config.name)
             optimizer = opt.optimizer
 
             # Multiple optimizers in a single attribute (i.e. multi-agent)
@@ -522,74 +493,55 @@ class Mutations:
             # Multiple modules optimized by a single optimizer (e.g. PPO)
             else:
                 opt_nets = [getattr(individual, net) for net in opt.network_names]
-            
+
             # Reinitialize optimizer with mutated nets
             offspring_opt = OptimizerWrapper(
-                optimizer_cls=opt_config.get_optimizer_cls(),
+                optimizer_cls=config.get_optimizer_cls(),
                 networks=opt_nets,
+                lr=getattr(individual, opt.lr_name),
                 optimizer_kwargs=opt.optimizer_kwargs,
                 network_names=opt.network_names,
+                lr_name=opt.lr_name,
                 multiagent=opt.multiagent,
             )
 
-            setattr(individual, opt_config.name, offspring_opt)
+            setattr(individual, config.name, offspring_opt)
 
-    # TODO: Generalize this based on argument specification
+        if optimizer is not None:
+            _reinit_individual(optimizer)
+        else:
+            optimizer_configs = individual.registry.optimizers
+            for opt_config in optimizer_configs:
+                _reinit_individual(opt_config)
+
     def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
         """Returns individual from population with RL hyperparameter mutation.
 
         :param individual: Individual agent from population
         :type individual: object
         """
-        # Learning hyperparameter mutation
-        rl_params = self.rl_hp_selection
-        # Select HP to mutate from options
-        mutate_param = self.rng.choice(rl_params, 1)[0]
+        # Randomly sample hyperparameter to mutate from the passed configuration
+        hp_config = individual.registry.hp_config
 
-        # Increase or decrease HP randomly (within clipped limits)
-        if mutate_param == "batch_size":
-            bs_multiplication_options = [1.2, 0.8]  # Grow or shrink
-            bs_probs = [0.5, 0.5]  # Equal probability
-            bs_mult = self.rng.choice(bs_multiplication_options, size=1, p=bs_probs)[0]
-            individual.batch_size = min(
-                self.max_batch_size,
-                max(self.min_batch_size, int(individual.batch_size * bs_mult)),
-            )
-            individual.mut = "bs"
+        if hp_config is None:
+            individual.mut = "None"
+            return individual
 
-        elif mutate_param == "lr":
-            lr_multiplication_options = [1.2, 0.8]  # Grow or shrink
-            lr_probs = [0.5, 0.5]  # Equal probability
-            lr_mult = self.rng.choice(lr_multiplication_options, size=1, p=lr_probs)[0]
-            if individual.algo in ["DDPG", "TD3", "MADDPG", "MATD3"]:
-                lr_choice = self.rng.choice(
-                    ["lr_actor", "lr_critic"], size=1, p=lr_probs
-                )[0]
-            else:
-                lr_choice = "lr"
-            setattr(
-                individual,
-                lr_choice,
-                min(
-                    self.max_lr,
-                    max(self.min_lr, getattr(individual, lr_choice) * lr_mult),
-                ),
-            )
-            self.reinit_opt(individual)  # Reinitialise optimizer if new learning rate
-            individual.mut = lr_choice
+        mutate_attr, mutate_param = hp_config.sample()
+        if mutate_param.value is None:
+            mutate_param.value = getattr(individual, mutate_attr)
+        
+        # Randomly grow or shrink hyperparameters by specified factors
+        new_value = mutate_param.mutate()
+        setattr(individual, mutate_attr, new_value)
 
-        elif mutate_param == "learn_step":
-            if individual.algo in ["PPO"]:  # Needs to stay constant for on-policy
-                individual.mut = "None"
-                return individual
-            ls_multiplication_options = [1.5, 0.75]  # Grow or shrink
-            ls_probs = [0.5, 0.5]  # Equal probability
-            ls_mult = self.rng.choice(ls_multiplication_options, size=1, p=ls_probs)[0]
-            individual.learn_step = min(
-                self.max_learn_step,
-                max(self.min_learn_step, int(individual.learn_step * ls_mult)),
-            )
-            individual.mut = "ls"
+        # Need to reinitialize respective optimizer if mutated learning rate
+        if mutate_attr in individual.get_lr_names():
+            optimizer_configs = individual.registry.optimizers
+            to_reinit = [opt_config for opt_config in optimizer_configs if mutate_attr == opt_config.lr][0]
+            self.reinit_opt(individual, optimizer=to_reinit)  # Reinitialise optimizer if new learning rate
+
+        individual.mut = mutate_attr
 
         return individual
 
@@ -601,6 +553,8 @@ class Mutations:
         """
         # Needs to stay constant for policy gradient methods
         # TODO: Could set up an algorithm registry to make algo checks more robust
+        # OR perform actation mutations within evolvable modules directly and disable 
+        # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
             individual.mut = "None"
             return individual
@@ -834,26 +788,7 @@ class Mutations:
     
         return applied_muts, mut_dict
 
-    def to_device_and_set_individual(
-        self, 
-        individual: EvolvableAlgorithm, 
-        name: str, 
-        networks: OffspringType
-    ) -> None:
-        """Moves networks to the device and assigns them back to the individual.
-        
-        :param individual: The individual to assign the networks to
-        :type individual: EvolvableAlgorithm
-        :param name: The name of the attribute to assign the networks to
-        :type name: str
-        :param networks: The networks to move to the device
-        :type networks: OffspringType
-        """
-        if self.accelerator is None:
-            setattr(individual, name, self.to_device(networks))
-        else:
-            setattr(individual, name, networks)
-
+    # TODO: This can be implemented as a mutation hook for the bandit algorithms
     def _reinit_bandit_grads(
             self,
             individual: BanditAlgorithm,

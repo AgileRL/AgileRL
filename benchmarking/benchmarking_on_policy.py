@@ -2,6 +2,7 @@ import torch
 import yaml
 
 from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
@@ -46,14 +47,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
-        min_lr=MUTATION_PARAMS["MIN_LR"],
-        max_lr=MUTATION_PARAMS["MAX_LR"],
-        min_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        max_batch_size=MUTATION_PARAMS["MAX_BATCH_SIZE"],
-        min_learn_step=MUTATION_PARAMS["MIN_LEARN_STEP"],
-        max_learn_step=MUTATION_PARAMS["MAX_LEARN_STEP"],
         rand_seed=MUTATION_PARAMS["RAND_SEED"],
         device=device,
     )
@@ -82,12 +76,22 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         actor = None
         critic = None
 
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
+        batch_size = RLParameter(
+            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
+            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
+            dtype=int
+            )
+    )
+
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         observation_space=observation_space,
         action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],

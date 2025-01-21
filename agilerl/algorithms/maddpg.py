@@ -45,7 +45,7 @@ class MADDPG(MultiAgentAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to mlp with hidden size [64,64]
     :type net_config: dict, optional
@@ -290,13 +290,13 @@ class MADDPG(MultiAgentAlgorithm):
         self.actor_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.actors,
-            optimizer_kwargs={"lr": self.lr_actor},
+            lr=self.lr_actor,
             multiagent=True
         )
         self.critic_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics,
-            optimizer_kwargs={"lr": self.lr_critic},
+            lr=self.lr_critic,
             multiagent=True
         )
 

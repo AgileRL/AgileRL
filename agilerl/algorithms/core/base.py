@@ -39,8 +39,8 @@ class _RegistryMeta(type):
         instance: SelfEvolvableAlgorithm = super().__call__(*args, **kwargs)
 
         # Call the base class post_init_hook after all initialization
-        if isinstance(instance, cls) and hasattr(instance, "_register_networks"):
-            instance._register_networks()
+        if isinstance(instance, cls) and hasattr(instance, "_registry_init"):
+            instance._registry_init()
 
         return instance
 
@@ -191,10 +191,11 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         else:
             raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
     
-    def _register_networks(self) -> None:
-        """Registers the networks in the algorithm with the module registry. We also check 
-        that all of the evolvable networks and their respective optimizers have been registered
-        with the algorithm."""
+    def _registry_init(self) -> None:
+        """Registers the networks, optimizers, and algorithm hyperparameters in the algorithm with 
+        the mutations registry. We also check that all of the evolvable networks and their respective 
+        optimizers have been registered with the algorithm, and that the user-specified hyperparameters 
+        to mutate have been set as attributes in the algorithm."""
 
         if not self.registry.groups:
             raise ValueError(
@@ -210,6 +211,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 config = OptimizerConfig(
                     name=attr,
                     networks=obj.network_names,
+                    lr=obj.lr_name,
                     optimizer_cls=obj.optimizer_cls,
                     optimizer_kwargs=obj.optimizer_kwargs,
                     multiagent=obj.multiagent
@@ -229,10 +231,19 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Check that one of the network groups relates to a policy
         if not any(group.policy for group in self.registry.groups):
             raise ValueError(
-                "No network group has been registered as a policy (e.g. the network used to "
+                "No network group has been registered as a policy (i.e. the network used to "
                 "select actions) in the registry. Please register a NetworkGroup object "
                 "specifying the policy network."
             )
+
+        # Check that all the hyperparameters to mutate have been set as attributes in the algorithm
+        if self.registry.hp_config is not None:
+            for hp in self.registry.hp_config:
+                if not hasattr(self, hp):
+                    raise AttributeError(
+                        f"Hyperparameter {hp} was found in the mutations configuration but has " 
+                        "not been set as an attribute in the algorithm."
+                    )
 
     def _wrap_attr(self, attr: EvolvableAttributeType) -> EvolvableModule:
         """Wraps the model with the accelerator.
@@ -254,6 +265,10 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         
         # Only wrap the model if its part of the computation graph
         return self.accelerator.prepare(attr) if attr.state_dict() else attr
+
+    def get_lr_names(self) -> List[str]:
+        """Returns the learning rates of the algorithm."""
+        return [opt.lr for opt in self.registry.optimizers]
 
     def register_network_group(self, group: NetworkGroup) -> None:
         """Sets the evaluation network for the algorithm.
@@ -421,6 +436,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         
         # Reinitialize optimizers
         for opt_config in self.registry.optimizers:
+            orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
+
             networks = (
                 cloned_modules[opt_config.networks[0]]
                 if opt_config.multiagent
@@ -430,11 +447,12 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             opt = OptimizerWrapper(
                 getattr(torch.optim, opt_config.optimizer_cls),
                 networks=networks,
+                lr=orig_optimizer.lr,
                 network_names=opt_config.networks,
+                lr_name=opt_config.lr,
                 optimizer_kwargs=opt_config.optimizer_kwargs,
                 multiagent=opt_config.multiagent
             )
-            orig_optimizer: OptimizerWrapper = getattr(self, opt_config.name)
             opt.load_state_dict(orig_optimizer.state_dict())
             setattr(clone, opt_config.name, opt)
         
@@ -533,6 +551,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             opt_kwargs = opt_dict[f"{name}_kwargs"]
             optimizer_cls = opt_dict[f"{name}_cls"]
             opt_networks = opt_dict[f"{name}_networks"]
+            opt_lr = opt_dict[f"{name}_lr"]
             is_multiagent = opt_dict[f"{name}_multiagent"]
             networks = (
                 getattr(self, opt_networks[0])
@@ -542,7 +561,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             optimizer = OptimizerWrapper(
                 getattr(torch.optim, optimizer_cls),
                 networks=networks,
+                lr=getattr(self, opt_lr),
                 network_names=opt_networks,
+                lr_name=opt_lr,
                 optimizer_kwargs=opt_kwargs,
                 multiagent=is_multiagent
                 )
@@ -585,6 +606,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                     f"{attr}_cls": obj.optimizer_cls.__name__,
                     f"{attr}_state_dict": obj.state_dict(),
                     f"{attr}_networks": obj.network_names,
+                    f"{attr}_lr": obj.lr_name,
                     f"{attr}_kwargs": obj.optimizer_kwargs,
                     f"{attr}_multiagent": obj.multiagent
                 })
@@ -702,6 +724,16 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
                 loaded_modules[name] = module
 
+       # Reconstruct the algorithm
+        constructor_params = inspect.signature(cls.__init__).parameters.keys()
+        class_init_dict = {
+            k: v for k, v in checkpoint.items() if k in constructor_params
+        }
+
+        checkpoint['accelerator'] = accelerator
+        checkpoint['device'] = device
+        self = cls(**class_init_dict)
+
         # Reconstruct optimizers in algorithm
         optimizer_names = network_info['optimizer_names']
         loaded_optimizers = {}
@@ -712,6 +744,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
             # Add device to optimizer kwargs
             opt_kwargs = chkpt_attribute_to_device(opt_dict[f"{name}_kwargs"], device)
+            lr = opt_dict[f"{name}_lr"]
             optimizer_cls = opt_dict[f"{name}_cls"]
             opt_networks = opt_dict[f"{name}_networks"]
 
@@ -724,7 +757,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             optimizer = OptimizerWrapper(
                 getattr(torch.optim, optimizer_cls),
                 networks=networks,
+                lr=getattr(self, lr),
                 network_names=opt_networks,
+                lr_name=lr,
                 optimizer_kwargs=opt_kwargs,
                 multiagent=opt_dict[f"{name}_multiagent"]
                 )
@@ -732,16 +767,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             state_dict = chkpt_attribute_to_device(opt_dict[f"{name}_state_dict"], device)
             optimizer.load_state_dict(state_dict)
             loaded_optimizers[name] = optimizer
-
-        # Reconstruct the algorithm
-        constructor_params = inspect.signature(cls.__init__).parameters.keys()
-        class_init_dict = {
-            k: v for k, v in checkpoint.items() if k in constructor_params
-        }
-
-        checkpoint['accelerator'] = accelerator
-        checkpoint['device'] = device
-        self = cls(**class_init_dict)
 
         # Assign loaded modules and optimizers to the algorithm
         for name, module in loaded_modules.items():
@@ -851,9 +876,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
                 exp = [val.to(device) for val in exp]
             elif isinstance(exp, torch.Tensor):
                 exp = exp.to(device)
-            else:
-                raise TypeError(f"Unsupported experience type: {type(exp)}")
-            
+                
             on_device.append(exp)
         
         return on_device

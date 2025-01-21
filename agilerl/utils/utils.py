@@ -24,6 +24,7 @@ from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
+from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 from agilerl.modules.base import EvolvableModule
 from agilerl.hpo.tournament import TournamentSelection
@@ -72,6 +73,7 @@ def create_population(
     action_space: GymSpaceType,
     net_config: Optional[Dict[str, Any]],
     INIT_HP: Dict[str, Any],
+    hp_config: Optional[HyperparameterConfig] = None,
     actor_network: Optional[EvolvableModule] = None,
     critic_network: Optional[EvolvableModule] = None,
     population_size: int = 1,
@@ -116,6 +118,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr=INIT_HP["LR"],
@@ -136,6 +139,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr=INIT_HP["LR"],
@@ -166,6 +170,7 @@ def create_population(
                 theta=INIT_HP["THETA"],
                 dt=INIT_HP["DT"],
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr_actor=INIT_HP["LR_ACTOR"],
@@ -187,6 +192,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr=INIT_HP["LR"],
@@ -213,6 +219,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr=INIT_HP["LR"],
@@ -238,6 +245,7 @@ def create_population(
                 theta=INIT_HP["THETA"],
                 dt=INIT_HP["DT"],
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr_actor=INIT_HP["LR_ACTOR"],
@@ -266,6 +274,7 @@ def create_population(
                 theta=INIT_HP["THETA"],
                 dt=INIT_HP["DT"],
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr_actor=INIT_HP["LR_ACTOR"],
@@ -294,6 +303,7 @@ def create_population(
                 theta=INIT_HP["THETA"],
                 dt=INIT_HP["DT"],
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 batch_size=INIT_HP["BATCH_SIZE"],
                 lr_actor=INIT_HP["LR_ACTOR"],
@@ -316,6 +326,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 gamma=INIT_HP["GAMMA"],
                 lamb=INIT_HP["LAMBDA"],
@@ -335,6 +346,7 @@ def create_population(
                 observation_space=observation_space,
                 action_space=action_space,
                 index=idx,
+                hp_config=hp_config,
                 net_config=net_config,
                 gamma=INIT_HP["GAMMA"],
                 lamb=INIT_HP["LAMBDA"],

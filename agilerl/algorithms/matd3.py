@@ -41,7 +41,7 @@ class MATD3(MultiAgentAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param policy_freq: Policy update frequency, defaults to 2
     :type policy_freq: int, optional
@@ -113,15 +113,6 @@ class MATD3(MultiAgentAlgorithm):
         torch_compiler: Optional[str] = None,
         wrap: bool = True,
     ):
-
-        if hp_config is None:
-            hp_config = HyperparameterConfig(
-                lr_actor = RLParameter(min=1e-4, max=1e-2),
-                lr_critic = RLParameter(min=1e-4, max=1e-2),
-                batch_size = RLParameter(min=8, max=512, dtype=int),
-                learn_step = RLParameter(min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75)
-            )
-
         super().__init__(
             observation_spaces,
             action_spaces,
@@ -297,21 +288,21 @@ class MATD3(MultiAgentAlgorithm):
         self.actor_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.actors,
-            optimizer_kwargs={"lr": lr_actor},
+            lr=lr_actor,
             multiagent=True,
         )
 
         self.critic_1_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_1,
-            optimizer_kwargs={"lr": lr_critic},
+            lr=lr_critic,
             multiagent=True,
         )
 
         self.critic_2_optimizers = OptimizerWrapper(
             optim.Adam,
             networks=self.critics_2,
-            optimizer_kwargs={"lr": lr_critic},
+            lr=lr_critic,
             multiagent=True,
         )
 

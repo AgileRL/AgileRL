@@ -52,7 +52,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
         parameters=MUTATION_PARAMS["PARAMS_MUT"],
         activation=MUTATION_PARAMS["ACT_MUT"],
         rl_hp=MUTATION_PARAMS["RL_HP_MUT"],
-        rl_hp_selection=MUTATION_PARAMS["RL_HP_SELECTION"],
         mutation_sd=MUTATION_PARAMS["MUT_SD"],
         min_lr=MUTATION_PARAMS["MIN_LR"],
         max_lr=MUTATION_PARAMS["MAX_LR"],

@@ -40,7 +40,7 @@ class DDPG(RLAlgorithm):
     :type dt: float, optional
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Encoder configuration, defaults to None
     :type net_config: Optional[Dict[str, Any]], optional
@@ -103,15 +103,7 @@ class DDPG(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-    ) -> None:
-
-        if hp_config is None:
-            hp_config = HyperparameterConfig(
-                lr_actor = RLParameter(min=1e-4, max=1e-2),
-                lr_critic = RLParameter(min=1e-4, max=1e-2),
-                batch_size = RLParameter(min=8, max=512, dtype=int),
-                learn_step = RLParameter(min=1, max=16, dtype=int, grow_factor=1.5, shrink_factor=0.75)
-            )
+        ) -> None:
 
         super().__init__(
             observation_space,
@@ -232,12 +224,12 @@ class DDPG(RLAlgorithm):
         self.actor_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
-            optimizer_kwargs={"lr": lr_actor}
+            lr=lr_actor
         )
         self.critic_optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.critic,
-            optimizer_kwargs={"lr": lr_critic}
+            lr=lr_critic
         )
 
         if self.accelerator is not None and wrap:

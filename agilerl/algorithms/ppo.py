@@ -19,6 +19,7 @@ from agilerl.utils.algo_utils import (
     obs_channels_to_first,
     stack_experiences,
     flatten_experiences,
+    get_experiences_samples,
     is_vectorized_experiences,
     make_safe_deepcopies
 )
@@ -32,7 +33,7 @@ class PPO(RLAlgorithm):
     :type action_space: gym.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
@@ -111,13 +112,6 @@ class PPO(RLAlgorithm):
         cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
-        
-        if hp_config is None:
-            hp_config = HyperparameterConfig(
-                lr = RLParameter(min=6.25e-5, max=1e-2),
-                batch_size = RLParameter(min=8, max=512, dtype=int),
-                learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
-            )
 
         super().__init__(
             observation_space,
@@ -248,7 +242,7 @@ class PPO(RLAlgorithm):
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=[self.actor, self.critic],
-            optimizer_kwargs={"lr": self.lr}
+            lr=self.lr
         )
 
         if self.accelerator is not None and wrap:
@@ -338,12 +332,12 @@ class PPO(RLAlgorithm):
             self.actor.eval()
             self.critic.eval()
             with torch.no_grad():
-                action_dist = self.actor(state)
+                action_dist = self.actor(state, action_mask=action_mask)
                 state_values = self.critic(state).squeeze(-1)
         else:
             self.actor.train()
             self.critic.train()
-            action_dist = self.actor(state)
+            action_dist = self.actor(state, action_mask=action_mask)
             state_values = self.critic(state).squeeze(-1)
         
         if not isinstance(action_dist, torch.distributions.Distribution):
@@ -358,7 +352,16 @@ class PPO(RLAlgorithm):
         else:
             action = action.to(self.device)
 
-        action_logprob = action_dist.log_prob(action)
+        try:
+            action_logprob = action_dist.log_prob(action)
+        except Exception as e:
+            print(f"Action: {action.shape}")
+            print(f"Action dist: {action_dist.probs.shape}")
+            raise e
+
+        if len(action_logprob.shape) > 1:
+            action_logprob = action_logprob.sum(dim=1)
+
         dist_entropy = action_dist.entropy()
 
         if return_tensors:
@@ -461,14 +464,23 @@ class PPO(RLAlgorithm):
             np.random.shuffle(batch_idxs)
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
+                (
+                    batch_states, 
+                    batch_actions, 
+                    batch_log_probs, 
+                    batch_advantages, 
+                    batch_returns, 
+                    batch_values
+                 ) = get_experiences_samples(minibatch_idxs, *experiences)
+
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(
-                        state=states[minibatch_idxs],
-                        action=actions[minibatch_idxs],
-                        grad=True,
+                        state=batch_states,
+                        action=batch_actions,
+                        grad=True
                     )
 
-                    logratio = log_prob - log_probs[minibatch_idxs]
+                    logratio = log_prob - batch_log_probs
                     ratio = logratio.exp()
 
                     with torch.no_grad():
@@ -477,7 +489,7 @@ class PPO(RLAlgorithm):
                             ((ratio - 1.0).abs() > self.clip_coef).float().mean().item()
                         ]
 
-                    minibatch_advs = advantages[minibatch_idxs]
+                    minibatch_advs = batch_advantages
                     minibatch_advs = (minibatch_advs - minibatch_advs.mean()) / (
                         minibatch_advs.std() + 1e-8
                     )
@@ -491,13 +503,15 @@ class PPO(RLAlgorithm):
 
                     # Value loss
                     value = value.view(-1)
-                    v_loss_unclipped = (value - returns[minibatch_idxs]) ** 2
-                    v_clipped = values[minibatch_idxs] + torch.clamp(
-                        value - values[minibatch_idxs], -self.clip_coef, self.clip_coef
+                    v_loss_unclipped = (value - batch_returns) ** 2
+                    v_clipped = batch_values + torch.clamp(
+                        value - batch_values, -self.clip_coef, self.clip_coef
                     )
-                    v_loss_clipped = (v_clipped - returns[minibatch_idxs]) ** 2
+
+                    v_loss_clipped = (v_clipped - batch_returns) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
+
                     entropy_loss = entropy.mean()
                     loss = (
                         pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
@@ -509,6 +523,7 @@ class PPO(RLAlgorithm):
                         self.accelerator.backward(loss)
                     else:
                         loss.backward()
+
                     clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 

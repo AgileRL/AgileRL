@@ -47,6 +47,7 @@ class OptimizerConfig:
     """
     name: str
     networks: Union[str, List[str]]
+    lr: str
     optimizer_cls: Union[Type[Optimizer], List[Type[Optimizer]]]
     optimizer_kwargs: Union[Dict[str, Any], List[Dict[str, Any]]]
     multiagent: bool = field(default=False)
@@ -101,16 +102,18 @@ class RLParameter:
         # Equal probability of growing or shrinking 
         if torch.rand(1).item() < 0.5:
             if self.value * self.shrink_factor > self.min:
-                self.value *= self.shrink_factor
+                new_value = self.value * self.shrink_factor
             else:
-                self.value = self.min
+                new_value = self.min
         else:
             if self.value * self.grow_factor < self.max:
-                self.value *= self.grow_factor
+                new_value = self.value * self.grow_factor
             else:
-                self.value = self.max
-
-        return self.dtype(self.value)
+                new_value = self.max
+        
+        new_value = min(max(new_value, self.min), self.max)
+        self.value = self.dtype(new_value)
+        return self.value
 
 class HyperparameterConfig:
     """Stores the RL hyperparameters that will be mutated during training. For each
@@ -124,6 +127,15 @@ class HyperparameterConfig:
                 raise ValueError("Expected RLParameter object for hyperparameter configuration.")
 
             setattr(self, key, value)
+    
+    def __iter__(self) :
+        return iter(self.config)
+    
+    def __getitem__(self, key: str) -> RLParameter:
+        return self.config[key]
+    
+    def names(self) -> List[str]:
+        return list(self.config.keys())
     
     def items(self) -> Dict[str, Any]:
         return self.config.items()

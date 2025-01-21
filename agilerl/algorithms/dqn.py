@@ -30,7 +30,7 @@ class DQN(RLAlgorithm):
     :type action_space: gymnasium.spaces.Space
     :param index: Index to keep track of object instance during tournament selection and mutation, defaults to 0
     :type index: int, optional
-    :param hp_config: RL hyperparameter mutation configuration, defaults to None
+    :param hp_config: RL hyperparameter mutation configuration, defaults to None, whereby algorithm mutations are disabled.
     :type hp_config: HyperparameterConfig, optional
     :param net_config: Network configuration, defaults to None
     :type net_config: dict, optional
@@ -80,15 +80,7 @@ class DQN(RLAlgorithm):
         accelerator: Optional[Any] = None,
         cudagraphs: bool = False,
         wrap: bool = True,
-    ):
-
-        if hp_config is None:
-            hp_config = HyperparameterConfig(
-                lr = RLParameter(min=6.25e-5, max=1e-2),
-                batch_size = RLParameter(min=8, max=512, dtype=int),
-                learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
-            )
-
+        ) -> None:
         super().__init__(
             observation_space,
             action_space,
@@ -152,7 +144,8 @@ class DQN(RLAlgorithm):
         self.optimizer = OptimizerWrapper(
             optim.Adam,
             networks=self.actor,
-            optimizer_kwargs={"lr": self.lr, "capturable": self.capturable}
+            lr=self.lr,
+            optimizer_kwargs={"capturable": self.capturable}
         )
 
         if self.accelerator is not None and wrap:
