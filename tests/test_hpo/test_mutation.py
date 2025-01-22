@@ -13,7 +13,8 @@ from tests.helper_functions import (
     generate_random_box_space,
     generate_discrete_space,
     generate_multi_agent_box_spaces,
-    generate_multi_agent_discrete_spaces
+    generate_multi_agent_discrete_spaces,
+    assert_equal_state_dict
 )
 
 # from pytest_mock import mocker
@@ -91,38 +92,6 @@ SHARED_INIT_HP_MA = {
     "THETA": 0.15,
     "DT": 0.01,
 }
-
-def check_equal_params_ind(before_ind, mutated_ind):
-    before_dict = dict(before_ind.named_parameters())
-    after_dict = mutated_ind.named_parameters()
-    for key, param in after_dict:
-        if key in before_dict:
-            old_param = before_dict[key]
-            old_size = old_param.data.size()
-            new_size = param.data.size()
-            if old_size == new_size:
-                # If the sizes are the same, just copy the parameter
-                param.data = old_param.data
-            elif "norm" not in key:
-                # Create a slicing index to handle tensors with varying sizes
-                slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size[:2], new_size[:2]))
-                assert (
-                    torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index]))), \
-                    f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
-
-def assert_equal_state_dict(before_pop, mutated_pop):
-    not_eq = []
-    for before_ind, mutated in zip(before_pop, mutated_pop):
-        before_modules = before_ind.evolvable_attributes(networks_only=True).values()
-        mutated_modules = mutated.evolvable_attributes(networks_only=True).values()
-        for before_mod, mutated_mod in zip(before_modules, mutated_modules):
-            if isinstance(before_mod, list):
-                for before, mutated in zip(before_mod, mutated_mod):
-                    check_equal_params_ind(before, mutated)
-            else:
-                check_equal_params_ind(before_mod, mutated_mod)
-    
-    assert not not_eq, f"Parameters not equal: {not_eq}"
 
 ACTOR_CRITIC_CONFIG = HyperparameterConfig(
     lr_actor = RLParameter(min=1e-4, max=1e-2),

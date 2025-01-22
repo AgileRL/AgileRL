@@ -11,8 +11,6 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.networks.custom_modules import RainbowMLP
 from agilerl.utils.evolvable_networks import is_image_space
 
-DiscreteSpace = Union[spaces.Discrete, spaces.MultiDiscrete]
-
 class QNetwork(EvolvableNetwork):
     """Q Networks correspond to state-action value functions in deep reinforcement learning. From any given 
     state, they predict the value of each action that can be taken from that state. By default, we build an 
@@ -44,7 +42,7 @@ class QNetwork(EvolvableNetwork):
     def __init__(
             self,
             observation_space: spaces.Space,
-            action_space: DiscreteSpace,
+            action_space: spaces.Discrete,
             encoder_config: Optional[ConfigType] = None,
             head_config: Optional[ConfigType] = None,
             min_latent_dim: int = 8,
@@ -142,6 +140,8 @@ class QNetwork(EvolvableNetwork):
 class RainbowQNetwork(EvolvableNetwork):
     """RainbowQNetwork is an extension of the QNetwork that incorporates the Rainbow DQN improvements 
     from "Rainbow: Combining Improvements in Deep Reinforcement Learning" (Hessel et al., 2017).
+
+    Paper: https://arxiv.org/abs/1710.02298
     
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
@@ -171,7 +171,7 @@ class RainbowQNetwork(EvolvableNetwork):
     def __init__(
             self,
             observation_space: spaces.Space,
-            action_space: DiscreteSpace,
+            action_space: spaces.Discrete,
             support: torch.Tensor,
             num_atoms: int = 51,
             noise_std: float = 0.5,
@@ -309,6 +309,8 @@ class ContinuousQNetwork(EvolvableNetwork):
     This is used in off-policy algorithms like DDPG and TD3. The network predicts the Q value for a
     given state-action pair.
 
+    Paper: https://arxiv.org/abs/1509.02971
+
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
     :param action_space: Action space of the environment
@@ -410,6 +412,12 @@ class ContinuousQNetwork(EvolvableNetwork):
         :return: Output tensor.
         :rtype: torch.Tensor
         """
+        if not isinstance(actions, torch.Tensor):
+            actions = torch.tensor(actions, dtype=torch.float32).to(self.device)
+        
+        if len(actions.shape) == 1:
+            actions = actions.unsqueeze(0)
+
         x = self.encoder(obs)
         x = torch.cat([x, actions], dim=-1)
         return self.head_net(x)

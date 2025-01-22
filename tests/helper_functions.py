@@ -2,10 +2,13 @@ from typing import List, Tuple, Optional, Union
 from numbers import Number
 import random
 import torch.nn as nn
+import torch
 import numpy as np
 from gymnasium import spaces
 
-def unpack_network(model):
+from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
+
+def unpack_network(model: nn.Sequential) -> List[nn.Module]:
     """Unpacks an nn.Sequential type model"""
     layer_list = []
     for layer in model.children():
@@ -21,7 +24,7 @@ def unpack_network(model):
     return layer_list
 
 
-def check_models_same(model1, model2):
+def check_models_same(model1: nn.Module, model2: nn.Module) -> bool:
     for p1, p2 in zip(model1.parameters(), model2.parameters()):
         if p1.data.ne(p2.data).sum() > 0:
             return False
@@ -41,6 +44,9 @@ def generate_random_box_space(
 
 def generate_discrete_space(n: int) -> spaces.Discrete:
     return spaces.Discrete(n)
+
+def generate_multidiscrete_space(n: int, m: int) -> spaces.MultiDiscrete:
+    return spaces.MultiDiscrete([n] * m)
 
 def generate_dict_or_tuple_space(
         n_image: int,
@@ -91,3 +97,44 @@ def generate_multi_agent_box_spaces(
 
 def generate_multi_agent_discrete_spaces(n_agents: int, m: int) -> List[spaces.Discrete]:
     return [generate_discrete_space(m) for _ in range(n_agents)]
+
+def check_equal_params_ind(before_ind:  Union[nn.Module, EvolvableModule], mutated_ind: Union[nn.Module, EvolvableModule]) -> None:
+    before_dict = dict(before_ind.named_parameters())
+    after_dict = mutated_ind.named_parameters()
+    for key, param in after_dict:
+        if key in before_dict:
+            old_param = before_dict[key]
+            old_size = old_param.data.size()
+            new_size = param.data.size()
+            if old_size == new_size:
+                # If the sizes are the same, just copy the parameter
+                param.data = old_param.data
+            elif "norm" not in key:
+                # Create a slicing index to handle tensors with varying sizes
+                slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size, new_size))
+                assert (
+                    torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index]))), \
+                    f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
+
+def assert_equal_state_dict(before_pop: List[EvolvableAlgorithm], mutated_pop: List[EvolvableAlgorithm]) -> None:
+    not_eq = []
+    for before_ind, mutated in zip(before_pop, mutated_pop):
+        before_modules = before_ind.evolvable_attributes(networks_only=True).values()
+        mutated_modules = mutated.evolvable_attributes(networks_only=True).values()
+        for before_mod, mutated_mod in zip(before_modules, mutated_modules):
+            if isinstance(before_mod, list):
+                for before, mutated in zip(before_mod, mutated_mod):
+                    check_equal_params_ind(before, mutated)
+            else:
+                check_equal_params_ind(before_mod, mutated_mod)
+    
+    assert not not_eq, f"Parameters not equal: {not_eq}"
+
+def assert_close_dict(before: dict, after: dict) -> None:
+    for key, value in before.items():
+        if isinstance(value, dict):
+            assert_close_dict(value, after[key])
+        elif isinstance(value, torch.Tensor):
+            assert torch.allclose(value, after[key]), f"Value not close: {value} != {after[key]}"
+        else:
+            assert value == after[key], f"Value not equal: {value} != {after[key]}"

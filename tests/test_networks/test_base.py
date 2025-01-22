@@ -1,23 +1,37 @@
 import pytest
 from gymnasium import spaces
+import torch
+import torch.nn.functional as F
+import numpy as np
 
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.networks.base import EvolvableNetwork
-from tests.helper_functions import generate_dict_or_tuple_space, generate_discrete_space, generate_random_box_space
+from tests.helper_functions import (
+    generate_dict_or_tuple_space,
+    generate_discrete_space,
+    generate_random_box_space,
+    check_equal_params_ind,
+    assert_close_dict
+)
 
 class InvalidCustomNetwork(EvolvableNetwork):
     def __init__(self, observation_space: spaces.Space):
         super().__init__(observation_space)
 
+        self.name = "dummy"
+        self.net_config = {"hidden_size": [16]}
         self.build_network_head()
+
     
     def build_network_head(self):
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=1
+            num_outputs=1,
+            name=self.name,
+            net_config=self.net_config
         )
 
         # This should raise an AttributeError since we can't assign have 
@@ -25,30 +39,44 @@ class InvalidCustomNetwork(EvolvableNetwork):
         # with mutation methods
         self.invalid_module = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=1
+            num_outputs=1,
+            name=self.name,
+            net_config=self.net_config
         )
 
     def recreate_network(self):
         pass
 
+    def forward(self, x):
+        pass
+
 class CustomNetwork(EvolvableNetwork):
-    def __init__(self, observation_space: spaces.Space):
+    def __init__(self, observation_space: spaces.Space, **kwargs):
         super().__init__(observation_space)
 
+        self.name = "dummy"
+        self.net_config = {"hidden_size": [16]}
         self.build_network_head()
     
     def build_network_head(self):
         self.head_net = self.create_mlp(
             num_inputs=self.latent_dim,
-            num_outputs=1
+            num_outputs=1,
+            name=self.name,
+            net_config=self.net_config
         )
 
     def recreate_network(self):
         pass
 
-def test_network_invalid_initialization():
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.encoder(x)
+        return self.head_net(z)
+
+def test_network_incorrect_initialization():
+    observation_space = generate_random_box_space((8,)) 
     with pytest.raises(AttributeError):
-        InvalidCustomNetwork()
+        InvalidCustomNetwork(observation_space)
 
 @pytest.mark.parametrize(
     "observation_space, encoder_type",
@@ -60,7 +88,7 @@ def test_network_invalid_initialization():
     ]
 )
 def test_network_initialization(observation_space, encoder_type):
-    network = EvolvableNetwork(observation_space)
+    network = CustomNetwork(observation_space)
 
     assert network.observation_space == observation_space
 
@@ -84,10 +112,75 @@ def test_network_mutation_methods(observation_space):
     network = CustomNetwork(observation_space)
 
     for method in network.mutation_methods:
-        getattr(network, method)()
+        new_network = network.clone() 
+        getattr(new_network, method)()
 
         if "." in method:
             net_name = method.split(".")[0]
-            mutated_module: EvolvableModule = getattr(network, net_name)
-            exec_method = network.last_mutation_attr.split(".")[-1]
-            assert mutated_module.last_mutation_attr == exec_method
+            mutated_module: EvolvableModule = getattr(new_network, net_name)
+            exec_method = new_network.last_mutation_attr.split(".")[-1]
+
+            if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):
+                mutated_attr = mutated_module.last_mutation_attr.split(".")[-1]
+            else:
+                mutated_attr = mutated_module.last_mutation_attr
+
+            assert mutated_attr == exec_method
+        
+        check_equal_params_ind(network, new_network)
+
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        (generate_dict_or_tuple_space(2, 3)),
+        (generate_discrete_space(4)),
+        (generate_random_box_space((8,))),
+        (generate_random_box_space((3, 32, 32))),
+    ]
+)
+def test_network_forward(observation_space: spaces.Space):
+    network = CustomNetwork(observation_space)
+
+    x_np = observation_space.sample()
+
+    if isinstance(observation_space, spaces.Discrete):
+        x_np = F.one_hot(torch.tensor(x_np), num_classes=observation_space.n).float().numpy()
+
+    out = network(x_np)
+
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == torch.Size([1, 1])
+
+    if isinstance(observation_space, spaces.Dict):
+        x = {key: torch.tensor(value) for key, value in x_np.items()}
+    elif isinstance(observation_space, spaces.Tuple):
+        x = tuple(torch.tensor(value) for value in x_np)
+    else:
+        x = torch.tensor(x_np)
+    
+    out = network(x)
+
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == torch.Size([1, 1])
+
+@pytest.mark.parametrize(
+    "observation_space",
+    [
+        (generate_dict_or_tuple_space(2, 3)),
+        (generate_discrete_space(4)),
+        (generate_random_box_space((8,))),
+        (generate_random_box_space((3, 32, 32))),
+    ]
+)
+def test_network_clone(observation_space: spaces.Space):
+    network = CustomNetwork(observation_space)
+
+    original_net_dict = dict(network.named_parameters())
+    clone = network.clone()
+    assert isinstance(clone, EvolvableNetwork)
+
+    assert_close_dict(network.init_dict, clone.init_dict)
+
+    assert str(clone.state_dict()) == str(network.state_dict())
+    for key, param in clone.named_parameters():
+        torch.testing.assert_close(param, original_net_dict[key])

@@ -191,6 +191,9 @@ class EvolvableMLP(EvolvableModule):
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32, device=self.device)
 
+        if len(x.shape) == 1:
+            x = x.unsqueeze(0)
+
         return self.model(x)
     
     def get_output_dense(self) -> torch.nn.Module:

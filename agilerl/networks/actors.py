@@ -74,7 +74,7 @@ class EvolvableDistribution(EvolvableWrapper):
             return Categorical(probs=probs)
 
         elif isinstance(self.action_space, spaces.MultiDiscrete):
-            return[
+            return [
                 Categorical(probs=split) 
                 for split in torch.split(probs, list(self.action_space.nvec), dim=1)
                 ]

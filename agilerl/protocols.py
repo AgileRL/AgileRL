@@ -39,6 +39,8 @@ class EvolvableModule(Protocol):
     device: DeviceType
     layer_mutation_methods: List[str]
     node_mutation_methods: List[str]
+    last_mutation_attr: str
+    last_mutation: Callable[[Any], Any]
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         ...

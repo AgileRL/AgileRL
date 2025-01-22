@@ -126,12 +126,5 @@ class ValueFunction(EvolvableNetwork):
 
         self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net) 
-
-
-# TODO: Implement distributional value function
-class StochasticValueFunction(EvolvableNetwork):
-    ...
-
         
-        
-
+# TODO: Implement DistributionalValueFunction
