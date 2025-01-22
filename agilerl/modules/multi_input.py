@@ -39,14 +39,10 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
 
     return spaces.Dict(dict_space)
 
-
 class EvolvableMultiInput(EvolvableModule):
-    """
-    General object that allows for the composition of multiple evolvable networks given a dictionary 
-    observation space. For each key in the space, either a `EvolvableCNN` or `EvolvableMLP` object is 
-    created and used to process the corresponding observation. Each network is a feature extractor and 
-    their output is concatenated and passed through a final `EvolvableMLP` to produce the final output 
-    given the action space.
+    """Evolvable multi-input network composed of an evolvable feature extractor for each observation key, 
+    and an optional MLP for the concatenated vector inputs. The extracted features are concatenated and 
+    passed through a final MLP to produce the output tensor.
 
     .. note::
         The user can inherit from this class and override the `forward` method to define a custom 
@@ -508,7 +504,6 @@ class EvolvableMultiInput(EvolvableModule):
         """
         for key, module in self.feature_net.items():
             module.change_activation(activation, output=True)
-            self.init_dicts[key] = self.extract_init_dict(key)
         
         if output:
             self.output = get_activation(activation)
@@ -550,12 +545,7 @@ class EvolvableMultiInput(EvolvableModule):
         return {"numb_new_nodes": numb_new_nodes}
     
     def recreate_network(self) -> None:
-        """Recreates the network with the new latent dimension.
-        
-        :param shrink_params: Flag to indicate if the network should be recreated 
-            with smaller parameters, defaults to False.
-        :type shrink_params: bool, optional
-        """
+        """Recreates the network with the new latent dimension."""
         feature_net = self.build_feature_extractor()
         self.feature_net = EvolvableModule.preserve_parameters(
             old_net=self.feature_net, new_net=feature_net

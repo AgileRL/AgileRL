@@ -30,7 +30,7 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 
-def make_vect_envs(env_name: str, num_envs: int = 1) -> gym.vector.AsyncVectorEnv:
+def make_vect_envs(env_name: str, num_envs: int = 1, **kwargs: Dict[str, Any]) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -39,7 +39,7 @@ def make_vect_envs(env_name: str, num_envs: int = 1) -> gym.vector.AsyncVectorEn
     :type num_envs: int, optional
     """
     return gym.vector.AsyncVectorEnv(
-        [lambda: gym.make(env_name) for i in range(num_envs)]
+        [lambda: gym.make(env_name, **kwargs) for i in range(num_envs)]
     )
 
 def make_multi_agent_vect_envs(env: Any, num_envs: int = 1, **env_kwargs: Any) -> AsyncPettingZooVecEnv:

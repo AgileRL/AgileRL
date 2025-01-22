@@ -153,8 +153,9 @@ class DQN(RLAlgorithm):
 
         self.criterion = nn.MSELoss()
 
+        # torch.compile and cuda graph optimizations
         if self.cudagraphs:
-            # torch.compile and cuda graph optimizations
+            warnings.warn("CUDA graphs for DQN are implemented experimentally and may not work as expected.")
             self.update = torch.compile(self.update, mode=None)
             self._get_action = torch.compile(self._get_action, mode=None, fullgraph=True)
             self.update = CudaGraphModule(self.update)

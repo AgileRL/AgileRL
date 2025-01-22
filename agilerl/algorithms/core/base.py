@@ -88,7 +88,6 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
                 "max-autotune",
             ], "Choose between torch compiler modes: default, reduce-overhead, max-autotune or None"
 
-
         self.accelerator = accelerator
         self.device = device if self.accelerator is None else self.accelerator.device
         self.torch_compiler = torch_compiler
@@ -190,6 +189,31 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return action_space.shape[0]
         else:
             raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
+        
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Sets the attribute of the algorithm. If the attribute is an OptimizerWrapper,
+        we register the optimizer with the algorithm's registry.
+        
+        :param name: The name of the attribute.
+        :type name: str
+        :param value: The value of the attribute.
+        :type value: Any
+        """
+        if (
+            isinstance(value, OptimizerWrapper) and 
+            not name in [config.name for config in self.registry.optimizers]
+            ):
+            config = OptimizerConfig(
+                name=name,
+                networks=value.network_names,
+                lr=value.lr_name,
+                optimizer_cls=value.optimizer_cls,
+                optimizer_kwargs=value.optimizer_kwargs,
+                multiagent=value.multiagent
+                )
+            self.registry.register_optimizer(config)
+
+        super().__setattr__(name, value)
     
     def _registry_init(self) -> None:
         """Registers the networks, optimizers, and algorithm hyperparameters in the algorithm with 
@@ -198,31 +222,17 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         to mutate have been set as attributes in the algorithm."""
 
         if not self.registry.groups:
-            raise ValueError(
-                "No network groups have been registered with the algorithm's __init__ method. "
+            raise AttributeError(
+                "No network groups have been registered in the algorithm's __init__ method. "
                 "Please register NetworkGroup objects specifying all of the evaluation and "
                 "shared/target networks through the `register_network_group()` method."
             )
-
-        # Extract mapping from optimizer names to network attribute names
-        for attr, obj in self.evolvable_attributes().items():
-            if isinstance(obj, OptimizerWrapper):
-                # Set up config from OptimizerWrapper
-                config = OptimizerConfig(
-                    name=attr,
-                    networks=obj.network_names,
-                    lr=obj.lr_name,
-                    optimizer_cls=obj.optimizer_cls,
-                    optimizer_kwargs=obj.optimizer_kwargs,
-                    multiagent=obj.multiagent
-                    )
-                self.registry.register_optimizer(config)
 
         # Check that all the inspected evolvable attributes can be found in the registry
         all_registered = self.registry.all_registered()
         not_found = [attr for attr in self.evolvable_attributes() if attr not in all_registered]
         if not_found:
-            raise ValueError(
+            raise AttributeError(
                 f"The following evolvable attributes could not be found in the registry: {not_found}. "
                 "Please check that the defined NetworkGroup objects contain all of the EvolvableModule's "
                 "in the algorithm."
@@ -230,7 +240,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         # Check that one of the network groups relates to a policy
         if not any(group.policy for group in self.registry.groups):
-            raise ValueError(
+            raise AttributeError(
                 "No network group has been registered as a policy (i.e. the network used to "
                 "select actions) in the registry. Please register a NetworkGroup object "
                 "specifying the policy network."

@@ -311,19 +311,13 @@ class RainbowDQN(RLAlgorithm):
             u[(L < (self.num_atoms - 1)) * (L == u)] += 1
             offset = (
                 torch.linspace(
-                    0, (self.batch_size - 1) * self.num_atoms, self.batch_size
+                    0, (self.batch_size - 1) * self.num_atoms, self.batch_size, device=self.device
                 )
                 .long()
                 .unsqueeze(1)
                 .expand(self.batch_size, self.num_atoms)
             )
-            proj_dist = torch.zeros(target_q_dist.size())
-            if self.accelerator is None:
-                offset = offset.to(self.device)
-                proj_dist = proj_dist.to(self.device)
-            else:
-                offset = offset.to(self.accelerator.device)
-                proj_dist = proj_dist.to(self.accelerator.device)
+            proj_dist = torch.zeros(target_q_dist.size(), device=self.device)
 
             proj_dist.view(-1).index_add_(
                 0, (L + offset).view(-1), (target_q_dist * (u.float() - b)).view(-1)

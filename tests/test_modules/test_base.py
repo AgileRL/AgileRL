@@ -1,8 +1,7 @@
 import pytest
-from unittest.mock import MagicMock
-from agilerl.modules.base import EvolvableModule, is_evolvable, mutation
+
+from agilerl.modules.base import EvolvableModule, mutation
 from agilerl.protocols import MutationType
-from torch import nn
 
 def test_register_mutation_fn():
     @mutation(MutationType.NODE)

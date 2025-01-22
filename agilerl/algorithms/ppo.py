@@ -108,8 +108,6 @@ class PPO(RLAlgorithm):
         critic_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
-        compile: bool = True,
-        cudagraphs: bool = False,
         wrap: bool = True,
     ) -> None:
 
@@ -197,8 +195,6 @@ class PPO(RLAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.target_kl = target_kl
         self.update_epochs = update_epochs
-        self.compile = compile
-        self.cudagraphs = cudagraphs
 
         if actor_network is not None and critic_network is not None:
             if not isinstance(actor_network, EvolvableModule):

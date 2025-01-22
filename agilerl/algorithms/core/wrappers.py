@@ -215,3 +215,14 @@ class OptimizerWrapper:
         else:
             self.optimizer.step()
     
+    def __repr__(self) -> str:
+        return (
+            f"OptimizerWrapper(\n"
+            f"    optimizer={self.optimizer_cls.__name__},\n"
+            f"    lr={self.lr},\n"
+            f"    networks={self.network_names},\n"
+            f"    optimizer_kwargs={self.optimizer_kwargs}\n"
+            f"    multiagent={self.multiagent}\n"
+            f")"
+        )
+    

@@ -73,10 +73,6 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
         "latent_dim" in net_config.keys()
     ), "Net config must contain latent_dim: int."
 
-class NetworkError(Exception):
-    """Exception raised for errors in the network."""
-    pass
-
 class NetworkMeta(ModuleMeta):
     """Metaclass for evolvable networks. Checks that the network has 
     an encoder and a head_net (named as such)."""
@@ -90,9 +86,9 @@ class NetworkMeta(ModuleMeta):
             if "." in mut_method:
                 attr =  mut_method.split(".")[0]
                 if attr not in ['encoder', 'head_net']:
-                    raise NetworkError(
+                    raise AttributeError(
                         "Mutation methods of underlying modules in EvolvableNetwork's should only correspond " \
-                        "to the encoder or head_net. This is done for robustness to ensure that analogous mutations " \
+                        "to the encoder or head_net. This is done to ensure that analogous mutations " \
                         "can be applied between different networks. "
                         )
 
@@ -182,7 +178,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         # NOTE: We disable layer mutations for the encoder since this usually adds a lot 
         # of variance to the optimization process
         self.encoder.disable_mutations(MutationType.LAYER)
-    
+
     @property
     def init_dict(self) -> Dict[str, Any]:
         """Initial dictionary for the network.
