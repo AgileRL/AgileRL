@@ -1,5 +1,4 @@
 from typing import Optional, Tuple, Dict, Any
-import warnings
 import numpy as np
 import torch
 import torch.optim as optim
@@ -10,7 +9,7 @@ from gymnasium import spaces
 from agilerl.typing import ArrayLike, GymEnvType, ExperiencesType, TorchObsType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, RLParameter, HyperparameterConfig
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import RainbowQNetwork
@@ -47,9 +46,9 @@ class RainbowDQN(RLAlgorithm):
     :type prior_eps: float, optional
     :param num_atoms: Unit number of support, defaults to 51
     :type num_atoms: int, optional
-    :param v_min: Minimum value of support, defaults to -10
+    :param v_min: Minimum value of support, defaults to 0
     :type v_min: float, optional
-    :param v_max: Maximum value of support, defaults to 10
+    :param v_max: Maximum value of support, defaults to 200
     :type v_max: float, optional
     :param noise_std: Noise standard deviation, defaults to 0.5
     :type noise_std: float, optional
@@ -64,7 +63,7 @@ class RainbowDQN(RLAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Any, optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
@@ -84,8 +83,8 @@ class RainbowDQN(RLAlgorithm):
         beta: float = 0.4,
         prior_eps: float = 1e-6,
         num_atoms: int = 51,
-        v_min: float = -10,
-        v_max: float = 10,
+        v_min: float = 0,
+        v_max: float = 200,
         noise_std: float = 0.5,
         n_step: int = 3,
         mut: Optional[str] = None,

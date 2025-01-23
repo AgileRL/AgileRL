@@ -25,6 +25,67 @@ from agilerl.typing import (
     ArrayOrTensor
 )
 
+def contains_image_space(space: spaces.Space) -> bool:
+    """Checks if the space contains an image space.
+
+    :param space: Observation space
+    :type space: spaces.Space
+    :return: True if the space contains an image space, False otherwise
+    :rtype: bool
+    """
+    if isinstance(space, spaces.Dict):
+        return any(contains_image_space(subspace) for subspace in space.spaces.values())
+    elif isinstance(space, spaces.Tuple):
+        return any(contains_image_space(subspace) for subspace in space.spaces)
+    elif isinstance(space, spaces.Box):
+        return is_image_space(space)
+    return False
+
+def multi_agent_sample_tensor_from_space(
+        space: spaces.Space,
+        n_agents: int,
+        critic: bool = False,
+        device: torch.device = torch.device("cpu")
+        ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+    """Gets the sample tensor from an observation space for multi-agent settings.
+
+    :param space: Observation space
+    :type space: spaces.Space
+    :param n_agents: Number of agents
+    :type n_agents: int
+    :param critic: If True, the tensor is for the critic, defaults to False
+    :type critic: bool, optional
+
+    :return: Sample tensor
+    :rtype: torch.Tensor or dict[str, torch.Tensor]
+    """
+    def sample(image_shape: Tuple[int, ...], critic: bool) -> torch.Tensor:
+        tensor = torch.zeros(
+            (1, *image_shape), dtype=torch.float32, device=device
+            ).unsqueeze(2)
+        
+        if critic:
+            tensor = tensor.repeat(1, 1, n_agents, 1, 1)
+        
+        return tensor
+    
+    if isinstance(space, spaces.Dict):
+        sample_tensor = {
+            key: multi_agent_sample_tensor_from_space(subspace, n_agents, critic, device)
+            for key, subspace in space.spaces.items() if is_image_space(subspace)
+        }
+    elif isinstance(space, spaces.Tuple):
+        sample_tensor = tuple(
+            multi_agent_sample_tensor_from_space(subspace, n_agents, critic, device)
+            if is_image_space(subspace) else None for subspace in space.spaces
+        )
+    elif is_image_space(space):
+        sample_tensor = sample(space.shape, critic)
+    else:
+        sample_tensor = None
+    
+    return sample_tensor
+
 def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
     """Makes deep copies of EvolvableModule's and their attributes.
     
@@ -221,7 +282,9 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
         ]
     )
 
-def concatenate_spaces(space_list: List[spaces.Space]) -> spaces.Space:
+SupportedSpace = Union[spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete, spaces.MultiDiscrete]
+
+def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
     """Concatenates a list of spaces into a single space. If spaces correspond to images, 
     we check that their shapes are the same and use the first space's shape as the shape of the
     concatenated space.
@@ -231,7 +294,20 @@ def concatenate_spaces(space_list: List[spaces.Space]) -> spaces.Space:
     :return: Concatenated space
     :rtype: spaces.Space
     """
-    if all(isinstance(space, spaces.Box) for space in space_list):
+    if all(isinstance(space, spaces.Dict) for space in space_list):
+        return spaces.Dict(
+            {
+                key: concatenate_spaces([space[key] for space in space_list])
+                for key in space_list[0].spaces.keys()
+            }
+        )
+
+    elif all(isinstance(space, spaces.Tuple) for space in space_list):
+        return spaces.Tuple(
+            [concatenate_spaces([space[i] for space in space_list]) for i in range(len(space_list[0]))]
+        )
+
+    elif all(isinstance(space, spaces.Box) for space in space_list):
         # NOTE: For image spaces the concatenation is handled under-the-hood through the 
         # specification of `n_agents` in EvolvableNetwork objects, whereby 3d convolutions 
         # are used. This is why we enforce all image spaces to have the same shape.
@@ -251,7 +327,7 @@ def concatenate_spaces(space_list: List[spaces.Space]) -> spaces.Space:
         return spaces.Discrete(n)
     
     elif all(isinstance(space, spaces.MultiDiscrete) for space in space_list):
-        nvec = np.concatenate([space.nvec for space in spaces], axis=0)
+        nvec = np.concatenate([space.nvec for space in space_list], axis=0)
         return spaces.MultiDiscrete(nvec)
     
     else:
@@ -319,7 +395,7 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
         raise Exception(f"Unrecognized type of observation {type(obs)}")
     
 def maybe_add_batch_dim(obs: TorchObsType, space_shape: Tuple[int, ...]) -> TorchObsType:
-    """Adds batch dimension if necessary
+    """Adds batch dimension if necessary.
 
     :param obs: Observation tensor
     :type obs: torch.Tensor[float]
@@ -417,6 +493,8 @@ def preprocess_observation(
 
     return observation
 
+# TODO: The following functions are currently used in PPO (on-policy) as a means of handling 
+# experiences in the absence of a rollout buffer -> This will not be needed in the future.
 def get_experiences_samples(minibatch_indices: np.ndarray, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
     """Samples experiences given minibatch indices.
 
@@ -440,6 +518,7 @@ def get_experiences_samples(minibatch_indices: np.ndarray, *experiences: TorchOb
         sampled_experiences.append(sampled_exp)
     
     return tuple(sampled_experiences)
+
 
 def stack_experiences(*experiences: MaybeObsList, to_torch: bool = True) -> Tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single array or tensor.
@@ -485,6 +564,7 @@ def stack_experiences(*experiences: MaybeObsList, to_torch: bool = True) -> Tupl
 
     return tuple(stacked_experiences)
 
+
 def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...]:
     """Flattens experiences into a single array or tensor.
 
@@ -515,6 +595,7 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
         flattened_experiences.append(flattened_exp)
     
     return tuple(flattened_experiences)
+
 
 def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
     """Checks if experiences are vectorised.

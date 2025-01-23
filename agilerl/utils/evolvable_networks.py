@@ -1,6 +1,5 @@
 # This file contains utility functions for tuning
 from typing import Tuple, Union, List, Dict, Optional, Iterable, Literal
-import math
 import numpy as np
 import torch
 from torch.optim import Optimizer
@@ -14,6 +13,27 @@ from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGEL
 from agilerl.modules.configs import MlpNetConfig, CnnNetConfig, MultiInputNetConfig
 
 TupleorInt = Union[Tuple[int, ...], int]
+
+def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
+    """Converts a Tuple observation space to a Dict observation space.
+    
+    :param observation_space: Tuple observation space.
+    :type observation_space: spaces.Tuple
+    :return: Dictionary observation space.
+    :rtype: spaces.Dict
+    """
+    num_image = 0
+    num_vector = 0
+    dict_space = OrderedDict()
+    for space in observation_space.spaces:
+        if is_image_space(space):
+            dict_space[f"image_{num_image}"] = space
+            num_image += 1
+        else:
+            dict_space[f"vector_{num_vector}"] = space
+            num_vector += 1
+
+    return spaces.Dict(dict_space)
 
 def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.

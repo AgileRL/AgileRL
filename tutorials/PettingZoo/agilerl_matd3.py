@@ -117,7 +117,6 @@ if __name__ == "__main__":
 
     # Instantiate a mutations object (used for HPO)
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=0.2,  # Probability of no mutation
         architecture=0.2,  # Probability of architecture mutation
         new_layer_prob=0.2,  # Probability of new layer mutation

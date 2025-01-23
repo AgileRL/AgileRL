@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, Dict, Callable, Any, Tuple, Type
+from typing import List, Optional, Union, Dict, Callable, Any, Tuple, Type, TypeVar
 import inspect
 import copy
 import numpy as np
@@ -20,9 +20,10 @@ from agilerl.utils.algo_utils import remove_compile_prefix
 
 NetworkConfig = Dict[str, str]
 NetworkList = List[NetworkConfig]
-MutationMethod = Callable[[EvolvableAlgorithm], EvolvableAlgorithm]
+SelfEvolvableAlgorithm = TypeVar("T", bound=EvolvableAlgorithm)
+MutationMethod = Callable[[SelfEvolvableAlgorithm], SelfEvolvableAlgorithm]
 AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
-PopulationType = List[EvolvableAlgorithm]
+PopulationType = List[SelfEvolvableAlgorithm]
 ModuleType = Union[OptimizedModule, EvolvableModule]
 OffspringType = Union[List[EvolvableModule], EvolvableModule]
 MutationReturnType = Union[Dict[str, Any], List[Dict[str, Any]]]
@@ -71,7 +72,7 @@ def get_architecture_mut_method(
     return  eval.sample_mutation_method(new_layer_prob, rng)
 
 
-def get_offspring_eval_modules(individual: EvolvableAlgorithm) -> Tuple[Dict[str, OffspringType], ...]:
+def get_offspring_eval_modules(individual: SelfEvolvableAlgorithm) -> Tuple[Dict[str, OffspringType], ...]:
     """Get the offsprings of all of the evaluation modules in the individual.
     
     :param individual: The individual to inspect
@@ -283,7 +284,7 @@ class Mutations:
         mutation_proba = np.array(mutation_proba) / np.sum(mutation_proba)
         return mutation_funcs, mutation_proba
 
-    def no_mutation(self, individual: EvolvableAlgorithm):
+    def no_mutation(self, individual: SelfEvolvableAlgorithm):
         """Returns individual from population without mutation.
 
         :param individual: Individual agent from population
@@ -305,7 +306,7 @@ class Mutations:
 
     def to_device_and_set_individual(
         self, 
-        individual: EvolvableAlgorithm, 
+        individual: SelfEvolvableAlgorithm, 
         name: str, 
         networks: OffspringType
     ) -> None:
@@ -470,7 +471,7 @@ class Mutations:
 
         return mutated_population
 
-    def reinit_opt(self, individual: EvolvableAlgorithm, optimizer: Optional[OptimizerConfig] = None) -> None:
+    def reinit_opt(self, individual: SelfEvolvableAlgorithm, optimizer: Optional[OptimizerConfig] = None) -> None:
         """Reinitialize the optimizers of an individual.
 
         :param individual: The individual to reinitialize the optimizers for
@@ -509,7 +510,7 @@ class Mutations:
             for opt_config in optimizer_configs:
                 _reinit_individual(opt_config)
 
-    def rl_hyperparam_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
+    def rl_hyperparam_mutation(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
         """Returns individual from population with RL hyperparameter mutation.
 
         :param individual: Individual agent from population
@@ -540,7 +541,7 @@ class Mutations:
 
         return individual
 
-    def activation_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
+    def activation_mutation(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
         """Returns individual from population with activation layer mutation.
 
         :param individual: Individual agent from population
@@ -589,7 +590,7 @@ class Mutations:
         network.change_activation(new_activation, output=False)  # Change activation layer
         return network
 
-    def parameter_mutation(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
+    def parameter_mutation(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
         """Returns individual from population with network parameters mutation.
 
         :param individual: Individual agent from population
@@ -689,7 +690,7 @@ class Mutations:
 
         return network
 
-    def architecture_mutate(self, individual: EvolvableAlgorithm) -> EvolvableAlgorithm:
+    def architecture_mutate(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
         """Returns individual from population with network architecture mutation, which 
         adds either layers or nodes to different types of network architectures.
 

@@ -135,7 +135,7 @@ def test_incorrect_instantiation_for_multi_agents(
     num_outputs,
     device,
 ):
-    with pytest.raises(AssertionError):
+    with pytest.raises(TypeError):
         EvolvableMultiInput(
             observation_space=observation_space,
             channel_size=channel_size,

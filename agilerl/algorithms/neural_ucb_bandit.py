@@ -8,7 +8,7 @@ from gymnasium import spaces
 from agilerl.typing import NumpyObsType, ArrayLike, ExperiencesType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.value_functions import ValueFunction
 from agilerl.utils.evolvable_networks import get_default_encoder_config
@@ -49,7 +49,7 @@ class NeuralUCB(RLAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Any, optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

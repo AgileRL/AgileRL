@@ -1,5 +1,4 @@
 from typing import List, Optional, Dict, Any, Union, Literal, Tuple
-from collections import defaultdict
 import copy
 import numpy as np
 import torch
@@ -7,37 +6,15 @@ import torch.nn as nn
 from gymnasium import spaces
 
 from agilerl.typing import ArrayOrTensor
-from agilerl.utils.evolvable_networks import is_image_space, get_activation
-from agilerl.modules.base import EvolvableModule, ModuleDict, mutation, MutationType
+from agilerl.utils.evolvable_networks import is_image_space, get_activation, tuple_to_dict_space
+from agilerl.modules.base import EvolvableModule, ModuleDict, MutationType, mutation
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-import re
 
 ModuleType = Union[EvolvableModule, nn.Module]
 SupportedEvolvableTypes = Union[EvolvableCNN, EvolvableMLP]
 TupleOrDictSpace = Union[spaces.Tuple, spaces.Dict]
 TupleOrDictObservation = Union[Dict[str, ArrayOrTensor], Tuple[ArrayOrTensor]]
-
-def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
-    """Converts a Tuple observation space to a Dict observation space.
-    
-    :param observation_space: Tuple observation space.
-    :type observation_space: spaces.Tuple
-    :return: Dictionary observation space.
-    :rtype: spaces.Dict
-    """
-    num_image = 0
-    num_vector = 0
-    dict_space = {}
-    for space in observation_space.spaces:
-        if is_image_space(space):
-            dict_space[f"image_{num_image}"] = space
-            num_image += 1
-        else:
-            dict_space[f"vector_{num_vector}"] = space
-            num_vector += 1
-
-    return spaces.Dict(dict_space)
 
 class EvolvableMultiInput(EvolvableModule):
     """Evolvable multi-input network composed of an evolvable feature extractor for each observation key, 
@@ -105,6 +82,9 @@ class EvolvableMultiInput(EvolvableModule):
     :type device: str, optional
     """
     feature_net: ModuleDict
+    
+    # Supported underlying spaces in passed Dict or Tuple space
+    _SupportedSpaces = (spaces.Box, spaces.Discrete, spaces.MultiDiscrete)
 
     def __init__(
             self,
@@ -115,7 +95,7 @@ class EvolvableMultiInput(EvolvableModule):
             stride_size: List[int],
             latent_dim: int = 16,
             cnn_block_type: Literal["Conv2d", "Conv3d"] = "Conv2d",
-            sample_input: Optional[Dict[str, torch.Tensor]] = None,
+            sample_input: Optional[TupleOrDictObservation] = None,
             vector_space_mlp: bool = False,
             hidden_size: Optional[List[int]] = None,
             init_dicts: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -145,23 +125,29 @@ class EvolvableMultiInput(EvolvableModule):
             isinstance(observation_space, (spaces.Dict, spaces.Tuple)),
             "Observation space must be a Dict or Tuple space."
         )
+        subspaces = observation_space.spaces.values() if isinstance(observation_space, spaces.Dict) else observation_space.spaces
+        assert all(
+            [isinstance(space, self._SupportedSpaces) for space in subspaces]
+            ), "Observation space must contain only Box, Discrete, or MultiDiscrete spaces."
 
-        if isinstance(observation_space, spaces.Tuple):
-            observation_space = tuple_to_dict_space(observation_space)
-            assert (
-                cnn_block_type == "Conv2d"
-                ), "For multi-input spaces in multi-agent environments, please convert to a dictionary " \
-                "space and specify the sample inputs for each corresponding image space in a dictionary too."
-        else:
-            if cnn_block_type == "Conv3d":
-                assert isinstance(sample_input, dict), "Sample input must be a dictionary in multi-agent settings."
+        if cnn_block_type == "Conv3d":
+            if isinstance(observation_space, spaces.Tuple) and not isinstance(sample_input, tuple):
+                raise TypeError("Sample input must be provided as a tuple for Conv3d block type.")
+
+            if isinstance(observation_space, spaces.Dict) and not isinstance(sample_input, dict):
+                raise TypeError("Sample input must be provided as a dict for Conv3d block type.")
 
         if vector_space_mlp:
             assert hidden_size is not None, "Hidden size must be specified for vector space MLP."
         
+        # Convert Tuple space to Dict space for consistency
+        self.is_tuple_space = False
+        if isinstance(observation_space, spaces.Tuple):
+            observation_space = tuple_to_dict_space(observation_space)
+            self.is_tuple_space = True
+        
         self._init_dicts = init_dicts if init_dicts is not None else {}
         self._activation = activation
-
         self.observation_space = observation_space
         self.num_outputs = num_outputs
         self.name = name
@@ -188,7 +174,6 @@ class EvolvableMultiInput(EvolvableModule):
         self.latent_dim = latent_dim
         self.noisy = noisy
         self.noise_std = noise_std
-
         self.vector_spaces = [
             key for key, space in observation_space.spaces.items() 
             if not is_image_space(space)
@@ -395,14 +380,15 @@ class EvolvableMultiInput(EvolvableModule):
         """
         # Build feature extractors for image spaces only
         feature_net = ModuleDict(device=self.device)
-        for key, space in self.observation_space.spaces.items():
+        for i, (key, space) in enumerate(self.observation_space.spaces.items()):
             if is_image_space(space):  # Use CNN if it's an image space
                 init_dict = copy.deepcopy(self.get_init_dict(key, default='cnn'))
 
                 if "sample_input" in init_dict:
                     sample_input = init_dict.pop("sample_input")
                 else:
-                    sample_input = self.sample_input[key] if self.sample_input is not None else None
+                    idx = i if self.is_tuple_space else key
+                    sample_input = self.sample_input[idx] if self.sample_input is not None else None
 
                 feature_extractor = EvolvableCNN(
                     input_shape=space.shape,
@@ -415,7 +401,7 @@ class EvolvableMultiInput(EvolvableModule):
                 feature_net[key] = feature_extractor
             elif isinstance(space, spaces.Box) and not len(space.shape) == 1:
                 raise ValueError(
-                    "Observation space with shape > 1 must be an image space. Shape is: {}".format(space.shape)
+                    "Box spaces with shape {} are not supported. Please use vector or image observations.".format(space.shape)
                     )
 
         # Collect all vector space shapes for concatenation

@@ -15,7 +15,7 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
 
 
@@ -71,7 +71,7 @@ class DDPG(RLAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Optional[Any], optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

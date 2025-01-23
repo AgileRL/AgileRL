@@ -51,7 +51,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         INIT_HP["EVAL_LOOP"],
     )
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUTATION_PARAMS["NO_MUT"],
         architecture=MUTATION_PARAMS["ARCH_MUT"],
         new_layer_prob=MUTATION_PARAMS["NEW_LAYER"],

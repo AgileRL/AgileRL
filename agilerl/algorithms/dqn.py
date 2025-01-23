@@ -13,7 +13,7 @@ from tensordict.nn import CudaGraphModule
 from agilerl.typing import TorchObsType, ExperiencesType, NumpyObsType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.networks.q_networks import QNetwork
 from agilerl.modules.base import EvolvableModule
 from agilerl.utils.algo_utils import (
@@ -53,7 +53,7 @@ class DQN(RLAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Any, optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param cudagraphs: Use CUDA graphs for optimization, defaults to False
     :type cudagraphs: bool, optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True

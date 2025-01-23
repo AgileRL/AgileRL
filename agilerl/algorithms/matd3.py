@@ -10,13 +10,19 @@ from gymnasium import spaces
 from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict, ArrayLike, GymEnvType
 from agilerl.algorithms.core import MultiAgentAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
-from agilerl.utils.evolvable_networks import get_default_encoder_config, is_image_space
-from agilerl.utils.algo_utils import key_in_nested_dict, make_safe_deepcopies, concatenate_spaces
+from agilerl.utils.evolvable_networks import get_default_encoder_config
+from agilerl.utils.algo_utils import (
+    key_in_nested_dict,
+    make_safe_deepcopies,
+    concatenate_spaces,
+    contains_image_space,
+    multi_agent_sample_tensor_from_space
+)
 
 class MATD3(MultiAgentAlgorithm):
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
@@ -70,7 +76,7 @@ class MATD3(MultiAgentAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Optional[Any], optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param torch_compiler: The torch compile mode 'default', 'reduce-overhead' or 'max-autotune', defaults to None
     :type torch_compiler: Optional[str], optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
@@ -149,7 +155,7 @@ class MATD3(MultiAgentAlgorithm):
             wrap, bool
         ), "Wrap models flag must be boolean value True or False."
 
-        self.is_image_space = is_image_space(observation_spaces[0])
+        self.is_image_space = contains_image_space(self.single_space)
         self.batch_size = batch_size
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
@@ -230,19 +236,18 @@ class MATD3(MultiAgentAlgorithm):
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
             if encoder_config is None:
-                encoder_config = get_default_encoder_config(observation_spaces[0])
-                critic_encoder_config= get_default_encoder_config(observation_spaces[0])
+                encoder_config = get_default_encoder_config(self.single_space)
+                critic_encoder_config= get_default_encoder_config(self.single_space)
             
             # For image spaces we need to give a sample input tensor to 
             # build networks with Conv3d blocks approproately
             if self.is_image_space:
-                encoder_config["sample_input"] = torch.zeros(
-                    (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
-                ).unsqueeze(2)
-    
-                critic_encoder_config['sample_input'] = torch.zeros(
-                    (1, *observation_spaces[0].shape), dtype=torch.float32, device=self.device
-                ).unsqueeze(2).repeat(1, 1, self.n_agents, 1, 1)
+                encoder_config["sample_input"] = multi_agent_sample_tensor_from_space(
+                    self.single_space, self.n_agents, device=self.device
+                    )
+                critic_encoder_config['sample_input'] = multi_agent_sample_tensor_from_space(
+                    self.single_space, self.n_agents, device=self.device, critic=True
+                    )
 
             net_config['encoder_config'] = encoder_config
             net_config['head_config'] = head_config
@@ -255,7 +260,7 @@ class MATD3(MultiAgentAlgorithm):
                 self.action_spaces[idx],
                 n_agents=self.n_agents,
                 device=self.device,
-                **net_config
+                **copy.deepcopy(net_config)
             )
 
             # NOTE: Critic uses observations + actions of all agents to predict Q-value
@@ -264,7 +269,7 @@ class MATD3(MultiAgentAlgorithm):
                 action_space=concatenate_spaces(action_spaces),
                 n_agents=self.n_agents,
                 device=self.device,
-                **critic_net_config
+                **copy.deepcopy(critic_net_config)
             )
 
             self.actors = [create_actor(idx) for idx in range(self.n_agents)]
@@ -634,13 +639,8 @@ class MATD3(MultiAgentAlgorithm):
                     next_actions.append(unscaled_actions)
 
         # Stack states and actions
-        if self.is_image_space:
-            stacked_states = torch.stack(list(states.values()), dim=2)
-            stacked_next_states = torch.stack(list(next_states.values()), dim=2)
-        else:
-            stacked_states = torch.cat(list(states.values()), dim=1)
-            stacked_next_states = torch.cat(list(next_states.values()), dim=1)
-
+        stacked_states = self.stack_critic_observations(states)
+        stacked_next_states = self.stack_critic_observations(next_states)
         stacked_actions = torch.cat(list(actions.values()), dim=1)
         stacked_next_actions = torch.cat(next_actions, dim=1)
 

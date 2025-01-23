@@ -1348,26 +1348,11 @@ def test_maddpg_learns_from_experiences_mlp_distributed(
     ):
         assert old_critic_state_dict != str(updated_critic.state_dict())
 
-
-@pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "agent_1"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "agent_1"],
-            "default",
-        ),
-    ],
-)
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1"]])
+@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_box_spaces(2, (2,)), generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("observation_spaces", [generate_multi_agent_box_spaces(2, (3, 32, 32))])
 def test_maddpg_learns_from_experiences_cnn(
     observation_spaces,
     experiences,
@@ -1427,47 +1412,16 @@ def test_maddpg_learns_from_experiences_cnn(
     ):
         assert old_critic_state_dict != str(updated_critic.state_dict())
 
-
-@pytest.mark.parametrize(
-    "observation_spaces, batch_size, action_spaces, agent_ids, compile_mode",
-    [
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "agent_1"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "agent_1"],
-            None,
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_box_spaces(2, (2,)),
-            ["agent_0", "agent_1"],
-            "default",
-        ),
-        (
-            generate_multi_agent_box_spaces(2, (3, 32, 32), low=0, high=255),
-            64,
-            generate_multi_agent_discrete_spaces(2, 2),
-            ["agent_0", "agent_1"],
-            "default",
-        ),
-    ],
-)
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("agent_ids", [["agent_0", "agent_1"]])
+@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("action_spaces", [generate_multi_agent_box_spaces(2, (2,)), generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("observation_spaces", [generate_multi_agent_box_spaces(2, (3, 32, 32))])
 def test_maddpg_learns_from_experiences_cnn_distributed(
     observation_spaces,
     accelerated_experiences,
-    batch_size,
     action_spaces,
     agent_ids,
-    device,
     compile_mode,
 ):
     accelerator = Accelerator(device_placement=False)
@@ -1664,18 +1618,9 @@ def test_maddpg_algorithm_test_loop_cnn_vectorized(device, sum_score, compile_mo
         assert len(mean_score) == 2
     env.close()
 
-
-@pytest.mark.parametrize(
-    "accelerator_flag, wrap, compile_mode",
-    [
-        (False, True, None),
-        (True, True, None),
-        (True, False, None),
-        (False, True, "default"),
-        (True, True, "default"),
-        (True, False, "default"),
-    ],
-)
+@pytest.mark.parametrize("compile_mode", [None, "default"])
+@pytest.mark.parametrize("accelerator_flag", [False, True])
+@pytest.mark.parametrize("wrap", [True, False])
 def test_maddpg_clone_returns_identical_agent(accelerator_flag, wrap, compile_mode):
     # Clones the agent and returns an identical copy.
     observation_spaces = generate_multi_agent_box_spaces(2, (4,))
@@ -1851,18 +1796,9 @@ def test_clone_after_learning(compile_mode):
     # assert clone_agent.critic_networks == maddpg.critic_networks
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"])
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_save_load_checkpoint_correct_data_and_format(
     tmpdir, device, accelerator, compile_mode
 ):
@@ -1967,18 +1903,9 @@ def test_save_load_checkpoint_correct_data_and_format(
     assert maddpg.steps == [0]
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"])
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     tmpdir, device, accelerator, compile_mode
 ):
@@ -2088,18 +2015,9 @@ def test_maddpg_save_load_checkpoint_correct_data_and_format_cnn(
     assert maddpg.steps == [0]
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"])
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 @pytest.mark.parametrize(
     "observation_spaces, action_spaces",
     [
@@ -2287,18 +2205,9 @@ def test_action_scaling(compile_mode):
     np.array_equal(scaled_action, np.array([0.2, 0.4, 0.6, -0.1, -0.2, -0.3]))
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"])
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     # Initialize the maddpg agent
@@ -2380,18 +2289,9 @@ def test_load_from_pretrained(device, accelerator, tmpdir, compile_mode):
     assert new_maddpg.steps == maddpg.steps
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"]
-)
-@pytest.mark.parametrize(
-    "accelerator, compile_mode",
-    [
-        (None, None),
-        (Accelerator(), None),
-        (None, "default"),
-        (Accelerator(), "default"),
-    ],
-)
+@pytest.mark.parametrize("device", ["cpu", "cuda" if torch.cuda.is_available() else "cpu"])
+@pytest.mark.parametrize("accelerator", [None, Accelerator()])
+@pytest.mark.parametrize("compile_mode", [None, "default"])
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir, compile_mode):
     # Initialize the maddpg agent

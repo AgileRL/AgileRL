@@ -15,6 +15,7 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.algorithms.core.registry import MutationRegistry, NetworkGroup, OptimizerConfig, HyperparameterConfig
 from agilerl.protocols import EvolvableModule, EvolvableAttributeType, EvolvableAttributeDict
 from agilerl.typing import NumpyObsType, TorchObsType, ObservationType, GymSpaceType, DeviceType
+from agilerl.utils.evolvable_networks import is_image_space
 from agilerl.utils.algo_utils import (
     chkpt_attribute_to_device,
     compile_model,
@@ -997,6 +998,7 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
 
         # Build observation and action space dictionaries using agent IDs
+        self.single_space = observation_spaces[0]
         self.observation_space = spaces.Dict({
             agent_id: space for agent_id, space in zip(agent_ids, observation_spaces)
         })
@@ -1023,3 +1025,44 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             )
 
         return preprocessed
+
+    def stack_critic_observations(self, obs: Dict[str, TorchObsType]) -> TorchObsType:
+        """Process observations for critic network input
+
+        :param obs: Observation dict
+        :type obs: Dict[str, torch.Tensor]
+
+        :return: Stacked observations
+        :rtype: torch.Tensor
+        """
+        obs = list(obs.values())
+        if isinstance(self.single_space, spaces.Dict):
+            processed_obs = {}
+            for key, space in self.single_space.spaces.items():
+                if is_image_space(space):
+                    processed_obs[key] = torch.stack(
+                        [obs[i][key] for i in range(self.n_agents)], dim=2
+                    )
+                else:
+                    processed_obs[key] = torch.cat(
+                        [obs[i][key] for i in range(self.n_agents)], dim=1
+                    )
+
+        elif isinstance(self.single_space, spaces.Tuple):
+            processed_obs = []
+            for i, space in enumerate(self.single_space):
+                if is_image_space(space):
+                    processed_obs.append(
+                        torch.stack([obs[j][i] for j in range(self.n_agents)], dim=2)
+                    )
+                else:
+                    processed_obs.append(
+                        torch.cat([obs[j][i] for j in range(self.n_agents)], dim=1)
+                    )
+            processed_obs = tuple(processed_obs)
+        elif is_image_space(self.single_space):
+            processed_obs = torch.stack(obs, dim=2)
+        else:
+            processed_obs = torch.cat(obs, dim=1)
+        
+        return processed_obs

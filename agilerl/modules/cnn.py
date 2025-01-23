@@ -252,7 +252,7 @@ class EvolvableCNN(EvolvableModule):
         elif block_type == "Conv3d":
             assert (
                 sample_input is not None and len(sample_input.shape) == 5
-            ), "Sample input must be provided for 3D convolutional networks."
+            ), "Sample input with shape format (B, C, D, H, W) must be provided for 3D convolutional networks."
         else:
             raise ValueError(
                 f"Invalid block type: {block_type}. Must be either 'Conv2d' or 'Conv3d'."
@@ -289,6 +289,7 @@ class EvolvableCNN(EvolvableModule):
         net_config = self.init_dict.copy()
         for attr in ["input_shape", "num_outputs", "device", "name"]:
             net_config.pop(attr, None)
+
         return net_config
 
     @property

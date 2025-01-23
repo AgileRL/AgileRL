@@ -14,7 +14,7 @@ from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_functions import ValueFunction
 from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig, RLParameter
+from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.utils.algo_utils import (
     obs_channels_to_first,
     stack_experiences,
@@ -74,11 +74,7 @@ class PPO(RLAlgorithm):
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional
     :param accelerator: Accelerator for distributed computing, defaults to None
-    :type accelerator: Any, optional
-    :param compile: Flag to compile the model, defaults to True
-    :type compile: bool, optional
-    :param cudagraphs: Flag to use CUDA graphs, defaults to False
-    :type cudagraphs: bool, optional
+    :type accelerator: accelerate.Accelerator(), optional
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """

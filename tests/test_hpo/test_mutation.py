@@ -760,7 +760,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 @pytest.mark.parametrize("observation_space, net_config", [
     (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
     (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+    (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
 ])
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("hp_config", [None])
@@ -894,7 +894,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 @pytest.mark.parametrize("observation_space, net_config", [
     (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
     (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+    (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
 ])
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
@@ -988,7 +988,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 @pytest.mark.parametrize("observation_space, net_config", [
     (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
     (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+    (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
 ])
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
@@ -1031,7 +1031,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize("observation_space, net_config", [
     (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
     (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+    (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
 ])
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
@@ -1077,7 +1077,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 @pytest.mark.parametrize("observation_space, net_config", [
     (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
     (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+    (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
 ])
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])

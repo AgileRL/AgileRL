@@ -234,7 +234,6 @@ Tournament selection and mutation should be applied sequentially to fully evolve
 .. code-block:: python
 
     mutations = Mutations(
-        algo=INIT_HP["ALGO"],
         no_mutation=MUT_P["NO_MUT"],
         architecture=MUT_P["ARCH_MUT"],
         new_layer_prob=MUT_P["NEW_LAYER"],
