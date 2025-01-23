@@ -69,9 +69,6 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
     """
     # Multi-input networks contain at least one image space
     assert_correct_cnn_net_config(net_config)
-    assert (
-        "latent_dim" in net_config.keys()
-    ), "Net config must contain latent_dim: int."
 
 class NetworkMeta(ModuleMeta):
     """Metaclass for evolvable networks. Checks that the network has 

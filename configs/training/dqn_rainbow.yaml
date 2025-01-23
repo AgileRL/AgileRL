@@ -32,7 +32,7 @@ INIT_HP:
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
     LEARNING_DELAY: 1000       # Steps before learning
-    WANDB: false               # Log with Weights and Biases
+    WANDB: true               # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation

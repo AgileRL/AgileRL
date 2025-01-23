@@ -6,6 +6,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.custom_modules import RainbowMLP
+from benchmarking.legacy_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.algo_utils import observation_space_channels_to_first
 from agilerl.utils.utils import (
@@ -103,17 +104,19 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     state_dim = RLAlgorithm.get_state_dim(observation_space)
     action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
-        actor = RainbowMLP(
+        actor = EvolvableMLP(
             num_inputs=state_dim[0],
             num_outputs=action_dim,
-            output_vanish=True,
-            layer_norm=True,
+            output_vanish=False,
+            init_layers=False,
+            layer_norm=False,
             num_atoms=51,
             support=torch.linspace(-200, 200, 51).to(device),
+            rainbow=True,
             device=device,
             hidden_size=[128, 128],
-            activation="ReLU",
-            output_activation="ReLU",
+            mlp_activation="ReLU",
+            mlp_output_activation="ReLU",
         )
     else:
         actor = None
@@ -186,4 +189,4 @@ if __name__ == "__main__":
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
     NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

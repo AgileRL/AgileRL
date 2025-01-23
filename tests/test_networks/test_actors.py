@@ -18,17 +18,14 @@ from tests.helper_functions import (
     assert_close_dict
 )
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space, encoder_type",
+    "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,)), "multi_input"),
-        (generate_discrete_space(4), generate_random_box_space((4,)), "mlp"),
-        (generate_random_box_space((8,)), generate_random_box_space((4,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,)), "cnn"),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4), "multi_input"),
-        (generate_discrete_space(4), generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4), "cnn"),
+        (generate_dict_or_tuple_space(2, 3), "multi_input"),
+        (generate_discrete_space(4), "mlp"),
+        (generate_random_box_space((8,)), "mlp"),
+        (generate_random_box_space((3, 32, 32)), "cnn"),
     ]
 )
 def test_deterministic_actor_initialization(observation_space, action_space, encoder_type):
@@ -43,17 +40,14 @@ def test_deterministic_actor_initialization(observation_space, action_space, enc
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space",
+    "observation_space",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,))),
-        (generate_discrete_space(4), generate_random_box_space((4,))),
-        (generate_random_box_space((8,)), generate_random_box_space((4,))),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,))),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4)),
-        (generate_discrete_space(4), generate_discrete_space(4)),
-        (generate_random_box_space((8,)), generate_discrete_space(4)),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4)),
+        generate_dict_or_tuple_space(2, 3),
+        generate_discrete_space(4),
+        generate_random_box_space((8,)),
+        generate_random_box_space((3, 32, 32)),
     ]
 )
 def test_deterministic_actor_mutation_methods(observation_space, action_space):
@@ -77,17 +71,14 @@ def test_deterministic_actor_mutation_methods(observation_space, action_space):
         
         check_equal_params_ind(network, new_network)
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space",
+    "observation_space",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,))),
-        (generate_discrete_space(4), generate_random_box_space((4,))),
-        (generate_random_box_space((8,)), generate_random_box_space((4,))),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,))),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4)),
-        (generate_discrete_space(4), generate_discrete_space(4)),
-        (generate_random_box_space((8,)), generate_discrete_space(4)),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4)),
+        generate_dict_or_tuple_space(2, 3),
+        generate_discrete_space(4),
+        generate_random_box_space((8,)),
+        generate_random_box_space((3, 32, 32)),
     ]
 )
 def test_deterministic_actor_forward(observation_space: spaces.Space, action_space: spaces.Space):
@@ -117,17 +108,14 @@ def test_deterministic_actor_forward(observation_space: spaces.Space, action_spa
     assert isinstance(out, torch.Tensor)
     assert out.shape == torch.Size([1, spaces.flatdim(action_space)])
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space",
+    "observation_space",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,))),
-        (generate_discrete_space(4), generate_random_box_space((4,))),
-        (generate_random_box_space((8,)), generate_random_box_space((4,))),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,))),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4)),
-        (generate_discrete_space(4), generate_discrete_space(4)),
-        (generate_random_box_space((8,)), generate_discrete_space(4)),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4)),
+        generate_dict_or_tuple_space(2, 3),
+        generate_discrete_space(4),
+        generate_random_box_space((8,)),
+        generate_random_box_space((3, 32, 32)),
     ]
 )
 def test_deterministic_actor_clone(observation_space: spaces.Space, action_space: spaces.Space):
@@ -143,17 +131,14 @@ def test_deterministic_actor_clone(observation_space: spaces.Space, action_space
     for key, param in clone.named_parameters():
         torch.testing.assert_close(param, original_net_dict[key])
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space, encoder_type",
+    "observation_space, encoder_type",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,)), "multi_input"),
-        (generate_discrete_space(4), generate_random_box_space((4,)), "mlp"),
-        (generate_random_box_space((8,)), generate_random_box_space((4,)), "mlp"),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,)), "cnn"),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4), "multi_input"),
-        (generate_discrete_space(4), generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((8,)), generate_discrete_space(4), "mlp"),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4), "cnn"),
+        (generate_dict_or_tuple_space(2, 3), "multi_input"),
+        (generate_discrete_space(4), "mlp"),
+        (generate_random_box_space((8,)), "mlp"),
+        (generate_random_box_space((3, 32, 32)), "cnn"),
     ]
 )
 def test_stochastic_actor_initialization(observation_space, action_space, encoder_type):
@@ -168,17 +153,14 @@ def test_stochastic_actor_initialization(observation_space, action_space, encode
     elif encoder_type == "cnn":
         assert isinstance(network.encoder, EvolvableCNN)
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space",
+    "observation_space",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,))),
-        (generate_discrete_space(4), generate_random_box_space((4,))),
-        (generate_random_box_space((8,)), generate_random_box_space((4,))),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,))),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4)),
-        (generate_discrete_space(4), generate_discrete_space(4)),
-        (generate_random_box_space((8,)), generate_discrete_space(4)),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4)),
+        generate_dict_or_tuple_space(2, 3),
+        generate_discrete_space(4),
+        generate_random_box_space((8,)),
+        generate_random_box_space((3, 32, 32)),
     ]
 )
 def test_stochastic_actor_mutation_methods(observation_space, action_space):
@@ -202,17 +184,14 @@ def test_stochastic_actor_mutation_methods(observation_space, action_space):
         
         check_equal_params_ind(network, new_network)
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space",
+    "observation_space",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,))),
-        (generate_discrete_space(4), generate_random_box_space((4,))),
-        (generate_random_box_space((8,)), generate_random_box_space((4,))),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,))),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4)),
-        (generate_discrete_space(4), generate_discrete_space(4)),
-        (generate_random_box_space((8,)), generate_discrete_space(4)),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4)),
+        generate_dict_or_tuple_space(2, 3),
+        generate_discrete_space(4),
+        generate_random_box_space((8,)),
+        generate_random_box_space((3, 32, 32)),
     ]
 )
 def test_stochastic_actor_forward(observation_space: spaces.Space, action_space: spaces.Space):
@@ -243,17 +222,14 @@ def test_stochastic_actor_forward(observation_space: spaces.Space, action_space:
 
     assert isinstance(dist, torch.distributions.Distribution)
 
+@pytest.mark.parametrize("action_space", [generate_random_box_space((4,)), generate_discrete_space(4)])
 @pytest.mark.parametrize(
-    "observation_space, action_space",
+    "observation_space",
     [
-        (generate_dict_or_tuple_space(2, 3), generate_random_box_space((4,))),
-        (generate_discrete_space(4), generate_random_box_space((4,))),
-        (generate_random_box_space((8,)), generate_random_box_space((4,))),
-        (generate_random_box_space((3, 32, 32)), generate_random_box_space((4,))),
-        (generate_dict_or_tuple_space(2, 3), generate_discrete_space(4)),
-        (generate_discrete_space(4), generate_discrete_space(4)),
-        (generate_random_box_space((8,)), generate_discrete_space(4)),
-        (generate_random_box_space((3, 32, 32)), generate_discrete_space(4)),
+        generate_dict_or_tuple_space(2, 3),
+        generate_discrete_space(4),
+        generate_random_box_space((8,)),
+        generate_random_box_space((3, 32, 32)),
     ]
 )
 def test_stochastic_actor_clone(observation_space: spaces.Space, action_space: spaces.Space):

@@ -73,7 +73,7 @@ def make_vect_envs(env_name, num_envs):
     )
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")
     print(f"DEVICE: {device}")
 

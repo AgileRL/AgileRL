@@ -236,12 +236,14 @@ class EvolvableMultiInput(EvolvableModule):
     
     @activation.setter
     def activation(self, activation: str) -> None:
-        """Sets the activation function for the network.
+        """Set the activation function for the network.
         
         :param activation: Activation function to use.
         :type activation: str
         """
         self._activation = activation
+        for module in self.feature_net.values():
+            module.change_activation(activation, output=True)
 
     @property
     def base_init_dict(self) -> Dict[str, Any]:
@@ -502,9 +504,7 @@ class EvolvableMultiInput(EvolvableModule):
         :return: Activation function
         :rtype: str
         """
-        for key, module in self.feature_net.items():
-            module.change_activation(activation, output=True)
-        
+        self.activation = activation
         if output:
             self.output = get_activation(activation)
 

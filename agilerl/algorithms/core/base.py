@@ -189,6 +189,23 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
             return action_space.shape[0]
         else:
             raise AttributeError(f"Can't access action dimensions for {type(action_space)} spaces.")
+
+    @classmethod
+    def population(
+        cls: Type[SelfEvolvableAlgorithm],
+        size: int,
+        observation_space: GymSpaceType,
+        action_space: GymSpaceType,
+        **kwargs) -> List[SelfEvolvableAlgorithm]:
+        """Creates a population of algorithms.
+        
+        :param size: The size of the population.
+        :type size: int.
+        
+        :return: A list of algorithms.
+        :rtype: List[SelfEvolvableAlgorithm].
+        """
+        return [cls(observation_space, action_space, index=i, **kwargs) for i in range(size)]
         
     def __setattr__(self, name: str, value: Any) -> None:
         """Sets the attribute of the algorithm. If the attribute is an OptimizerWrapper,
@@ -215,6 +232,8 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         super().__setattr__(name, value)
     
+    # NOTE: We could check for these things elsewhere and remove the need for a 
+    # metacalass for the sake of simplicity
     def _registry_init(self) -> None:
         """Registers the networks, optimizers, and algorithm hyperparameters in the algorithm with 
         the mutations registry. We also check that all of the evolvable networks and their respective 
@@ -947,8 +966,13 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
             all(isinstance(_space, spaces.Space) for _space in action_spaces),
             "Action spaces must be instances of gym.spaces.Space."
         )
+        if not all(isinstance(space, observation_spaces[0].__class__) for space in observation_spaces):
+            raise ValueError(
+                "AgileRL 2.0 only supports homogeneous multi-agent environments " \
+                "(i.e. all agents have the same type of observation space)"
+                )
 
-         # TODO: This is a bit of a temporary hack to support legacy code
+         # TODO: This can be removed once we have a more robust implementation
         self.state_dims = self.get_state_dim(observation_spaces)
         self.action_dims = self.get_action_dim(action_spaces)
         self.one_hot = all(isinstance(space, spaces.Discrete) for space in observation_spaces)
@@ -967,7 +991,10 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         self.observation_spaces = observation_spaces
         self.action_spaces = action_spaces
         self.total_actions = sum(self.action_dims)
-        self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
+        self.total_state_dims = None
+
+        if not any(isinstance(space, (spaces.Dict, spaces.Tuple)) for space in observation_spaces):
+            self.total_state_dims = sum(state_dim[0] for state_dim in self.state_dims)
 
         # Build observation and action space dictionaries using agent IDs
         self.observation_space = spaces.Dict({

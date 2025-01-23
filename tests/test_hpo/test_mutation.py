@@ -2,6 +2,7 @@ import copy
 import numpy as np
 import pytest
 import torch
+from gymnasium import spaces
 from accelerate import Accelerator
 
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
@@ -12,8 +13,10 @@ from agilerl.utils.utils import create_population
 from tests.helper_functions import (
     generate_random_box_space,
     generate_discrete_space,
+    generate_dict_or_tuple_space,
     generate_multi_agent_box_spaces,
     generate_multi_agent_discrete_spaces,
+    gen_multi_agent_dict_or_tuple_spaces,
     assert_equal_state_dict
 )
 
@@ -106,6 +109,23 @@ DEFAULT_CONFIG = HyperparameterConfig(
     learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
 )
 
+ENCODER_MLP_CONFIG = {"encoder_config":  {"hidden_size": [8]}}
+ENCODER_CNN_CONFIG = {
+    "encoder_config": {
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
+        }
+}
+ENCODER_MULTI_INPUT_CONFIG = {
+    "encoder_config": {
+        "channel_size": [3],
+        "kernel_size": [3],
+        "stride_size": [1],
+        "hidden_size": [8],
+        }
+}
+
 @pytest.fixture
 def init_pop(
     algo,
@@ -122,8 +142,8 @@ def init_pop(
         algo=algo,
         observation_space=observation_space,
         action_space=action_space,
-        hp_config=hp_config,
-        net_config=net_config,
+        hp_config=copy.deepcopy(hp_config),
+        net_config=copy.deepcopy(net_config),
         INIT_HP=INIT_HP,
         population_size=population_size,
         device=device,
@@ -133,14 +153,6 @@ def init_pop(
 
 # The constructor initializes all the attributes of the Mutations class correctly.
 def test_constructor_initializes_attributes():
-    algo = {
-        "actor": {
-            "eval": "actor",
-            "target": "actor_target",
-            "optimizer": "optimizer",
-        },
-        "critics": [],
-    }
     no_mutation = 0.1
     architecture = 0.2
     new_layer_prob = 0.3
@@ -156,7 +168,6 @@ def test_constructor_initializes_attributes():
     accelerator = None
 
     mutations = Mutations(
-        algo,
         no_mutation,
         architecture,
         new_layer_prob,
@@ -188,9 +199,7 @@ def test_constructor_initializes_attributes():
 
 # Can regularize weight
 def test_returns_regularize_weight():
-    mutations = Mutations(
-        "DQN", 0, 0, 0, 0, 0, 0, 0.1
-    )
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1)
 
     weight = 10
     mag = 5
@@ -216,7 +225,7 @@ def test_returns_regularize_weight():
             "DQN",
             generate_random_box_space((4,)),
             generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
+            ENCODER_MLP_CONFIG,
             SHARED_INIT_HP,
             1,
             torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -241,8 +250,7 @@ def test_mutation_no_options(
 
     population = init_pop
 
-    mutations = Mutations(
-        algo, 0, 0, 0, 0, 0, 0, 0.1, device=device
+    mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1, device=device
     )
 
     new_population = [agent.clone() for agent in population]
@@ -255,214 +263,32 @@ def test_mutation_no_options(
 
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-
-        ),
-    ],
-)
-def test_mutation_applies_random_mutations(
-    algo, distributed, observation_space, action_space, net_config, INIT_HP,
-    population_size, device, accelerator, hp_config, init_pop
-):
+@pytest.mark.parametrize("algo, hp_config, action_space", [
+    ("DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("Rainbow DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("DDPG", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("CQN", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("NeuralUCB", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("NeuralTS", DEFAULT_CONFIG, generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("observation_space, net_config", [
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     pre_training_mut = True
 
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0.1,
         0.1,
@@ -471,8 +297,8 @@ def test_mutation_applies_random_mutations(
         0.1,
         0.1,
         mutate_elite=False,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     for agent in population:
@@ -498,236 +324,33 @@ def test_mutation_applies_random_mutations(
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_no_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo, action_space", [
+    ("DQN", generate_discrete_space(2)),
+    ("Rainbow DQN", generate_discrete_space(2)),
+    ("DDPG", generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", generate_discrete_space(2)),
+    ("CQN", generate_discrete_space(2)),
+    ("NeuralUCB", generate_discrete_space(2)),
+    ("NeuralTS", generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("observation_space, net_config", [
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
     pre_training_mut = False
 
     population = init_pop
 
     mutations = Mutations(
-        algo,
         1,
         0,
         0,
@@ -735,8 +358,8 @@ def test_mutation_applies_no_mutations(
         0,
         0,
         0.1,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -751,236 +374,33 @@ def test_mutation_applies_no_mutations(
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_no_mutations_pre_training_mut(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo, action_space", [
+    ("DQN", generate_discrete_space(2)),
+    ("Rainbow DQN", generate_discrete_space(2)),
+    ("DDPG", generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", generate_discrete_space(2)),
+    ("CQN", generate_discrete_space(2)),
+    ("NeuralUCB", generate_discrete_space(2)),
+    ("NeuralTS", generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("observation_space, net_config",[
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_no_mutations_pre_training_mut(algo, device, accelerator, init_pop):
     pre_training_mut = True
-
     population = init_pop
 
+    # Set all mutation probabilities to 0
     mutations = Mutations(
-        algo,
         1,
         0,
         0,
@@ -1011,212 +431,31 @@ def test_mutation_applies_no_mutations_pre_training_mut(
 
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((4,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_rl_hp_mutations(
-    algo, distributed, observation_space, action_space, net_config, INIT_HP,
-    population_size, device, accelerator, hp_config, init_pop
-):
+@pytest.mark.parametrize("algo, hp_config, action_space", [
+    ("DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("Rainbow DQN", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("DDPG", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", ACTOR_CRITIC_CONFIG, generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("CQN", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("NeuralUCB", DEFAULT_CONFIG, generate_discrete_space(2)),
+    ("NeuralTS", DEFAULT_CONFIG, generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("observation_space, net_config",[
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_rl_hp_mutations(algo, device, accelerator, hp_config, init_pop):
     pre_training_mut = False
 
     population = init_pop
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -1224,8 +463,8 @@ def test_mutation_applies_rl_hp_mutations(
         0,
         1,
         0.1,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -1243,236 +482,40 @@ def test_mutation_applies_rl_hp_mutations(
         assert old.index == individual.index
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo, action_space", [
+    ("DQN", generate_discrete_space(2)),
+    ("Rainbow DQN", generate_discrete_space(2)),
+    ("DDPG", generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", generate_discrete_space(2)),
+    ("CQN", generate_discrete_space(2)),
+    ("NeuralUCB", generate_discrete_space(2)),
+    ("NeuralTS", generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("observation_space, net_config",[
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_activation_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
+    algo, observation_space, device, accelerator, init_pop
 ):
     pre_training_mut = False
 
     population = init_pop
 
+    if isinstance(observation_space, spaces.Box) and len(observation_space.shape) == 3:
+        activation_selection = ["ReLU", "ELU", "GELU"]
+    else:
+        activation_selection = ["Tanh", "ReLU", "ELU", "GELU"]
+
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -1480,9 +523,9 @@ def test_mutation_applies_activation_mutations(
         1,
         0,
         0.1,
-        activation_selection=["Tanh", "ReLU", "ELU", "GELU"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        activation_selection=activation_selection,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -1493,49 +536,31 @@ def test_mutation_applies_activation_mutations(
         assert individual.mut in ["None", "act"]
         if individual.mut == "act":
             assert old.actor.activation != individual.actor.activation
-            assert individual.actor.activation in ["Tanh", "ReLU", "ELU", "GELU"]
+            assert individual.actor.activation in activation_selection
         assert old.index == individual.index
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-    ],
-)
+@pytest.mark.parametrize("observation_space, net_config",[
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("algo, action_space", [("DDPG", generate_random_box_space((4,), low=-1, high=1))])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_activation_mutations_no_skip(
-    algo, distributed, device, accelerator, init_pop, hp_config
+    algo, device, accelerator, init_pop
 ):
     pre_training_mut = False
 
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -1543,8 +568,8 @@ def test_mutation_applies_activation_mutations_no_skip(
         1,
         0,
         0.1,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     for individual in population:
@@ -1561,563 +586,29 @@ def test_mutation_applies_activation_mutations_no_skip(
             assert individual.actor.activation in ["ReLU", "ELU", "GELU"]
         assert old.index == individual.index
 
-
-# The mutation method applies CNN activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_cnn_activation_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
-    pre_training_mut = False
-
-    population = init_pop
-
-    mutations = Mutations(
-        algo,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0.1,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
-    )
-
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        assert individual.mut in ["None", "act"]
-        if individual.mut == "act":
-            assert old.actor.activation != individual.actor.activation
-            assert individual.actor.activation in ["ReLU", "ELU", "GELU"]
-        assert old.index == individual.index
-
 # The mutation method applies parameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_parameter_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo, action_space, observation_space, net_config", [
+    ("DQN", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("Rainbow DQN", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("DDPG", generate_random_box_space((4,), low=-1, high=1), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("TD3", generate_random_box_space((4,), low=-1, high=1), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("PPO", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("CQN", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("NeuralUCB", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("NeuralTS", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+    ("ILQL", generate_discrete_space(2), generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_pop):
     pre_training_mut = False
 
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -2125,8 +616,8 @@ def test_mutation_applies_parameter_mutations(
         0,
         0,
         0.5,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -2140,535 +631,32 @@ def test_mutation_applies_parameter_mutations(
         assert old.index == individual.index
 
 
-# The mutation method applies CNN parameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_cnn_parameter_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
-    pre_training_mut = False
-
-    population = init_pop
-
-    mutations = Mutations(
-        algo,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0.5,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
-    )
-
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        assert individual.mut == "param"
-        # Due to randomness, sometimes parameters are not different
-        # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-        assert old.index == individual.index
 # The mutation method applies architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG
-        ),
-    ],
-)
-def test_mutation_applies_architecture_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo, action_space", [
+    ("DQN", generate_discrete_space(2)),
+    ("Rainbow DQN", generate_discrete_space(2)),
+    ("DDPG", generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", generate_discrete_space(2)),
+    ("CQN", generate_discrete_space(2)),
+    ("NeuralUCB", generate_discrete_space(2)),
+    ("NeuralTS", generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("observation_space, net_config",[
+        (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
+        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_discrete_space(4), ENCODER_MLP_CONFIG)
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+def test_mutation_applies_architecture_mutations(algo, device, accelerator, init_pop):
     for _ in range(10):
         population = init_pop
-
         mutations = Mutations(
-            algo,
             0,
             1,
             0.5,
@@ -2676,8 +664,8 @@ def test_mutation_applies_architecture_mutations(
             0,
             0,
             0.5,
-            device=device if not distributed else None,
-            accelerator=accelerator if distributed else None,
+            device=device,
+            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -2692,411 +680,27 @@ def test_mutation_applies_architecture_mutations(
             # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
             assert old.index == individual.index
         
-        # assert_equal_state_dict(population, mutated_population)
-
-
-# The mutation method applies CNN architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "DQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-        (
-            "Rainbow DQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "Rainbow DQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "TD3",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "TD3",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_random_box_space((2,), low=-1, high=1),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "PPO",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "PPO",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-        (
-            "CQN",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "CQN",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-        (
-            "ILQL",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "ILQL",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-        (
-            "NeuralUCB",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "NeuralUCB",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-        (
-            "NeuralTS",
-            False,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "NeuralTS",
-            True,
-            generate_random_box_space((3, 32, 32)),
-            generate_discrete_space(2),
-           {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            DEFAULT_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_cnn_architecture_mutations(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
-    pre_training_mut = True
-
-    population = init_pop
-
-    mutations = Mutations(
-        algo,
-        0,
-        1,
-        0.5,
-        0,
-        0,
-        0,
-        0.5,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
-    )
-
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        assert individual.mut == "arch"
-        # Due to randomness and constraints on size, sometimes architectures are not different
-        # assert str(old.actor.state_dict()) != str(individual.actor.state_dict())
-        assert old.index == individual.index
-    
-    assert_equal_state_dict(population, mutated_population)
-
+        assert_equal_state_dict(population, mutated_population)
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config, mut_method",
-    [
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-            [
-                "add_encoder_layer",
-                "remove_encoder_layer",
-                "add_decoder_layer",
-                "remove_decoder_layer",
-            ],
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=True),
-            ACTOR_CRITIC_CONFIG,
-            [
-                "add_encoder_layer",
-                "remove_encoder_layer",
-                "add_decoder_layer",
-                "remove_decoder_layer",
-            ],
-        ),
-        (
-            "DDPG",
-            False,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-        (
-            "DDPG",
-            True,
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=True),
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo", ["DDPG"])
+@pytest.mark.parametrize("observation_space, net_config", [(generate_random_box_space((4,)), ENCODER_MLP_CONFIG)])
+@pytest.mark.parametrize("action_space", [generate_random_box_space((2,), low=-1, high=1)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=True)])
+@pytest.mark.parametrize("mut_method", [
+    ["add_encoder_layer", "remove_encoder_layer", "add_decoder_layer", "remove_decoder_layer"],
+    ["add_node", "remove_node"]
+])
 def test_mutation_applies_bert_architecture_mutations_single_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config, mut_method
+    algo, device, accelerator, mut_method, init_pop
 ):
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         1,
         0.5,
@@ -3104,8 +708,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
         0,
         0,
         0.5,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     class DummyRNG:
@@ -3115,8 +719,6 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     mutations.rng = DummyRNG()
 
     for individual in population:
-
-
         individual.actor = EvolvableBERT([12], [12], device=device)
         individual.actor_target = copy.deepcopy(individual.actor)
         individual.critic = EvolvableBERT([12], [12], device=device)
@@ -3152,71 +754,26 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     
     # assert_equal_state_dict(population, mutated_population)
 
-
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_random_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [
+    (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
+    (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
+    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
+def test_mutation_applies_random_mutations_multi_agent(algo, device, accelerator, init_pop):
     pre_training_mut = False
-
     population = init_pop
 
+    # Random mutations
     mutations = Mutations(
-        algo,
         0,
         0.1,
         0.1,
@@ -3225,13 +782,14 @@ def test_mutation_applies_random_mutations_multi_agent(
         0.1,
         0.1,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     for agent in population:
         if accelerator is not None:
             agent.unwrap_models()
+
     mutated_population = mutations.mutation(population, pre_training_mut)
 
     assert len(mutated_population) == len(population)
@@ -3250,68 +808,19 @@ def test_mutation_applies_random_mutations_multi_agent(
 
 
 # The mutation method applies no mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_no_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [(generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG)])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, init_pop):
     pre_training_mut = False
-
     population = init_pop
 
     mutations = Mutations(
-        algo,
         1,
         0,
         0,
@@ -3320,8 +829,8 @@ def test_mutation_applies_no_mutations_multi_agent(
         0,
         0.1,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     for agent in population:
@@ -3337,68 +846,22 @@ def test_mutation_applies_no_mutations_multi_agent(
 
 
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [(generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG)])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
+@pytest.mark.parametrize("hp_config", [ACTOR_CRITIC_CONFIG])
 def test_mutation_applies_rl_hp_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
+    algo, device, accelerator, init_pop, hp_config
 ):
     pre_training_mut = False
 
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -3407,8 +870,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         1,
         0.1,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -3427,68 +890,23 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_activation_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [
+    (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
+    (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
+    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
+def test_mutation_applies_activation_mutations_multi_agent(algo, device, accelerator, init_pop):
     pre_training_mut = False
-
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -3497,8 +915,8 @@ def test_mutation_applies_activation_mutations_multi_agent(
         0,
         0.1,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -3519,68 +937,22 @@ def test_mutation_applies_activation_mutations_multi_agent(
 
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [(generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG)])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent_no_skip(
-    algo, distributed, device, accelerator, init_pop, hp_config
+    algo, device, accelerator, init_pop
 ):
     pre_training_mut = False
 
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -3589,8 +961,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         0,
         0.1,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     for individual in population:
@@ -3611,176 +983,26 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
                 ]
         assert old.index == individual.index
 
-# The mutation method applies CNN activation mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_cnn_activation_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
-    pre_training_mut = False
-
-    population = init_pop
-
-    mutations = Mutations(
-        algo,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0.1,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
-    )
-
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        assert individual.mut in ["None", "act"]
-        if individual.mut == "act":
-            assert old.actor.activation != individual.actor.activation
-            assert individual.actors[0].activation in [
-                "ReLU",
-                "ELU",
-                "GELU",
-            ]
-        assert old.index == individual.index
-
-
 # The mutation method applies parameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [
+    (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
+    (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
+    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_parameter_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
+    algo, device, accelerator, init_pop
 ):
     pre_training_mut = False
-
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         0,
         0,
@@ -3789,8 +1011,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         0,
         0.5,
         agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     new_population = [agent.clone(wrap=False) for agent in population]
@@ -3802,173 +1024,28 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         # Due to randomness, sometimes parameters are not different
         # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
         assert old.index == individual.index
-
-
-# The mutation method applies CNN parameter mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_cnn_parameter_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
-    pre_training_mut = False
-
-    population = init_pop
-
-    mutations = Mutations(
-        algo,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0.5,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
-    )
-
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        assert individual.mut == "param"
-        # Due to randomness, sometimes parameters are not different
-        # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-        assert old.index == individual.index
-
 
 
 # The mutation method applies architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [
+    (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
+    (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
+    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
+    algo, device, accelerator, init_pop
 ):
     for _ in range(10):
         population = init_pop
 
         mutations = Mutations(
-            algo,
             0,
             1,
             0.5,
@@ -3977,8 +1054,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             0,
             0.5,
             agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-            device=device if not distributed else None,
-            accelerator=accelerator if distributed else None,
+            device=device,
+            accelerator=accelerator,
         )
 
         new_population = [agent.clone(wrap=False) for agent in population]
@@ -3993,245 +1070,31 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
             assert old.index == individual.index
         
-        # assert_equal_state_dict(population, mutated_population)
-
-
-# The mutation method applies architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(3, 32, 32)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1],
-            }},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-        ),
-    ],
-)
-def test_mutation_applies_cnn_architecture_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config
-):
-    pre_training_mut = False
-
-    population = init_pop
-
-    mutations = Mutations(
-        algo,
-        0,
-        1,
-        0.5,
-        0,
-        0,
-        0,
-        0.5,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
-    )
-
-    new_population = [agent.clone(wrap=False) for agent in population]
-    mutated_population = mutations.mutation(new_population, pre_training_mut)
-
-    assert len(mutated_population) == len(population)
-    for old, individual in zip(population, mutated_population):
-        assert individual.mut == "arch"
-        # Due to randomness and constraints on size, sometimes architectures are not different
-        # assert str(old.actors[0].state_dict()) != str(individual.actors[0].state_dict())
-        assert old.index == individual.index
-    
-    assert_equal_state_dict(population, mutated_population)
-
+        assert_equal_state_dict(population, mutated_population)
 
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
-@pytest.mark.parametrize(
-    "algo, distributed, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config, mut_method",
-    [
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-            [
-                "add_encoder_layer",
-                "remove_encoder_layer",
-                "add_decoder_layer",
-                "remove_decoder_layer",
-            ],
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-            [
-                "add_encoder_layer",
-                "remove_encoder_layer",
-                "add_decoder_layer",
-                "remove_decoder_layer",
-            ],
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-            [
-                "add_encoder_layer",
-                "remove_encoder_layer",
-                "add_decoder_layer",
-                "remove_decoder_layer",
-            ],
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-        (
-            "MADDPG",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-        (
-            "MADDPG",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-        (
-            "MATD3",
-            False,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-        (
-            "MATD3",
-            True,
-            generate_multi_agent_box_spaces(2, shape=(4,)),
-            generate_multi_agent_discrete_spaces(2, 2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP_MA,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            Accelerator(device_placement=False),
-            ACTOR_CRITIC_CONFIG,
-            ["add_node", "remove_node"],
-        ),
-    ],
-)
+@pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
+@pytest.mark.parametrize("observation_space, net_config", [
+    (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
+    (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
+    # (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+])
+@pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
+@pytest.mark.parametrize("population_size", [1])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("mut_method", [
+    ["add_encoder_layer", "remove_encoder_layer", "add_decoder_layer", "remove_decoder_layer"],
+    ["add_node", "remove_node"]
+])
 def test_mutation_applies_bert_architecture_mutations_multi_agent(
-    algo, distributed, device, accelerator, init_pop, hp_config, mut_method
+    algo, device, accelerator, init_pop, mut_method
 ):
     population = init_pop
 
     mutations = Mutations(
-        algo,
         0,
         1,
         0.5,
@@ -4239,8 +1102,8 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         0,
         0,
         0.5,
-        device=device if not distributed else None,
-        accelerator=accelerator if distributed else None,
+        device=device,
+        accelerator=accelerator,
     )
 
     class DummyRNG:
@@ -4250,8 +1113,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     mutations.rng = DummyRNG()
 
     for individual in population:
-
-        if distributed:
+        if accelerator is not None:
             adam_actors = [
                 actor_optimizer.optimizer
                 for actor_optimizer in individual.actor_optimizers
@@ -4362,104 +1224,25 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     
     # assert_equal_state_dict(population, mutated_population)
 
-@pytest.mark.parametrize(
-    "algo, observation_space, action_space, net_config, INIT_HP, population_size, device, accelerator, hp_config",
-    [
-        (
-            "DQN",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "Rainbow DQN",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8, 8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "DDPG",
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "TD3",
-            generate_random_box_space((4,)),
-            generate_random_box_space((2,), low=-1, high=1),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            ACTOR_CRITIC_CONFIG,
-        ),
-        (
-            "PPO",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "CQN",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "NeuralUCB",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-        (
-            "NeuralTS",
-            generate_random_box_space((4,)),
-            generate_discrete_space(2),
-            {"encoder_config":  {"hidden_size": [8]}},
-            SHARED_INIT_HP,
-            1,
-            torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            None,
-            DEFAULT_CONFIG,
-        ),
-    ],
-)
-def test_reinit_opt(algo, init_pop, hp_config):
+@pytest.mark.parametrize("algo, action_space", [
+    ("DQN", generate_discrete_space(2)),
+    ("Rainbow DQN", generate_discrete_space(2)),
+    ("DDPG", generate_random_box_space((4,), low=-1, high=1)),
+    ("TD3", generate_random_box_space((4,), low=-1, high=1)),
+    ("PPO", generate_discrete_space(2)),
+    ("CQN", generate_discrete_space(2)),
+    ("NeuralUCB", generate_discrete_space(2)),
+    ("NeuralTS", generate_discrete_space(2)),
+])
+@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
+@pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
+@pytest.mark.parametrize("observation_space, net_config", [(generate_random_box_space((4,)), ENCODER_MLP_CONFIG),])
+@pytest.mark.parametrize("hp_config", [None])
+@pytest.mark.parametrize("population_size", [1])
+def test_reinit_opt(algo, init_pop):
     population = init_pop
-
     mutations = Mutations(
-        algo,
         1,
         1,
         1,

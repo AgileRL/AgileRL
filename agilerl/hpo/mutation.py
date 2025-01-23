@@ -160,10 +160,8 @@ class Mutations:
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     """
-
     def __init__(
         self,
-        algo: Union[str, AlgoConfig],
         no_mutation: float,
         architecture: float,
         new_layer_prob: float,
@@ -178,9 +176,6 @@ class Mutations:
         device: str = "cpu",
         accelerator: Optional[Accelerator] = None,
     ):
-        assert isinstance(
-            algo, (str, dict)
-        ), "Algo must be string e.g. 'DQN' or a dictionary with agent network names."
         assert isinstance(
             no_mutation, (float, int)
         ), "Probability of no mutation must be a float or integer."

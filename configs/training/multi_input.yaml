@@ -47,13 +47,23 @@ MUTATION_PARAMS:
     MAX_LEARN_STEP: 8192
 
 NET_CONFIG:
-    channel_size: [16, 16]
-    kernel_size: [3, 3]
-    stride_size: [1, 1]
-    hidden_size: [64, 64]
-    latent_dim: 16
-    mlp_activation: Tanh
-    min_hidden_layers: 1
-    max_hidden_layers: 3
-    min_mlp_nodes: 64
-    max_mlp_nodes: 500
+    latent_dim: 64
+
+    encoder_config:
+        hidden_size: [64]
+        channel_size: [16, 16]
+        kernel_size: [3, 3]
+        stride_size: [1, 1]
+        latent_dim: 16
+        activation: ReLU
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+    
+    head_config:
+        hidden_size: [64]
+        activation: ReLU
+        min_hidden_layers: 1
+        max_hidden_layers: 3
+        min_mlp_nodes: 64
+        max_mlp_nodes: 500
+

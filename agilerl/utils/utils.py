@@ -13,7 +13,7 @@ from accelerate import Accelerator
 import numpy as np
 import wandb
 
-from agilerl.typing import GymSpaceType, TorchObsType, MaybeObsList, ArrayOrTensor, NumpyObsType, PopulationType
+from agilerl.typing import GymSpaceType, PopulationType
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN

@@ -298,6 +298,7 @@ class RainbowQNetwork(EvolvableNetwork):
             num_outputs=self.num_actions,
             num_atoms=self.num_atoms,
             support=self.support,
+            device=self.device,
             **self.head_net.net_config
         )
 

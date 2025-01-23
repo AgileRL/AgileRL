@@ -128,6 +128,11 @@ class HyperparameterConfig:
 
             setattr(self, key, value)
     
+    def __repr__(self) -> str:
+        return "HyperparameterConfig(\n" + "\n".join(
+            [f"{key}: {value}" for key, value in self.config.items()]
+        ) + "\n)"
+
     def __iter__(self) :
         return iter(self.config)
     

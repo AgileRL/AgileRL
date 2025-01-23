@@ -98,6 +98,16 @@ def generate_multi_agent_box_spaces(
 def generate_multi_agent_discrete_spaces(n_agents: int, m: int) -> List[spaces.Discrete]:
     return [generate_discrete_space(m) for _ in range(n_agents)]
 
+def gen_multi_agent_dict_or_tuple_spaces(
+        n_agents: int,
+        n_image: int,
+        n_vector: int,
+        image_shape: Tuple[int, ...] = (3, 128, 128),
+        vector_shape: Tuple[int] = (5,),
+        dict_space: Optional[bool] = False
+        ) -> List[Union[spaces.Dict, spaces.Tuple]]:
+    return [generate_dict_or_tuple_space(n_image, n_vector, image_shape, vector_shape, dict_space) for _ in range(n_agents)]
+
 def check_equal_params_ind(before_ind:  Union[nn.Module, EvolvableModule], mutated_ind: Union[nn.Module, EvolvableModule]) -> None:
     before_dict = dict(before_ind.named_parameters())
     after_dict = mutated_ind.named_parameters()
@@ -112,6 +122,7 @@ def check_equal_params_ind(before_ind:  Union[nn.Module, EvolvableModule], mutat
             elif "norm" not in key:
                 # Create a slicing index to handle tensors with varying sizes
                 slice_index = tuple(slice(0, min(o, n)) for o, n in zip(old_size, new_size))
+                print(mutated_ind.last_mutation_attr)
                 assert (
                     torch.all(torch.eq(param.data[slice_index], old_param.data[slice_index]))), \
                     f"Parameter {key} not equal after mutation {mutated_ind.last_mutation_attr}:\n{param.data[slice_index]}\n{old_param.data[slice_index]}"
