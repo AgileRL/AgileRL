@@ -420,7 +420,6 @@ class RainbowDQN:
                 next_states = next_states.to(self.accelerator.device)
                 dones = dones.to(self.accelerator.device)
                 weights = weights.to(self.accelerator.device)
-            # FIXME gamma needs to be raised to the power of specific experience n_step
             n_gamma = self.gamma**self.n_step
             elementwise_loss = self._dqn_loss(
                 states, actions, rewards, next_states, dones, n_gamma
@@ -444,7 +443,7 @@ class RainbowDQN:
             idxs = None
             new_priorities = None
 
-            # n_gamma = self.gamma**self.n_step
+            n_gamma = self.gamma**self.n_step
             elementwise_loss = self._dqn_loss(
                 states, actions, rewards, next_states, dones, self.gamma
             )
