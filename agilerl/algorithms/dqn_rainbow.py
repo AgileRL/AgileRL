@@ -421,9 +421,9 @@ class RainbowDQN:
                 dones = dones.to(self.accelerator.device)
                 weights = weights.to(self.accelerator.device)
             # FIXME gamma needs to be raised to the power of specific experience n_step
-            # n_gamma = self.gamma**self.n_step
+            n_gamma = self.gamma**self.n_step
             elementwise_loss = self._dqn_loss(
-                states, actions, rewards, next_states, dones, self.gamma
+                states, actions, rewards, next_states, dones, n_gamma
             )
             loss = torch.mean(elementwise_loss * weights)
 
