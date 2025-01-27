@@ -333,24 +333,6 @@ def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
     else:
         raise TypeError(f"Unsupported space types: {set(type(space) for space in spaces)}")
 
-def observation_space_channels_to_first(observation_space: Union[spaces.Box, spaces.Dict]) -> spaces.Box:
-    """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
-
-    :param observation_space: Observation space
-    :type observation_space: spaces.Box
-    :return: Observation space with swapped channels
-    :rtype: spaces.Box
-    """
-    if isinstance(observation_space, spaces.Dict):
-        for key in observation_space.spaces.keys():
-            if isinstance(observation_space[key], spaces.Box) and len(observation_space[key].shape) == 3:
-                observation_space[key] = observation_space_channels_to_first(observation_space[key])
-        return observation_space
-    
-    low = observation_space.low.transpose(2, 0, 1)
-    high = observation_space.high.transpose(2, 0, 1)
-    return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
-
 def obs_channels_to_first(observation: NumpyObsType) ->  NumpyObsType:
     """Converts observation space from channels last to channels first format.
 

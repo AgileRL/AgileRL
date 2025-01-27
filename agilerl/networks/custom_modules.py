@@ -6,8 +6,10 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.evolvable_networks import create_mlp
 
-class RainbowMLP(EvolvableMLP):
-    """RainbowMLP is a multi-layer perceptron network that is used in the Rainbow DQN algorithm.
+class DuelingMLP(EvolvableMLP):
+    """A multi-layer perceptron network that calculates state-action values through 
+    the use of separate advantage and value networks. It outputs a distribution of values 
+    for both of these networks. Used in the Rainbow DQN algorithm.
 
     :param num_inputs: Number of input features.
     :type num_inputs: int
@@ -62,6 +64,8 @@ class RainbowMLP(EvolvableMLP):
             hidden_size, 
             noisy=True,
             init_layers=False,
+            layer_norm=True,
+            output_vanish=True,
             noise_std=noise_std,
             name="value",
             **kwargs
@@ -102,6 +106,8 @@ class RainbowMLP(EvolvableMLP):
         mlp_dict["support"] = self.support
         mlp_dict.pop("noisy")
         mlp_dict.pop("init_layers")
+        mlp_dict.pop("layer_norm")
+        mlp_dict.pop("output_vanish")
         mlp_dict.pop("name")
         return mlp_dict
 
@@ -146,8 +152,8 @@ class RainbowMLP(EvolvableMLP):
             input_size=self.num_inputs,
             output_size=self.num_actions * self.num_atoms,
             hidden_size=self.hidden_size,
-            output_vanish=self.output_vanish,
             output_activation=self.output_activation,
+            output_vanish=self.output_vanish,
             noisy=self.noisy,
             init_layers=self.init_layers,
             layer_norm=self.layer_norm,

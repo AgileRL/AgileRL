@@ -365,13 +365,13 @@ class EvolvableMLP(EvolvableModule):
 
         return feature_net, value_net, advantage_net
 
-    def reset_noise(self) -> None:
-        """Resets noise of value and advantage networks."""
-        networks = [self.value_net]
-        if self.rainbow:
-            networks.append(self.advantage_net)
+    # def reset_noise(self) -> None:
+    #     """Resets noise of value and advantage networks."""
+    #     networks = [self.value_net]
+    #     if self.rainbow:
+    #         networks.append(self.advantage_net)
         
-        EvolvableModule.reset_noise(*networks)
+    #     EvolvableModule.reset_noise(*networks)
 
     def forward(self, x: ArrayOrTensor, q: bool = True, log: bool = False) -> torch.Tensor:
         """Returns output of neural network.

@@ -41,8 +41,6 @@ MUTATION_PARAMS:
     PARAMS_MUT: 0.2                        # Network parameters mutation
     ACT_MUT: 0.2                           # Activation layer mutation
     RL_HP_MUT: 0.2                         # Learning HP mutation
-    # Learning HPs to choose from
-    RL_HP_SELECTION: [lr, batch_size, learn_step]
     MUT_SD: 0.1                            # Mutation strength
     RAND_SEED: 42                          # Random seed
     # Define max and min limits for mutating RL hyperparams
@@ -65,9 +63,8 @@ NET_CONFIG:
     head_config:
         hidden_size: [128]
         activation: ReLU
-        output_activation: ReLU
         min_hidden_layers: 1
-        max_hidden_layers: 2
+        max_hidden_layers: 3
         min_mlp_nodes: 64
         max_mlp_nodes: 500
 

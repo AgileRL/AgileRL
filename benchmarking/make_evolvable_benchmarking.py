@@ -24,10 +24,11 @@ from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.utils.algo_utils import observation_space_channels_to_first
+
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
+    observation_space_channels_to_first,
     print_hyperparams
 )
 

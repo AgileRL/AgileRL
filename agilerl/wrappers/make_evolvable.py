@@ -164,12 +164,6 @@ class MakeEvolvable(EvolvableModule):
 
         # Need to remove CNN mutation methods if network is not a CNN
         if not self.has_conv_layers:
-            self._mutation_methods = [
-                method
-                for method in self._mutation_methods
-                if "cnn" not in method
-            ]
-
             self._layer_mutation_methods = [
                 method
                 for method in self._layer_mutation_methods

@@ -67,6 +67,24 @@ def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.ve
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
+def observation_space_channels_to_first(observation_space: Union[spaces.Box, spaces.Dict]) -> spaces.Box:
+    """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
+
+    :param observation_space: Observation space
+    :type observation_space: spaces.Box
+    :return: Observation space with swapped channels
+    :rtype: spaces.Box
+    """
+    if isinstance(observation_space, spaces.Dict):
+        for key in observation_space.spaces.keys():
+            if isinstance(observation_space[key], spaces.Box) and len(observation_space[key].shape) == 3:
+                observation_space[key] = observation_space_channels_to_first(observation_space[key])
+        return observation_space
+    
+    low = observation_space.low.transpose(2, 0, 1)
+    high = observation_space.high.transpose(2, 0, 1)
+    return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
+
 def create_population(
     algo: str,
     observation_space: GymSpaceType,
@@ -94,6 +112,8 @@ def create_population(
     :type net_config: dict or None
     :param INIT_HP: Initial hyperparameters
     :type INIT_HP: dict
+    :param hp_config: Choice of algorithm hyperparameters to mutate during training, defaults to None
+    :type hp_config: HyperparameterConfig, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
     :param critic_network: Custom critic network, defaults to None

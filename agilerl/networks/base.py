@@ -1,6 +1,5 @@
 from typing import Optional, Union, TypeVar, Dict, Any
 from dataclasses import asdict
-import copy
 from abc import ABC, abstractmethod
 from gymnasium import spaces
 import numpy as np 
@@ -70,6 +69,7 @@ def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:
     # Multi-input networks contain at least one image space
     assert_correct_cnn_net_config(net_config)
 
+# TODO: Need to think of a way to do this check without the metaclass
 class NetworkMeta(ModuleMeta):
     """Metaclass for evolvable networks. Checks that the network has 
     an encoder and a head_net (named as such)."""
@@ -85,7 +85,7 @@ class NetworkMeta(ModuleMeta):
                 if attr not in ['encoder', 'head_net']:
                     raise AttributeError(
                         "Mutation methods of underlying modules in EvolvableNetwork's should only correspond " \
-                        "to the encoder or head_net. This is done to ensure that analogous mutations " \
+                        "to the encoder or head_net. This is done to ensure that analogous architecture mutations " \
                         "can be applied between different networks. "
                         )
 
@@ -367,7 +367,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
                 **net_config
             )
         else:
-            assert_correct_mlp_net_config(net_config)
+            # assert_correct_mlp_net_config(net_config)
 
             encoder = EvolvableMLP(
                 num_inputs=spaces.flatdim(self.observation_space),

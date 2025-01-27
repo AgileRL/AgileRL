@@ -8,10 +8,11 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.custom_modules import RainbowMLP
 from benchmarking.legacy_mlp import EvolvableMLP
 from agilerl.training.train_off_policy import train_off_policy
-from agilerl.utils.algo_utils import observation_space_channels_to_first
+
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
+    observation_space_channels_to_first,
     print_hyperparams
 )
 from agilerl.components.replay_buffer import (
@@ -106,13 +107,15 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         actor = EvolvableMLP(
             num_inputs=state_dim[0],
             num_outputs=action_dim,
-            output_vanish=False,
+            output_vanish=True,
             init_layers=False,
-            layer_norm=False,
+            layer_norm=True,
             num_atoms=51,
             support=torch.linspace(-200, 200, 51).to(device),
             rainbow=True,
             device=device,
+            min_hidden_layers=2,
+            max_hidden_layers=3,
             hidden_size=[128, 128],
             mlp_activation="ReLU",
             mlp_output_activation="ReLU",
@@ -148,7 +151,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         num_envs=INIT_HP["NUM_ENVS"],
         device=device,
     )
-
     trained_pop, pop_fitnesses = train_off_policy(
         env,
         INIT_HP["ENV_NAME"],
@@ -168,10 +170,10 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         learning_delay=INIT_HP["LEARNING_DELAY"],
         target=INIT_HP["TARGET_SCORE"],
         tournament=tournament,
-        # mutation=mutations,
+        mutation=mutations,
         wb=INIT_HP["WANDB"],
-        save_elite=True,
-        elite_path="elite_rainbow.pt",
+        # save_elite=True,
+        # elite_path="elite_rainbow.pt",
     )
 
     print_hyperparams(trained_pop)
@@ -188,4 +190,4 @@ if __name__ == "__main__":
     INIT_HP = rainbow_dqn_config["INIT_HP"]
     MUTATION_PARAMS = rainbow_dqn_config["MUTATION_PARAMS"]
     NET_CONFIG = rainbow_dqn_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)

@@ -8,7 +8,7 @@ from agilerl.typing import TorchObsType, ConfigType
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.modules.base import EvolvableModule
-from agilerl.networks.custom_modules import RainbowMLP
+from agilerl.networks.custom_modules import DuelingMLP
 from agilerl.utils.evolvable_networks import is_image_space
 
 class QNetwork(EvolvableNetwork):
@@ -196,6 +196,7 @@ class RainbowQNetwork(EvolvableNetwork):
             encoder_config['output_activation'] = encoder_config.get("activation", "ReLU")
             encoder_config['output_vanish'] = False
             encoder_config['init_layers'] = False
+            encoder_config['layer_norm'] = True
 
         super().__init__(
             observation_space, 
@@ -223,11 +224,12 @@ class RainbowQNetwork(EvolvableNetwork):
             head_config = asdict(head_config)
             head_config['noise_std'] = noise_std
 
-        if head_config.get("noisy", None) is not None:
-            head_config.pop("noisy")
-        
-        if head_config.get("init_layers", None) is not None:
-            head_config.pop("init_layers")
+        # The heads should have no output activation
+        head_config['output_activation'] = None
+
+        for arg in ["noisy", "init_layers", "layer_norm", "output_vanish"]:
+            if head_config.get(arg, None) is not None:
+                head_config.pop(arg)
 
         self.num_actions = spaces.flatdim(action_space)
         self.num_atoms = num_atoms
@@ -264,7 +266,7 @@ class RainbowQNetwork(EvolvableNetwork):
         :param net_config: Configuration of the network head.
         :type net_config: Dict[str, Any]
         """
-        self.head_net = RainbowMLP(
+        self.head_net = DuelingMLP(
             num_inputs=self.latent_dim,
             num_outputs=self.num_actions,
             num_atoms=self.num_atoms,
@@ -293,7 +295,7 @@ class RainbowQNetwork(EvolvableNetwork):
         """Recreates the network"""
         encoder = self._build_encoder(self.encoder.net_config)
 
-        head_net = RainbowMLP(
+        head_net = DuelingMLP(
             num_inputs=self.latent_dim,
             num_outputs=self.num_actions,
             num_atoms=self.num_atoms,

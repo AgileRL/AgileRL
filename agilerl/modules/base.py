@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Callable, Optional, TypeVar, Type, Iterable, Tuple
+from typing import Any, Dict, List, Union, Callable, Optional, TypeVar, Type, Iterable, Tuple
 import copy
 import inspect
 from functools import wraps
@@ -123,7 +123,7 @@ class MutationContext:
         return self.module.last_mutation_attr
 
 def _mutation_wrapper(
-        module: 'EvolvableModule',
+        module: "EvolvableModule",
         method: MutationMethod,
         attribute: str
         ) -> Callable:
@@ -139,7 +139,6 @@ def _mutation_wrapper(
     :return: The wrapped mutation method.
     :rtype: Callable
     """
-
     @wraps(method) 
     def wrapped(*args, **kwargs):
         with MutationContext(module, method, attribute):
@@ -152,16 +151,34 @@ def _mutation_wrapper(
             
     return wrapped
 
-# TODO: There's definitely a simpler way of doing this
+def _get_filtered_methods(module: "EvolvableModule", mut_type: MutationType) -> List[str]:
+    _fetch = (
+        "layer_mutation_methods" if mut_type == MutationType.LAYER 
+        else "node_mutation_methods"
+    )
+    
+    init_methods: List[str] = getattr(module, "_" + _fetch)
+    _filtered = []
+    for method in init_methods:
+        if "." not in method:
+            _filtered.append(method)
+            continue
+
+        comps = method.split(".")
+        mod: EvolvableModule = getattr(module, comps[0])
+        layer_muts = getattr(mod, _fetch)
+        if any(".".join([comps[0], m]) == method for m in layer_muts):
+            _filtered.append(method)
+    
+    return _filtered
+
+# TODO: Think of a way that doesn't require the use of a metaclass
 class _ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance 
     and its superclasses."""
 
     def __call__(cls, *args, **kwargs):
         instance: SelfEvolvableModule = super().__call__(*args, **kwargs)
-
-        # Parse and log mutation methods from the instance
-        instance._init_underlying_methods()
 
         # Wrap mutation methods to use context manager
         for name, method in instance.get_mutation_methods().items():
@@ -171,6 +188,7 @@ class _ModuleMeta(type):
 
 class ModuleMeta(_ModuleMeta, ABCMeta):
     pass
+
 
 class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     """Base class for evolvable neural networks.
@@ -195,15 +213,15 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     
     @property
     def mutation_methods(self) -> List[str]:
-        return self._mutation_methods
+        return self.layer_mutation_methods + self.node_mutation_methods
     
     @property
     def layer_mutation_methods(self) -> List[str]:
-        return self._layer_mutation_methods
+        return _get_filtered_methods(self, MutationType.LAYER)
     
     @property
     def node_mutation_methods(self) -> List[str]:
-        return self._node_mutation_methods
+        return _get_filtered_methods(self, MutationType.NODE)
 
     @property
     def activation(self) -> Optional[str]:
@@ -251,6 +269,38 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         raise NotImplementedError(
             "change_activation method must be implemented in order to set the activation function."
             )
+    
+    def __setattr__(self, name: str, value: Union[Any, SelfEvolvableModule]) -> None:
+        """Set attribute of the network. If the attribute is a module, add its mutation methods
+        to the network. Otherwise, set the attribute as usual.
+        
+        :param name: The name of the attribute.
+        :type name: str
+        :param value: The value of the attribute.
+        :type value: Any
+        """
+        # Add mutation methods to the network
+        if isinstance(value, EvolvableModule):
+            if name in self.__dict__['_modules']:
+                self.filter_mutation_methods(name)
+
+            layer_fns = []
+            node_fns = []
+            for mut_name, method in value.get_mutation_methods().items():
+                method_name = ".".join([name, mut_name])
+                method_type = method._mutation_type
+                if method_type == MutationType.LAYER:
+                    layer_fns.append(method_name)
+                elif method_type == MutationType.NODE:
+                    node_fns.append(method_name)
+                else:
+                    raise ValueError(f"Invalid mutation type: {method_type}")
+            
+            self._layer_mutation_methods += layer_fns
+            self._node_mutation_methods += node_fns
+
+        super().__setattr__(name, value)
+        
 
     def __getattr__(self, name: str) -> Any:
         """Get attribute of the network. If the attribute is a mutation method, return the
@@ -309,17 +359,15 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
 
         return new_net
 
-    @staticmethod
-    def reset_noise(*networks: nn.Module) -> None:
+    def reset_noise(self) -> None:
         """Reset noise for all NoisyLinear layers in the network.
         
         :param networks: The networks to reset noise for.
         :type networks: nn.Module
         """
-        for net in networks:
-            for layer in net.modules():
-                if isinstance(layer, NoisyLinear):
-                    layer.reset_noise()
+        for layer in super().modules():
+            if isinstance(layer, NoisyLinear):
+                layer.reset_noise()
 
     @staticmethod
     def init_weights_gaussian(module: nn.Module, std_coeff: float) -> None:
@@ -346,27 +394,35 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
             init_weights(layer)
 
     def _init_surface_methods(self) -> None:
+        """Initialize the surface mutation methods of the network."""
+        def _fetch_methods(cls: Type) -> List[str]:
+            return [
+                method for method in vars(cls).values() 
+                if isinstance(method, MutationMethod)
+                ]
+    
         # Check mutation methods in class
+        class_methods: List[MutationMethod] = _fetch_methods(self.__class__)
         layer_methods = []
         node_methods = []
-        for method in vars(self.__class__).values():
-            if isinstance(method, MutationMethod):
-                if method._mutation_type == MutationType.LAYER:
-                    layer_methods.append(method.__name__)
-                elif method._mutation_type == MutationType.NODE:
-                    node_methods.append(method.__name__)
-        
+        for method in class_methods:
+            if method._mutation_type == MutationType.LAYER:
+                layer_methods.append(method.__name__)
+            elif method._mutation_type == MutationType.NODE:
+                node_methods.append(method.__name__)
+
         # Check mutation methods in superclasses
         def check_base_methods(cls) -> None:
             for base in cls.__bases__:
                 if base is EvolvableModule:
                     return
-                for method in vars(base).values():
-                    if isinstance(method, MutationMethod):
-                        if method._mutation_type == MutationType.LAYER:
-                            layer_methods.append(method.__name__)
-                        elif method._mutation_type == MutationType.NODE:
-                            node_methods.append(method.__name__)
+                
+                base_methods: List[MutationMethod] = _fetch_methods(base)
+                for method in base_methods:
+                    if method._mutation_type == MutationType.LAYER:
+                        layer_methods.append(method.__name__)
+                    elif method._mutation_type == MutationType.NODE:
+                        node_methods.append(method.__name__)
 
                 check_base_methods(base)
 
@@ -375,32 +431,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         # We want the unique set of mutation methods across the class and its superclasses
         self._layer_mutation_methods = list(set(layer_methods))
         self._node_mutation_methods = list(set(node_methods))
-
-        self._mutation_methods = (
-            self._layer_mutation_methods + self._node_mutation_methods
-        )
-
-    def _init_underlying_methods(self) -> None:
-        # After module has been initialized, we can identify 
-        # any additional methods of underlying EvolvableModule attributes
-        # and add them to the registry
-        layer_fns = []
-        node_fns = []
-        for attr, module in self.modules().items():
-            for name, method in module.get_mutation_methods().items():
-                method_name = ".".join([attr, name])
-                method_type = method._mutation_type
-                if method_type == MutationType.LAYER:
-                    layer_fns.append(method_name)
-                elif method_type == MutationType.NODE:
-                    node_fns.append(method_name)
-                else:
-                    raise ValueError(f"Invalid mutation type: {method_type}")
-        
-        all_methods = layer_fns + node_fns
-        self._mutation_methods += all_methods
-        self._layer_mutation_methods += layer_fns
-        self._node_mutation_methods += node_fns
 
     def register_mutation_hook(self, hook: Callable) -> None:
         """Register a hook to be called after a mutation has been applied to an 
@@ -421,18 +451,9 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         if mut_type is None:
             self._layer_mutation_methods = []
             self._node_mutation_methods = []
-            self._mutation_methods = []
         elif mut_type == MutationType.LAYER:
-            self._mutation_methods = [
-                method for method in self._mutation_methods 
-                if method not in self._layer_mutation_methods
-                ]
             self._layer_mutation_methods = []
         elif mut_type == MutationType.NODE:
-            self._mutation_methods = [
-                method for method in self._mutation_methods 
-                if method not in self._node_mutation_methods
-                ]
             self._node_mutation_methods = []
         else:
             raise ValueError(f"Invalid mutation type: {mut_type}")
@@ -486,7 +507,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         
         self._layer_mutation_methods = filter_methods(self._layer_mutation_methods)
         self._node_mutation_methods = filter_methods(self._node_mutation_methods)
-        self._mutation_methods = filter_methods(self._mutation_methods)
 
     def get_mutation_probs(self, new_layer_prob: float) -> List[float]:
         """Get the mutation probabilities for each mutation method.
@@ -499,8 +519,9 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         num_layer_fns = len(self.layer_mutation_methods)
         num_node_fns = len(self.node_mutation_methods)
 
+        num_total = num_layer_fns + num_node_fns
         if num_layer_fns == 0 or num_node_fns == 0:
-            return [1 / len(self.mutation_methods) for _ in self.mutation_methods]
+            return [1 / num_total for _ in range(num_total)]
 
         probs = []
         for fn in self.get_mutation_methods().values():
@@ -547,28 +568,40 @@ class EvolvableWrapper(EvolvableModule):
 
     def __init__(self, module: EvolvableModule) -> None:
         super().__init__(module.device)
+        
+        self._init_wrapped_methods(module, MutationType.LAYER)
+        self._init_wrapped_methods(module, MutationType.NODE)
+
+        # Disable mutations in the wrapped module since these are 
+        # now handled by the wrapper
+        module.disable_mutations()
         self._wrapped = module
 
     @property
-    def wrapped(self) -> Optional["EvolvableModule"]:
+    def wrapped(self) -> EvolvableModule:
         return self._wrapped
+    
+    def _init_wrapped_methods(self, module: EvolvableModule, mut_type: MutationType) -> None:
+        """Initialize the mutation methods of the wrapped module.
+        
+        :param module: The wrapped module.
+        :type module: EvolvableModule
+        :param mut_type: The type of mutation method.
+        :type mut_type: MutationType
+        """
+        _fetch = (
+            "layer_mutation_methods" if mut_type == MutationType.LAYER 
+            else "node_mutation_methods"
+        )
 
-    def _init_underlying_methods(self) -> None:
-        super()._init_underlying_methods()
-
-        layer_fns = self.wrapped.layer_mutation_methods
-        node_fns = self.wrapped.node_mutation_methods
-        all_methods = layer_fns + node_fns
-
-        conflicting_methods = [method for method in self._mutation_methods if method in all_methods]
-        if conflicting_methods:
-            raise ValueError(
-            f"Mutation methods in the wrapped module conflict with the wrapper's methods: {conflicting_methods}"
-            )
-
-        self._node_mutation_methods += node_fns
-        self._layer_mutation_methods += layer_fns
-        self._mutation_methods += all_methods
+        for method in getattr(module, _fetch):
+            if method not in self.mutation_methods:
+                setattr(self, method, getattr(module, method))
+                current_methods: List[str] = getattr(self, f"_{_fetch}")
+                current_methods.append(method)
+                setattr(self, f"_{_fetch}", current_methods)
+            else:
+                raise AttributeError(f"Duplicate mutation method: {method}")
 
     def modules(self) -> Dict[str, "EvolvableModule"]:
         """Returns the attributes related to the evolvable modules in the algorithm. Includes 
@@ -587,38 +620,12 @@ class EvolvableWrapper(EvolvableModule):
 
         return evolvable_attrs
 
-    def get_mutation_methods(self) -> Dict[str, MutationMethod]:
-        """Get all mutation methods for the network.
-
-        :return: A dictionary of mutation methods.
-        :rtype: Dict[str, MutationMethod]
-        """
-        def get_method_from_name(name: str) -> MutationMethod:
-            if "." not in name:
-                try:
-                    return getattr(self.wrapped, name)
-                except AttributeError:
-                    pass
-
-                return getattr(self, name)
-
-            attr = name.split(".")[0]
-            method = ".".join(name.split(".")[1:])
-            return getattr(getattr(self, attr), method)
-
-        return {name: get_method_from_name(name) for name in self.mutation_methods}
 
 
 class ModuleDict(EvolvableModule, nn.ModuleDict):
     """Analogous to nn.ModuleDict, but allows for the recursive inheritance of the 
     mutation methods of underlying evolvable modules.
     """
-    @property
-    def mutation_methods(self) -> List[str]:
-        return [
-            f"{name}.{method}" for name, module in self.items() 
-            for method in module.mutation_methods
-        ]
 
     @property
     def layer_mutation_methods(self) -> List[str]:

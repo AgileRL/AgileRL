@@ -13,7 +13,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
-    observation_space_channels_to_first
+    observation_space_channels_to_first,
 )
 
 # !Note: If you are running this demo without having installed agilerl,

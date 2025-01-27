@@ -240,6 +240,7 @@ class RainbowDQN(RLAlgorithm):
         self.actor.train(mode=training)
         with torch.no_grad():
             action_values = self.actor(state)
+
         if action_mask is None:
             action = np.argmax(action_values.cpu().data.numpy(), axis=-1)
         else:

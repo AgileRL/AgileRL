@@ -135,50 +135,45 @@ MUTATION_PARAMS = {
     'PARAMS_MUT': 0.2,                          # Network parameters mutation
     'ACT_MUT': 0,                               # Activation layer mutation
     'RL_HP_MUT': 0.2,                           # Learning HP mutation
-    'RL_HP_SELECTION': ['lr', 'batch_size'],    # Learning HPs to choose from
     'MUT_SD': 0.1,                              # Mutation strength
     'RAND_SEED': 1,                             # Random seed
 }
 ```
 ```python
 NET_CONFIG = {
-    'arch': 'mlp',      # Network architecture
+    'latent_dim': 16
+
     'hidden_size': [32, 32], # Actor hidden size
 }
 ```
 First, use <code>utils.utils.create_population</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.
 ```python
-from agilerl.utils.utils import make_vect_envs, create_population
 import torch
+from agilerl.utils.utils import (
+    make_vect_envs,
+    create_population,
+    observation_space_channels_to_first
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 num_envs = 16
 env = make_vect_envs(env_name=INIT_HP['ENV_NAME'], num_envs=num_envs)
-try:
-    state_dim = env.single_observation_space.n          # Discrete observation space
-    one_hot = True                                      # Requires one-hot encoding
-except Exception:
-    state_dim = env.single_observation_space.shape      # Continuous observation space
-    one_hot = False                                     # Does not require one-hot encoding
-try:
-    action_dim = env.single_action_space.n             # Discrete action space
-except Exception:
-    action_dim = env.single_action_space.shape[0]      # Continuous action space
 
+observation_space = env.single_observation_space
+action_space = env.single_action_space
 if INIT_HP['CHANNELS_LAST']:
-    state_dim = (state_dim[2], state_dim[0], state_dim[1])
+    observation_space = observation_space_channels_to_first(observation_space)
 
 agent_pop = create_population(
     algo=INIT_HP['ALGO'],                 # Algorithm
-    state_dim=state_dim,                  # State dimension
-    action_dim=action_dim,                # Action dimension
-    one_hot=one_hot,                      # One-hot encoding
+    observation_space=observation_space,  # Observation space
+    action_space=action_space,            # Action space
     net_config=NET_CONFIG,                # Network configuration
     INIT_HP=INIT_HP,                      # Initial hyperparameters
     population_size=INIT_HP['POP_SIZE'],  # Population size
     num_envs=num_envs,                    # Number of vectorized environments
-    device=device,
+    device=device
 )
 ```
 Next, create the tournament, mutations and experience replay buffer objects that allow agents to share memory and efficiently perform evolutionary HPO.
@@ -202,16 +197,13 @@ tournament = TournamentSelection(
 )
 
 mutations = Mutations(
-    algo=INIT_HP['ALGO'],                                 # Algorithm
     no_mutation=MUTATION_PARAMS['NO_MUT'],                # No mutation
     architecture=MUTATION_PARAMS['ARCH_MUT'],             # Architecture mutation
     new_layer_prob=MUTATION_PARAMS['NEW_LAYER'],          # New layer mutation
     parameters=MUTATION_PARAMS['PARAMS_MUT'],             # Network parameters mutation
     activation=MUTATION_PARAMS['ACT_MUT'],                # Activation layer mutation
     rl_hp=MUTATION_PARAMS['RL_HP_MUT'],                   # Learning HP mutation
-    rl_hp_selection=MUTATION_PARAMS['RL_HP_SELECTION'],   # Learning HPs to choose from
     mutation_sd=MUTATION_PARAMS['MUT_SD'],                # Mutation strength
-    arch=NET_CONFIG['arch'],                              # Network architecture
     rand_seed=MUTATION_PARAMS['RAND_SEED'],               # Random seed
     device=device,
 )

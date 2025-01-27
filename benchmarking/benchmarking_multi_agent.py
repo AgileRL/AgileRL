@@ -10,7 +10,7 @@ from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_multi_agent import train_multi_agent
-from agilerl.utils.algo_utils import observation_space_channels_to_first
+
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs

@@ -9,10 +9,11 @@ from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.training.train_offline import train_offline
-from agilerl.utils.algo_utils import observation_space_channels_to_first
+
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
+    observation_space_channels_to_first,
     print_hyperparams
 )
 
