@@ -3,9 +3,9 @@ from datetime import datetime
 
 import numpy as np
 import torch
-import wandb
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import create_population, make_skill_vect_envs, make_vect_envs
