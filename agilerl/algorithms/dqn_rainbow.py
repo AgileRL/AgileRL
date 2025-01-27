@@ -404,49 +404,122 @@ class RainbowDQN:
         :type per: bool, optional
         """
         if per:
-            (
-                states,
-                actions,
-                rewards,
-                next_states,
-                dones,
-                weights,
-                idxs,
-            ) = experiences
-            if self.accelerator is not None:
-                states = states.to(self.accelerator.device)
-                actions = actions.to(self.accelerator.device)
-                rewards = rewards.to(self.accelerator.device)
-                next_states = next_states.to(self.accelerator.device)
-                dones = dones.to(self.accelerator.device)
-                weights = weights.to(self.accelerator.device)
-            n_gamma = self.gamma**self.n_step
-            elementwise_loss = self._dqn_loss(
-                states, actions, rewards, next_states, dones, n_gamma
-            )
+            if n_step:
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                    n_states,
+                    n_actions,
+                    n_rewards,
+                    n_next_states,
+                    n_dones,
+                ) = experiences
+                if self.accelerator is not None:
+                    states = states.to(self.accelerator.device)
+                    actions = actions.to(self.accelerator.device)
+                    rewards = rewards.to(self.accelerator.device)
+                    next_states = next_states.to(self.accelerator.device)
+                    dones = dones.to(self.accelerator.device)
+                    weights = weights.to(self.accelerator.device)
+                    n_states = n_states.to(self.accelerator.device)
+                    n_actions = n_actions.to(self.accelerator.device)
+                    n_rewards = n_rewards.to(self.accelerator.device)
+                    n_next_states = n_next_states.to(self.accelerator.device)
+                    n_dones = n_dones.to(self.accelerator.device)
+            else:
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    weights,
+                    idxs,
+                ) = experiences
+                if self.accelerator is not None:
+                    states = states.to(self.accelerator.device)
+                    actions = actions.to(self.accelerator.device)
+                    rewards = rewards.to(self.accelerator.device)
+                    next_states = next_states.to(self.accelerator.device)
+                    dones = dones.to(self.accelerator.device)
+                    weights = weights.to(self.accelerator.device)
+            if self.combined_reward or not n_step:
+                elementwise_loss = self._dqn_loss(
+                    states, actions, rewards, next_states, dones, self.gamma
+                )
+            if n_step:
+                n_gamma = self.gamma**self.n_step
+                n_step_elementwise_loss = self._dqn_loss(
+                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                )
+                if self.combined_reward:
+                    elementwise_loss += n_step_elementwise_loss
+                else:
+                    elementwise_loss = n_step_elementwise_loss
             loss = torch.mean(elementwise_loss * weights)
 
         else:
-            (
-                states,
-                actions,
-                rewards,
-                next_states,
-                dones,
-            ) = experiences
-            if self.accelerator is not None:
-                states = states.to(self.accelerator.device)
-                actions = actions.to(self.accelerator.device)
-                rewards = rewards.to(self.accelerator.device)
-                next_states = next_states.to(self.accelerator.device)
-                dones = dones.to(self.accelerator.device)
-            idxs = None
+            if n_step:
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                    idxs,
+                    n_states,
+                    n_actions,
+                    n_rewards,
+                    n_next_states,
+                    n_dones,
+                ) = experiences
+                if self.accelerator is not None:
+                    states = states.to(self.accelerator.device)
+                    actions = actions.to(self.accelerator.device)
+                    rewards = rewards.to(self.accelerator.device)
+                    next_states = next_states.to(self.accelerator.device)
+                    dones = dones.to(self.accelerator.device)
+                    n_states = n_states.to(self.accelerator.device)
+                    n_actions = n_actions.to(self.accelerator.device)
+                    n_rewards = n_rewards.to(self.accelerator.device)
+                    n_next_states = n_next_states.to(self.accelerator.device)
+                    n_dones = n_dones.to(self.accelerator.device)
+            else:
+                (
+                    states,
+                    actions,
+                    rewards,
+                    next_states,
+                    dones,
+                ) = experiences
+                if self.accelerator is not None:
+                    states = states.to(self.accelerator.device)
+                    actions = actions.to(self.accelerator.device)
+                    rewards = rewards.to(self.accelerator.device)
+                    next_states = next_states.to(self.accelerator.device)
+                    dones = dones.to(self.accelerator.device)
+                idxs = None
             new_priorities = None
 
-            n_gamma = self.gamma**self.n_step
-            elementwise_loss = self._dqn_loss(
-                states, actions, rewards, next_states, dones, self.gamma
-            )
+            if self.combined_reward or not n_step:
+                elementwise_loss = self._dqn_loss(
+                    states, actions, rewards, next_states, dones, self.gamma
+                )
+
+            if n_step:
+                n_gamma = self.gamma**self.n_step
+                n_step_elementwise_loss = self._dqn_loss(
+                    n_states, n_actions, n_rewards, n_next_states, n_dones, n_gamma
+                )
+                if self.combined_reward:
+                    elementwise_loss += n_step_elementwise_loss
+                else:
+                    elementwise_loss = n_step_elementwise_loss
             loss = torch.mean(elementwise_loss)
 
         self.optimizer.zero_grad()
