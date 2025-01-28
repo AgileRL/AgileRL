@@ -144,7 +144,7 @@ class PPO:
         assert batch_size >= 1, "Batch size must be greater than or equal to one."
         assert isinstance(lr, float), "Learning rate must be a float."
         assert lr > 0, "Learning rate must be greater than zero."
-        assert isinstance(gamma, (float, int)), "Gamma must be a float."
+        assert isinstance(gamma, (float, int, torch.Tensor)), "Gamma must be a float."
         assert isinstance(gae_lambda, (float, int)), "Lambda must be a float."
         assert gae_lambda >= 0, "Lambda must be greater than or equal to zero."
         assert isinstance(

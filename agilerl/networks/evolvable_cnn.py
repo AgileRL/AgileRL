@@ -17,7 +17,7 @@ class EvolvableCNN(nn.Module):
     :type input_shape: list[int]
     :param channel_size: CNN channel size
     :type channel_size: list[int]
-    :param kernel_size: Comvolution kernel size
+    :param kernel_size: Convolution kernel size
     :type kernel_size: list[int]
     :param stride_size: Convolution stride size
     :type stride_size: list[int]
