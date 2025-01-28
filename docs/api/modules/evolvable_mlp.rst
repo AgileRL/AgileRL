@@ -1,4 +1,4 @@
-.. _evolvable_mlp:
+.. _mlp:
 
 Evolvable Multi-layer Perceptron (MLP)
 ======================================
@@ -6,5 +6,5 @@ Evolvable Multi-layer Perceptron (MLP)
 Parameters
 ----------
 
-.. autoclass:: agilerl.networks.evolvable_mlp.EvolvableMLP
+.. autoclass:: agilerl.modules.mlp.EvolvableMLP
   :members:

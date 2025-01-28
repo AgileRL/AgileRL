@@ -71,13 +71,12 @@ Neural Network Configuration
 ----------------------------
 
 To configure the network architecture, pass a kwargs dict to the DDPG ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
 For an MLP, this can be as simple as:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'arch': 'mlp',      # Network architecture
         'hidden_size': [32, 32]  # Network hidden size
     }
 
@@ -86,7 +85,6 @@ Or for a CNN:
 .. code-block:: python
 
   NET_CONFIG = {
-        'arch': 'cnn',      # Network architecture
         'hidden_size': [128],    # Network hidden size
         'channel_size': [32, 32], # CNN channel size
         'kernel_size': [8, 4],   # CNN kernel size
@@ -96,7 +94,7 @@ Or for a CNN:
 
 .. code-block:: python
 
-  agent = DDPG(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create DDPG agent
+  agent = DDPG(observation_space=observation_space, action_space=action_space,  net_config=NET_CONFIG)   # Create DDPG agent
 
 Saving and loading agents
 -------------------------

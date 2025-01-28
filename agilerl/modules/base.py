@@ -207,6 +207,7 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         self._mutation_hook = None
         self._mutation_depth = 0
 
+    # TODO: Can probably extract this automatically to not have to define it in each subclass
     @property
     def init_dict(self) -> Dict[str, Any]:
         return {"device": self.device}
@@ -359,16 +360,6 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
 
         return new_net
 
-    def reset_noise(self) -> None:
-        """Reset noise for all NoisyLinear layers in the network.
-        
-        :param networks: The networks to reset noise for.
-        :type networks: nn.Module
-        """
-        for layer in super().modules():
-            if isinstance(layer, NoisyLinear):
-                layer.reset_noise()
-
     @staticmethod
     def init_weights_gaussian(module: nn.Module, std_coeff: float) -> None:
         """Initialize the weights of the neural network using a Gaussian distribution.
@@ -431,6 +422,16 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         # We want the unique set of mutation methods across the class and its superclasses
         self._layer_mutation_methods = list(set(layer_methods))
         self._node_mutation_methods = list(set(node_methods))
+
+    def reset_noise(self) -> None:
+        """Reset noise for all NoisyLinear layers in the network.
+        
+        :param networks: The networks to reset noise for.
+        :type networks: nn.Module
+        """
+        for layer in super().modules():
+            if isinstance(layer, NoisyLinear):
+                layer.reset_noise()
 
     def register_mutation_hook(self, hook: Callable) -> None:
         """Register a hook to be called after a mutation has been applied to an 

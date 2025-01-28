@@ -141,6 +141,7 @@ data/wordle.zip
 
 # WandB
 wandb/
+steelix/
 
 # Refactoring changes
 # demo.ipynb

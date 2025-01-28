@@ -49,7 +49,7 @@ Example
   field_names = ["state", "action", "reward", "next_state", "done"]
   memory = ReplayBuffer(memory_size=10000, field_names=field_names)
 
-  agent = TD3(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, max_action=max_action)   # Create TD3 agent
+  agent = TD3(observation_space=observation_space, action_space=action_space,  max_action=max_action)   # Create TD3 agent
 
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
@@ -73,13 +73,12 @@ Neural Network Configuration
 ----------------------------
 
 To configure the network architecture, pass a kwargs dict to the TD3 ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
+of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
 For an MLP, this can be as simple as:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'arch': 'mlp',      # Network architecture
         'hidden_size': [32, 32]  # Network hidden size
     }
 
@@ -88,7 +87,6 @@ Or for a CNN:
 .. code-block:: python
 
   NET_CONFIG = {
-        'arch': 'cnn',      # Network architecture
         'hidden_size': [128],    # Network hidden size
         'channel_size': [32, 32], # CNN channel size
         'kernel_size': [8, 4],   # CNN kernel size

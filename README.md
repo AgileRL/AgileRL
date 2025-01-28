@@ -143,7 +143,14 @@ MUTATION_PARAMS = {
 NET_CONFIG = {
     'latent_dim': 16
 
-    'hidden_size': [32, 32], # Actor hidden size
+    'encoder_config': {
+      'hidden_size': [32]     # Observation encoder configuration
+    }
+
+    'head_config': {
+      'hidden_size': [32]     # Network head configuration
+    }
+
 }
 ```
 First, use <code>utils.utils.create_population</code> to create a list of agents - our population that will evolve and mutate to the optimal hyperparameters.

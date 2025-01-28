@@ -36,26 +36,15 @@ Example
 
   import gymnasium as gym
   import h5py
+
   from agilerl.components.replay_buffer import ReplayBuffer
   from agilerl.algorithms.cqn import CQN
+  from agilerl.utils.algo_utils import obs_channels_to_first
 
   # Create environment and Experience Replay Buffer, and load dataset
   env = gym.make('CartPole-v1')
-  try:
-      state_dim = env.observation_space.n       # Discrete observation space
-      one_hot = True                            # Requires one-hot encoding
-  except Exception:
-      state_dim = env.observation_space.shape   # Continuous observation space
-      one_hot = False                           # Does not require one-hot encoding
-  try:
-      action_dim = env.action_space.n           # Discrete action space
-  except Exception:
-      action_dim = env.action_space.shape[0]    # Continuous action space
-
-  channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-
-  if channels_last:
-      state_dim = (state_dim[2], state_dim[0], state_dim[1])
+  observation_space = env.observation_space
+  action_space = env.action_space
 
   field_names = ["state", "action", "reward", "next_state", "done"]
   memory = ReplayBuffer(memory_size=10000, field_names=field_names)
@@ -69,12 +58,13 @@ Example
       if channels_last:
           state = obs_channels_to_first(state)
           next_state = obs_channels_to_first(next_state)
+
       action = dataset['actions'][i]
       reward = dataset['rewards'][i]
       done = bool(dataset['terminals'][i])
       memory.save_to_memory(state, action, reward, next_state, done)
 
-  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create DQN agent
+  agent = CQN(observation_space=observation_space, action_space=action_space)   # Create DQN agent
 
   state = env.reset()[0]  # Reset environment at start of episode
   while True:
@@ -86,32 +76,42 @@ Neural Network Configuration
 ----------------------------
 
 To configure the network architecture, pass a dict to the CQN ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<evolvable_mlp>` and :ref:`EvolvableCNN<evolvable_cnn>`.
-For an MLP, this can be as simple as:
+of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
+For a basic vector observation space, this can be as simple as:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'arch': 'mlp',      # Network architecture
-        'hidden_size': [32, 32]  # Network hidden size
+      'encoder_config': {
+        'hidden_size': [32]  # Network hidden size
+      }
+      'head_config': {
+        'hidden_size': [32]
     }
 
-Or for a CNN:
+Or for an image space:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'arch': 'cnn',      # Network architecture
-        'hidden_size': [128],    # Network hidden size
+      'encoder_config': {
         'channel_size': [32, 32], # CNN channel size
         'kernel_size': [8, 4],   # CNN kernel size
         'stride_size': [4, 2],   # CNN stride size
-        'normalize': True   # Normalize image from range [0,255] to [0,1]
+      }
+      'head_config': {
+        'hidden_size': [128] # Network head hidden size
     }
 
 .. code-block:: python
 
-  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot, net_config=NET_CONFIG)   # Create CQN agent
+  # Create CQN agent
+  agent = CQN(
+    observation_space=observation_space,
+    action_space=action_space,
+    net_config=NET_CONFIG
+    normalize_images=True
+    )
 
 
 Saving and loading agents
@@ -123,7 +123,8 @@ To save an agent, use the ``save_checkpoint`` method:
 
   from agilerl.algorithms.cqn import CQN
 
-  agent = CQN(state_dim=state_dim, action_dim=action_dim, one_hot=one_hot)   # Create CQN agent
+  # Create CQN agent
+  agent = CQN(observation_space=observation_space, action_space=action_space)
 
   checkpoint_path = "path/to/checkpoint"
   agent.save_checkpoint(checkpoint_path)

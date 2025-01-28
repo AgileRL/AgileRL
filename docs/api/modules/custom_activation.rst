@@ -3,5 +3,5 @@ Custom Activation Functions
 
 Parameters
 ----------
-.. autoclass:: agilerl.networks.custom_components.GumbelSoftmax
+.. autoclass:: agilerl.modules.custom_components.GumbelSoftmax
   :members:

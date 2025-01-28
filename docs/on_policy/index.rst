@@ -34,13 +34,16 @@ are more likely to remain present in the population. The sequence of evolution (
 
 .. code-block:: python
 
-    from agilerl.utils.utils import create_population, make_vect_envs
     import torch
+    from agilerl.utils.utils import (
+        create_population,
+        make_vect_envs,
+        observation_space_channels_to_first
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [32, 32],  # Actor hidden size
     }
 
@@ -66,25 +69,15 @@ are more likely to remain present in the population. The sequence of evolution (
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
-    try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
+    observation_space = env.single_observation_space
+    action_space - env.single_action_space
 
-    if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+    if INIT_HP['CHANNELS_LAST']:
+        observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
-        algo="PPO",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -93,68 +86,7 @@ are more likely to remain present in the population. The sequence of evolution (
     )
 
 
-.. _tournament_on_policy:
-
-Tournament Selection
---------------------
-
-Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
-is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
-fitness is preserved. This is repeated until the population for the next generation is full.
-
-The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation
-of agents.
-
-.. code-block:: python
-
-    from agilerl.hpo.tournament import TournamentSelection
-
-    tournament = TournamentSelection(
-        tournament_size=2,  # Tournament selection size
-        elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
-    )
-
-.. _mutate_on_policy:
-
-Mutation
---------
-
-Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
-prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
-population.
-
-The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
-    * No mutation
-    * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise.
-    * Network activation layer mutation - change of activation layer.
-    * RL algorithm mutation - mutation of learning hyperparameter, such as learning rate or batch size.
-
-``Mutations.mutation()`` returns a mutated population.
-
-Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
-
-.. code-block:: python
-
-    from agilerl.hpo.mutation import Mutations
-
-    mutations = Mutations(
-        algo="PPO",  # Algorithm
-        no_mutation=0.4,  # No mutation
-        architecture=0.2,  # Architecture mutation
-        new_layer_prob=0.2,  # New layer mutation
-        parameters=0.2,  # Network parameters mutation
-        activation=0,  # Activation layer mutation
-        rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size", "learn_step"],  # RL HPs to choose from
-        mutation_sd=0.1,  # Mutation strength  # Network architecture
-        rand_seed=1,  # Random seed
-        device=device,
-    )
-
-On-policy Training Loop
+On-Policy Training Loop
 -----------------------
 
 While off-policy RL algorithms can be considered more efficient than on-policy algorithms, due to their ability to learn from experiences
@@ -173,7 +105,6 @@ The easiest way to train a population of agents using PPO is to use our online t
     trained_pop, pop_fitnesses = train_on_policy(
         env=env,                              # Gym-style environment
         env_name="LunarLander-v2",  # Environment name
-        algo="PPO",  # Algorithm
         pop=agent_pop,  # Population of agents
         swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=200000,  # Max number of training steps
@@ -195,12 +126,11 @@ Alternatively, use a custom on-policy training loop:
     from tqdm import trange
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import create_population, make_vect_envs
+    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [32, 32],  # Actor hidden size
     }
 
@@ -226,25 +156,15 @@ Alternatively, use a custom on-policy training loop:
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
-    try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
+    observation_space = env.single_observation_space
+    action_space - env.single_action_space
 
-    if INIT_HP["CHANNELS_LAST"]:
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+    if INIT_HP['CHANNELS_LAST']:
+        observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
-        algo="PPO",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -260,14 +180,12 @@ Alternatively, use a custom on-policy training loop:
     )
 
     mutations = Mutations(
-        algo="PPO",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.2,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size", "learn_step"],  # RL HPs to choose from
         mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,

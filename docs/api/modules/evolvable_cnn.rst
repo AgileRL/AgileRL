@@ -1,4 +1,4 @@
-.. _evolvable_cnn:
+.. _cnn:
 
 Evolvable Convolutional Neural Network (CNN)
 ============================================
@@ -6,8 +6,8 @@ Evolvable Convolutional Neural Network (CNN)
 Parameters
 ------------
 
-.. autoclass:: agilerl.networks.evolvable_cnn.EvolvableCNN
+.. autoclass:: agilerl.modules.cnn.EvolvableCNN
   :members:
 
-.. autoclass:: agilerl.networks.evolvable_cnn.NoisyLinear
+.. autoclass:: agilerl.modules.cnn.NoisyLinear
   :members:

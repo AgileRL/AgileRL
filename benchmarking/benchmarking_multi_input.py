@@ -1,17 +1,16 @@
 import torch
 import yaml
-import numpy as np
-import gymnasium as gym
-from gymnasium.spaces import Box, Dict
 
 from agilerl.hpo.mutation import Mutations
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.training.train_on_policy import train_on_policy
 
 from agilerl.utils.utils import (
     create_population,
-    print_hyperparams
+    print_hyperparams,
+    make_vect_envs
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -23,54 +22,8 @@ from agilerl.utils.utils import (
 import sys
 sys.path.append('../racecar_gym')
 
-import racecar_gym
+import steelix
 
-class FlattenActionWrapper(gym.Wrapper):
-    def __init__(self, env):
-        super(FlattenActionWrapper, self).__init__(env)
-
-        # Get the original action space (Dict)
-        original_action_space = self.env.action_space
-
-        # Check if it's a Dict space
-        if isinstance(original_action_space, Dict):
-            # Flatten the Dict space into a single Box space
-            low = np.concatenate([original_action_space['motor'].low, original_action_space['steering'].low])
-            high = np.concatenate([original_action_space['motor'].high, original_action_space['steering'].high])
-
-            self.action_space = Box(low=low, high=high, shape=(2,), dtype=np.float32)
-        else:
-            raise ValueError(f"Expected Dict action space, but got {type(original_action_space)}.")
-
-    def reset(self, **kwargs):
-        # Reset the environment and return the initial observation
-        obs, info = self.env.reset(**kwargs)
-        obs['rgb_camera'] = obs['rgb_camera'].astype(np.uint8)
-        return obs, info
-
-    def step(self, action):
-        # Convert the flattened action back into the original Dict format
-        motor_action = action[0]
-        steering_action = action[1]
-        
-        # Create the Dict action
-        action_dict = {
-            'motor': np.array([motor_action], dtype=np.float32),
-            'steering': np.array([steering_action], dtype=np.float32)
-        }
-
-        # Pass the action to the environment
-        obs, reward, done, truncated, info = self.env.step(action_dict)
-
-        # change dtype of rgb_camera to uint8
-        obs['rgb_camera'] = obs['rgb_camera'].astype(np.uint8)
-        
-        return obs, reward, done, truncated, info
-
-def make_vect_envs(env_name, num_envs):
-    return gym.vector.AsyncVectorEnv(
-        [lambda: FlattenActionWrapper(gym.make(env_name, render_mode="rgb_array_birds_eye")) for i in range(num_envs)]
-    )
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,8 +34,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
     observation_space = env.single_observation_space
     action_space = env.single_action_space
-    if INIT_HP["CHANNELS_LAST"]:
-        observation_space = observation_space_channels_to_first(observation_space)
 
     tournament = TournamentSelection(
         INIT_HP["TOURN_SIZE"],
@@ -128,12 +79,22 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         actor = None
         critic = None
 
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
+        batch_size = RLParameter(
+            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
+            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
+            dtype=int
+            )
+    )
+
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
         observation_space=observation_space,
         action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
+        hp_config=hp_config,
         actor_network=actor,
         critic_network=critic,
         population_size=INIT_HP["POP_SIZE"],

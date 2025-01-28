@@ -1,4 +1,4 @@
-Networks
+Modules
 =========
 
 Evolvable network architectures implemented: (More coming soon!)
@@ -11,8 +11,8 @@ We are constantly adding more neural network architectures, with a view to add r
 .. toctree::
    :maxdepth: 1
 
-   evolvable_mlp
-   evolvable_cnn
-   evolvable_gpt
-   evolvable_bert
+   mlp
+   cnn
+   gpt
+   bert
    custom_activation

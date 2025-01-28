@@ -51,7 +51,6 @@ We can convert these labelled datasets into a bandit learning environment easily
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [128],  # Actor hidden size
     }
 
@@ -77,7 +76,6 @@ We can convert these labelled datasets into a bandit learning environment easily
     action_dim = env.arms
 
     pop = create_population(
-        algo="NeuralUCB",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=None,  # One-hot encoding
@@ -152,14 +150,12 @@ Tournament selection and mutation should be applied sequentially to fully evolve
     from agilerl.hpo.mutation import Mutations
 
     mutations = Mutations(
-        algo="NeuralUCB",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.5,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0.2,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,
@@ -219,7 +215,6 @@ Alternatively, use a custom bandit training loop:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [128],  # Actor hidden size
     }
 
@@ -245,7 +240,6 @@ Alternatively, use a custom bandit training loop:
     action_dim = env.arms
 
     pop = create_population(
-        algo="NeuralUCB",  # Algorithm
         state_dim=context_dim,  # State dimension
         action_dim=action_dim,  # Action dimension
         one_hot=None,  # One-hot encoding
@@ -269,14 +263,12 @@ Alternatively, use a custom bandit training loop:
         eval_loop=1,  # Evaluate using last N fitness scores
     )
     mutations = Mutations(
-        algo="NeuralUCB",  # Algorithm
         no_mutation=0.4,  # No mutation
         architecture=0.2,  # Architecture mutation
         new_layer_prob=0.5,  # New layer mutation
         parameters=0.2,  # Network parameters mutation
         activation=0.2,  # Activation layer mutation
         rl_hp=0.2,  # Learning HP mutation
-        rl_hp_selection=["lr", "batch_size"],  # Learning HPs to choose from
         mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
         device=device,

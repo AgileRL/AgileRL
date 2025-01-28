@@ -40,7 +40,6 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
 
     # Define the network configuration
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [32, 32],  # Actor hidden size
     }
 
@@ -135,71 +134,6 @@ multi-agent environments. During training it can be added to using the ``MultiAg
         device=device,
     )
 
-.. _tournament:
-
-Tournament Selection
---------------------
-
-Tournament selection is used to select the agents from a population which will make up the next generation of agents. If elitism is used, the best agent from a population
-is automatically preserved and becomes a member of the next generation. Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation
-fitness is preserved. This is repeated until the population for the next generation is full.
-
-The class ``TournamentSelection()`` defines the functions required for tournament selection. ``TournamentSelection.select()`` returns the best agent, and the new generation
-of agents.
-
-.. code-block:: python
-
-    from agilerl.hpo.tournament import TournamentSelection
-
-    tournament = TournamentSelection(
-        tournament_size=2,  # Tournament selection size
-        elitism=True,  # Elitism in tournament selection
-        population_size=INIT_HP["POP_SIZE"],  # Population size
-        eval_loop=1,  # Evaluate using last N fitness scores
-    )
-.. _mutate:
-
-Mutation
-------------
-
-Mutation is periodically used to explore the hyperparameter space, allowing different hyperparameter combinations to be trialled during training. If certain hyperparameters
-prove relatively beneficial to training, then that agent is more likely to be preserved in the next generation, and so those characteristics are more likely to remain in the
-population.
-
-The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
-    * No mutation
-    * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise.
-    * Network activation layer mutation - change of activation layer.
-    * RL algorithm mutation - mutation of learning hyperparameter, such as learning rate or batch size.
-
-``Mutations.mutation()`` returns a mutated population.
-
-Tournament selection and mutation should be applied sequentially to fully evolve a population between evaluation and learning cycles.
-
-.. code-block:: python
-
-    from agilerl.hpo.mutation import Mutations
-
-    mutations = Mutations(
-        algo="MADDPG",
-        no_mutation=0.2,  # Probability of no mutation
-        architecture=0.2,  # Probability of architecture mutation
-        new_layer_prob=0.2,  # Probability of new layer mutation
-        parameters=0.2,  # Probability of parameter mutation
-        activation=0,  # Probability of activation function mutation
-        rl_hp=0.2,  # Probability of RL hyperparameter mutation
-        rl_hp_selection=[
-            "lr",
-            "learn_step",
-            "batch_size",
-        ],  # RL hyperparams selected for mutation
-        mutation_sd=0.1,  # Mutation strength
-        agent_ids=INIT_HP["AGENT_IDS"],
-        rand_seed=1,
-        device=device,
-    )
-
 .. _trainloop:
 
 Training Loop
@@ -255,7 +189,6 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     # Define the network configuration
     NET_CONFIG = {
-        "arch": "mlp",  # Network architecture
         "hidden_size": [32, 32],  # Actor hidden size
     }
 
@@ -345,18 +278,12 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     # Instantiate a mutations object (used for HPO)
     mutations = Mutations(
-        algo="MADDPG",
         no_mutation=0.2,  # Probability of no mutation
         architecture=0.2,  # Probability of architecture mutation
         new_layer_prob=0.2,  # Probability of new layer mutation
         parameters=0.2,  # Probability of parameter mutation
         activation=0,  # Probability of activation function mutation
         rl_hp=0.2,  # Probability of RL hyperparameter mutation
-        rl_hp_selection=[
-            "lr",
-            "learn_step",
-            "batch_size",
-        ],  # RL hyperparams selected for mutation
         mutation_sd=0.1,  # Mutation strength
         agent_ids=INIT_HP["AGENT_IDS"],
         rand_seed=1,

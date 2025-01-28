@@ -53,7 +53,7 @@ Dependencies
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import create_population, make_vect_envs
+    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
     from tqdm import trange
 
 
@@ -163,10 +163,8 @@ population. The sequence of evolution (tournament selection followed by mutation
 
     # Define a population
     pop = create_population(
-        algo="TD3",  # Algorithm
-        state_dim=state_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
-        one_hot=one_hot,  # One-hot encoding
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=net_config,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size
@@ -240,13 +238,6 @@ Tournament selection and mutation should be applied sequentially to fully evolve
         parameters=MUT_P["PARAMS_MUT"],
         activation=MUT_P["ACT_MUT"],
         rl_hp=MUT_P["RL_HP_MUT"],
-        rl_hp_selection=MUT_P["RL_HP_SELECTION"],
-        min_lr=MUT_P["MIN_LR"],
-        max_lr=MUT_P["MAX_LR"],
-        min_batch_size=MUT_P["MAX_BATCH_SIZE"],
-        max_batch_size=MUT_P["MAX_BATCH_SIZE"],
-        min_learn_step=MUT_P["MIN_LEARN_STEP"],
-        max_learn_step=MUT_P["MAX_LEARN_STEP"],
         mutation_sd=MUT_P["MUT_SD"],
         rand_seed=MUT_P["RAND_SEED"],
         device=device,
