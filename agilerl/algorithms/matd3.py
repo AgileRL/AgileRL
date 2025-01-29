@@ -161,6 +161,7 @@ class MATD3(MultiAgentAlgorithm):
         self.lr_critic = lr_critic
         self.learn_step = learn_step
         self.gamma = gamma
+        self.net_config = net_config
         self.tau = tau
         self.mut = mut
         self.policy_freq = policy_freq

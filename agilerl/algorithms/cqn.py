@@ -111,6 +111,7 @@ class CQN(RLAlgorithm):
         self.tau = tau
         self.mut = mut
         self.double = double
+        self.net_config = net_config
 
         if actor_network is not None:
             if not isinstance(actor_network, EvolvableModule):

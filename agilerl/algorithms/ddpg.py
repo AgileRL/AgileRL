@@ -153,6 +153,7 @@ class DDPG(RLAlgorithm):
         self.lr_actor = lr_actor
         self.lr_critic = lr_critic
         self.learn_step = learn_step
+        self.net_config = net_config
         self.gamma = gamma
         self.tau = tau
         self.wrap = wrap

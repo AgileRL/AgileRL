@@ -185,6 +185,7 @@ class PPO(RLAlgorithm):
         self.mut = mut
         self.gae_lambda = gae_lambda
         self.action_std_init = action_std_init
+        self.net_config = net_config
         self.clip_coef = clip_coef
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef

@@ -1,13 +1,21 @@
 Using Custom Architecture
 =========================
 
-In all other AgileRL tutorials, the networks used by the agents have been consistently defined with a network configuration
-dictionary. Alternatively, it is also possible for a user to define their own custom architecture and add evolvable
-functionality through the ``MakeEvolvable`` wrapper.
+In the implemented algorithms, we allow users to pass architecture configurations for common RL networks (made evolvable34560345603456034560) 
+that are available with the framework. We employ a similar philosophy as PyTorch with how complex networks are defined by  
+inheriting from the ``nn.Module`` base class. 
+
+For sequential architectures that users have already implemented using PyTorch, it is also possible for a user to add 
+evolvable functionality through the ``MakeEvolvable`` wrapper.
 
 .. _createcustnet:
 
-Creating a Custom Evolvable Network
+Creating a Custom Module
+------------------------
+
+Modules are the backbones 
+
+Making a PyTorch Network Evolvable
 -----------------------------------
 
 To create a custom evolvable network, firstly you need to define your network class, ensuring correct input and output

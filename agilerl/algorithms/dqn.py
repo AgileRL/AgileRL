@@ -115,6 +115,7 @@ class DQN(RLAlgorithm):
         self.tau = tau
         self.mut = mut
         self.double = double
+        self.net_config = net_config
         self.cudagraphs = cudagraphs
         self.capturable = cudagraphs
 

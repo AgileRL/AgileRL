@@ -554,6 +554,8 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
     def clone(self: SelfEvolvableModule) -> SelfEvolvableModule:
         """Returns clone of neural net with identical parameters."""
         clone = self.__class__(**copy.deepcopy(self.init_dict))
+        clone._layer_mutation_methods = self._layer_mutation_methods
+        clone._node_mutation_methods = self._node_mutation_methods
 
         # Load state dict if the network has been trained
         try:

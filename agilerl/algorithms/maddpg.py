@@ -162,6 +162,7 @@ class MADDPG(MultiAgentAlgorithm):
         self.gamma = gamma
         self.tau = tau
         self.mut = mut
+        self.net_config = net_config
         self.learn_counter = 0
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim

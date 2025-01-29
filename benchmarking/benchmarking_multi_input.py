@@ -1,10 +1,13 @@
 import torch
+import copy
 import yaml
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.multi_input import EvolvableMultiInput
+from agilerl.networks.actors import StochasticActor
+from agilerl.networks.value_functions import ValueFunction
 from agilerl.training.train_on_policy import train_on_policy
 
 from agilerl.utils.utils import (
@@ -54,27 +57,28 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     )
 
     if use_net:
-        actor = EvolvableMultiInput(
-            observation_space=observation_space,
-            channel_size=[16, 16],
-            kernel_size=[3, 3],
-            stride_size=[1, 1],
-            hidden_size=[64, 64],
-            latent_dim=16,
-            num_outputs=action_space.shape[0],
-            device=device
-        )
+        net_config = NET_CONFIG
+        critic_net_config = copy.deepcopy(net_config)
 
-        critic = EvolvableMultiInput(
-            observation_space=observation_space,
-            channel_size=[16, 16],
-            kernel_size=[3, 3],
-            stride_size=[1, 1],
-            hidden_size=[64, 64],
-            latent_dim=16,
-            num_outputs=1,
-            device=device,
-        )
+        head_config = net_config.get("head_config", None)
+        critic_head_config = copy.deepcopy(head_config)
+        critic_head_config["output_activation"] = None # Value function has no output activation
+        critic_net_config["head_config"] = critic_head_config
+
+        actor = StochasticActor(
+                observation_space,
+                action_space,
+                log_std_init=INIT_HP['ACTION_STD_INIT'],
+                device=device,
+                **net_config
+            )
+        critic = ValueFunction(
+                observation_space,
+                device=device,
+                **critic_net_config
+            )
+        actor.filter_mutation_methods('kernel')
+        critic.filter_mutation_methods('kernel')
     else:
         actor = None
         critic = None
@@ -134,4 +138,4 @@ if __name__ == "__main__":
     INIT_HP = ppo_config["INIT_HP"]
     MUTATION_PARAMS = ppo_config["MUTATION_PARAMS"]
     NET_CONFIG = ppo_config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

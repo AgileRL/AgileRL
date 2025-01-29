@@ -155,6 +155,7 @@ class TD3(RLAlgorithm):
         self.tau = tau
         self.mut = mut
         self.policy_freq = policy_freq
+        self.net_config = net_config
         self.O_U_noise = O_U_noise
         self.vect_noise_dim = vect_noise_dim
         self.expl_noise = (

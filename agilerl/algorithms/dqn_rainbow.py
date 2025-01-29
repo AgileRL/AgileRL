@@ -144,6 +144,7 @@ class RainbowDQN(RLAlgorithm):
         self.beta = beta
         self.prior_eps = prior_eps
         self.num_atoms = num_atoms
+        self.net_config = net_config
         self.v_min = v_min
         self.v_max = v_max
         self.n_step = n_step

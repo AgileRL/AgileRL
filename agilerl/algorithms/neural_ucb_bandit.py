@@ -111,6 +111,7 @@ class NeuralUCB(RLAlgorithm):
         self.batch_size = batch_size
         self.learn_step = learn_step
         self.lr = lr
+        self.net_config = net_config
         self.mut = mut
         self.regret = [0]
         self.actor_network = None

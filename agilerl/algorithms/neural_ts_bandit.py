@@ -118,6 +118,7 @@ class NeuralTS(RLAlgorithm):
         self.batch_size = batch_size
         self.lr = lr
         self.mut = mut
+        self.net_config = net_config
         self.regret = [0]
 
         if actor_network is not None:
