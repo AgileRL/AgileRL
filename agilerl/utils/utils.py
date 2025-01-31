@@ -6,10 +6,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
+import wandb
 from accelerate import Accelerator
 from gymnasium import spaces
 
-import wandb
 from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
