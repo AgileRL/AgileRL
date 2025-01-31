@@ -84,6 +84,24 @@ class OptimizerConfig:
     
 @dataclass
 class RLParameter:
+    """Dataclass for storing the configuration of a hyperparameter that will be mutated during
+    training. The hyperparameter is defined by a range of values that it can take, and the
+    shrink and grow factors that will be used to mutate the hyperparameter value.
+
+    :param min: The minimum value that the hyperparameter can take.
+    :type min: float
+    :param max: The maximum value that the hyperparameter can take.
+    :type max: float
+    :param shrink_factor: The factor by which the hyperparameter will be shrunk during mutation. Default is 0.8.
+    :type shrink_factor: float
+    :param grow_factor: The factor by which the hyperparameter will be grown during mutation. Default is 1.2.
+    :type grow_factor: float
+    :param dtype: The data type of the hyperparameter. Default is float.
+    :type dtype: Union[Type[float], Type[int]]
+    :param value: The current value of the hyperparameter. Default is None.
+    :type value: Optional[Number]
+    """
+
     min: float
     max: float
     shrink_factor: float = 0.8

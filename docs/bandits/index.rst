@@ -75,6 +75,13 @@ We can convert these labelled datasets into a bandit learning environment easily
     context_dim = env.context_dim
     action_dim = env.arms
 
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=6.25e-5, max=1e-2),
+        batch_size = RLParameter(min=8, max=512, dtype=int),
+        learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+    )
+
     obs_space = spaces.Box(low=features.values.min(), high=features.values.max())
     action_space = spaces.Discrete(action_dim)
     pop = create_population(
@@ -83,6 +90,7 @@ We can convert these labelled datasets into a bandit learning environment easily
         action_space=action_space,  # Action space
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # Hyperparameter configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         device=device,
     )

@@ -158,12 +158,21 @@ Alternatively, use a custom on-policy training loop:
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
+    # RL hyperparameters configuration for mutation during training
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=1e-4, max=1e-2),
+        batch_size = RLParameter(
+            min=8, max=1024, dtype=int
+            )
+    )
+
     pop = create_population(
         algo="PPO",  # RL algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # Hyperparameters configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         num_envs=num_envs,  # Number of vectorized envs
         device=device,

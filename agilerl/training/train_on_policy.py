@@ -257,9 +257,8 @@ def train_on_policy(
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
 
-                    pbar.update(num_envs)
 
-                # pbar.update(learn_steps // len(pop))
+                pbar.update(learn_steps // len(pop))
 
                 if swap_channels:
                     next_state = obs_channels_to_first(next_state)

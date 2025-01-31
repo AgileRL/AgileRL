@@ -78,6 +78,16 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     INIT_HP["AGENT_IDS"] = env.agents
 
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr_actor = RLParameter(min=1e-4, max=1e-2),
+        lr_critic = RLParameter(min=1e-4, max=1e-2),
+        batch_size = RLParameter(min=8, max=512, dtype=int),
+        learn_step = RLParameter(
+            min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            )
+    )
+
     # Create a population ready for evolutionary hyper-parameter optimisation
     pop = create_population(
         "MADDPG",
@@ -85,6 +95,7 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
         action_spaces,
         NET_CONFIG,
         INIT_HP,
+        hp_config,
         population_size=INIT_HP["POP_SIZE"],
         num_envs=num_envs,
         device=device,

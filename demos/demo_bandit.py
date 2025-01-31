@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from gymnasium import spaces
 import numpy as np
 import torch
 import wandb
@@ -9,6 +10,7 @@ from ucimlrepo import fetch_ucirepo
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
 
@@ -25,7 +27,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {"encoder_config": {
-        "hidden_size": [128],  # Actor hidden size
+        "encoder_config": {"hidden_size": [128]}  # Actor hidden size
     }}
 
     INIT_HP = {
@@ -49,10 +51,12 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
+    observation_space = spaces.Box(low=features.values.min(), high=features.values.max())
+    action_space = spaces.Discrete(env.arms)
     pop = create_population(
         algo="NeuralUCB",  # Algorithm
-        state_dim=context_dim,  # State dimension
-        action_dim=action_dim,  # Action dimension
+        observation_space=observation_space,  # State dimension
+        action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
         population_size=INIT_HP["POP_SIZE"],  # Population size

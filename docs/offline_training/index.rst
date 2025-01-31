@@ -58,12 +58,22 @@ are more likely to remain present in the population. The sequence of evolution (
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
+    # RL hyperparameter configuration for mutations
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=1e-4, max=1e-2),
+        batch_size = RLParameter(min=8, max=64, dtype=int),
+        learn_step = RLParameter(
+            min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
+            )
+    )
+
     pop = create_population(
         algo="CQN",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # RL hyperparameters configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         num_envs=num_envs,  # Number of vectorized envs
         device=device,

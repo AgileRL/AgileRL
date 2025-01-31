@@ -90,10 +90,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             )
     )
 
+    observation_space = spaces.Box(low=features.values.min(), high=features.values.max())
+    action_space = spaces.Discrete(env.arms)
     agent_pop = create_population(
         algo=INIT_HP["ALGO"],
-        observation_space=spaces.Box(low=features.values.min(), high=features.values.max()),
-        action_space=spaces.Discrete(env.arms),
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=NET_CONFIG,
         INIT_HP=INIT_HP,
         hp_config=hp_config,
