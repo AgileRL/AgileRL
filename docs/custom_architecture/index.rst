@@ -140,7 +140,7 @@ If the single agent algorithm has more than one critic (e.g. TD3), then pass the
 
 
 If you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks for each agent in the
-multi-agent environment. The example below outlines how this would work for a two agent environment (asumming you have initilialised a multi-agent
+multi-agent environment. The example below outlines how this would work for a two agent environment (asumming you have initialised a multi-agent
 environment in the variable ``env``).
 
 .. code-block:: python

@@ -19,6 +19,8 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
+__all__ = ["DDPG"]
+
 
 class DDPG(RLAlgorithm):
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971

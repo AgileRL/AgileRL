@@ -15,6 +15,8 @@ from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
+__all__ = ["NeuralUCB"]
+
 
 class NeuralUCB(RLAlgorithm):
     """The NeuralUCB algorithm class. NeuralUCB paper: https://arxiv.org/abs/1911.04462

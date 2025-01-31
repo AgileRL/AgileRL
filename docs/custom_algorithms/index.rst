@@ -13,7 +13,7 @@ Network Groups
 Users must specify the "network groups" in their algorithm. A network group is a group of networks that work hand in hand with a common objective,
 and is registered through a :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` object, which contains at least one
 **evaluation** network (i.e. a network that is optimized during training e.g. the Q-network in DQN) and, optionally, "shared" networks that share
-parameters with the evaluation network in the group but arent optimized during training directly (e.g. the target network in DQN). An RL algorithm
+parameters with the evaluation network in the group but aren't optimized during training directly (e.g. the target network in DQN). An RL algorithm
 must also contain one :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` corresponding to the policy (i.e. the network used to
 select actions), signalled by the ``policy`` attribute in the group.
 

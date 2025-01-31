@@ -25,6 +25,8 @@ from agilerl.utils.algo_utils import (
     stack_experiences,
 )
 
+__all__ = ["PPO"]
+
 
 class PPO(RLAlgorithm):
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2

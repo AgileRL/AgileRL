@@ -17,6 +17,8 @@ from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, TorchObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+__all__ = ["RainbowDQN"]
+
 
 class RainbowDQN(RLAlgorithm):
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298

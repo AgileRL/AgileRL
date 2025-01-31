@@ -19,6 +19,8 @@ from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType, TorchObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
+__all__ = ["DQN"]
+
 
 class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602

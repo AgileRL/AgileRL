@@ -237,10 +237,10 @@ class NetworkGroup:
                     self._infer_attribute_names(container, shared) for shared in shared
                 ]
             else:
-                assert (
-                    isinstance(shared[0], EvolvableModule),
-                    "Expected a list of EvolvableModule objects for the shared argument in the network group.",
-                )
+                assert isinstance(
+                    shared[0], EvolvableModule
+                ), "Expected a list of EvolvableModule objects for the shared argument in the network group."
+
                 self.shared = self._infer_attribute_names(container, shared)
 
     def _infer_parent_container(self) -> EvolvableAlgorithm:

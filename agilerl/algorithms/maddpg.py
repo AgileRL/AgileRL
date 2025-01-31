@@ -33,6 +33,8 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
+__all__ = ["MADDPG"]
+
 
 class MADDPG(MultiAgentAlgorithm):
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
@@ -256,7 +258,7 @@ class MADDPG(MultiAgentAlgorithm):
                 critic_encoder_config = get_default_encoder_config(self.single_space)
 
             # For image spaces we need to give a sample input tensor to
-            # build networks with Conv3d blocks approproately
+            # build networks with Conv3d blocks appropriately
             if self.is_image_space:
                 encoder_config["sample_input"] = multi_agent_sample_tensor_from_space(
                     self.single_space, self.n_agents, device=self.device

@@ -18,6 +18,8 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import ArrayLike, ExperiencesType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
+__all__ = ["TD3"]
+
 
 class TD3(RLAlgorithm):
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477

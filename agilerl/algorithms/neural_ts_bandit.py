@@ -23,6 +23,8 @@ SupportedEvolvable = Union[
     EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableNetwork
 ]
 
+__all__ = ["NeuralTS"]
+
 
 class NeuralTS(RLAlgorithm):
     """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827

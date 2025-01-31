@@ -577,7 +577,7 @@ def test_ppo_optimizer_parameters():
         if torch.equal(initial_params[name], param):
             not_updated.append(name)
 
-    assert not not_updated, f"The following parameters werent updated:\n{not_updated}"
+    assert not not_updated, f"The following parameters weren't updated:\n{not_updated}"
 
 
 @pytest.mark.parametrize(

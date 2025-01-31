@@ -17,6 +17,8 @@ from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
+__all__ = ["CQN"]
+
 
 class CQN(RLAlgorithm):
     """The CQN algorithm class. CQN paper: https://arxiv.org/abs/2006.04779
