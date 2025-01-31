@@ -22,7 +22,6 @@ from agilerl.utils.utils import create_population, make_vect_envs, print_hyperpa
 sys.path.append("../racecar_gym")
 
 
-
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("============ AgileRL ============")

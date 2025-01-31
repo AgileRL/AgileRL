@@ -62,7 +62,7 @@ SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
 
 class _RegistryMeta(type):
     """Metaclass to wrap registry information after algorithm is done
-    intiializing with specified network groups and optimizers."""
+    initializing with specified network groups and optimizers."""
 
     def __call__(
         cls: Type[SelfEvolvableAlgorithm], *args, **kwargs
@@ -110,10 +110,9 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         assert isinstance(index, int), "Agent index must be an integer."
         assert isinstance(device, (str, torch.device)), "Device must be a string."
         assert isinstance(name, (type(None), str)), "Name must be a string."
-        assert (
-            isinstance(accelerator, (type(None), Accelerator)),
-            "Accelerator must be an instance of Accelerator.",
-        )
+        assert isinstance(
+            accelerator, (type(None), Accelerator)
+        ), "Accelerator must be an instance of Accelerator."
 
         if torch_compiler:
             assert torch_compiler in [
@@ -1051,17 +1050,16 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         assert isinstance(
             observation_spaces, (list, tuple)
         ), "Observation spaces must be a list or tuple."
-        assert (
-            all(isinstance(_space, spaces.Space) for _space in observation_spaces),
-            "Observation spaces must be instances of gym.spaces.Space.",
-        )
+        assert all(
+            isinstance(_space, spaces.Space) for _space in observation_spaces
+        ), "Observation spaces must be instances of gym.spaces.Space."
         assert isinstance(
             action_spaces, (list, tuple)
         ), "Action spaces must be a list or tuple."
-        assert (
-            all(isinstance(_space, spaces.Space) for _space in action_spaces),
-            "Action spaces must be instances of gym.spaces.Space.",
-        )
+        assert all(
+            isinstance(_space, spaces.Space) for _space in action_spaces
+        ), "Action spaces must be instances of gym.spaces.Space."
+
         if not all(
             isinstance(space, observation_spaces[0].__class__)
             for space in observation_spaces

@@ -1,5 +1,4 @@
 import copy
-import inspect
 from collections import OrderedDict, defaultdict
 from numbers import Number
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
@@ -10,7 +9,6 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
-from tensordict.nn import CudaGraphModule
 from torch._dynamo import OptimizedModule
 from torch.nn import Module
 from torch.optim import Optimizer
@@ -169,22 +167,6 @@ def assert_supported_space(space: spaces.Space) -> bool:
         isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces
     ):
         raise TypeError(f"Nested {type(space)} spaces are not supported.")
-
-
-def isroutine(obj: object) -> bool:
-    """Checks if an attribute is a routine, considering also methods wrapped by
-    CudaGraphModule.
-
-    :param attr: The attribute to check.
-    :type attr: str
-
-    :return: True if the attribute is a routine, False otherwise.
-    :rtype: bool
-    """
-    if isinstance(obj, CudaGraphModule):
-        return True
-
-    return inspect.isroutine(obj)
 
 
 def unwrap_optimizer(

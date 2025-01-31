@@ -67,12 +67,8 @@ def generate_dict_or_tuple_space(
     vector_spaces = [generate_random_box_space(vector_shape) for _ in range(n_vector)]
 
     if dict_space:
-        image_spaces = {
-            f"image_{i}": space for i, space in enumerate(image_spaces)
-        }
-        vector_spaces = {
-            f"vector_{i}": space for i, space in enumerate(vector_spaces)
-        }
+        image_spaces = {f"image_{i}": space for i, space in enumerate(image_spaces)}
+        vector_spaces = {f"vector_{i}": space for i, space in enumerate(vector_spaces)}
         return spaces.Dict(image_spaces | vector_spaces)
 
     return spaces.Tuple(image_spaces + vector_spaces)

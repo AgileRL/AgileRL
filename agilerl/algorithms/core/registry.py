@@ -212,15 +212,15 @@ class NetworkGroup:
 
     def __post_init__(self):
         if self.multiagent:
-            assert (
-                isinstance(self.eval, list)
-                and isinstance(self.eval[0], EvolvableModule),
+            assert isinstance(self.eval, list) and isinstance(
+                self.eval[0], EvolvableModule
+            ), (
                 "Multiagent algorithms should specify a list of EvolvableModule objects "
                 "for the evaluation argument in the network group.",
             )
+
             if self.shared is not None:
-                assert (
-                    isinstance(self.shared, list),
+                assert isinstance(self.shared, list), (
                     "Multiagent algorithms should specify a list of EvolvableModule objects "
                     "for the shared argument in the network group.",
                 )

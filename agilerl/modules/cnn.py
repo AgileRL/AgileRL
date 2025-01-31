@@ -43,7 +43,7 @@ def _assert_correct_kernel_sizes(
 
         assert (
             len(wh_unique) == 1,
-            "AgileRL currently doesnt support having different ",
+            "AgileRL currently doesn't support having different ",
             f"values for width and height in a single CNN kernel: {wh_unique}",
         )
 
