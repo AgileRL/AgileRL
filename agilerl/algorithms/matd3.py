@@ -606,8 +606,8 @@ class MATD3(MultiAgentAlgorithm):
     def learn(self, experiences: Tuple[TensorDict, ...]) -> Dict[str, float]:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions, rewards, next_states,
-        dones in that order for each individual agent.
+        :param experience: Tuple of dictionaries containing batched states, actions, 
+            rewards, next_states, dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
 
         :return: Losses for each agent

@@ -185,21 +185,8 @@ Alternatively, use a custom training loop. Combining all of the above:
     num_envs = 16
     env = make_vect_envs("LunarLander-v2", num_envs=num_envs)  # Create environment
 
-<<<<<<< HEAD
     observation_space = env.single_observation_space
     action_space - env.single_action_space
-=======
-    try:
-        state_dim = env.single_observation_space.n, # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
->>>>>>> main
 
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)

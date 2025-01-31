@@ -23,18 +23,19 @@ architectures. To address this, we provide a simple way of defining custom evolv
 Under the hood, any network inheriting from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`  automatically creates an appropriate encoder from the passed observation space. Custom networks only need to 
 specify a head that acts as a mapping from the latent space to a number of outputs (e.g. actions). AgileRL provides a variety of 
 common networks used in RL algorithms:
-  -  ``QNetwork``: State-action value function (used in e.g. DQN).
-  -  ``RainbowQNetwork``: State-action value function that uses a dueling distributional architecture for the network head (used in Rainbow DQN).
-  -  ``ContinuousQNetwork``: State-action value function for continuous action spaces, which takes the actions as input with the observations.
-  -  ``ValueFunction``: Outputs the scalar value of an observation (used in e.g. PPO).
-  -  ``DeterministicActor``: Outputs deterministic actions given an action space.
-  -  ``StochasticActor``: Outputs an appropriate PyTorch distribution over the given action space.
 
-  .. note::
-   We impose that the different evolvable networks in an algorithm (e.g. actor and critic in PPO) share the same mutation methods. This 
-   is done because we apply the same architecture mutations to all of the networks of an individual to reduce variance during training. 
-   For this reason, we only allow mutation methods in :class:`EvolvableModule <agilerl.networks.base.EvolvableNetwork>` objects to come from the encoder and the head, assuming the same 
-   modules are used in both. All of the implemented networks in AgileRL follow this structure.
+   -  ``QNetwork``: State-action value function (used in e.g. DQN).
+   -  ``RainbowQNetwork``: State-action value function that uses a dueling distributional architecture for the network head (used in Rainbow DQN).
+   -  ``ContinuousQNetwork``: State-action value function for continuous action spaces, which takes the actions as input with the observations.
+   -  ``ValueFunction``: Outputs the scalar value of an observation (used in e.g. PPO).
+   -  ``DeterministicActor``: Outputs deterministic actions given an action space.
+   -  ``StochasticActor``: Outputs an appropriate PyTorch distribution over the given action space.
+
+.. note::
+  We impose that the different evolvable networks in an algorithm (e.g. actor and critic in PPO) share the same mutation methods. This 
+  is done because we apply the same architecture mutations to all of the networks of an individual to reduce variance during training. 
+  For this reason, we only allow mutation methods in :class:`EvolvableModule <agilerl.networks.base.EvolvableNetwork>` objects to come from the encoder and the head, assuming the same 
+  modules are used in both. All of the implemented networks in AgileRL follow this structure.
 
 For simple use cases, it might be appropriate to create a network using ``EvolvableMLP`` or ``EvolvableCNN`` directly (depending on your 
 environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument. 

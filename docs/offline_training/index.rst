@@ -54,7 +54,6 @@ are more likely to remain present in the population. The sequence of evolution (
 
     observation_space = env.single_observation_space
     action_space - env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 

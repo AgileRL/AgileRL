@@ -511,11 +511,9 @@ class MADDPG(MultiAgentAlgorithm):
                     if action_masks[agent] is not None
                     else None
                 )
-                action = np.ma.array(action, mask=mask)
-                if self.one_hot:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
-                else:
-                    discrete_action_dict[agent] = action.argmax(axis=-1)
+                action: np.ndarray = np.ma.array(action, mask=mask)
+                discrete_action_dict[agent] = action.argmax(axis=-1)
+
                 if len(discrete_action_dict[agent].shape) == 1 and env_defined_actions:
                     env_defined_actions = {
                         agent: action.squeeze(1) if len(action.shape) > 1 else action
@@ -525,13 +523,6 @@ class MADDPG(MultiAgentAlgorithm):
                         agent: mask.squeeze(1) if len(mask.shape) > 1 else mask
                         for agent, mask in agent_masks.items()
                     }
-
-                action: np.ndarray = np.ma.array(action, mask=mask)
-                discrete_action_dict[agent] = action.argmax(axis=-1)
-                if len(discrete_action_dict[agent].shape) == 1:
-                    discrete_action_dict[agent] = discrete_action_dict[agent][
-                        :, np.newaxis
-                    ]
         else:
             discrete_action_dict = None
 
@@ -584,8 +575,8 @@ class MADDPG(MultiAgentAlgorithm):
     def learn(self, experiences: ExperiencesType) -> TensorDict:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions, rewards, next_states,
-        dones in that order for each individual agent.
+        :param experience: Tuple of dictionaries containing batched states, actions, 
+            rewards, next_states, dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
 
         :return: Loss dictionary

@@ -183,8 +183,11 @@ class NetworkGroup:
     :param shared: The list of shared networks.
     :type shared: str, List[str]
     :param policy: Whether the network is a policy (e.g. the network used to get the actions 
-    of the agent). There must be one network group in an algorithm which sets this to True.
-    Default is False.
+        of the agent). There must be one network group in an algorithm which sets this to True. 
+        Default is False.
+    :type policy: bool
+    :param multiagent: Whether the network group is used in a multiagent setting. Default is False.
+    :type multiagent: bool
     """
     eval: EvolvableModule
     shared: Optional[Union[EvolvableModule, List[EvolvableModule]]] = field(default=None)

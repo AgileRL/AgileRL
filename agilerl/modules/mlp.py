@@ -166,10 +166,6 @@ class EvolvableMLP(EvolvableModule):
     def activation(self, activation: str) -> None:
         """Set activation function."""
         self._activation = activation
-
-    def reset_noise(self) -> None:
-        """Resets noise of value and advantage networks."""
-        EvolvableModule.reset_noise(self.model)
         
     def init_weights_gaussian(self, std_coeff: float = 4, output_coeff: float = 4) -> None:
         """Initialise weights of neural network using Gaussian distribution."""

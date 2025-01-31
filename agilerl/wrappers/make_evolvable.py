@@ -291,7 +291,7 @@ class MakeEvolvable(EvolvableModule):
         :param input_tensor: Tensor used to perform forward pass to detect layers
         :type input_tensor: torch.Tensor
         :param secondary_input_tensor: Second tensor used to perform forward pass if forward
-        method of neural network takes two tensors as arguments, defaults to None
+            method of neural network takes two tensors as arguments, defaults to None
         :type secondary_input_tensor: torch.Tensor, optional
         """
         in_features_list = []

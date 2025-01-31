@@ -170,9 +170,10 @@ def test_stochastic_actor_mutation_methods(observation_space, action_space):
         new_network = network.clone() 
         getattr(new_network, method)()
 
-        if "." in method:
+        if "." in method and new_network.last_mutation_attr is not None:
             net_name = method.split(".")[0]
             mutated_module: EvolvableModule = getattr(new_network, net_name)
+            
             exec_method = new_network.last_mutation_attr.split(".")[-1]
 
             if isinstance(observation_space, (spaces.Tuple, spaces.Dict)):

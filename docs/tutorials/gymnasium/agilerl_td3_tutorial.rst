@@ -2,7 +2,7 @@
 
 
 Lunar Lander with TD3
-==========================
+=====================
 
 In this tutorial, we will be training and optimising the hyperparameters of a population of TD3 agents
 to beat the Gymnasium continuous lunar lander environment. AgileRL is a deep reinforcement learning
@@ -24,6 +24,7 @@ or not at all to safely navigate the lander to the landing pad without crashing.
 
 TD3 Overview
 ------------
+
 TD3 (twin-delayed deep deterministic policy gradient) is an off-policy actor-critic algorithm used
 to estimate the optimal policy function, which determines what actions an agent should take given the
 observed state of the environment. The agent does this by using a policy network (actor) to determine actions
@@ -182,6 +183,7 @@ population. The sequence of evolution (tournament selection followed by mutation
 
 Experience Replay
 -----------------
+
 In order to efficiently train a population of RL agents, off-policy algorithms are able to share memory within populations.
 This reduces the exploration needed by an individual agent because it allows faster learning from the behaviour of other agents.
 For example, if you were able to watch a bunch of people attempt to solve a maze, you could learn from their mistakes and successes
@@ -203,6 +205,7 @@ by the class ``ReplayBuffer()``. During training it can be added to using the ``
 
 Creating Mutations and Tournament objects
 -----------------------------------------
+
 Tournament selection is used to select the agents from a population which will make up the next generation of agents. If
 elitism is used, the best agent from a population is automatically preserved and becomes a member of the next generation.
 Then, for each tournament, k individuals are randomly chosen, and the agent with the best evaluation fitness is preserved.
@@ -255,7 +258,8 @@ Training and Saving an Agent
 ----------------------------
 
 Using AgileRL ``train_off_policy`` function
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 The simplest way to train an AgileRL agent is to use one of the implemented AgileRL train functions.
 Given that TD3 is an off-policy algorithm, we can make use of the ``train_off_policy`` function. This
 training function will orchestrate the training and hyperparameter optimisation process, removing the
