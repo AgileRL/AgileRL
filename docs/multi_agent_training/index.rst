@@ -33,6 +33,7 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
 .. code-block:: python
 
     from agilerl.utils.utils import create_population
+    from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
     from pettingzoo.mpe import simple_speaker_listener_v4
     import torch
 
@@ -143,10 +144,9 @@ for multi-agent environments) it is easiest to use our training function, which 
         env=env,  # Pettingzoo-style environment
         env_name='simple_speaker_listener_v4',  # Environment name
         algo="MADDPG",  # Algorithm
-        pop=agent_pop,  # Population of agents
+        pop=pop,  # Population of agents
         memory=memory,  # Replay buffer
         INIT_HP=INIT_HP,  # IINIT_HP dictionary
-        MUT_P=MUTATION_PARAMS,  # MUTATION_PARAMS dictionary
         net_config=NET_CONFIG,  # Network configuration
         swap_channels=INIT_HP['CHANNELS_LAST'],  # Swap image channel from last to first
         max_steps=2000000,  # Max number of training steps

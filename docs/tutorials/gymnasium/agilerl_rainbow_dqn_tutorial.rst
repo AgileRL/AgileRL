@@ -6,7 +6,7 @@ Cartpole with Rainbow DQN
 In this tutorial, we will be training a single Rainbow-DQN agent (without HPO) to beat the
 Gymnasium classic control cartpole environment. AgileRL is a deep reinforcement learning
 library, focussed on improving the RL training process through evolutionary hyperparameter
-optimisation (HPO), which has resulted in upto 10x faster HPO compared to other popular deep RL
+optimisation (HPO), which has resulted in up to 10x faster HPO compared to other popular deep RL
 libraries. Check out the AgileRL github `repository <https://github.com/AgileRL/AgileRL/>`__ for
 more information about the library.
 
@@ -226,6 +226,18 @@ for both the tournament and mutation arguments.
         checkpoint=INIT_HP["MAX_STEPS"],
         checkpoint_path="RainbowDQN.pt",
     )
+
+.. note::
+
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+
+   .. code-block:: python
+
+      def train_agent():
+          # ... training code
+
+      if __name__ == "__main__":
+          train_agent()
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

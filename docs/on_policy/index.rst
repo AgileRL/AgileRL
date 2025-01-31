@@ -112,8 +112,20 @@ The easiest way to train a population of agents using PPO is to use our online t
         target=200.,  # Target score for early stopping
         tournament=tournament,  # Tournament selection object
         mutation=mutations,  # Mutations object
-        wb=INIT_HP['WANDB'],  # Weights and Biases tracking
+        wb=True,  # Weights and Biases tracking
     )
+
+.. note::
+
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+
+   .. code-block:: python
+
+      def train_agent():
+          # ... training code
+
+      if __name__ == "__main__":
+          train_agent()
 
 Alternatively, use a custom on-policy training loop:
 

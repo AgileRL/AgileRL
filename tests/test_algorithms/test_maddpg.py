@@ -1141,7 +1141,7 @@ def test_maddpg_get_action_agent_masking(
     cont_actions, discrete_action = maddpg.get_action(state, training, infos=info)
     if discrete_actions:
         assert np.array_equal(
-            discrete_action["agent_0"], np.array([[1]])
+            discrete_action["agent_0"], np.array([1])
         ), discrete_action["agent_0"]
     else:
         assert np.array_equal(

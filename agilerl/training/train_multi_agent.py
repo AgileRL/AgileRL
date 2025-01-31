@@ -94,7 +94,7 @@ def train_multi_agent(
     :type tournament: object, optional
     :param mutation: Mutation object, defaults to None
     :type mutation: object, optional
-    :param checkpoint: Checkpoint frequency (episodes), defaults to None
+    :param checkpoint: Checkpoint frequency (steps), defaults to None
     :type checkpoint: int, optional
     :param checkpoint_path: Location to save checkpoint, defaults to None
     :type checkpoint_path: str, optional

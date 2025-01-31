@@ -30,17 +30,39 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
 
-def make_vect_envs(env_name: str, num_envs: int = 1, **kwargs: Dict[str, Any]) -> gym.vector.AsyncVectorEnv:
+
+def make_vect_envs(
+    env_name: Optional[str] = None,
+    num_envs=1,
+    *,
+    make_env: Optional[Callable] = None,
+    should_async_vector: bool = True,
+    **env_kwargs
+):
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
     :type env_name: str
     :param num_envs: Number of vectorized environments, defaults to 1
     :type num_envs: int, optional
+    :param make_env: Function that creates a gym environment, defaults use gym.make(env_name)
+    :type make_env: Callable, optional
+    :param should_async_vector: Whether to asynchronous vectorized environments, defaults to True
+    :type should_async_vector: bool, optional
     """
-    return gym.vector.AsyncVectorEnv(
-        [lambda: gym.make(env_name, **kwargs) for i in range(num_envs)]
+    if env_name is None and make_env is None:
+        raise ValueError("Either env_name or make_env must be provided")
+
+    vectorize = (
+        gym.vector.AsyncVectorEnv if should_async_vector else gym.vector.SyncVectorEnv
     )
+
+    def default_make_env():
+        return gym.make(env_name, **env_kwargs)
+
+    make_env = make_env or default_make_env
+
+    return vectorize([make_env for _ in range(num_envs)])
 
 def make_multi_agent_vect_envs(env: Any, num_envs: int = 1, **env_kwargs: Any) -> AsyncPettingZooVecEnv:
     """Returns async-vectorized PettingZoo parallel environments.

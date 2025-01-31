@@ -10,8 +10,11 @@
 [![Documentation Status](https://readthedocs.org/projects/agilerl/badge/?version=latest)](https://docs.agilerl.com/en/latest/?badge=latest)
 [![Downloads](https://static.pepy.tech/badge/agilerl)](https://pypi.python.org/pypi/agilerl/)
 [![Discord](https://dcbadge.vercel.app/api/server/eB8HyTA2ux?style=flat)](https://discord.gg/eB8HyTA2ux)
-
+[![Arena](./.github/badges/arena-github-badge.svg)](https://arena.agilerl.com)
+<br>
+<h3><i>✨ <b>NEW:</b> Train super-fast for free on <a href="https://arena.agilerl.com">Arena</a>, the RLOps platform from AgileRL ✨</i></h3>
 </div>
+<br>
 
 AgileRL is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 

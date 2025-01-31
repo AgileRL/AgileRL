@@ -388,10 +388,13 @@ class MADDPG(MultiAgentAlgorithm):
 
         :param infos: Info dict
         :type infos: Dict[str, Dict[...]]
-
-        :return: env_defined_actions, agent_masks
-        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
+
+        # Deal with case of no env_defined_actions defined in the info dict
+        if not key_in_nested_dict(infos, "env_defined_actions"):
+            return None, None
+
+        # Deal with empty info dicts for each sub agent
         if all(not info for agent, info in infos.items() if agent in self.agent_ids):
             return None, None
         env_defined_actions = {
@@ -508,6 +511,21 @@ class MADDPG(MultiAgentAlgorithm):
                     if action_masks[agent] is not None
                     else None
                 )
+                action = np.ma.array(action, mask=mask)
+                if self.one_hot:
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
+                else:
+                    discrete_action_dict[agent] = action.argmax(axis=-1)
+                if len(discrete_action_dict[agent].shape) == 1 and env_defined_actions:
+                    env_defined_actions = {
+                        agent: action.squeeze(1) if len(action.shape) > 1 else action
+                        for agent, action in env_defined_actions.items()
+                    }
+                    agent_masks = {
+                        agent: mask.squeeze(1) if len(mask.shape) > 1 else mask
+                        for agent, mask in agent_masks.items()
+                    }
+
                 action: np.ndarray = np.ma.array(action, mask=mask)
                 discrete_action_dict[agent] = action.argmax(axis=-1)
                 if len(discrete_action_dict[agent].shape) == 1:

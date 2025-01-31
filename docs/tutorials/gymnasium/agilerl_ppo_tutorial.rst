@@ -6,7 +6,7 @@ Acrobot with PPO
 In this tutorial, we will be training and optimising the hyperparameters of a population of PPO agents
 to beat the Gymnasium acrobot environment. AgileRL is a deep reinforcement learning
 library, focussed on improving the RL training process through evolutionary hyperparameter
-optimisation (HPO), which has resulted in upto 10x faster HPO compared to other popular deep RL
+optimisation (HPO), which has resulted in up to 10x faster HPO compared to other popular deep RL
 libraries. Check out the AgileRL github
 `repository <https://github.com/AgileRL/AgileRL/>`__
 for more information about the library.
@@ -239,6 +239,18 @@ fitnesses (fitness is each agents test scores on the environment).
         save_elite=True,  # Boolean flag to save the elite agent in the population
         elite_path=save_path,
     )
+
+.. note::
+
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+
+   .. code-block:: python
+
+      def train_agent():
+          # ... training code
+
+      if __name__ == "__main__":
+          train_agent()
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

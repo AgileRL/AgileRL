@@ -7,7 +7,7 @@ Lunar Lander with TD3
 In this tutorial, we will be training and optimising the hyperparameters of a population of TD3 agents
 to beat the Gymnasium continuous lunar lander environment. AgileRL is a deep reinforcement learning
 library, focussed on improving the RL training process through evolutionary hyperparameter
-optimisation (HPO), which has resulted in upto 10x faster HPO compared to other popular deep RL
+optimisation (HPO), which has resulted in up to 10x faster HPO compared to other popular deep RL
 libraries. Check out the AgileRL github `repository <https://github.com/AgileRL/AgileRL/>`__ for
 more information about the library.
 
@@ -96,6 +96,10 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "TARGET_SCORE": 200.0,  # Target score that will beat the environment
         "EVO_LOOP": 3,  # Number of evaluation episodes
         "MAX_STEPS": 500,  # Maximum number of steps an agent takes in an environment
+        "LEARNING_DELAY": 1000,  # Steps before starting learning
+        "EVO_STEPS": 10000,  # Evolution frequency
+        "EVAL_STEPS": None,  # Number of evaluation steps per episode
+        "EVAL_LOOP": 1,  # Number of evaluation episodes
         "TOURN_SIZE": 2,  # Tournament size
         "ELITISM": True,  # Elitism in tournament selection
     }
@@ -269,7 +273,7 @@ fitnesses (fitness is each agents test scores on the environment).
         INIT_HP=INIT_HP,
         MUT_P=MUT_P,
         swap_channels=INIT_HP["CHANNELS_LAST"],
-        INIT_HP["MAX_STEPS"]=INIT_HP["MAX_STEPS"],
+        max_steps=INIT_HP["MAX_STEPS"],
         evo_steps=INIT_HP["EVO_STEPS"],
         eval_steps=INIT_HP["EVAL_STEPS"],
         eval_loop=INIT_HP["EVAL_LOOP"],
@@ -282,6 +286,17 @@ fitnesses (fitness is each agents test scores on the environment).
         elite_path="TD3_trained_agent.pt",
     )
 
+.. note::
+
+   Known `Gymnasium issue <https://github.com/Farama-Foundation/Gymnasium/issues/722>`_ - running vectorize environments as top-level code (without ``if __name__ == "__main__":``) may cause multiprocessing errors. To fix, run the above as a method under ``main``, e.g.
+
+   .. code-block:: python
+
+      def train_agent():
+          # ... training code
+
+      if __name__ == "__main__":
+          train_agent()
 
 Using a custom training loop
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
