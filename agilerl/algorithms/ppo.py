@@ -320,6 +320,8 @@ class PPO(RLAlgorithm):
         :type preprocess_obs: bool, optional
         """
         state = self.preprocess_observation(state)
+        # for k, v in state.items():
+        #     print(k, v.shape)
 
         if not grad:
             self.actor.eval()
@@ -345,12 +347,7 @@ class PPO(RLAlgorithm):
         else:
             action = action.to(self.device)
 
-        try:
-            action_logprob = action_dist.log_prob(action)
-        except Exception as e:
-            print(f"Action: {action.shape}")
-            print(f"Action dist: {action_dist.probs.shape}")
-            raise e
+        action_logprob = action_dist.log_prob(action)
 
         if len(action_logprob.shape) > 1:
             action_logprob = action_logprob.sum(dim=1)
@@ -447,7 +444,7 @@ class PPO(RLAlgorithm):
             advantages,
             returns,
             values,
-        ) = experiences 
+        ) = experiences
 
         num_samples = returns.size(0)
         batch_idxs = np.arange(num_samples)
@@ -465,6 +462,12 @@ class PPO(RLAlgorithm):
                     batch_returns, 
                     batch_values
                  ) = get_experiences_samples(minibatch_idxs, *experiences)
+                
+                batch_actions = batch_actions.squeeze()
+                batch_returns = batch_returns.squeeze()
+                batch_log_probs = batch_log_probs.squeeze()
+                batch_advantages = batch_advantages.squeeze()
+                batch_values = batch_values.squeeze()
 
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(

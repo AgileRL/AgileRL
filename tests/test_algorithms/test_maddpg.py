@@ -27,6 +27,11 @@ from agilerl.utils.evolvable_networks import get_default_encoder_config
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import generate_multi_agent_box_spaces, generate_multi_agent_discrete_spaces
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 class DummyMultiEnv(ParallelEnv):
     def __init__(self, observation_spaces, action_spaces):
         self.observation_spaces = observation_spaces

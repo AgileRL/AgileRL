@@ -563,7 +563,7 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
             shape = (*shape, 1)
 
         arr = arr.swapaxes(0, 1).reshape(shape[0] * shape[1], *shape[2:])
-        return arr.squeeze()
+        return arr
 
     flattened_experiences = []
     for exp in experiences:

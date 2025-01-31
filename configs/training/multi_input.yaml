@@ -8,7 +8,7 @@ INIT_HP:
     NUM_ENVS: 6                # No. parallel environments for training
     BATCH_SIZE: 128            # Batch size
     LR: 0.001                  # Learning rate
-    LEARN_STEP: 4_320          # Learning frequency
+    LEARN_STEP: 6_480          # Learning frequency
     MAX_STEPS: 2_000_000       # Max no. steps
     TARGET_SCORE: 190.         # Early training stop at avg score of last 100 episodes
     GAMMA: 0.99                # Discount factor
@@ -23,10 +23,10 @@ INIT_HP:
     TOURN_SIZE: 2              # Tournament size
     ELITISM: true              # Elitism in tournament selection
     POP_SIZE: 4                # Population size
-    EVO_STEPS: 43_200          # Evolution frequency
+    EVO_STEPS: 12_960          # Evolution frequency
     EVAL_STEPS:                # Evaluation steps
     EVAL_LOOP: 1               # Evaluation episodes
-    WANDB: false                # Log with Weights and Biases
+    WANDB: true                # Log with Weights and Biases
 
 MUTATION_PARAMS:
     NO_MUT: 0.4                            # No mutation
@@ -48,18 +48,18 @@ NET_CONFIG:
     latent_dim: 64
 
     encoder_config:
-        hidden_size: [64]
-        channel_size: [16]
-        kernel_size: [2]
+        hidden_size: [8]
+        channel_size: [8]
+        kernel_size: [3]
         stride_size: [1]
-        latent_dim: 16
-        activation: ReLU
+        latent_dim: 5
+        activation: Tanh
         min_mlp_nodes: 64
         max_mlp_nodes: 500
     
     head_config:
-        hidden_size: [64]
-        activation: ReLU
+        hidden_size: [8]
+        activation: Tanh
         min_hidden_layers: 1
         max_hidden_layers: 3
         min_mlp_nodes: 64

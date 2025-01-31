@@ -31,6 +31,12 @@ from tests.helper_functions import (
     generate_multi_agent_discrete_spaces
 )
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
+
 class MultiAgentCNNActor(nn.Module):
     def __init__(self):
         super().__init__()

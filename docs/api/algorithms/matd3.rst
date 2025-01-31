@@ -74,6 +74,7 @@ Example
     from pettingzoo.mpe import simple_speaker_listener_v4
     from tqdm import trange
 
+    from agilerl.utils.algo_utils import obs_channels_to_first
     from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -84,22 +85,8 @@ Example
     env.reset()
 
     # Configure the multi-agent algo input arguments
-    try:
-        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.single_action_space(agent).n for agent in env.agents]
-        discrete_actions = True
-        max_action = None
-        min_action = None
-    except Exception:
-        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
-        discrete_actions = False
-        max_action = [env.single_action_space(agent).high for agent in env.agents]
-        min_action = [env.single_action_space(agent).low for agent in env.agents]
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
     channels_last = False  # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
     n_agents = env.num_agents
@@ -113,15 +100,10 @@ Example
     )
 
     agent = MATD3(
-        state_dims=state_dim,
-        action_dims=action_dim,
-        one_hot=one_hot,
-        n_agents=n_agents,
+        observation_spaces=observation_spaces,
+        action_spaces=action_spaces,
         agent_ids=agent_ids,
-        max_action=max_action,
-        min_action=min_action,
         vect_noise_dim=num_envs,
-        discrete_actions=discrete_actions,
         device=device,
     )
 
@@ -134,7 +116,7 @@ Example
         scores = np.zeros(num_envs)
         completed_episode_scores = []
         if channels_last:
-            state = {agent_id: np.moveaxis(s, [-1], [-3]) for agent_id, s in state.items()}
+            state = {agent_id: obs_channels_to_first(s) for agent_id, s in state.items()}
 
         for _ in range(1000):
             # Get next action from agent
@@ -158,7 +140,7 @@ Example
             # Save experiences to replay buffer
             if channels_last:
                 next_state = {
-                    agent_id: np.moveaxis(ns, [-1], [-3])
+                    agent_id: obs_channels_to_first(ns)
                     for agent_id, ns in next_state.items()
                 }
             memory.save_to_memory(state, cont_actions, reward, next_state, done, is_vectorised=True)
@@ -189,39 +171,54 @@ Example
 Neural Network Configuration
 ----------------------------
 
-To configure the network architecture, pass a kwargs dict to the MATD3 ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
-For an MLP, this can be as simple as:
+To configure the architecture of the network's encoder / head, pass a kwargs dict to the MATD3 ``net_config`` field. 
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and 
+:ref:`EvolvableMultiInput<multi_input>`.
+
+For discrete / vector observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'hidden_size': [32, 32]  # Network hidden size
+        "encoder_config": {'hidden_size': [32, 32]},  # Network head hidden size
+        "head_config": {'hidden_size': [32]}      # Network head hidden size
     }
 
-Or for a CNN:
+For image observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'hidden_size': [32,32],    # Network hidden size
+      "encoder_config": {
         'channel_size': [32, 32], # CNN channel size
-        'kernel_size': [3, 3],   # CNN kernel size
-        'stride_size': [2, 2],   # CNN stride size
-        'normalize': True   # Normalize image from range [0,255] to [0,1]
+        'kernel_size': [8, 4],   # CNN kernel size
+        'stride_size': [4, 2],   # CNN stride size
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
     }
+
+For dictionary / tuple observations containing any combination of image, discrete, and vector observations:
 
 .. code-block:: python
 
-  agent = MATD3(state_dims=state_dim,
-                action_dims=action_dim,
-                one_hot=one_hot,
-                n_agents=n_agents,
-                agent_ids=agent_ids,
-                max_action=max_action,
-                min_action=min_action,
-                discrete_actions=discrete_actions,
-                net_config=NET_CONFIG)   # Create MATD3 agent
+  NET_CONFIG = {
+      "encoder_config": {
+        'hidden_size': [32, 32],  # Network head hidden size
+        'channel_size': [32, 32], # CNN channel size
+        'kernel_size': [8, 4],   # CNN kernel size
+        'stride_size': [4, 2],   # CNN stride size
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
+    }
+.. code-block:: python
+
+  # Create MATD3 agent
+  agent = MATD3(
+    observation_spaces=observation_spaces,
+    action_spaces=action_spaces,
+    agent_ids=agent_ids,
+    net_config=NET_CONFIG
+    )
 
 Saving and loading agents
 -------------------------
@@ -232,14 +229,13 @@ To save an agent, use the ``save_checkpoint`` method:
 
   from agilerl.algorithms.matd3 import MATD3
 
-  agent = MATD3(state_dims=state_dim,
-                 action_dims=action_dim,
-                 one_hot=one_hot,
-                 n_agents=n_agents,
-                 agent_ids=agent_ids,
-                 max_action=max_action,
-                 min_action=min_action,
-                 discrete_actions=discrete_actions)   # Create MATD3 agent
+  # Create MATD3 agent
+  agent = MATD3(
+    observation_spaces=observation_spaces,
+    action_spaces=action_spaces,
+    agent_ids=agent_ids,
+    net_config=NET_CONFIG
+    )
 
   checkpoint_path = "path/to/checkpoint"
   agent.save_checkpoint(checkpoint_path)

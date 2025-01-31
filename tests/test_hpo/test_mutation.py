@@ -21,6 +21,10 @@ from tests.helper_functions import (
 )
 
 # from pytest_mock import mocker
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 # Shared HP dict that can be used by any algorithm
 SHARED_INIT_HP = {
@@ -161,7 +165,6 @@ def test_constructor_initializes_attributes():
     rl_hp = 0.6
     mutation_sd = 0.7
     activation_selection = ["ReLU", "Sigmoid"]
-    agent_ids = None
     mutate_elite = True
     rand_seed = 12345
     device = "cpu"
@@ -176,7 +179,6 @@ def test_constructor_initializes_attributes():
         rl_hp,
         mutation_sd,
         activation_selection,
-        agent_ids,
         mutate_elite,
         rand_seed,
         device,
@@ -195,7 +197,6 @@ def test_constructor_initializes_attributes():
     assert mutations.mutate_elite == mutate_elite
     assert mutations.device == device
     assert mutations.accelerator == accelerator
-    assert mutations.agent_ids == agent_ids
 
 # Can regularize weight
 def test_returns_regularize_weight():
@@ -781,7 +782,6 @@ def test_mutation_applies_random_mutations_multi_agent(algo, device, accelerator
         0.1,
         0.1,
         0.1,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
         device=device,
         accelerator=accelerator,
     )
@@ -828,7 +828,6 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
         0,
         0,
         0.1,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
         device=device,
         accelerator=accelerator,
     )
@@ -869,7 +868,6 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
         0,
         1,
         0.1,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
         device=device,
         accelerator=accelerator,
     )
@@ -914,7 +912,6 @@ def test_mutation_applies_activation_mutations_multi_agent(algo, device, acceler
         1,
         0,
         0.1,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
         device=device,
         accelerator=accelerator,
     )
@@ -960,7 +957,6 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
         1,
         0,
         0.1,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
         device=device,
         accelerator=accelerator,
     )
@@ -1010,7 +1006,6 @@ def test_mutation_applies_parameter_mutations_multi_agent(
         0,
         0,
         0.5,
-        agent_ids=SHARED_INIT_HP["AGENT_IDS"],
         device=device,
         accelerator=accelerator,
     )
@@ -1053,7 +1048,6 @@ def test_mutation_applies_architecture_mutations_multi_agent(
             0,
             0,
             0.5,
-            agent_ids=SHARED_INIT_HP["AGENT_IDS"],
             device=device,
             accelerator=accelerator,
         )

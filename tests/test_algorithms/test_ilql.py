@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import pytest
 
 from agilerl.algorithms.ilql import ILQL, ILQL_Policy
 from agilerl.data.language_environment import Language_Observation
@@ -8,6 +9,10 @@ from agilerl.data.rl_data import ConstantTokenReward, DataPoint, List_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset
 from tests.test_data import WordleTokenizer
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
 
 def test_ilql_init():
     List_RL_Dataset.__abstractmethods__ = set()

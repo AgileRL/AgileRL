@@ -48,13 +48,18 @@ Dependencies
     import gymnasium as gym
     import numpy as np
     import torch
+    from tqdm import trange
+
     from agilerl.algorithms.td3 import TD3
     from agilerl.components.replay_buffer import ReplayBuffer
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_off_policy import train_off_policy
-    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
-    from tqdm import trange
+    from agilerl.utils.utils import (
+        create_population,
+        make_vect_envs,
+        observation_space_channels_to_first
+    )
 
 
 Defining Hyperparameters
@@ -104,8 +109,6 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "PARAMS_MUT": 0.2,  # Network parameters mutation
         "ACT_MUT": 0.2,  # Activation layer mutation
         "RL_HP_MUT": 0.2,  # Learning HP mutation
-        # Learning HPs to choose from
-        "RL_HP_SELECTION": ["lr", "batch_size", "learn_step"],
         "MUT_SD": 0.1,  # Mutation strength
         "RAND_SEED": 42,  # Random seed
         # Define max and min limits for mutating RL hyperparams
@@ -120,30 +123,18 @@ Additionally, we also define our upper and lower limits for these hyperparameter
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the continuous lunar lander environment as TD3 can only be
-used with continuous action environments. The snippet below creates a vectorised environment and then assigns the
-correct values for ``state_dim`` and ``one_hot``, depending on whether the observation space is discrete or continuous.
+used with continuous action environments.
 
 .. code-block:: python
 
     num_envs=8
     env = make_vect_envs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
-    try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
-
-    INIT_HP["MAX_ACTION"] = float(env.single_action_space.high[0])
-    INIT_HP["MIN_ACTION"] = float(env.single_action_space.low[0])
-
+    
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
         # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
 
 Create a Population of Agents
@@ -159,14 +150,26 @@ population. The sequence of evolution (tournament selection followed by mutation
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"head_config": {"hidden_size": [64, 64]}}
+
+    # Mutation config for RL hyperparameters
+    hp_config = HyperparameterConfig(
+        lr_actor = RLParameter(min=1e-4, max=1e-2),
+        lr_critic = RLParameter(min=1e-4, max=1e-2),
+        learn_step = RLParameter(min=1, max=16, dtype=int),
+        batch_size = RLParameter(
+            min=8, max=512, dtype=int
+            )
+    )
 
     # Define a population
     pop = create_population(
+        algo="TD3", # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=net_config,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameters
+        hp_config=hp_config,  # RL hyperparameter configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         num_envs=num_envs,
         device=device,

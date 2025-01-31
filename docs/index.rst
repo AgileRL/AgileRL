@@ -57,6 +57,7 @@ Contents
    bandits/index
    distributed_training/index
    custom_architecture/index
+   custom_algorithms/index
    debugging_rl/index
 
 .. toctree::
@@ -67,6 +68,7 @@ Contents
    tutorials/pettingzoo/index
    tutorials/skills/index
    tutorials/bandits/index
+   tutorials/custom_networks/index
 
 .. toctree::
    :maxdepth: 1
@@ -75,6 +77,7 @@ Contents
    api/algorithms/index
    api/components/index
    api/hpo/index
+   api/modules/index
    api/networks/index
    api/train
    api/utils/index

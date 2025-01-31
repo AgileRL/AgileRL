@@ -43,7 +43,7 @@ Example distributed training loop:
     accelerator.wait_for_everyone()
 
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]},  # Actor head hidden size
     }
 
     INIT_HP = {
@@ -67,6 +67,7 @@ Example distributed training loop:
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="DQN",  # RL algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
@@ -104,8 +105,8 @@ Example distributed training loop:
         rl_hp=0.2,  # Learning HP mutation
         mutation_sd=0.1,  # Mutation strength  # Network architecture
         rand_seed=1,  # Random seed
-        accelerator=accelerator,
-    )  # Accelerator)
+        accelerator=accelerator, # Accelerator
+    )
 
     max_steps = 200000  # Max steps
     learning_delay = 1000  # Steps before starting learning

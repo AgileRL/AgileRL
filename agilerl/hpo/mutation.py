@@ -171,7 +171,6 @@ class Mutations:
         rl_hp: float,
         mutation_sd: float = 0.1,
         activation_selection: List[str] = ["ReLU", "ELU", "GELU"],
-        agent_ids: Optional[List[str]] = None,
         mutate_elite: bool = True,
         rand_seed: Optional[int] = None,
         device: str = "cpu",
@@ -246,7 +245,6 @@ class Mutations:
         self.mutate_elite = mutate_elite
         self.device = device
         self.accelerator = accelerator
-        self.agent_ids = agent_ids
 
         self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(pretraining=True)
         self.mut_options, self.mut_proba = self.get_mutations_options()

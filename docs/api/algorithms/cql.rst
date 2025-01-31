@@ -75,33 +75,46 @@ Example
 Neural Network Configuration
 ----------------------------
 
-To configure the network architecture, pass a dict to the CQN ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
-For a basic vector observation space, this can be as simple as:
+To configure the architecture of the network's encoder / head, pass a kwargs dict to the CQN ``net_config`` field. 
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and 
+:ref:`EvolvableMultiInput<multi_input>`.
+
+For discrete / vector observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-      'encoder_config': {
-        'hidden_size': [32]  # Network hidden size
-      }
-      'head_config': {
-        'hidden_size': [32]
+        "encoder_config": {'hidden_size': [32, 32]},  # Network head hidden size
+        "head_config": {'hidden_size': [32]}      # Network head hidden size
     }
 
-Or for an image space:
+For image observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-      'encoder_config': {
+      "encoder_config": {
         'channel_size': [32, 32], # CNN channel size
         'kernel_size': [8, 4],   # CNN kernel size
         'stride_size': [4, 2],   # CNN stride size
-      }
-      'head_config': {
-        'hidden_size': [128] # Network head hidden size
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
     }
+
+For dictionary / tuple observations containing any combination of image, discrete, and vector observations:
+
+.. code-block:: python
+
+  NET_CONFIG = {
+      "encoder_config": {
+        'hidden_size': [32, 32],  # Network head hidden size
+        'channel_size': [32, 32], # CNN channel size
+        'kernel_size': [8, 4],   # CNN kernel size
+        'stride_size': [4, 2],   # CNN stride size
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
+    }
+
 
 .. code-block:: python
 
@@ -110,9 +123,7 @@ Or for an image space:
     observation_space=observation_space,
     action_space=action_space,
     net_config=NET_CONFIG
-    normalize_images=True
     )
-
 
 Saving and loading agents
 -------------------------
@@ -124,7 +135,7 @@ To save an agent, use the ``save_checkpoint`` method:
   from agilerl.algorithms.cqn import CQN
 
   # Create CQN agent
-  agent = CQN(observation_space=observation_space, action_space=action_space)
+  agent = CQN(observation_space, action_space)
 
   checkpoint_path = "path/to/checkpoint"
   agent.save_checkpoint(checkpoint_path)

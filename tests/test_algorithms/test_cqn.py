@@ -15,6 +15,11 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 class DummyCQN(CQN):
     def __init__(self, observation_space, action_space, *args, **kwargs):
         super().__init__(observation_space, action_space, *args, **kwargs)

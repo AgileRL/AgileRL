@@ -33,7 +33,9 @@ Example
     field_names = ["state", "action", "reward", "next_state", "done"]
     memory = ReplayBuffer(memory_size=10000, field_names=field_names)
 
-    bandit = NeuralTS(state_dim=context_dim, action_dim=action_dim)
+    observation_space = spaces.Box(low=features.values.min(), high=features.values.max())
+    action_space = spaces.Discrete(action_dim)
+    bandit = NeuralTS(observation_space, action_space)   # Create NeuralTS agent
 
     context = env.reset()  # Reset environment at start of episode
     for _ in range(500):
@@ -56,31 +58,49 @@ Example
 Neural Network Configuration
 ----------------------------
 
-To configure the network architecture, pass a kwargs dict to the NeuralTS ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
-For an MLP, this can be as simple as:
+To configure the architecture of the network's encoder / head, pass a kwargs dict to the NeuralTS ``net_config`` field. 
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and 
+:ref:`EvolvableMultiInput<multi_input>`.
+
+For discrete / vector observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'hidden_size': [32, 32]  # Network hidden size
+        "encoder_config": {'hidden_size': [32, 32]},  # Network head hidden size
+        "head_config": {'hidden_size': [32]}      # Network head hidden size
     }
 
-Or for a CNN:
+For image observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'hidden_size': [128],    # Network hidden size
+      "encoder_config": {
         'channel_size': [32, 32], # CNN channel size
         'kernel_size': [8, 4],   # CNN kernel size
         'stride_size': [4, 2],   # CNN stride size
-        'normalize': True   # Normalize image from range [0,255] to [0,1]
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
+    }
+
+For dictionary / tuple observations containing any combination of image, discrete, and vector observations:
+
+.. code-block:: python
+
+  NET_CONFIG = {
+      "encoder_config": {
+        'hidden_size': [32, 32],  # Network head hidden size
+        'channel_size': [32, 32], # CNN channel size
+        'kernel_size': [8, 4],   # CNN kernel size
+        'stride_size': [4, 2],   # CNN stride size
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
     }
 
 .. code-block:: python
 
-  agent = NeuralTS(state_dim=state_dim, action_dim=action_dim, net_config=NET_CONFIG)   # Create NeuralTS agent
+  agent = NeuralTS(observation_space, action_space, net_config=NET_CONFIG)   # Create NeuralTS agent
 
 Saving and loading agents
 -------------------------
@@ -91,7 +111,7 @@ To save an agent, use the ``save_checkpoint`` method:
 
   from agilerl.algorithms.neural_ts import NeuralTS
 
-  agent = NeuralTS(state_dim=state_dim, action_dim=action_dim)   # Create NeuralTS agent
+  agent = NeuralTS(observation_space, action_space)   # Create NeuralTS agent
 
   checkpoint_path = "path/to/checkpoint"
   agent.save_checkpoint(checkpoint_path)

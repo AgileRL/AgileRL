@@ -59,6 +59,7 @@ are more likely to remain present in the population. The sequence of evolution (
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="CQN",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
@@ -144,19 +145,24 @@ Alternatively, use a custom training loop. Combining all of the above:
 
 .. code-block:: python
 
-    from agilerl.components.replay_buffer import ReplayBuffer
-    from agilerl.hpo.mutation import Mutations
-    from agilerl.hpo.tournament import TournamentSelection
-    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
     import h5py
     import numpy as np
     import torch
     from tqdm import trange
 
+    from agilerl.components.replay_buffer import ReplayBuffer
+    from agilerl.hpo.mutation import Mutations
+    from agilerl.hpo.tournament import TournamentSelection
+    from agilerl.utils.utils import (
+        create_population,
+        make_vect_envs,
+        observation_space_channels_to_first
+    )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
     }
 
     INIT_HP = {
@@ -177,11 +183,11 @@ Alternatively, use a custom training loop. Combining all of the above:
 
     observation_space = env.single_observation_space
     action_space - env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="CQN",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration

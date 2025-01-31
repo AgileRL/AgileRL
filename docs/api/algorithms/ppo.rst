@@ -33,25 +33,28 @@ Example
 .. code-block:: python
 
   import gymnasium as gym
-  from agilerl.utils.utils import make_vect_envs
+  from agilerl.utils.algo_utils import obs_channels_to_first
+  from agilerl.utils.utils import make_vect_envs, observation_space_channels_first
   from agilerl.algorithms.ppo import PPO
 
   # Create environment
   num_envs = 1
   env = make_vect_envs('LunarLanderContinuous-v2', num_envs=num_envs)
+  observation_space = env.observation_space
+  action_space = env.action_space
 
   channels_last = False # Swap image channels dimension from last to first [H, W, C] -> [C, H, W]
-  discrete_actions = False # Discrete action space
 
   if channels_last:
-      state_dim = (state_dim[2], state_dim[0], state_dim[1])
+      observation_space = observation_space_channels_first(observation_space)
 
-  agent = PPO(observation_space=observation_space, action_space=action_space,  discrete_actions=discrete_actions)   # Create PPO agent
+  agent = PPO(observation_space, action_space)   # Create PPO agent
 
   while True:
       for step in range(agent.learn_step):
           if channels_last:
               state = obs_channels_to_first(state)
+
           # Get next action from agent
           action, log_prob, _, value = agent.get_action(state)
           next_state, reward, done, trunc, _ = env.step(action)  # Act in environment
@@ -80,31 +83,54 @@ Example
 Neural Network Configuration
 ----------------------------
 
-To configure the network architecture, pass a kwargs dict to the PPO ``net_config`` field. Full arguments can be found in the documentation
-of :ref:`EvolvableMLP<mlp>` and :ref:`EvolvableCNN<cnn>`.
-For an MLP, this can be as simple as:
+To configure the architecture of the network's encoder / head, pass a kwargs dict to the PPO ``net_config`` field. 
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and 
+:ref:`EvolvableMultiInput<multi_input>`.
+
+For discrete / vector observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'hidden_size': [32, 32]  # Network hidden size
+        "encoder_config": {'hidden_size': [32, 32]},  # Network head hidden size
+        "head_config": {'hidden_size': [32]}      # Network head hidden size
     }
 
-Or for a CNN:
+For image observations:
 
 .. code-block:: python
 
   NET_CONFIG = {
-        'hidden_size': [128],    # Network hidden size
-        'channnel_size': [32, 32], # CNN channel size
+      "encoder_config": {
+        'channel_size': [32, 32], # CNN channel size
         'kernel_size': [8, 4],   # CNN kernel size
         'stride_size': [4, 2],   # CNN stride size
-        'normalize': True   # Normalize image from range [0,255] to [0,1]
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
+    }
+
+For dictionary / tuple observations containing any combination of image, discrete, and vector observations:
+
+.. code-block:: python
+
+  NET_CONFIG = {
+      "encoder_config": {
+        'hidden_size': [32, 32],  # Network head hidden size
+        'channel_size': [32, 32], # CNN channel size
+        'kernel_size': [8, 4],   # CNN kernel size
+        'stride_size': [4, 2],   # CNN stride size
+      },
+      "head_config": {'hidden_size': [32]}  # Network head hidden size
     }
 
 .. code-block:: python
 
-  agent = PPO(observation_space=observation_space, action_space=action_space,  discrete_actions=discrete_actions, net_config=NET_CONFIG)   # Create PPO agent
+  # Create PPO agent
+  agent = PPO(
+    observation_space=observation_space,
+    action_space=action_space,
+    net_config=NET_CONFIG
+    )
 
 Saving and loading agents
 -------------------------
@@ -115,7 +141,7 @@ To save an agent, use the ``save_checkpoint`` method:
 
   from agilerl.algorithms.ppo import PPO
 
-  agent = PPO(observation_space=observation_space, action_space=action_space,  discrete_actions=discrete_actions)   # Create PPO agent
+  agent = PPO(observation_space, action_space)   # Create PPO agent
 
   checkpoint_path = "path/to/checkpoint"
   agent.save_checkpoint(checkpoint_path)

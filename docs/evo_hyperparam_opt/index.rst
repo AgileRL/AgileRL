@@ -52,11 +52,11 @@ prove relatively beneficial to training, then that agent is more likely to be pr
 population.
 
 The ``Mutations()`` class is used to mutate agents with pre-set probabilities. The available mutations currently implemented are:
-    * No mutation
-    * Network architecture mutation - adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
-    * Network parameters mutation - mutating weights with Gaussian noise.
-    * Network activation layer mutation - change of activation layer.
-    * RL algorithm mutation - mutation of learning hyperparameter, such as learning rate or batch size.
+    * **No mutation**
+    * **Network architecture mutations**: Currently involves adding layers or nodes. Trained weights are reused and new weights are initialized randomly.
+    * **Network parameters mutation**: Mutating weights with Gaussian noise.
+    * **Network activation layer mutation**: Change of activation layer.
+    * **RL algorithm mutation**: Mutation of learning hyperparameter, such as learning rate or batch size.
 
 ``Mutations.mutation()`` returns a mutated population.
 

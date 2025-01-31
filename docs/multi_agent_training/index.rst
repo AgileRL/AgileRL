@@ -40,7 +40,7 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
 
     # Define the network configuration
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
     }
 
     # Define the initial hyperparameters
@@ -70,39 +70,19 @@ hyper-parameter tuning is only compatible with **cooperative** multi-agent envir
     env.reset()
 
     # Configure the multi-agent algo input arguments
-    try:
-        state_dim = [env.single_observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.single_observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.single_action_space(agent).n for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = True
-        INIT_HP["MAX_ACTION"] = None
-        INIT_HP["MIN_ACTION"] = None
-    except Exception:
-        action_dim = [env.single_action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [env.single_action_space(agent).high for agent in env.agents]
-        INIT_HP["MIN_ACTION"] = [env.single_action_space(agent).low for agent in env.agents]
-
-    # Not applicable to MPE environments, used when images are used for observations (Atari environments)
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim
-        ]
+        observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Create a population ready for evolutionary hyper-parameter optimisation
     pop = create_population(
         "MADDPG",
-        state_dim,
-        action_dim,
-        one_hot,
+        observation_spaces,
+        action_spaces,
         NET_CONFIG,
         INIT_HP,
         population_size=INIT_HP["POP_SIZE"],
@@ -183,13 +163,14 @@ Alternatively, use a custom training loop. Combining all of the above:
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.utils.utils import create_population
+    from agilerl.utils.algo_utils import obs_channels_to_first
     from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Define the network configuration
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
     }
 
     # Define the initial hyperparameters
@@ -219,39 +200,19 @@ Alternatively, use a custom training loop. Combining all of the above:
     env.reset()
 
     # Configure the multi-agent algo input arguments
-    try:
-        state_dim = [env.observation_space(agent).n for agent in env.agents]
-        one_hot = True
-    except Exception:
-        state_dim = [env.observation_space(agent).shape for agent in env.agents]
-        one_hot = False
-    try:
-        action_dim = [env.action_space(agent).n for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = True
-        INIT_HP["MAX_ACTION"] = None
-        INIT_HP["MIN_ACTION"] = None
-    except Exception:
-        action_dim = [env.action_space(agent).shape[0] for agent in env.agents]
-        INIT_HP["DISCRETE_ACTIONS"] = False
-        INIT_HP["MAX_ACTION"] = [env.action_space(agent).high for agent in env.agents]
-        INIT_HP["MIN_ACTION"] = [env.action_space(agent).low for agent in env.agents]
-
-    # Not applicable to MPE environments, used when images are used for observations (Atari environments)
+    observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
+    action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        state_dim = [
-            (state_dim[2], state_dim[0], state_dim[1]) for state_dim in state_dim
-        ]
+        observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
-    INIT_HP["N_AGENTS"] = env.num_agents
     INIT_HP["AGENT_IDS"] = env.agents
 
     # Create a population ready for evolutionary hyper-parameter optimisation
     pop = create_population(
         "MADDPG",
-        state_dim,
-        action_dim,
-        one_hot,
+        observation_spaces,
+        action_spaces,
         NET_CONFIG,
         INIT_HP,
         population_size=INIT_HP["POP_SIZE"],
@@ -285,7 +246,6 @@ Alternatively, use a custom training loop. Combining all of the above:
         activation=0,  # Probability of activation function mutation
         rl_hp=0.2,  # Probability of RL hyperparameter mutation
         mutation_sd=0.1,  # Mutation strength
-        agent_ids=INIT_HP["AGENT_IDS"],
         rand_seed=1,
         device=device,
     )
@@ -312,7 +272,7 @@ Alternatively, use a custom training loop. Combining all of the above:
             steps = 0
             if INIT_HP["CHANNELS_LAST"]:
                 state = {
-                    agent_id: np.moveaxis(s, [-1], [-3])
+                    agent_id: obs_channels_to_first(s)
                     for agent_id, s in state.items()
                 }
 
@@ -339,7 +299,7 @@ Alternatively, use a custom training loop. Combining all of the above:
                 # Image processing if necessary for the environment
                 if INIT_HP["CHANNELS_LAST"]:
                     next_state = {
-                        agent_id: np.moveaxis(ns, [-1], [-3])
+                        agent_id: obs_channels_to_first(ns)
                         for agent_id, ns in next_state.items()
                     }
 

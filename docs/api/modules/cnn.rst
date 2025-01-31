@@ -9,5 +9,3 @@ Parameters
 .. autoclass:: agilerl.modules.cnn.EvolvableCNN
   :members:
 
-.. autoclass:: agilerl.modules.cnn.NoisyLinear
-  :members:

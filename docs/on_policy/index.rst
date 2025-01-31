@@ -44,12 +44,11 @@ are more likely to remain present in the population. The sequence of evolution (
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "encoder_config": {"hidden_size": [32, 32]}  # Actor head hidden size
     }
 
     INIT_HP = {
         "POP_SIZE": 6,  # Population size
-        "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "LEARN_STEP": 128,  # Learning frequency
@@ -71,11 +70,11 @@ are more likely to remain present in the population. The sequence of evolution (
 
     observation_space = env.single_observation_space
     action_space - env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="PPO",  # RL algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
@@ -84,7 +83,6 @@ are more likely to remain present in the population. The sequence of evolution (
         num_envs=num_envs,  # Number of vectorized envs
         device=device,
     )
-
 
 On-Policy Training Loop
 -----------------------
@@ -131,12 +129,11 @@ Alternatively, use a custom on-policy training loop:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
     }
 
     INIT_HP = {
         "POP_SIZE": 6,  # Population size
-        "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 1e-3,  # Learning rate
         "LEARN_STEP": 128,  # Learning frequency
@@ -158,11 +155,11 @@ Alternatively, use a custom on-policy training loop:
 
     observation_space = env.single_observation_space
     action_space - env.single_action_space
-
     if INIT_HP['CHANNELS_LAST']:
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="PPO",  # RL algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration

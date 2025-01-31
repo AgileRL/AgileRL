@@ -17,6 +17,7 @@ from agilerl.components.sampler import Sampler
 from agilerl.algorithms.core.base import MultiAgentAlgorithm
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     tournament_selection_and_mutation,
     save_population_checkpoint,
@@ -226,12 +227,12 @@ def train_multi_agent(
             if swap_channels:
                 if not is_vectorised:
                     state = {
-                        agent_id: np.moveaxis(np.expand_dims(s, 0), [-1], [-3])
+                        agent_id: obs_channels_to_first(np.expand_dims(s, 0))
                         for agent_id, s in state.items()
                     }
                 else:
                     state = {
-                        agent_id: np.moveaxis(s, [-1], [-3])
+                        agent_id: obs_channels_to_first(s)
                         for agent_id, s in state.items()
                     }
             for idx_step in range(evo_steps // num_envs):

@@ -1,7 +1,7 @@
 .. _ppo_tutorial:
 
 Acrobot with PPO
-==========================
+=================
 
 In this tutorial, we will be training and optimising the hyperparameters of a population of PPO agents
 to beat the Gymnasium acrobot environment. AgileRL is a deep reinforcement learning
@@ -37,16 +37,21 @@ Dependencies
     # Author: Michael Pratt
     import os
 
+    from tqdm import trange
     import imageio
     import gymnasium as gym
     import numpy as np
     import torch
+
     from agilerl.algorithms.ppo import PPO
     from agilerl.hpo.mutation import Mutations
     from agilerl.hpo.tournament import TournamentSelection
     from agilerl.training.train_on_policy import train_on_policy
-    from agilerl.utils.utils import create_population, make_vect_envs, observation_space_channels_to_first
-    from tqdm import trange
+    from agilerl.utils.utils import (
+        create_population,
+        make_vect_envs,
+        observation_space_channels_to_first
+    )
 
 
 Defining Hyperparameters
@@ -61,7 +66,6 @@ Additionally, we also define our upper and lower limits for these hyperparameter
     # Initial hyperparameters
     INIT_HP = {
         "POP_SIZE": 4,  # Population size
-        "DISCRETE_ACTIONS": True,  # Discrete action space
         "BATCH_SIZE": 128,  # Batch size
         "LR": 0.001,  # Learning rate
         "LEARN_STEP": 1024,  # Learning frequency
@@ -94,44 +98,26 @@ Additionally, we also define our upper and lower limits for these hyperparameter
         "PARAMS_MUT": 0.2,  # Network parameters mutation
         "ACT_MUT": 0.2,  # Activation layer mutation
         "RL_HP_MUT": 0.2,  # Learning HP mutation
-        # Learning HPs to choose from
-        "RL_HP_SELECTION": ["lr", "batch_size", "learn_step"],
         "MUT_SD": 0.1,  # Mutation strength
         "RAND_SEED": 42,  # Random seed
-        # Define max and min limits for mutating RL hyperparams
-        "MIN_LR": 0.0001,
-        "MAX_LR": 0.01,
-        "MIN_BATCH_SIZE": 8,
-        "MAX_BATCH_SIZE": 1024,
-        "MIN_LEARN_STEP": 256,
-        "MAX_LEARN_STEP": 8192,
     }
 
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the acrobot environment as you can use PPO with
-either discrete or continuous action spaces. The snippet below creates a vectorised environment and then assigns the
-correct values for ``state_dim`` and ``one_hot``, depending on whether the observation or action spaces are discrete
-or continuous.
+either discrete or continuous action spaces. The snippet below creates a vectorised environment and 
+initialises the population of agents from the corresponding observation and action spaces.
 
 .. code-block:: python
 
     num_envs=8
     env = make_vect_envs("Acrobot-v1", num_envs=num_envs)  # Create environment
-    try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
 
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
         # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
 Create a Population of Agents
 -----------------------------
@@ -148,14 +134,24 @@ followed by mutations) is detailed further below.
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"arch": "mlp", "hidden_size": [64, 64]}
+    net_config = {"head_config": {"hidden_size": [64, 64]}}
+
+    # RL hyperparameters configuration for mutation during training
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=1e-4, max=1e-2),
+        batch_size = RLParameter(
+            min=8, max=1024, dtype=int
+            )
+    )
 
     # Define a population
     pop = create_population(
+        algo="PPO",  # RL algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=net_config,  # Network configuration
         INIT_HP=INIT_HP,  # Initial hyperparameter
+        hp_config=hp_config,  # RL hyperparameter configuration
         population_size=INIT_HP["POP_SIZE"],  # Population size
         num_envs=num_envs,
         device=device,

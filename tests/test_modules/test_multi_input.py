@@ -17,6 +17,11 @@ DictOrTupleSpace = Union[Dict, Tuple]
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 ######### Test instantiation #########
 
 @pytest.mark.parametrize(

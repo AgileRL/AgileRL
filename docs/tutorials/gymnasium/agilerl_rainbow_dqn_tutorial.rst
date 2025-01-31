@@ -105,28 +105,19 @@ is the case, we do not need to define a mutatinos parameters dictionary.
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the cartpole environment as Rainbow-DQN can only be
-used with discrete action environments. The snippet below creates a vectorised environment and then assigns the
-correct values for ``state_dim`` and ``one_hot``, depending on whether the observation or action spaces are discrete
-or continuous.
+used with discrete action environments. The snippet below creates a vectorised environment and 
+initialises the population of agents from the corresponding observation and action spaces.
 
 .. code-block:: python
 
     num_envs=16
     env = make_vect_envs("CartPole-v1", num_envs=num_envs)  # Create environment
-    try:
-        state_dim = env.single_observation_space.n  # Discrete observation space
-        one_hot = True  # Requires one-hot encoding
-    except Exception:
-        state_dim = env.single_observation_space.shape  # Continuous observation space
-        one_hot = False  # Does not require one-hot encoding
-    try:
-        action_dim = env.single_action_space.n  # Discrete action space
-    except Exception:
-        action_dim = env.single_action_space.shape[0]  # Continuous action space
 
+    observation_space = env.single_observation_space
+    action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:
         # Adjust dimensions for PyTorch API (C, H, W), for envs with RGB image states
-        state_dim = (state_dim[2], state_dim[0], state_dim[1])
+        observation_space = observation_space_channels_to_first(observation_space)
 
 Instantiate an Agent
 --------------------
@@ -137,14 +128,23 @@ Instantiate an Agent
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Define the network configuration of a simple mlp with two hidden layers, each with 64 nodes
-    net_config = {"arch": "mlp", "hidden_size": [128, 128]}
+    net_config = {"head_config": {"hidden_size": [64, 64]}}
+
+    # RL hyperparameters configuration for mutation during training
+    hp_config = HyperparameterConfig(
+        lr = RLParameter(min=6.25e-5, max=1e-2),
+        learn_step = RLParameter(min=1, max=10),
+        batch_size = RLParameter(
+            min=8, max=512, dtype=int
+            )
+    )
 
     # Define a Rainbow-DQN agent
     rainbow_dqn = RainbowDQN(
-        state_dim=state_dim,
-        action_dim=action_dim,
-        one_hot=one_hot,
+        observation_space=observation_space,
+        action_space=action_space,
         net_config=net_config,
+        hp_config=hp_config,
         batch_size=INIT_HP["BATCH_SIZE"],
         lr=INIT_HP["LR"],
         learn_step=INIT_HP["LEARN_STEP"],

@@ -51,7 +51,7 @@ are more likely to remain present in the population. The sequence of evolution (
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]}  # Actor head hidden size
     }
 
     INIT_HP = {
@@ -75,6 +75,7 @@ are more likely to remain present in the population. The sequence of evolution (
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="DQN",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration
@@ -108,8 +109,6 @@ To sample from the replay buffer, call ``ReplayBuffer.sample()``.
         field_names=field_names,  # Field names to store in memory
         device=device,
     )
-
-
 
 .. _trainloop_off_policy:
 
@@ -157,7 +156,7 @@ Alternatively, use a custom training loop. Combining all of the above:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     NET_CONFIG = {
-        "hidden_size": [32, 32],  # Actor hidden size
+        "head_config": {"hidden_size": [32, 32]}  # Actor hidden size
     }
 
     INIT_HP = {
@@ -181,6 +180,7 @@ Alternatively, use a custom training loop. Combining all of the above:
         observation_space = observation_space_channels_to_first(observation_space)
 
     pop = create_population(
+        algo="DQN",  # Algorithm
         observation_space=observation_space,  # State dimension
         action_space=action_space,  # Action dimension
         net_config=NET_CONFIG,  # Network configuration

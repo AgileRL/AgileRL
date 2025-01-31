@@ -42,9 +42,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
         for env, learn_steps in vector_envs:
             algo_args = {
-                "state_dim": (env.observation_space.n,),
-                "action_dim": env.action_space.n,
-                "one_hot": True if env.observation_space.n > 1 else False,
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
                 "lr": 1e-2,
             }
 
@@ -80,11 +79,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
         for env, learn_steps in cont_vector_envs:
             algo_args = {
-                "state_dim": (env.observation_space.n,),
-                "action_dim": env.action_space.shape[0],
-                "one_hot": True if env.observation_space.n > 1 else False,
-                "max_action": 1.0,
-                "min_action": 0.0,
+                "observation_space": env.observation_space,
+                "action_space": env.action_space,
                 "lr_actor": 1e-2,
                 "lr_critic": 1e-2,
             }
@@ -121,10 +117,8 @@ correctly functioning agent should be able to learn, and can be used to diagnose
 
           for env, learn_steps in cont_vector_envs:
               algo_args = {
-                  "state_dim": (env.observation_space.n,),
-                  "action_dim": env.action_space.shape[0],
-                  "one_hot": True if env.observation_space.n > 1 else False,
-                  "discrete_actions": False,
+                  "observation_space": env.observation_space,
+                  "action_space": env.action_space,
                   "lr": 0.001
               }
 
@@ -157,15 +151,10 @@ See function docs: :ref:`agilerl.utils.probe_envs.check_policy_on_policy_with_pr
 
         for env, learn_steps in vector_envs:
             algo_args = {
-                "state_dims": [(env.observation_space[agent].n,) for agent in env.agents],
-                "action_dims": [env.action_space[agent].n for agent in env.agents],
-                "one_hot": True,
-                "n_agents": env.num_agents,
+                "observation_spaces": [env.observation_spaces[agent] for agent in env.agents],
+                "action_spaces": [env.action_space[agent] for agent in env.agents],
                 "agent_ids": env.possible_agents,
-                "max_action": [(1.0,), (1.0,)],
-                "min_action": [(0.0,), (0.0,)],
-                "discrete_actions": True,
-                "net_config": {"arch": "mlp", "hidden_size": [32, 32]},
+                "net_config": {"head_config": {"hidden_size": [32, 32]}},
                 "batch_size": 256,
             }
             field_names = ["state", "action", "reward", "next_state", "done"]

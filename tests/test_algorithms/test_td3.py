@@ -18,6 +18,11 @@ from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
 from tests.helper_functions import generate_random_box_space, generate_discrete_space
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 class DummyTD3(TD3):
     def __init__(self, observation_space, action_space, *args, **kwargs):
         super().__init__(observation_space, action_space, *args, **kwargs)

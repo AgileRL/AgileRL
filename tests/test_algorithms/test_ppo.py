@@ -18,6 +18,11 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import generate_discrete_space, generate_random_box_space
 
+@pytest.fixture(autouse=True)
+def cleanup():
+    yield  # Run the test first
+    torch.cuda.empty_cache()  # Free up GPU memory
+
 class DummyPPO(PPO):
     def __init__(
         self, observation_space, action_space, *args, **kwargs
