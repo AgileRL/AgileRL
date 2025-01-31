@@ -11,7 +11,7 @@ We are constantly adding more neural network architectures, with a view to add r
 
 .. toctree::
    :maxdepth: 1
-   
+
    base
    mlp
    cnn

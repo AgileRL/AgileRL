@@ -1,25 +1,26 @@
-from typing import List, Tuple, Optional, Any, Dict
-import os
 import warnings
 from datetime import datetime
-from accelerate import Accelerator
+from typing import Any, Dict, List, Optional, Tuple
+
 import gymnasium as gym
 import numpy as np
 import wandb
+from accelerate import Accelerator
 from tqdm import trange
 
 from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
-    tournament_selection_and_mutation,
+    init_wandb,
     save_population_checkpoint,
-    init_wandb
+    tournament_selection_and_mutation,
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]   
+PopulationType = List[RLAlgorithm]
+
 
 def train_on_policy(
     env: gym.Env,
@@ -135,7 +136,7 @@ def train_on_policy(
             init_hyperparams=INIT_HP,
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
-            accelerator=accelerator
+            accelerator=accelerator,
         )
 
     # Detect if environment is vectorised
@@ -227,7 +228,7 @@ def train_on_policy(
                         action = action[0]
                         log_prob = log_prob[0]
                         value = value[0]
-                    
+
                     next_state, reward, done, trunc, info = env.step(
                         action
                     )  # Act in environment
@@ -256,7 +257,6 @@ def train_on_policy(
                             completed_episode_scores.append(scores[idx])
                             agent.scores.append(scores[idx])
                             scores[idx] = 0
-
 
                 pbar.update(learn_steps // len(pop))
 
@@ -354,7 +354,7 @@ def train_on_policy(
                 algo=algo,
                 elite_path=elite_path,
                 save_elite=save_elite,
-                accelerator=accelerator
+                accelerator=accelerator,
             )
 
         if verbose:
@@ -387,7 +387,7 @@ def train_on_policy(
                     population=pop,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
-                    accelerator=accelerator
+                    accelerator=accelerator,
                 )
                 checkpoint_count += 1
 

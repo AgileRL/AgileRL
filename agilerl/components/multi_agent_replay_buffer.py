@@ -1,16 +1,18 @@
-from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple, Union
 import random
 from collections import deque, namedtuple
-import numpy as np
 from numbers import Number
-from numpy.typing import ArrayLike
+from typing import Any, Deque, Dict, List, NamedTuple, Optional, Tuple, Union
+
+import numpy as np
 import torch
+from numpy.typing import ArrayLike
 
 from agilerl.typing import NumpyObsType
 from agilerl.utils.algo_utils import obs_to_tensor
 
 NpTransitionType = Union[Number, ArrayLike, Dict[str, ArrayLike]]
 TorchTransitionType = Union[torch.Tensor, Dict[str, torch.Tensor]]
+
 
 class MultiAgentReplayBuffer:
     """The Multi-Agent Experience Replay Buffer class. Used to store multiple agents'
@@ -26,7 +28,13 @@ class MultiAgentReplayBuffer:
     :type device: Optional[str]
     """
 
-    def __init__(self, memory_size: int, field_names: List[str], agent_ids: List[str], device: Optional[str] = None):
+    def __init__(
+        self,
+        memory_size: int,
+        field_names: List[str],
+        agent_ids: List[str],
+        device: Optional[str] = None,
+    ):
         assert memory_size > 0, "Memory size must be greater than zero."
         assert len(field_names) > 0, "Field names must contain at least one field name."
         assert len(agent_ids) > 0, "Agent ids must contain at least one agent id."
@@ -34,7 +42,9 @@ class MultiAgentReplayBuffer:
         self.memory_size: int = memory_size
         self.memory: Deque = deque(maxlen=memory_size)
         self.field_names: List[str] = field_names
-        self.experience: NamedTuple = namedtuple("Experience", field_names=self.field_names)
+        self.experience: NamedTuple = namedtuple(
+            "Experience", field_names=self.field_names
+        )
         self.counter: int = 0
         self.device: Optional[str] = device
         self.agent_ids: List[str] = agent_ids
@@ -89,7 +99,7 @@ class MultiAgentReplayBuffer:
             ts = np.array(ts)
             if ts.ndim == 1:
                 ts = np.expand_dims(ts, axis=1)
-        
+
         return ts
 
     def _add(self, *args: Any) -> None:
@@ -102,7 +112,9 @@ class MultiAgentReplayBuffer:
         e = self.experience(*args)
         self.memory.append(e)
 
-    def _process_transition(self, experiences: List[NamedTuple], np_array: bool = False) -> Dict[str, Dict[str, Any]]:
+    def _process_transition(
+        self, experiences: List[NamedTuple], np_array: bool = False
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Returns transition dictionary from experiences.
 
@@ -168,7 +180,9 @@ class MultiAgentReplayBuffer:
         self._add(*args)
         self.counter += 1
 
-    def _reorganize_dicts(self, *args: Dict[str, np.ndarray]) -> Tuple[List[Dict[str, np.ndarray]], ...]:
+    def _reorganize_dicts(
+        self, *args: Dict[str, np.ndarray]
+    ) -> Tuple[List[Dict[str, np.ndarray]], ...]:
         """
         Reorganizes dictionaries from vectorized to unvectorized experiences.
 

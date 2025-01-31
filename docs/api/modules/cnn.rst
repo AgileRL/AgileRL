@@ -8,4 +8,3 @@ Parameters
 
 .. autoclass:: agilerl.modules.cnn.EvolvableCNN
   :members:
-

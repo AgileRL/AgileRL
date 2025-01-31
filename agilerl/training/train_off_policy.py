@@ -1,29 +1,34 @@
-from typing import List, Tuple, Optional, Any, Dict
 import time
 import warnings
-import wandb
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+import gymnasium as gym
 import numpy as np
+import wandb
+from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
-import gymnasium as gym
-from accelerate import Accelerator
 
-from agilerl.components.replay_buffer import PrioritizedReplayBuffer, MultiStepReplayBuffer
+from agilerl.algorithms.core.base import RLAlgorithm
+from agilerl.components.replay_buffer import (
+    MultiStepReplayBuffer,
+    PrioritizedReplayBuffer,
+)
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
-    tournament_selection_and_mutation,
+    init_wandb,
     save_population_checkpoint,
-    init_wandb
+    tournament_selection_and_mutation,
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]   
+PopulationType = List[RLAlgorithm]
+
 
 def train_off_policy(
     env: gym.Env,
@@ -58,7 +63,6 @@ def train_off_policy(
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
-
     """The general online RL training function. Returns trained population of agents
     and their fitnesses.
 
@@ -167,7 +171,7 @@ def train_off_policy(
             init_hyperparams=INIT_HP,
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
-            accelerator=accelerator
+            accelerator=accelerator,
         )
 
     # Detect if environment is vectorised
@@ -334,7 +338,7 @@ def train_off_policy(
                             done,
                             is_vectorised=is_vectorised,
                         )
-                
+
                 if per:
                     fraction = min(
                         ((agent.steps[-1] + idx_step + 1) * num_envs / max_steps), 1.0
@@ -539,7 +543,7 @@ def train_off_policy(
                 algo=algo,
                 elite_path=elite_path,
                 save_elite=save_elite,
-                accelerator=accelerator
+                accelerator=accelerator,
             )
 
         if verbose:
@@ -572,7 +576,7 @@ def train_off_policy(
                     population=pop,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
-                    accelerator=accelerator
+                    accelerator=accelerator,
                 )
                 checkpoint_count += 1
 

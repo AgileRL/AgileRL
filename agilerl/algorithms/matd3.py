@@ -1,28 +1,37 @@
-from typing import Optional, Any, List, Tuple, Dict, Union
 import copy
 import warnings
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.typing import NumpyObsType, TensorDict, ArrayDict, InfosDict, ArrayLike, GymEnvType
 from agilerl.algorithms.core import MultiAgentAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
-from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.networks.actors import DeterministicActor
 from agilerl.modules.base import EvolvableModule
-from agilerl.utils.evolvable_networks import get_default_encoder_config
+from agilerl.modules.configs import MlpNetConfig
+from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.typing import (
+    ArrayDict,
+    ArrayLike,
+    GymEnvType,
+    InfosDict,
+    NumpyObsType,
+    TensorDict,
+)
 from agilerl.utils.algo_utils import (
-    key_in_nested_dict,
-    make_safe_deepcopies,
     concatenate_spaces,
     contains_image_space,
-    multi_agent_sample_tensor_from_space
+    key_in_nested_dict,
+    make_safe_deepcopies,
+    multi_agent_sample_tensor_from_space,
 )
+from agilerl.utils.evolvable_networks import get_default_encoder_config
+
 
 class MATD3(MultiAgentAlgorithm):
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
@@ -82,6 +91,7 @@ class MATD3(MultiAgentAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
     actors: List[Union[nn.Module, DeterministicActor]]
     actor_targets: List[Union[nn.Module, DeterministicActor]]
     critics_1: List[Union[nn.Module, ContinuousQNetwork]]
@@ -176,7 +186,8 @@ class MATD3(MultiAgentAlgorithm):
             expl_noise
             if isinstance(expl_noise, list)
             else [
-                expl_noise * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
+                expl_noise
+                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
                 for action_dim in self.action_dims
             ]
         )
@@ -184,7 +195,8 @@ class MATD3(MultiAgentAlgorithm):
             mean_noise
             if isinstance(mean_noise, list)
             else [
-                mean_noise * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
+                mean_noise
+                * torch.ones(*(vect_noise_dim, action_dim), device=self.device)
                 for action_dim in self.action_dims
             ]
         )
@@ -216,8 +228,14 @@ class MATD3(MultiAgentAlgorithm):
                 raise TypeError(
                     "All critic networks must be instances of EvolvableModule"
                 )
-            self.actors, self.critics_1, self.critics_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
-            self.actor_targets, self.critic_targets_1, self.critic_targets_2 = make_safe_deepcopies(actor_networks, critic_networks[0], critic_networks[1])
+            self.actors, self.critics_1, self.critics_2 = make_safe_deepcopies(
+                actor_networks, critic_networks[0], critic_networks[1]
+            )
+            self.actor_targets, self.critic_targets_1, self.critic_targets_2 = (
+                make_safe_deepcopies(
+                    actor_networks, critic_networks[0], critic_networks[1]
+                )
+            )
         else:
             net_config = {} if net_config is None else net_config
             critic_net_config = copy.deepcopy(net_config)
@@ -233,35 +251,42 @@ class MATD3(MultiAgentAlgorithm):
                 critic_head_config = copy.deepcopy(head_config)
                 critic_head_config["output_activation"] = None
             else:
-                head_config = MlpNetConfig(hidden_size=[64], output_activation=output_activation)
+                head_config = MlpNetConfig(
+                    hidden_size=[64], output_activation=output_activation
+                )
                 critic_head_config = MlpNetConfig(hidden_size=[64])
 
             if encoder_config is None:
                 encoder_config = get_default_encoder_config(self.single_space)
-                critic_encoder_config= get_default_encoder_config(self.single_space)
-            
-            # For image spaces we need to give a sample input tensor to 
+                critic_encoder_config = get_default_encoder_config(self.single_space)
+
+            # For image spaces we need to give a sample input tensor to
             # build networks with Conv3d blocks approproately
             if self.is_image_space:
                 encoder_config["sample_input"] = multi_agent_sample_tensor_from_space(
                     self.single_space, self.n_agents, device=self.device
+                )
+                critic_encoder_config["sample_input"] = (
+                    multi_agent_sample_tensor_from_space(
+                        self.single_space,
+                        self.n_agents,
+                        device=self.device,
+                        critic=True,
                     )
-                critic_encoder_config['sample_input'] = multi_agent_sample_tensor_from_space(
-                    self.single_space, self.n_agents, device=self.device, critic=True
-                    )
+                )
 
-            net_config['encoder_config'] = encoder_config
-            net_config['head_config'] = head_config
+            net_config["encoder_config"] = encoder_config
+            net_config["head_config"] = head_config
 
-            critic_net_config['encoder_config'] = critic_encoder_config
-            critic_net_config['head_config'] = critic_head_config
+            critic_net_config["encoder_config"] = critic_encoder_config
+            critic_net_config["head_config"] = critic_head_config
 
             create_actor = lambda idx: DeterministicActor(
                 self.observation_spaces[idx],
                 self.action_spaces[idx],
                 n_agents=self.n_agents,
                 device=self.device,
-                **copy.deepcopy(net_config)
+                **copy.deepcopy(net_config),
             )
 
             # NOTE: Critic uses observations + actions of all agents to predict Q-value
@@ -270,7 +295,7 @@ class MATD3(MultiAgentAlgorithm):
                 action_space=concatenate_spaces(action_spaces),
                 n_agents=self.n_agents,
                 device=self.device,
-                **copy.deepcopy(critic_net_config)
+                **copy.deepcopy(critic_net_config),
             )
 
             self.actors = [create_actor(idx) for idx in range(self.n_agents)]
@@ -316,10 +341,7 @@ class MATD3(MultiAgentAlgorithm):
             self.wrap_models()
         elif self.torch_compiler:
             if (
-                any(
-                    actor.output_activation == "GumbelSoftmax"
-                    for actor in self.actors
-                )
+                any(actor.output_activation == "GumbelSoftmax" for actor in self.actors)
                 and self.torch_compiler != "default"
             ):
                 warnings.warn(
@@ -338,21 +360,17 @@ class MATD3(MultiAgentAlgorithm):
                 eval=self.actors,
                 shared=self.actor_targets,
                 policy=True,
-                multiagent=True
+                multiagent=True,
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics_1,
-                shared=self.critic_targets_1,
-                multiagent=True
+                eval=self.critics_1, shared=self.critic_targets_1, multiagent=True
             )
         )
         self.register_network_group(
             NetworkGroup(
-                eval=self.critics_2,
-                shared=self.critic_targets_2,
-                multiagent=True
+                eval=self.critics_2, shared=self.critic_targets_2, multiagent=True
             )
         )
 
@@ -479,11 +497,11 @@ class MATD3(MultiAgentAlgorithm):
         return action_masks, env_defined_actions, agent_masks
 
     def get_action(
-            self,
-            states: Dict[str, NumpyObsType],
-            training: bool = True,
-            infos: Optional[InfosDict] = None
-            ) -> Tuple[ArrayDict, ArrayDict]:
+        self,
+        states: Dict[str, NumpyObsType],
+        training: bool = True,
+        infos: Optional[InfosDict] = None,
+    ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -595,7 +613,7 @@ class MATD3(MultiAgentAlgorithm):
 
     def reset_action_noise(self, indices: List[int]) -> None:
         """Reset action noise.
-        
+
         :param indices: List of indices to reset noise for
         :type indices: List[int]
         """
@@ -606,7 +624,7 @@ class MATD3(MultiAgentAlgorithm):
     def learn(self, experiences: Tuple[TensorDict, ...]) -> Dict[str, float]:
         """Updates agent network parameters to learn from experiences.
 
-        :param experience: Tuple of dictionaries containing batched states, actions, 
+        :param experience: Tuple of dictionaries containing batched states, actions,
             rewards, next_states, dones in that order for each individual agent.
         :type experience: Tuple[Dict[str, torch.Tensor]]
 
@@ -615,9 +633,18 @@ class MATD3(MultiAgentAlgorithm):
         """
         states, actions, rewards, next_states, dones = experiences
 
-        actions = {agent_id: agent_actions.to(self.device) for agent_id, agent_actions in actions.items()}
-        rewards = {agent_id: agent_rewards.to(self.device) for agent_id, agent_rewards in rewards.items()}
-        dones = {agent_id: agent_dones.to(self.device) for agent_id, agent_dones in dones.items()}
+        actions = {
+            agent_id: agent_actions.to(self.device)
+            for agent_id, agent_actions in actions.items()
+        }
+        rewards = {
+            agent_id: agent_rewards.to(self.device)
+            for agent_id, agent_rewards in rewards.items()
+        }
+        dones = {
+            agent_id: agent_dones.to(self.device)
+            for agent_id, agent_dones in dones.items()
+        }
 
         # Preprocess observations
         states = self.preprocess_observation(states)
@@ -626,9 +653,7 @@ class MATD3(MultiAgentAlgorithm):
         next_actions = []
         with torch.no_grad():
             for i, agent_id_label in enumerate(self.agent_ids):
-                unscaled_actions = self.actor_targets[i](
-                    next_states[agent_id_label]
-                )
+                unscaled_actions = self.actor_targets[i](next_states[agent_id_label])
                 if not self.discrete_actions:
                     scaled_actions = torch.where(
                         unscaled_actions > 0,
@@ -734,7 +759,7 @@ class MATD3(MultiAgentAlgorithm):
         dones: TensorDict,
     ) -> Tuple[Optional[float], float]:
         """
-        Inner call to each agent for the learning/algo training steps, up until the soft updates. 
+        Inner call to each agent for the learning/algo training steps, up until the soft updates.
         Applies all forward/backward props.
 
         :param idx: Index of the agent
@@ -842,18 +867,14 @@ class MATD3(MultiAgentAlgorithm):
         # update actor and targets every policy_freq learn steps
         self.learn_counter[agent_id] += 1
         if self.learn_counter[agent_id] % self.policy_freq == 0:
-            stacked_detached_actions = torch.cat(
-                list(detached_actions.values()), dim=1
-            )
+            stacked_detached_actions = torch.cat(list(detached_actions.values()), dim=1)
             if self.accelerator is not None:
                 with critic_1.no_sync():
                     actor_loss = -critic_1(
                         stacked_states, stacked_detached_actions
                     ).mean()
             else:
-                actor_loss = -critic_1(
-                    stacked_states, stacked_detached_actions
-                ).mean()
+                actor_loss = -critic_1(stacked_states, stacked_detached_actions).mean()
 
             # actor loss backprop
             actor_optimizer.zero_grad()
@@ -873,13 +894,13 @@ class MATD3(MultiAgentAlgorithm):
             )
 
     def test(
-            self,
-            env: GymEnvType,
-            swap_channels: bool = False,
-            max_steps: Optional[int] = None,
-            loop: int = 3,
-            sum_scores: bool = True
-            ) -> float:
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3,
+        sum_scores: bool = True,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in

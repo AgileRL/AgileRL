@@ -1,17 +1,17 @@
-from typing import Tuple, Optional, Dict, Any
 import inspect
 import math
 from collections import OrderedDict
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from accelerate import Accelerator
 
-from agilerl.typing import DeviceType
-from agilerl.modules.custom_components import NewGELU
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.mlp import EvolvableMLP
+from agilerl.typing import DeviceType
+
 
 class EvolvableGPT(EvolvableModule):
     """The Evolvable GPT class.
@@ -45,6 +45,7 @@ class EvolvableGPT(EvolvableModule):
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     """
+
     arch: str = "gpt"
 
     def __init__(
@@ -61,7 +62,7 @@ class EvolvableGPT(EvolvableModule):
         min_layers: int = 8,
         max_layers: int = 16,
         bias: bool = True,
-        device: str = "cpu"
+        device: str = "cpu",
     ):
         super().__init__(device)
 
@@ -141,7 +142,7 @@ class EvolvableGPT(EvolvableModule):
     def activation(self) -> str:
         """Return activation function."""
         return self._activation
-    
+
     @activation.setter
     def activation(self, activation: str) -> None:
         """Set activation function."""
@@ -210,7 +211,9 @@ class EvolvableGPT(EvolvableModule):
         past_key_values: Optional[Tuple[torch.Tensor]] = None,
         pos: Optional[torch.Tensor] = None,
         is_causal: bool = True,
-    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[
+        torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor], Optional[torch.Tensor]
+    ]:
         """Forward pass through evolvable GPT model.
 
         :param idx: Input ids
@@ -323,8 +326,8 @@ class EvolvableGPT(EvolvableModule):
         cls,
         model_type: str,
         override_args: Optional[dict] = None,
-        custom_sd: Optional[str] = None
-        ) -> 'EvolvableGPT':
+        custom_sd: Optional[str] = None,
+    ) -> "EvolvableGPT":
         """
         Load a pretrained GPT model with the option to override certain configuration parameters or use a custom state dictionary.
 
@@ -411,11 +414,13 @@ class EvolvableGPT(EvolvableModule):
                     sd[k].copy_(sd_hf[khf])
         return model
 
-    def configure_optimizers(self, weight_decay: float, learning_rate: float, betas: tuple, device_type: str) -> torch.optim.Optimizer:
+    def configure_optimizers(
+        self, weight_decay: float, learning_rate: float, betas: tuple, device_type: str
+    ) -> torch.optim.Optimizer:
         """
         Configures the optimizer for the model by separating parameters into those that will and won't experience weight decay.
 
-        This function separates all parameters of the model into two buckets: those that will experience weight decay for 
+        This function separates all parameters of the model into two buckets: those that will experience weight decay for
         regularization and those that won't (biases, and layernorm/embedding weights). It then returns the PyTorch optimizer object.
 
         :param weight_decay: The weight decay factor for regularization.
@@ -494,9 +499,7 @@ class EvolvableGPT(EvolvableModule):
         print(f"using fused AdamW: {use_fused}")
         extra_args = dict(fused=True) if use_fused else dict()
         lr = torch.tensor(learning_rate, device=self.device)
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr=lr, betas=betas, **extra_args
-        )
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=betas, **extra_args)
 
         return optimizer
 
@@ -647,7 +650,8 @@ class EvolvableGPT(EvolvableModule):
 
         self.transformer = EvolvableModule.preserve_parameters(
             old_net=self.transformer, new_net=new_transformer
-            )
+        )
+
 
 class LayerNorm(nn.Module):
     """
@@ -666,7 +670,14 @@ class LayerNorm(nn.Module):
     :return: The normalized tensor.
     :rtype: torch.Tensor
     """
-    def __init__(self, ndim: int, bias: bool, layer_norm_eps: float = 1e-5, device: DeviceType = "cpu"):
+
+    def __init__(
+        self,
+        ndim: int,
+        bias: bool,
+        layer_norm_eps: float = 1e-5,
+        device: DeviceType = "cpu",
+    ):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(ndim, device=device))
         self.bias = nn.Parameter(torch.zeros(ndim, device=device)) if bias else None
@@ -676,6 +687,7 @@ class LayerNorm(nn.Module):
         return F.layer_norm(
             input, self.weight.shape, self.weight, self.bias, self.layer_norm_eps
         )
+
 
 class CausalSelfAttention(nn.Module):
     """
@@ -695,17 +707,18 @@ class CausalSelfAttention(nn.Module):
     :param block_size: The maximum block size for the causal mask.
     :type block_size: int
     """
+
     attention_bias: torch.Tensor
 
     def __init__(
-            self,
-            n_embd: int,
-            n_head: int,
-            bias: bool,
-            dropout: float,
-            block_size: int,
-            device: DeviceType = "cpu"
-            ) -> None:
+        self,
+        n_embd: int,
+        n_head: int,
+        bias: bool,
+        dropout: float,
+        block_size: int,
+        device: DeviceType = "cpu",
+    ) -> None:
         super().__init__()
         assert n_embd % n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -736,12 +749,12 @@ class CausalSelfAttention(nn.Module):
             )
 
     def forward(
-            self,
-            x: torch.Tensor,
-            attn_mask: Optional[torch.Tensor] = None,
-            layer_past: Optional[Tuple[torch.Tensor]] = None,
-            is_causal: bool = True
-            ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        is_causal: bool = True,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
         """
         Forward pass through the CausalSelfAttention module.
 
@@ -756,7 +769,9 @@ class CausalSelfAttention(nn.Module):
         :return: Tuple containing the output tensor and the present key and value tensors.
         :rtype: Tuple[torch.Tensor, Tuple[torch.Tensor]]
         """
-        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = (
+            x.size()
+        )  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head
         # forward to be the batch dim
@@ -792,7 +807,9 @@ class CausalSelfAttention(nn.Module):
             )
         else:
             # manual implementation of attention
-            att: torch.Tensor = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att: torch.Tensor = (q @ k.transpose(-2, -1)) * (
+                1.0 / math.sqrt(k.size(-1))
+            )
             att = att.masked_fill(self.attention_bias[:, :, :T, :T] == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -804,6 +821,7 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
 
         return y, present
+
 
 class Block(nn.Module):
     """
@@ -826,6 +844,7 @@ class Block(nn.Module):
     :param layer_norm_eps: A value added to the denominator for numerical stability in layer normalization, defaults to 1e-5.
     :type layer_norm_eps: float, optional
     """
+
     def __init__(
         self,
         n_embd: int,
@@ -836,13 +855,19 @@ class Block(nn.Module):
         hidden_size: int,
         activation: str = "GELU",
         layer_norm_eps: float = 1e-5,
-        device: DeviceType = "cpu"
+        device: DeviceType = "cpu",
     ):
         super().__init__()
         self.device = device
-        self.ln_1 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device)
-        self.attn = CausalSelfAttention(n_embd, n_head, bias, dropout, block_size, device=device)
-        self.ln_2 = LayerNorm(n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device)
+        self.ln_1 = LayerNorm(
+            n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device
+        )
+        self.attn = CausalSelfAttention(
+            n_embd, n_head, bias, dropout, block_size, device=device
+        )
+        self.ln_2 = LayerNorm(
+            n_embd, bias=bias, layer_norm_eps=layer_norm_eps, device=device
+        )
         self.mlp = MLP(n_embd, dropout, hidden_size, activation, device=device)
 
     def forward(
@@ -850,7 +875,7 @@ class Block(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor]] = None,
-        is_causal: bool = True
+        is_causal: bool = True,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
         """
         Forward pass through the transformer block.
@@ -876,6 +901,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x, present
 
+
 class MLP(EvolvableMLP):
     def __init__(self, n_embd, dropout, hidden_size, activation="GELU", **kwargs):
         super().__init__(
@@ -888,7 +914,6 @@ class MLP(EvolvableMLP):
             **kwargs,
         )
         self.dropout = nn.Dropout(dropout)
-
 
     def forward(self, x):
         """Returns output of neural network.
@@ -905,6 +930,7 @@ class MLP(EvolvableMLP):
             x = value(x)
         x = self.dropout(x)
         return x
+
 
 class PositionalEncoding(nn.Module):
     """The positional embedding class.

@@ -105,7 +105,7 @@ Additionally, we also define our upper and lower limits for these hyperparameter
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the acrobot environment as you can use PPO with
-either discrete or continuous action spaces. The snippet below creates a vectorised environment and 
+either discrete or continuous action spaces. The snippet below creates a vectorised environment and
 initialises the population of agents from the corresponding observation and action spaces.
 
 .. code-block:: python

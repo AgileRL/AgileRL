@@ -8,13 +8,14 @@ from tqdm import trange
 
 from agilerl.algorithms.ppo import PPO
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.wrappers.learning import Skill
 from agilerl.utils.utils import (
     create_population,
     make_skill_vect_envs,
     make_vect_envs,
-    observation_space_channels_to_first
+    observation_space_channels_to_first,
 )
+from agilerl.wrappers.learning import Skill
+
 
 class StabilizeSkill(Skill):
     def __init__(self, env):
@@ -130,7 +131,7 @@ class LandingSkill(Skill):
 if __name__ == "__main__":
     NET_CONFIG = {
         "encoder_config": {"hidden_size": [64]},  # Encoder hidden size
-        "head_config": {"hidden_size": [64]}  # Actor head hidden size
+        "head_config": {"hidden_size": [64]},  # Actor head hidden size
     }
 
     INIT_HP = {

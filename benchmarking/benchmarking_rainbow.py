@@ -3,29 +3,28 @@ import yaml
 
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
-from agilerl.hpo.mutation import Mutations
-from agilerl.hpo.tournament import TournamentSelection
-from agilerl.networks.custom_modules import RainbowMLP
-from benchmarking.legacy_mlp import EvolvableMLP
-from agilerl.training.train_off_policy import train_off_policy
-
-from agilerl.utils.utils import (
-    create_population,
-    make_vect_envs,
-    observation_space_channels_to_first,
-    print_hyperparams
-)
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.training.train_off_policy import train_off_policy
+from agilerl.utils.utils import (
+    create_population,
+    make_vect_envs,
+    observation_space_channels_to_first,
+    print_hyperparams,
+)
+from benchmarking.legacy_mlp import EvolvableMLP
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
 # import sys
 # sys.path.append('../')
+
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,19 +123,19 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         actor = None
 
     hp_config = HyperparameterConfig(
-        lr = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
-        batch_size = RLParameter(
-            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
-            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
-            dtype=int
-            ),
-        learn_step = RLParameter(
-            min=MUTATION_PARAMS['MIN_LEARN_STEP'],
-            max=MUTATION_PARAMS['MAX_LEARN_STEP'],
+        lr=RLParameter(min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
+        learn_step=RLParameter(
+            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
             dtype=int,
             grow_factor=1.5,
-            shrink_factor=0.75
-            )
+            shrink_factor=0.75,
+        ),
     )
 
     agent_pop = create_population(

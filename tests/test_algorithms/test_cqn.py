@@ -15,16 +15,19 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 class DummyCQN(CQN):
     def __init__(self, observation_space, action_space, *args, **kwargs):
         super().__init__(observation_space, action_space, *args, **kwargs)
 
         self.tensor_test = torch.randn(1)
+
 
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
@@ -117,11 +120,13 @@ def test_initialize_cqn_with_cnn_accelerator():
     observation_space = spaces.Box(0, 255, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
     index = 0
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
     batch_size = 64
     lr = 1e-4
     learn_step = 5
@@ -175,10 +180,16 @@ def test_initialize_cqn_with_cnn_accelerator():
     "observation_space, actor_network, input_tensor",
     [
         (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
-        (spaces.Box(0, 255, shape=(3, 32, 32)), "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (
+            spaces.Box(0, 255, shape=(3, 32, 32)),
+            "simple_cnn",
+            torch.randn(1, 3, 64, 64),
+        ),
     ],
 )
-def test_initialize_cqn_with_make_evo(observation_space, actor_network, input_tensor, request):
+def test_initialize_cqn_with_make_evo(
+    observation_space, actor_network, input_tensor, request
+):
     action_space = spaces.Discrete(2)
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -290,6 +301,7 @@ def test_returns_expected_action_epsilon_greedy():
 
     assert action.is_integer()
     assert action >= 0 and action < action_space.n
+
 
 # Returns the expected action when given a state observation and action mask.
 def test_returns_expected_action_mask():
@@ -437,6 +449,7 @@ def test_soft_update():
         for expected_param, target_param in zip(expected_params, target_params)
     )
 
+
 # Runs algorithm test loop
 def test_algorithm_test_loop():
     observation_space = spaces.Box(0, 1, shape=(4,))
@@ -465,16 +478,18 @@ def test_algorithm_test_loop_unvectorized():
 
 # Runs algorithm test loop with images
 def test_algorithm_test_loop_images():
-    observation_space = spaces.Box(0, 1, shape= (3, 32, 32))
+    observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
 
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     agent = CQN(
         observation_space=observation_space,
@@ -487,19 +502,21 @@ def test_algorithm_test_loop_images():
 
 # Runs algorithm test loop with unvectorized images
 def test_algorithm_test_loop_images_unvectorized():
-    observation_space = spaces.Box(0, 1, shape= (32, 32, 3))
+    observation_space = spaces.Box(0, 1, shape=(32, 32, 3))
     action_space = spaces.Discrete(2)
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     agent = CQN(
-        observation_space=spaces.Box(0, 1, shape= (3, 32, 32)),
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=action_space,
         net_config=net_config_cnn,
     )
@@ -599,7 +616,11 @@ def test_clone_new_index():
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
-    cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), accelerator=Accelerator())
+    cqn = CQN(
+        observation_space=spaces.Box(0, 1, shape=(4,)),
+        action_space=spaces.Discrete(2),
+        accelerator=Accelerator(),
+    )
     cqn.unwrap_models()
     assert isinstance(cqn.actor.encoder, nn.Module)
     assert isinstance(cqn.actor_target.encoder, nn.Module)
@@ -608,7 +629,9 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the cqn agent
-    cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    cqn = CQN(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -618,11 +641,11 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -634,7 +657,9 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    cqn = CQN(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
     # Load checkpoint
     cqn.load_checkpoint(checkpoint_path)
 
@@ -655,17 +680,19 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     # Initialize the cqn agent
     cqn = CQN(
         observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        net_config=net_config_cnn
+        net_config=net_config_cnn,
     )
 
     # Save the checkpoint to a file
@@ -676,11 +703,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -692,7 +719,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    cqn = CQN(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
     # Load checkpoint
     cqn.load_checkpoint(checkpoint_path)
 
@@ -727,7 +756,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     # Initialize the cqn agent
     cqn = CQN(
-        observation_space=spaces.Box(0, 255, shape=(3, 32, 32)), action_space=spaces.Discrete(2), actor_network=actor_network
+        observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
+        actor_network=actor_network,
     )
 
     # Save the checkpoint to a file
@@ -738,11 +769,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -754,7 +785,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    cqn = CQN(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
     # Load checkpoint
     cqn.load_checkpoint(checkpoint_path)
 
@@ -784,7 +817,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the cqn agent
-    cqn = CQN(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    cqn = CQN(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -827,11 +862,13 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     cqn = CQN(
         observation_space=spaces.Box(0, 255, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        net_config={"encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }},
+        net_config={
+            "encoder_config": {
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+            }
+        },
     )
 
     # Save the checkpoint to a file
@@ -866,7 +903,11 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     "observation_space, actor_network, input_tensor",
     [
         (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
-        (spaces.Box(0, 255, shape=(3, 32, 32)), "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (
+            spaces.Box(0, 255, shape=(3, 32, 32)),
+            "simple_cnn",
+            torch.randn(1, 3, 64, 64),
+        ),
     ],
 )
 # The saved checkpoint file contains the correct data and format.

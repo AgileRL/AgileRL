@@ -10,7 +10,6 @@ from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_multi_agent import train_multi_agent
-
 from agilerl.utils.utils import (
     create_population,
     make_multi_agent_vect_envs,
@@ -55,7 +54,9 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
+        observation_spaces = [
+            observation_space_channels_to_first(obs) for obs in observation_spaces
+        ]
 
     INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
 
@@ -89,20 +90,24 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, DISTRIBUTED_TRAINING):
     )
 
     hp_config = HyperparameterConfig(
-        lr_actor = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
-        lr_critic = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
-        batch_size = RLParameter(
-            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
-            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
-            dtype=int
-            ),
-        learn_step = RLParameter(
-            min=MUTATION_PARAMS['MIN_LEARN_STEP'],
-            max=MUTATION_PARAMS['MAX_LEARN_STEP'],
+        lr_actor=RLParameter(
+            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+        ),
+        lr_critic=RLParameter(
+            min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]
+        ),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
+        learn_step=RLParameter(
+            min=MUTATION_PARAMS["MIN_LEARN_STEP"],
+            max=MUTATION_PARAMS["MAX_LEARN_STEP"],
             dtype=int,
             grow_factor=1.5,
-            shrink_factor=0.75
-            )
+            shrink_factor=0.75,
+        ),
     )
 
     agent_pop = create_population(

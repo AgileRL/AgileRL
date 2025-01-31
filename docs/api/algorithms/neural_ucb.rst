@@ -59,8 +59,8 @@ Example
 Neural Network Configuration
 ----------------------------
 
-To configure the architecture of the network's encoder / head, pass a kwargs dict to the NeuralUCB ``net_config`` field. 
-Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and 
+To configure the architecture of the network's encoder / head, pass a kwargs dict to the NeuralUCB ``net_config`` field.
+Full arguments can be found in the documentation of :ref:`EvolvableMLP<mlp>`, :ref:`EvolvableCNN<cnn>`, and
 :ref:`EvolvableMultiInput<multi_input>`.
 
 For discrete / vector observations:

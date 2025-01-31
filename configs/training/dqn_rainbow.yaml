@@ -59,7 +59,7 @@ NET_CONFIG:
         activation: ReLU
         min_mlp_nodes: 64
         max_mlp_nodes: 500
-    
+
     head_config:
         hidden_size: [128]
         activation: ReLU
@@ -67,4 +67,3 @@ NET_CONFIG:
         max_hidden_layers: 3
         min_mlp_nodes: 64
         max_mlp_nodes: 500
-

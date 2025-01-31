@@ -1,5 +1,6 @@
 import copy
 from pathlib import Path
+
 import dill
 import numpy as np
 import pytest
@@ -8,20 +9,21 @@ import torch.nn as nn
 import torch.optim as optim
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
-from gymnasium import spaces
 
 from agilerl.algorithms.td3 import TD3
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
-from tests.helper_functions import generate_random_box_space, generate_discrete_space
+from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.helper_functions import generate_discrete_space, generate_random_box_space
+
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 class DummyTD3(TD3):
     def __init__(self, observation_space, action_space, *args, **kwargs):
@@ -174,11 +176,13 @@ def test_initialize_td3_with_cnn_accelerator():
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
     max_action = 1
     index = 0
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -361,7 +365,11 @@ def test_initialize_td3_with_actor_network_no_critics(
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255), "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (
+            generate_random_box_space(shape=(3, 64, 64), low=0, high=255),
+            "simple_cnn",
+            torch.randn(1, 3, 64, 64),
+        ),
     ],
 )
 def test_initialize_td3_with_actor_network_cnn(
@@ -468,13 +476,17 @@ def test_learns_from_experiences(min_action, max_action):
     min_action = np.array(min_action) if isinstance(min_action, list) else min_action
     max_action = np.array(max_action) if isinstance(max_action, list) else max_action
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
-    action_space = generate_random_box_space(shape=(2,), low=min_action, high=max_action)
+    action_space = generate_random_box_space(
+        shape=(2,), low=min_action, high=max_action
+    )
     batch_size = 64
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     # Create an instance of the td3 class
     td3 = TD3(
@@ -695,11 +707,13 @@ def test_algorithm_test_loop_images():
 
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     agent = TD3(
         observation_space=observation_space,
@@ -717,11 +731,13 @@ def test_algorithm_test_loop_images_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     agent = TD3(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
@@ -825,9 +841,7 @@ def test_clone_returns_identical_agent():
     assert clone_agent.scores == td3.scores
 
     accelerator = Accelerator()
-    td3 = TD3(
-        observation_space, action_space, accelerator=accelerator, wrap=False
-    )
+    td3 = TD3(observation_space, action_space, accelerator=accelerator, wrap=False)
     clone_agent = td3.clone(wrap=False)
 
     assert clone_agent.observation_space == td3.observation_space
@@ -952,8 +966,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the td3 agent
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1)
-        )
+        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -963,21 +977,21 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_1_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_1_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_1_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_1_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_1_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_2_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_2_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_2_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_2_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_2_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_1_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_1_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_1_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_1_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_1_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_2_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_2_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_2_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_2_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_2_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "max_action" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
@@ -993,8 +1007,8 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=-1, high=1)
-        )
+        action_space=generate_random_box_space(shape=(2,), low=-1, high=1),
+    )
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1023,11 +1037,13 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     # Initialize the td3 agent
     td3 = TD3(
@@ -1044,21 +1060,21 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_1_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_1_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_1_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_1_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_1_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_2_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_2_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_2_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_2_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_2_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_1_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_1_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_1_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_1_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_1_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_2_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_2_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_2_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_2_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_2_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "max_action" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
@@ -1074,8 +1090,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=-1, high=1)
-        )
+        action_space=generate_random_box_space(shape=(2,), low=-1, high=1),
+    )
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1114,7 +1130,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network, input_tensor, request, tmpdir
 ):
     action_space = generate_random_box_space(shape=(2,), low=0, high=1)
-    observation_space = generate_random_box_space(shape=input_tensor.shape[1:], low=0, high=1)
+    observation_space = generate_random_box_space(
+        shape=input_tensor.shape[1:], low=0, high=1
+    )
 
     actor_network = request.getfixturevalue(actor_network)
     actor_network = MakeEvolvable(actor_network, input_tensor)
@@ -1146,21 +1164,21 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_1_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_1_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_1_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_1_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_1_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_2_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_2_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_2_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_2_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_2_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_1_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_1_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_1_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_1_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_1_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_2_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_2_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_2_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_2_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_2_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "max_action" in checkpoint
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
@@ -1176,8 +1194,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1)
-        )
+        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
+    )
     # Load checkpoint
     td3.load_checkpoint(checkpoint_path)
 
@@ -1217,13 +1235,15 @@ def test_initialize_td3_with_actor_network_evo_net(observation_space, net_type):
     max_action = 1
 
     actor_network = DeterministicActor(observation_space, action_space)
-    critic_networks = [ContinuousQNetwork(observation_space, action_space) for _ in range(2)]
+    critic_networks = [
+        ContinuousQNetwork(observation_space, action_space) for _ in range(2)
+    ]
 
     td3 = TD3(
         observation_space,
         action_space,
         actor_network=actor_network,
-        critic_networks=critic_networks
+        critic_networks=critic_networks,
     )
 
     assert td3.observation_space == observation_space
@@ -1258,7 +1278,7 @@ def test_initialize_td3_with_incorrect_actor_net():
             observation_space,
             action_space,
             actor_network=actor_network,
-            critic_networks=critic_networks
+            critic_networks=critic_networks,
         )
         assert td3
 
@@ -1280,10 +1300,12 @@ def test_initialize_td3_with_incorrect_actor_net():
     ],
 )
 def test_action_scaling_td3(action_array_vals, min_max, activation_func):
-    net_config = {"head_config": {
-        "hidden_size": [64, 64],
-        "output_activation": activation_func,
-    }}
+    net_config = {
+        "head_config": {
+            "hidden_size": [64, 64],
+            "output_activation": activation_func,
+        }
+    }
     min_action, max_action = min_max
     if activation_func == "Tanh":
         min_activation_val, max_activation_val = -1, 1
@@ -1294,7 +1316,9 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     max_action = np.array(max_action) if isinstance(max_action, list) else max_action
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(4,), low=min_action, high=max_action),
+        action_space=generate_random_box_space(
+            shape=(4,), low=min_action, high=max_action
+        ),
         net_config=net_config,
     )
     scaled_action = td3.scale_to_action_space(action)
@@ -1339,7 +1363,8 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(shape=(1,), low=0, high=1),
-        device=device)
+        device=device,
+    )
     input = torch.tensor(action, dtype=torch.float32).to(device)
     clamped_actions = td3.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
@@ -1358,8 +1383,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the td3 agent
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
-        action_space=generate_random_box_space(shape=(2,), low=0, high=1)
-        )
+        action_space=generate_random_box_space(shape=(2,), low=0, high=1),
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1422,11 +1447,13 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,), low=0, high=1),
-        net_config={"encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1],
-        }},
+        net_config={
+            "encoder_config": {
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+            }
+        },
     )
 
     # Save the checkpoint to a file
@@ -1480,8 +1507,16 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
-        (generate_random_box_space(shape=(4,), low=0, high=255), "simple_mlp", torch.randn(1, 4)),
-        (generate_random_box_space(shape=(3, 64, 64), low=0, high=255), "simple_cnn", torch.randn(1, 3, 64, 64)),
+        (
+            generate_random_box_space(shape=(4,), low=0, high=255),
+            "simple_mlp",
+            torch.randn(1, 4),
+        ),
+        (
+            generate_random_box_space(shape=(3, 64, 64), low=0, high=255),
+            "simple_cnn",
+            torch.randn(1, 3, 64, 64),
+        ),
     ],
 )
 # The saved checkpoint file contains the correct data and format.

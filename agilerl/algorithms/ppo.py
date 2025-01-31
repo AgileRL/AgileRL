@@ -1,28 +1,30 @@
-from typing import Optional, Dict, Any, Tuple, Union
 import copy
+from typing import Any, Dict, Optional, Tuple, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
+from torch.nn.utils import clip_grad_norm_
 
-from agilerl.typing import ExperiencesType, GymEnvType, ArrayOrTensor, ArrayLike
-from agilerl.modules.configs import MlpNetConfig
+from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_functions import ValueFunction
-from agilerl.algorithms.core import RLAlgorithm
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
+from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
-    obs_channels_to_first,
-    stack_experiences,
     flatten_experiences,
     get_experiences_samples,
     is_vectorized_experiences,
-    make_safe_deepcopies
+    make_safe_deepcopies,
+    obs_channels_to_first,
+    stack_experiences,
 )
+
 
 class PPO(RLAlgorithm):
     """The PPO algorithm class. PPO paper: https://arxiv.org/abs/1707.06347v2
@@ -78,6 +80,7 @@ class PPO(RLAlgorithm):
     :param wrap: Wrap models for distributed training upon creation, defaults to True
     :type wrap: bool, optional
     """
+
     def __init__(
         self,
         observation_space: spaces.Space,
@@ -115,8 +118,8 @@ class PPO(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="PPO"
-            )
+            name="PPO",
+        )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
@@ -176,7 +179,9 @@ class PPO(RLAlgorithm):
 
         # For continuous action spaces
         if not self.discrete_actions:
-            self.action_var = torch.full((self.action_dim,), action_std_init**2, device=self.device)
+            self.action_var = torch.full(
+                (self.action_dim,), action_std_init**2, device=self.device
+            )
 
         self.batch_size = batch_size
         self.lr = lr
@@ -197,13 +202,15 @@ class PPO(RLAlgorithm):
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
                     f"Passed actor network is of type {type(actor_network)}, but must be of type EvolvableModule."
-                     )
+                )
             if not isinstance(critic_network, EvolvableModule):
                 raise TypeError(
                     f"Passed critic network is of type {type(critic_network)}, but must be of type EvolvableModule."
                 )
-            
-            self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
+
+            self.actor, self.critic = make_safe_deepcopies(
+                actor_network, critic_network
+            )
 
         else:
             net_config = {} if net_config is None else net_config
@@ -212,10 +219,12 @@ class PPO(RLAlgorithm):
             head_config = net_config.get("head_config", None)
             if head_config is not None:
                 critic_head_config = copy.deepcopy(head_config)
-                critic_head_config["output_activation"] = None # Value function has no output activation
+                critic_head_config["output_activation"] = (
+                    None  # Value function has no output activation
+                )
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[16])
-            
+
             critic_net_config["head_config"] = critic_head_config
 
             self.actor = StochasticActor(
@@ -223,38 +232,27 @@ class PPO(RLAlgorithm):
                 action_space,
                 log_std_init=self.action_std_init,
                 device=device,
-                **net_config
+                **net_config,
             )
 
             self.critic = ValueFunction(
-                observation_space,
-                device=device,
-                **critic_net_config
+                observation_space, device=device, **critic_net_config
             )
 
         self.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=[self.actor, self.critic],
-            lr=self.lr
+            optim.Adam, networks=[self.actor, self.critic], lr=self.lr
         )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
 
         # Register network groups for mutations
-        self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                policy=True
-            )
-        )
-        self.register_network_group(
-            NetworkGroup(
-                eval=self.critic
-            )
-        )
+        self.register_network_group(NetworkGroup(eval=self.actor, policy=True))
+        self.register_network_group(NetworkGroup(eval=self.critic))
 
-    def scale_to_action_space(self, action: ArrayLike, convert_to_torch: bool = False) -> ArrayOrTensor:
+    def scale_to_action_space(
+        self, action: ArrayLike, convert_to_torch: bool = False
+    ) -> ArrayOrTensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
@@ -263,7 +261,9 @@ class PPO(RLAlgorithm):
         :type convert_to_torch: bool, optional
         """
         if convert_to_torch:
-            device = self.device if self.accelerator is None else self.accelerator.device
+            device = (
+                self.device if self.accelerator is None else self.accelerator.device
+            )
             max_action = (
                 torch.from_numpy(self.max_action).to(device)
                 if isinstance(self.max_action, (np.ndarray))
@@ -305,7 +305,9 @@ class PPO(RLAlgorithm):
         action: Optional[torch.Tensor] = None,
         grad: bool = False,
         action_mask: Optional[np.ndarray] = None,
-    ) -> Tuple[Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        Union[np.ndarray, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -334,7 +336,7 @@ class PPO(RLAlgorithm):
             self.critic.train()
             action_dist = self.actor(state, action_mask=action_mask)
             state_values = self.critic(state).squeeze(-1)
-        
+
         if not isinstance(action_dist, torch.distributions.Distribution):
             raise ValueError(
                 f"Expected action_dist to be a torch.distributions.Distribution, got {type(action_dist)}."
@@ -378,11 +380,11 @@ class PPO(RLAlgorithm):
             )
 
     def learn(
-            self,
-            experiences: ExperiencesType,
-            noise_clip: float = 0.5,
-            policy_noise: float = 0.2
-            ) -> float:
+        self,
+        experiences: ExperiencesType,
+        noise_clip: float = 0.5,
+        policy_noise: float = 0.2,
+    ) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
@@ -392,15 +394,9 @@ class PPO(RLAlgorithm):
         :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
         :type policy_noise: float, optional
         """
-        (
-            states,
-            actions,
-            log_probs,
-            rewards,
-            dones,
-            values,
-            next_state
-        ) = stack_experiences(*experiences)
+        (states, actions, log_probs, rewards, dones, values, next_state) = (
+            stack_experiences(*experiences)
+        )
 
         # Bootstrapping returns using GAE advantage estimation
         dones = dones.long()
@@ -455,14 +451,14 @@ class PPO(RLAlgorithm):
             for start in range(0, num_samples, self.batch_size):
                 minibatch_idxs = batch_idxs[start : start + self.batch_size]
                 (
-                    batch_states, 
-                    batch_actions, 
-                    batch_log_probs, 
-                    batch_advantages, 
-                    batch_returns, 
-                    batch_values
-                 ) = get_experiences_samples(minibatch_idxs, *experiences)
-                
+                    batch_states,
+                    batch_actions,
+                    batch_log_probs,
+                    batch_advantages,
+                    batch_returns,
+                    batch_values,
+                ) = get_experiences_samples(minibatch_idxs, *experiences)
+
                 batch_actions = batch_actions.squeeze()
                 batch_returns = batch_returns.squeeze()
                 batch_log_probs = batch_log_probs.squeeze()
@@ -471,9 +467,7 @@ class PPO(RLAlgorithm):
 
                 if len(minibatch_idxs) > 1:
                     _, log_prob, entropy, value = self.get_action(
-                        state=batch_states,
-                        action=batch_actions,
-                        grad=True
+                        state=batch_states, action=batch_actions, grad=True
                     )
 
                     logratio = log_prob - batch_log_probs
@@ -533,12 +527,12 @@ class PPO(RLAlgorithm):
         return mean_loss
 
     def test(
-            self,
-            env: GymEnvType,
-            swap_channels: bool = False,
-            max_steps: Optional[int] = None,
-            loop: int = 3
-        ) -> float:
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in

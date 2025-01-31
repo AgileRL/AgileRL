@@ -1,4 +1,5 @@
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 import torch
 import torch.nn.functional as F
 
@@ -6,9 +7,10 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.evolvable_networks import create_mlp
 
+
 class DuelingMLP(EvolvableMLP):
-    """A multi-layer perceptron network that calculates state-action values through 
-    the use of separate advantage and value networks. It outputs a distribution of values 
+    """A multi-layer perceptron network that calculates state-action values through
+    the use of separate advantage and value networks. It outputs a distribution of values
     for both of these networks. Used in the Rainbow DQN algorithm.
 
     :param num_inputs: Number of input features.
@@ -48,20 +50,20 @@ class DuelingMLP(EvolvableMLP):
     """
 
     def __init__(
-            self,
-            num_inputs: int,
-            num_outputs: int,
-            hidden_size: List[int],
-            num_atoms: int,
-            support: torch.Tensor,
-            noise_std: float = 0.5,
-            **kwargs
-            ) -> None:
+        self,
+        num_inputs: int,
+        num_outputs: int,
+        hidden_size: List[int],
+        num_atoms: int,
+        support: torch.Tensor,
+        noise_std: float = 0.5,
+        **kwargs
+    ) -> None:
 
         super().__init__(
             num_inputs,
             num_atoms,
-            hidden_size, 
+            hidden_size,
             noisy=True,
             init_layers=False,
             layer_norm=True,
@@ -69,7 +71,7 @@ class DuelingMLP(EvolvableMLP):
             noise_std=noise_std,
             name="value",
             **kwargs
-            )
+        )
 
         self.num_atoms = num_atoms
         self.num_actions = num_outputs
@@ -88,7 +90,7 @@ class DuelingMLP(EvolvableMLP):
             noise_std=self.noise_std,
             device=self.device,
             new_gelu=self.new_gelu,
-            name="advantage"
+            name="advantage",
         )
 
     @property
@@ -97,12 +99,12 @@ class DuelingMLP(EvolvableMLP):
         net_config.pop("num_atoms")
         net_config.pop("support")
         return net_config
-    
+
     @property
     def init_dict(self) -> Dict[str, Any]:
         mlp_dict = super().init_dict
         mlp_dict["num_atoms"] = self.num_atoms
-        mlp_dict['num_outputs'] = self.num_actions
+        mlp_dict["num_outputs"] = self.num_actions
         mlp_dict["support"] = self.support
         mlp_dict.pop("noisy")
         mlp_dict.pop("init_layers")
@@ -111,7 +113,9 @@ class DuelingMLP(EvolvableMLP):
         mlp_dict.pop("name")
         return mlp_dict
 
-    def forward(self, x: torch.Tensor, q: bool = True, log: bool = False) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, q: bool = True, log: bool = False
+    ) -> torch.Tensor:
         """Forward pass of the RainbowMLP.
 
         :param obs: Input to the network.
@@ -126,7 +130,7 @@ class DuelingMLP(EvolvableMLP):
         """
         value: torch.Tensor = self.model(x)
         advantage: torch.Tensor = self.advantage_net(x)
-        
+
         batch_size = value.size(0)
         value = value.view(batch_size, 1, self.num_atoms)
         advantage = advantage.view(batch_size, self.num_actions, self.num_atoms)
@@ -161,9 +165,9 @@ class DuelingMLP(EvolvableMLP):
             noise_std=self.noise_std,
             device=self.device,
             new_gelu=self.new_gelu,
-            name="advantage"
+            name="advantage",
         )
 
         self.advantage_net = EvolvableModule.preserve_parameters(
             self.advantage_net, advantage_net
-            )
+        )

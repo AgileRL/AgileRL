@@ -8,4 +8,3 @@ Parameters
 
 .. autoclass:: agilerl.modules.multi_input.EvolvableMultiInput
   :members:
-

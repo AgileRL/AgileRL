@@ -1,17 +1,19 @@
-from typing import List, Optional, Tuple, Dict, Any, Deque, NamedTuple, Union
-from numbers import Number
 import random
 from collections import deque, namedtuple
-import numpy as np
-from numpy.typing import ArrayLike
-import torch
+from numbers import Number
+from typing import Any, Deque, Dict, List, NamedTuple, Optional, Tuple, Union
 
+import numpy as np
+import torch
+from numpy.typing import ArrayLike
+
+from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 from agilerl.typing import NumpyObsType
 from agilerl.utils.algo_utils import obs_to_tensor
-from agilerl.components.segment_tree import MinSegmentTree, SumSegmentTree
 
 NpTransitionType = Union[Number, ArrayLike, Dict[str, ArrayLike]]
 TorchTransitionType = Union[torch.Tensor, Dict[str, torch.Tensor]]
+
 
 class ReplayBuffer:
     """The Experience Replay Buffer class. Used to store experiences and allow
@@ -25,7 +27,9 @@ class ReplayBuffer:
     :type device: str, optional
     """
 
-    def __init__(self, memory_size: int, field_names: List[str], device: Optional[str] = None):
+    def __init__(
+        self, memory_size: int, field_names: List[str], device: Optional[str] = None
+    ):
         assert memory_size > 0, "Memory size must be greater than zero."
         assert len(field_names) > 0, "Field names must contain at least one field name."
 
@@ -69,7 +73,7 @@ class ReplayBuffer:
             ts = tuple(np.vstack([t[i] for t in ts]) for i in range(len(ts[0])))
         else:
             ts = np.vstack(ts)
-        
+
         return ts
 
     def _add(self, *args: Any) -> None:
@@ -81,7 +85,9 @@ class ReplayBuffer:
         e = self.experience(*args)
         self.memory.append(e)
 
-    def _process_transition(self, experiences: List[NamedTuple], np_array: bool = False) -> Dict[str, Any]:
+    def _process_transition(
+        self, experiences: List[NamedTuple], np_array: bool = False
+    ) -> Dict[str, Any]:
         """Returns transition dictionary from experiences.
 
         :param experiences: List of experiences
@@ -95,10 +101,8 @@ class ReplayBuffer:
         for field in self.field_names:
             # Extract all of the transitions for the current field
             field_transitions: NpTransitionType = [
-                getattr(e, field) 
-                for e in experiences 
-                if e is not None
-                ]
+                getattr(e, field) for e in experiences if e is not None
+            ]
 
             # Stack the transitions into a single array or tuple/dictionary of arrays
             ts = ReplayBuffer.stack_transitions(field_transitions)
@@ -281,7 +285,9 @@ class MultiStepReplayBuffer(ReplayBuffer):
         transition = self._process_transition(experiences)
         return tuple(transition.values())
 
-    def _get_n_step_info(self, n_step_buffer: Deque[NamedTuple], gamma: float) -> Tuple[Any, ...]:
+    def _get_n_step_info(
+        self, n_step_buffer: Deque[NamedTuple], gamma: float
+    ) -> Tuple[Any, ...]:
         """Returns n step reward, next_state, and done, as well as other saved transition elements, in order.
 
         :param n_step_buffer: Buffer containing n-step transitions

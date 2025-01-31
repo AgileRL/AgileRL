@@ -8,10 +8,12 @@ from agilerl.modules.custom_components import NoisyLinear
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 from tests.helper_functions import unpack_network
 
+
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 class TwoArgCNN(nn.Module):
     def __init__(self):
@@ -197,6 +199,7 @@ def test_instantiation_with_rainbow():
   )
 )"""
     )
+
 
 ######### Test forward #########
 @pytest.mark.parametrize(

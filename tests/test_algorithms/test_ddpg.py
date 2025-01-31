@@ -14,21 +14,24 @@ from gymnasium import spaces
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
-from tests.helper_functions import generate_random_box_space, generate_discrete_space
+from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.wrappers.make_evolvable import MakeEvolvable
+from tests.helper_functions import generate_discrete_space, generate_random_box_space
+
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
 
+
 class DummyDDPG(DDPG):
     def __init__(self, observation_space, action_space, one_hot, *args, **kwargs):
         super().__init__(observation_space, action_space, one_hot, *args, **kwargs)
 
         self.tensor_test = torch.randn(1)
+
 
 class DummyEnv:
     def __init__(self, state_size, vect=True, num_envs=2):
@@ -170,11 +173,13 @@ def test_initialize_ddpg_with_cnn_accelerator():
     observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
     action_space = generate_random_box_space(shape=(2,))
     index = 0
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
     batch_size = 64
     lr_actor = 1e-4
     lr_critic = 1e-3
@@ -230,11 +235,22 @@ def test_initialize_ddpg_with_cnn_accelerator():
 @pytest.mark.parametrize(
     "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
-        (generate_random_box_space(shape=(4,)), "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        (
+            generate_random_box_space(shape=(4,)),
+            "simple_mlp",
+            "simple_mlp_critic",
+            torch.randn(1, 4),
+            torch.randn(1, 6),
+        ),
     ],
 )
 def test_initialize_ddpg_with_actor_network(
-    observation_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
+    observation_space,
+    actor_network,
+    critic_network,
+    input_tensor,
+    input_tensor_critic,
+    request,
 ):
     action_space = generate_random_box_space(shape=(2,))
     actor_network = request.getfixturevalue(actor_network)
@@ -331,11 +347,22 @@ def test_initialize_ddpg_with_incorrect_actor_net():
 @pytest.mark.parametrize(
     "observation_space, actor_network, critic_network, input_tensor, input_tensor_critic",
     [
-        (generate_random_box_space(shape=(4,)), "simple_mlp", "simple_mlp_critic", torch.randn(1, 4), torch.randn(1, 6)),
+        (
+            generate_random_box_space(shape=(4,)),
+            "simple_mlp",
+            "simple_mlp_critic",
+            torch.randn(1, 4),
+            torch.randn(1, 6),
+        ),
     ],
 )
 def test_initialize_ddpg_with_actor_network_no_critic(
-    observation_space, actor_network, critic_network, input_tensor, input_tensor_critic, request
+    observation_space,
+    actor_network,
+    critic_network,
+    input_tensor,
+    input_tensor_critic,
+    request,
 ):
     action_space = generate_random_box_space(shape=(2,))
     actor_network = request.getfixturevalue(actor_network)
@@ -416,11 +443,13 @@ def test_learns_from_experiences():
     action_space = generate_random_box_space(shape=(2,))
     batch_size = 4
     policy_freq = 4
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     # Create an instance of the ddpg class
     ddpg = DDPG(
@@ -617,11 +646,13 @@ def test_algorithm_test_loop_images():
 
     env = DummyEnv(state_size=observation_space.shape, vect=True)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     agent = DDPG(
         observation_space=observation_space,
@@ -639,11 +670,13 @@ def test_algorithm_test_loop_images_unvectorized():
 
     env = DummyEnv(state_size=observation_space.shape, vect=False)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     agent = DDPG(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
@@ -825,7 +858,11 @@ def test_clone_after_learning():
 
 # The method successfully unwraps the actor and actor_target models when an accelerator is present.
 def test_unwrap_models():
-    ddpg = DDPG(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_random_box_space(shape=(2,)), accelerator=Accelerator())
+    ddpg = DDPG(
+        observation_space=generate_random_box_space(shape=(4,)),
+        action_space=generate_random_box_space(shape=(2,)),
+        accelerator=Accelerator(),
+    )
     ddpg.unwrap_models()
     assert isinstance(ddpg.actor.encoder, nn.Module)
     assert isinstance(ddpg.actor_target.encoder, nn.Module)
@@ -836,7 +873,10 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the ddpg agent
-    ddpg = DDPG(observation_space=generate_random_box_space(shape=(4,)), action_space=generate_random_box_space(shape=(2,)))
+    ddpg = DDPG(
+        observation_space=generate_random_box_space(shape=(4,)),
+        action_space=generate_random_box_space(shape=(2,)),
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -846,16 +886,16 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -869,7 +909,7 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "steps" in checkpoint
 
     ddpg = DDPG(
-        observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,)),
     )
     # Load checkpoint
@@ -896,17 +936,19 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1],
-    }}
+    net_config_cnn = {
+        "encoder_config": {
+            "channel_size": [3],
+            "kernel_size": [3],
+            "stride_size": [1],
+        }
+    }
 
     # Initialize the ddpg agent
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,)),
-        net_config=net_config_cnn
+        net_config=net_config_cnn,
     )
 
     # Save the checkpoint to a file
@@ -917,16 +959,16 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -941,8 +983,8 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
 
     # Load checkpoint
     ddpg = DDPG(
-        observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
-        action_space=generate_random_box_space(shape=(2,))
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        action_space=generate_random_box_space(shape=(2,)),
     )
     ddpg.load_checkpoint(checkpoint_path)
 
@@ -1004,16 +1046,16 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_target_state_dict" in checkpoint['network_info']['modules']
-    assert "actor_optimizer_state_dict" in checkpoint['network_info']['optimizers']
-    assert "critic_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_init_dict" in checkpoint['network_info']['modules']
-    assert "critic_target_state_dict" in checkpoint['network_info']['modules']
-    assert "critic_optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
+    assert "critic_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_init_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_target_state_dict" in checkpoint["network_info"]["modules"]
+    assert "critic_optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr_actor" in checkpoint
     assert "lr_critic" in checkpoint
@@ -1027,7 +1069,7 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "steps" in checkpoint
 
     ddpg = DDPG(
-        observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,)),
     )
     # Load checkpoint
@@ -1071,10 +1113,12 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     ],
 )
 def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
-    net_config = {"head_config": {
-        "hidden_size": [64, 64],
-        "output_activation": activation_func,
-    }}
+    net_config = {
+        "head_config": {
+            "hidden_size": [64, 64],
+            "output_activation": activation_func,
+        }
+    }
     min_action, max_action = min_max
     if activation_func == "Tanh":
         min_activation_val, max_activation_val = -1, 1
@@ -1087,7 +1131,9 @@ def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
     max_action = np.array(max_action) if isinstance(max_action, list) else max_action
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(4,)),
-        action_space=generate_random_box_space(shape=(4,), low=min_action, high=max_action),
+        action_space=generate_random_box_space(
+            shape=(4,), low=min_action, high=max_action
+        ),
         net_config=net_config,
     )
     scaled_action = ddpg.scale_to_action_space(action)
@@ -1129,7 +1175,11 @@ def test_multi_dim_clamp(min, max, action, expected_result, device):
         min = np.array(min)
     if isinstance(max, list):
         max = np.array(max)
-    ddpg = DDPG(observation_space=generate_random_box_space(shape=(4,)), action_space=spaces.Box(0, 1, shape=(1,)), device=device)
+    ddpg = DDPG(
+        observation_space=generate_random_box_space(shape=(4,)),
+        action_space=spaces.Box(0, 1, shape=(1,)),
+        device=device,
+    )
     input = torch.tensor(action, dtype=torch.float32).to(device)
     clamped_actions = ddpg.multi_dim_clamp(min, max, input).type(torch.float32)
     expected_result = torch.tensor(expected_result)
@@ -1148,8 +1198,8 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the ddpg agent
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(4,)),
-        action_space=generate_random_box_space(shape=(2,))
-        )
+        action_space=generate_random_box_space(shape=(2,)),
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -1200,13 +1250,15 @@ def test_load_from_pretrained(device, accelerator, tmpdir):
 def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     # Initialize the ddpg agent
     ddpg = DDPG(
-        observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
+        observation_space=generate_random_box_space(shape=(3, 32, 32), low=0, high=255),
         action_space=generate_random_box_space(shape=(2,)),
-        net_config={"encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1]
-        }},
+        net_config={
+            "encoder_config": {
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+            }
+        },
     )
 
     # Save the checkpoint to a file

@@ -7,37 +7,37 @@ from agilerl.algorithms.dqn import DQN
 from agilerl.algorithms.ppo import PPO
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.utils.probe_envs import (
+    ConstantRewardContActionsDictEnv,
     ConstantRewardContActionsEnv,
     ConstantRewardContActionsImageEnv,
-    ConstantRewardContActionsDictEnv,
+    ConstantRewardDictEnv,
     ConstantRewardEnv,
     ConstantRewardImageEnv,
-    ConstantRewardDictEnv,
+    DiscountedRewardContActionsDictEnv,
     DiscountedRewardContActionsEnv,
     DiscountedRewardContActionsImageEnv,
-    DiscountedRewardContActionsDictEnv,
+    DiscountedRewardDictEnv,
     DiscountedRewardEnv,
     DiscountedRewardImageEnv,
-    DiscountedRewardDictEnv,
+    FixedObsPolicyContActionsDictEnv,
     FixedObsPolicyContActionsEnv,
     FixedObsPolicyContActionsImageEnv,
-    FixedObsPolicyContActionsDictEnv,
+    FixedObsPolicyDictEnv,
     FixedObsPolicyEnv,
     FixedObsPolicyImageEnv,
-    FixedObsPolicyDictEnv,
+    ObsDependentRewardContActionsDictEnv,
     ObsDependentRewardContActionsEnv,
     ObsDependentRewardContActionsImageEnv,
-    ObsDependentRewardContActionsDictEnv,
+    ObsDependentRewardDictEnv,
     ObsDependentRewardEnv,
     ObsDependentRewardImageEnv,
-    ObsDependentRewardDictEnv,
+    PolicyContActionsDictEnv,
     PolicyContActionsEnv,
     PolicyContActionsImageEnv,
     PolicyContActionsImageEnvSimple,
-    PolicyContActionsDictEnv,
+    PolicyDictEnv,
     PolicyEnv,
     PolicyImageEnv,
-    PolicyDictEnv,
     check_policy_on_policy_with_probe_env,
     check_policy_q_learning_with_probe_env,
     check_q_learning_with_probe_env,
@@ -52,7 +52,14 @@ from agilerl.utils.probe_envs import (
         (ConstantRewardContActionsEnv, 0, 1, True, False, {}),
         (ConstantRewardContActionsImageEnv, 0, 1, True, False, {}),
         (ConstantRewardDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
-        (ConstantRewardContActionsDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
+        (
+            ConstantRewardContActionsDictEnv,
+            {"discrete": 0, "box": 0},
+            1,
+            True,
+            False,
+            {},
+        ),
     ],
 )
 def test_constant_reward_envs(
@@ -65,8 +72,8 @@ def test_constant_reward_envs(
         state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(exp_state, dict):
-            assert int(np.mean(np.array(state['box']))) == exp_state['box']
-            assert state['discrete'] == exp_state['discrete']
+            assert int(np.mean(np.array(state["box"]))) == exp_state["box"]
+            assert state["discrete"] == exp_state["discrete"]
         else:
             assert int(np.mean(np.array(state))) == exp_state
 
@@ -94,10 +101,38 @@ def test_constant_reward_envs(
         (ObsDependentRewardContActionsEnv, 1, 1, True, False, {}),
         (ObsDependentRewardContActionsImageEnv, 0, -1, True, False, {}),
         (ObsDependentRewardContActionsImageEnv, 1, 1, True, False, {}),
-        (ObsDependentRewardContActionsDictEnv, {"discrete": 0, "box": 1}, -1, True, False, {}),
-        (ObsDependentRewardContActionsDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
-        (ObsDependentRewardContActionsDictEnv, {"discrete": 1, "box": 0}, -1, True, False, {}),
-        (ObsDependentRewardContActionsDictEnv, {"discrete": 1, "box": 1}, 1, True, False, {})
+        (
+            ObsDependentRewardContActionsDictEnv,
+            {"discrete": 0, "box": 1},
+            -1,
+            True,
+            False,
+            {},
+        ),
+        (
+            ObsDependentRewardContActionsDictEnv,
+            {"discrete": 0, "box": 0},
+            1,
+            True,
+            False,
+            {},
+        ),
+        (
+            ObsDependentRewardContActionsDictEnv,
+            {"discrete": 1, "box": 0},
+            -1,
+            True,
+            False,
+            {},
+        ),
+        (
+            ObsDependentRewardContActionsDictEnv,
+            {"discrete": 1, "box": 1},
+            1,
+            True,
+            False,
+            {},
+        ),
     ],
 )
 def test_observation_dependent_reward_envs(
@@ -110,7 +145,12 @@ def test_observation_dependent_reward_envs(
         state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(exp_state, dict):
-            if all([int(np.mean(np.array(state[key]))) == exp_state[key] for key in exp_state.keys()]):
+            if all(
+                [
+                    int(np.mean(np.array(state[key]))) == exp_state[key]
+                    for key in exp_state.keys()
+                ]
+            ):
                 assert reward == exp_reward
         else:
             if int(np.mean(np.array(state))) == exp_state:
@@ -155,9 +195,14 @@ def test_discounted_reward_envs(
         next_state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(exp_state, dict):
-            if all([int(np.mean(np.array(state[key]))) == exp_state[key] for key in exp_state.keys()]):
+            if all(
+                [
+                    int(np.mean(np.array(state[key]))) == exp_state[key]
+                    for key in exp_state.keys()
+                ]
+            ):
                 assert reward == exp_reward
-            assert terminated == int(np.mean(state["box"])) 
+            assert terminated == int(np.mean(state["box"]))
         else:
             if int(np.mean(np.array(state))) == exp_state:
                 assert reward == exp_reward
@@ -198,8 +243,8 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
         state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(exp_state, dict):
-            assert int(np.mean(np.array(state['box']))) == exp_state['box']
-            assert state['discrete'] == exp_state['discrete']
+            assert int(np.mean(np.array(state["box"]))) == exp_state["box"]
+            assert state["discrete"] == exp_state["discrete"]
         else:
             assert int(np.mean(np.array(state))) == exp_state
 
@@ -218,7 +263,14 @@ def test_discrete_actions_fixed_observation_policy_reward_envs(
     [
         (FixedObsPolicyContActionsEnv, 0, 1, True, False, {}),
         (FixedObsPolicyContActionsImageEnv, 0, 1, True, False, {}),
-        (FixedObsPolicyContActionsDictEnv, {"discrete": 0, "box": 0}, 1, True, False, {}),
+        (
+            FixedObsPolicyContActionsDictEnv,
+            {"discrete": 0, "box": 0},
+            1,
+            True,
+            False,
+            {},
+        ),
     ],
 )
 def test_continuous_actions_fixed_observation_policy_reward_envs(
@@ -231,8 +283,8 @@ def test_continuous_actions_fixed_observation_policy_reward_envs(
         state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(exp_state, dict):
-            assert int(np.mean(np.array(state['box']))) == exp_state['box']
-            assert state['discrete'] == exp_state['discrete']
+            assert int(np.mean(np.array(state["box"]))) == exp_state["box"]
+            assert state["discrete"] == exp_state["discrete"]
         else:
             assert int(np.mean(np.array(state))) == exp_state
 
@@ -263,9 +315,13 @@ def test_discrete_actions_policy_envs(
         state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(state, dict):
-            if (int(np.mean(np.array(state['box']))) == action[0]
-                and state['discrete'] == action[0]):
-                assert reward == same_reward, f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
+            if (
+                int(np.mean(np.array(state["box"]))) == action[0]
+                and state["discrete"] == action[0]
+            ):
+                assert (
+                    reward == same_reward
+                ), f"action: {action}, state: {state} box: {int(np.mean(state['box']))}"
             else:
                 assert reward == diff_reward
         else:
@@ -299,7 +355,7 @@ def test_continuous_actions_policy_envs(
         state, reward, terminated, truncated, info = env.step(action)
 
         if isinstance(state, dict):
-            if int(np.mean(np.array(state['box']))) and int(np.mean(state['discrete'])):
+            if int(np.mean(np.array(state["box"]))) and int(np.mean(state["discrete"])):
                 assert (
                     reward
                     == -((reward_goal_0 - action[0]) ** 2)
@@ -376,6 +432,7 @@ def test_q_learning_with_probe_env():
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
 
+
 def test_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardImageEnv()
@@ -383,11 +440,13 @@ def test_q_learning_with_probe_env_cnn():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {'encoder_config': {
-            "channel_size": [32],  # CNN channel size
-            "kernel_size": [3],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
-        }},
+        "net_config": {
+            "encoder_config": {
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            }
+        },
         "normalize_images": False,
         "lr": 1e-2,
     }
@@ -399,6 +458,7 @@ def test_q_learning_with_probe_env_cnn():
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
 
+
 def test_q_learning_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = ConstantRewardDictEnv()
@@ -406,13 +466,15 @@ def test_q_learning_with_probe_env_dict():
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
-        "net_config": {'encoder_config': {
-            "channel_size": [32],  # CNN channel size
-            "kernel_size": [3],  # CNN kernel size
-            "stride_size": [1],  # CNN stride size
-            "hidden_size": [64],  # Network hidden size
-            "latent_dim": 16,  # Latent dimension
-        }},
+        "net_config": {
+            "encoder_config": {
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+                "hidden_size": [64],  # Network hidden size
+                "latent_dim": 16,  # Latent dimension
+            }
+        },
         "normalize_images": False,
         "lr": 1e-2,
     }
@@ -423,6 +485,7 @@ def test_q_learning_with_probe_env_dict():
         device=device,
     )
     check_q_learning_with_probe_env(env, DQN, algo_args, memory, learn_steps, device)
+
 
 def test_policy_q_learning_with_probe_env():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -453,47 +516,14 @@ def test_policy_q_learning_with_probe_env_cnn():
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            'encoder_config': {
+            "encoder_config": {
                 "channel_size": [32],  # CNN channel size
                 "kernel_size": [3],  # CNN kernel size
                 "stride_size": [1],  # CNN stride size
             },
-            'head_config': {
+            "head_config": {
                 "hidden_size": [64],  # Network hidden size
-        }},
-        "normalize_images": False,
-        "policy_freq": 2,
-        "lr_actor": 1e-2,
-        "lr_critic": 1e-2,
-    }
-    field_names = ["state", "action", "reward", "next_state", "done"]
-    memory = ReplayBuffer(
-        memory_size=1000,  # Max replay buffer size
-        field_names=field_names,  # Field names to store in memory
-        device=device,
-    )
-    check_policy_q_learning_with_probe_env(
-        env, DDPG, algo_args, memory, learn_steps, device
-    )
-
-def test_policy_q_learning_with_probe_env_dict():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = FixedObsPolicyContActionsDictEnv()
-    learn_steps = 100
-    algo_args = {
-        "observation_space": env.observation_space,
-        "action_space": env.action_space,
-        "net_config": {
-            'encoder_config': {
-                "hidden_size": [64],  # Network hidden size
-                "latent_dim": 16,  # Latent dimension
-                "channel_size": [32],  # CNN channel size
-                "kernel_size": [3],  # CNN kernel size
-                "stride_size": [1],  # CNN stride size
             },
-            'head_config': {
-                "hidden_size": [64],  # Network hidden size
-            }
         },
         "normalize_images": False,
         "policy_freq": 2,
@@ -510,6 +540,42 @@ def test_policy_q_learning_with_probe_env_dict():
         env, DDPG, algo_args, memory, learn_steps, device
     )
 
+
+def test_policy_q_learning_with_probe_env_dict():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = FixedObsPolicyContActionsDictEnv()
+    learn_steps = 100
+    algo_args = {
+        "observation_space": env.observation_space,
+        "action_space": env.action_space,
+        "net_config": {
+            "encoder_config": {
+                "hidden_size": [64],  # Network hidden size
+                "latent_dim": 16,  # Latent dimension
+                "channel_size": [32],  # CNN channel size
+                "kernel_size": [3],  # CNN kernel size
+                "stride_size": [1],  # CNN stride size
+            },
+            "head_config": {
+                "hidden_size": [64],  # Network hidden size
+            },
+        },
+        "normalize_images": False,
+        "policy_freq": 2,
+        "lr_actor": 1e-2,
+        "lr_critic": 1e-2,
+    }
+    field_names = ["state", "action", "reward", "next_state", "done"]
+    memory = ReplayBuffer(
+        memory_size=1000,  # Max replay buffer size
+        field_names=field_names,  # Field names to store in memory
+        device=device,
+    )
+    check_policy_q_learning_with_probe_env(
+        env, DDPG, algo_args, memory, learn_steps, device
+    )
+
+
 def test_policy_on_policy_with_probe_env():
     device = torch.device("cpu")
     env = ConstantRewardContActionsEnv()
@@ -524,43 +590,45 @@ def test_policy_on_policy_with_probe_env():
 
 def test_policy_on_policy_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = ConstantRewardContActionsImageEnv() # FixedObsPolicyContActionsImageEnv()
+    env = ConstantRewardContActionsImageEnv()  # FixedObsPolicyContActionsImageEnv()
     learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            'encoder_config': {
+            "encoder_config": {
                 "channel_size": [32],  # CNN channel size
                 "kernel_size": [3],  # CNN kernel size
                 "stride_size": [1],  # CNN stride size
             },
-            'head_config': {
+            "head_config": {
                 "hidden_size": [64],  # Network hidden size
-        }},
+            },
+        },
         "normalize_images": False,
         "lr": 0.01,
     }
     check_policy_on_policy_with_probe_env(env, PPO, algo_args, learn_steps, device)
 
+
 def test_policy_on_policy_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env =  ConstantRewardContActionsDictEnv() # FixedObsPolicyContActionsDictEnv()
+    env = ConstantRewardContActionsDictEnv()  # FixedObsPolicyContActionsDictEnv()
     learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
         "action_space": env.action_space,
         "net_config": {
-            'encoder_config': {
+            "encoder_config": {
                 "hidden_size": [64],  # Network hidden size
                 "latent_dim": 16,  # Latent dimension
                 "channel_size": [32],  # CNN channel size
                 "kernel_size": [3],  # CNN kernel size
                 "stride_size": [1],  # CNN stride size
             },
-            'head_config': {
+            "head_config": {
                 "hidden_size": [64],  # Network hidden size
-            }
+            },
         },
         "normalize_images": False,
         "lr": 0.01,

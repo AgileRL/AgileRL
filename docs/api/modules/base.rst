@@ -8,4 +8,3 @@ Parameters
 
 .. autoclass:: agilerl.modules.base.EvolvableModule
   :members:
-

@@ -57,7 +57,7 @@ NET_CONFIG:
         hidden_size: [64]
         min_mlp_nodes: 64
         max_mlp_nodes: 500
-    
+
     head_config:
         hidden_size: [64]
         min_hidden_layers: 1

@@ -62,7 +62,9 @@ class BC_LM(nn.Module):
         # prefix_embs – b,t',d
         # prefix_attn_mask - b, t'
         if prefix_embs is None:
-            prefix_embs = torch.empty((tokens.shape[0], 0, self.h_dim), device=self.device)
+            prefix_embs = torch.empty(
+                (tokens.shape[0], 0, self.h_dim), device=self.device
+            )
         set_pos_ids = prefix_attn_mask is not None
         if prefix_attn_mask is not None and attn_mask is not None:
             input_attn_mask = torch.cat((prefix_attn_mask, attn_mask), dim=1)

@@ -3,18 +3,10 @@ import supersuit as ss
 import torch
 import yaml
 from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
-from benchmarking.networks import (
-    BasicNetActor,
-    BasicNetCritic,
-    ClipReward,
-    SimpleCNNActor,
-    SimpleCNNCritic,
-    SoftmaxActor,
-)
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
-from agilerl.algorithms.core.base import RLAlgorithm, MultiAgentAlgorithm
+from agilerl.algorithms.core.base import MultiAgentAlgorithm, RLAlgorithm
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -23,14 +15,22 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.training.train_multi_agent import train_multi_agent
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.training.train_on_policy import train_on_policy
-from agilerl.wrappers.make_evolvable import MakeEvolvable
-
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
-    print_hyperparams
+    print_hyperparams,
 )
+from agilerl.wrappers.make_evolvable import MakeEvolvable
+from benchmarking.networks import (
+    BasicNetActor,
+    BasicNetCritic,
+    ClipReward,
+    SimpleCNNActor,
+    SimpleCNNCritic,
+    SoftmaxActor,
+)
+
 
 def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -200,7 +200,9 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         observation_space = [env.observation_space(agent) for agent in env.agents]
         action_space = [env.action_space(agent) for agent in env.agents]
         if INIT_HP["CHANNELS_LAST"]:
-            observation_space = [observation_space_channels_to_first(obs) for obs in observation_space]
+            observation_space = [
+                observation_space_channels_to_first(obs) for obs in observation_space
+            ]
 
         INIT_HP["N_AGENTS"] = env.num_agents
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]

@@ -4,24 +4,24 @@ Creating Custom Evolvable Networks
 Creating Evolvable Networks from Scratch
 ----------------------------------------
 
-In the implemented algorithms, we allow users to pass architecture configurations for common RL networks (made evolvable) 
-that are available with the framework. We employ a similar philosophy to PyTorch in our way of processing the nested structure 
+In the implemented algorithms, we allow users to pass architecture configurations for common RL networks (made evolvable)
+that are available with the framework. We employ a similar philosophy to PyTorch in our way of processing the nested structure
 of complex custom architectures to keep track of the available architecture mutation methods in a neural network.
 
 1. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`: This is the base class to define a custom module in AgileRL. It is a wrapper around PyTorch's
-``nn.Module`` class, allowing users to create complex networks with nested :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`'s that have different available 
-architecture mutations. We provide e.g. ``EvolvableMLP``, ``EvolvableCNN``, and ``EvolvableMultiInput`` modules to process 
-vector, image, and dictionary / tuple observations, respectively, into a desired number of outputs. Modules in AgileRL 
-each have specific mutation methods (wrapped by a ``@mutation`` decorator to signal their nature) that allow us to dynamically 
-change their architectures during training. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` objects should implement a 
-:meth:`recreate_network() <agilerl.modules.base.EvolvableModule.recreate_network>` method that recreates the network with the new architecture 
+``nn.Module`` class, allowing users to create complex networks with nested :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`'s that have different available
+architecture mutations. We provide e.g. ``EvolvableMLP``, ``EvolvableCNN``, and ``EvolvableMultiInput`` modules to process
+vector, image, and dictionary / tuple observations, respectively, into a desired number of outputs. Modules in AgileRL
+each have specific mutation methods (wrapped by a ``@mutation`` decorator to signal their nature) that allow us to dynamically
+change their architectures during training. :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` objects should implement a
+:meth:`recreate_network() <agilerl.modules.base.EvolvableModule.recreate_network>` method that recreates the network with the new architecture
 after a mutation method is applied. This method is called automatically after calling a method wrapped by the ``@mutation`` decorator.
 
-1. :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`: Abstracting neural networks for RL problems is hard because different observation spaces require different 
-architectures. To address this, we provide a simple way of defining custom evolvable networks for RL algorithms through the 
-:class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` class, which inherits from :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`. 
-Under the hood, any network inheriting from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`  automatically creates an appropriate encoder from the passed observation space. Custom networks only need to 
-specify a head that acts as a mapping from the latent space to a number of outputs (e.g. actions). AgileRL provides a variety of 
+1. :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`: Abstracting neural networks for RL problems is hard because different observation spaces require different
+architectures. To address this, we provide a simple way of defining custom evolvable networks for RL algorithms through the
+:class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` class, which inherits from :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`.
+Under the hood, any network inheriting from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`  automatically creates an appropriate encoder from the passed observation space. Custom networks only need to
+specify a head that acts as a mapping from the latent space to a number of outputs (e.g. actions). AgileRL provides a variety of
 common networks used in RL algorithms:
 
    -  ``QNetwork``: State-action value function (used in e.g. DQN).
@@ -32,13 +32,13 @@ common networks used in RL algorithms:
    -  ``StochasticActor``: Outputs an appropriate PyTorch distribution over the given action space.
 
 .. note::
-  We impose that the different evolvable networks in an algorithm (e.g. actor and critic in PPO) share the same mutation methods. This 
-  is done because we apply the same architecture mutations to all of the networks of an individual to reduce variance during training. 
-  For this reason, we only allow mutation methods in :class:`EvolvableModule <agilerl.networks.base.EvolvableNetwork>` objects to come from the encoder and the head, assuming the same 
+  We impose that the different evolvable networks in an algorithm (e.g. actor and critic in PPO) share the same mutation methods. This
+  is done because we apply the same architecture mutations to all of the networks of an individual to reduce variance during training.
+  For this reason, we only allow mutation methods in :class:`EvolvableModule <agilerl.networks.base.EvolvableNetwork>` objects to come from the encoder and the head, assuming the same
   modules are used in both. All of the implemented networks in AgileRL follow this structure.
 
-For simple use cases, it might be appropriate to create a network using ``EvolvableMLP`` or ``EvolvableCNN`` directly (depending on your 
-environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument. 
+For simple use cases, it might be appropriate to create a network using ``EvolvableMLP`` or ``EvolvableCNN`` directly (depending on your
+environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument.
 
 Please refer to the `RainbowQNetwork <Custom_networks_tutorials>`_ tutorial for an example of how to build a custom network using AgileRL.
 
@@ -47,12 +47,12 @@ Please refer to the `RainbowQNetwork <Custom_networks_tutorials>`_ tutorial for 
 Making an Existing PyTorch Network Evolvable
 --------------------------------------------
 
-For sequential architectures that users have already implemented using PyTorch, it is also possible to add 
-evolvable functionality through the ``MakeEvolvable`` wrapper. Below is an example of a simple multi-layer 
-perceptron that can be used by a DQN agent to solve the Lunar Lander environment. The input size is set as 
-the state dimensions and output size the action dimensions. It's worth noting that, during the model definition, 
-it is imperative to employ the ``torch.nn`` module to define all layers instead of relying on functions from 
-``torch.nn.functional`` within the forward() method of the network. This is crucial as the forward hooks implemented 
+For sequential architectures that users have already implemented using PyTorch, it is also possible to add
+evolvable functionality through the ``MakeEvolvable`` wrapper. Below is an example of a simple multi-layer
+perceptron that can be used by a DQN agent to solve the Lunar Lander environment. The input size is set as
+the state dimensions and output size the action dimensions. It's worth noting that, during the model definition,
+it is imperative to employ the ``torch.nn`` module to define all layers instead of relying on functions from
+``torch.nn.functional`` within the forward() method of the network. This is crucial as the forward hooks implemented
 will only be able to detect layers derived from ``nn.Module``.
 
 .. code-block:: python
@@ -92,7 +92,7 @@ the ``MakeEvolvable`` wrapper.
                         device=device
                       )
 
-When instantiating using ``create_population`` to generate a population of agents with a custom actor, 
+When instantiating using ``create_population`` to generate a population of agents with a custom actor,
 you need to set ``actor_network`` to ``evolvable_actor``.
 
 .. code-block:: python
@@ -140,7 +140,7 @@ If the single agent algorithm has more than one critic (e.g. TD3), then pass the
 
 
 If you are using a multi-agent algorithm, define ``actor_network`` and ``critic_network`` as lists containing networks for each agent in the
-multi-agent environment. The example below outlines how this would work for a two agent environment (asumming you have initilialised a multi-agent 
+multi-agent environment. The example below outlines how this would work for a two agent environment (asumming you have initilialised a multi-agent
 environment in the variable ``env``).
 
 .. code-block:: python

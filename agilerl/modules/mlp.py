@@ -1,10 +1,12 @@
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 import torch
 
-from agilerl.typing import ArrayOrTensor
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
+from agilerl.typing import ArrayOrTensor
 from agilerl.utils.evolvable_networks import create_mlp
+
 
 class EvolvableMLP(EvolvableModule):
     """The Evolvable Multi-layer Perceptron class.
@@ -63,8 +65,8 @@ class EvolvableMLP(EvolvableModule):
         noise_std: float = 0.5,
         new_gelu: bool = False,
         device: str = "cpu",
-        name: str = "mlp"
-        ):
+        name: str = "mlp",
+    ):
         super().__init__(device)
 
         assert (
@@ -115,19 +117,14 @@ class EvolvableMLP(EvolvableModule):
             noise_std=self.noise_std,
             device=self.device,
             new_gelu=self.new_gelu,
-            name=self.name
+            name=self.name,
         )
 
     @property
     def net_config(self) -> Dict[str, Any]:
         """Returns model configuration in dictionary."""
         net_config = self.init_dict.copy()
-        for attr in [
-            "num_inputs",
-            "num_outputs",
-            "device",
-            "name"
-        ]:
+        for attr in ["num_inputs", "num_outputs", "device", "name"]:
             if attr in net_config:
                 net_config.pop(attr)
 
@@ -153,21 +150,23 @@ class EvolvableMLP(EvolvableModule):
             "new_gelu": self.new_gelu,
             "noisy": self.noisy,
             "device": self.device,
-            "name": self.name
+            "name": self.name,
         }
         return init_dict
-    
+
     @property
     def activation(self) -> str:
         """Returns activation function."""
         return self._activation
-    
+
     @activation.setter
     def activation(self, activation: str) -> None:
         """Set activation function."""
         self._activation = activation
-        
-    def init_weights_gaussian(self, std_coeff: float = 4, output_coeff: float = 4) -> None:
+
+    def init_weights_gaussian(
+        self, std_coeff: float = 4, output_coeff: float = 4
+    ) -> None:
         """Initialise weights of neural network using Gaussian distribution."""
         EvolvableModule.init_weights_gaussian(self.model, std_coeff=std_coeff)
 
@@ -180,7 +179,7 @@ class EvolvableMLP(EvolvableModule):
 
         :param x: Neural network input
         :type x: torch.Tensor()
-    
+
         :return: Neural network output
         :rtype: torch.Tensor
         """
@@ -191,7 +190,7 @@ class EvolvableMLP(EvolvableModule):
             x = x.unsqueeze(0)
 
         return self.model(x)
-    
+
     def get_output_dense(self) -> torch.nn.Module:
         """Returns output layer of neural network."""
         return getattr(self.model, f"{self.name}_linear_layer_output")
@@ -216,7 +215,7 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
-        """Adds a hidden layer to neural network. Falls back on add_node if 
+        """Adds a hidden layer to neural network. Falls back on add_node if
         max hidden layers reached."""
         # add layer to hyper params
         if len(self.hidden_size) < self.max_hidden_layers:  # HARD LIMIT
@@ -235,10 +234,8 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_node(
-        self,
-        hidden_layer: Optional[int] = None,
-        numb_new_nodes: Optional[int] = None
-        ) -> Dict[str, int]:
+        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, int]:
         """Adds nodes to hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -263,10 +260,8 @@ class EvolvableMLP(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self,
-        hidden_layer: Optional[int] = None,
-        numb_new_nodes: Optional[int] = None
-        ) -> Dict[str, int]:
+        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -290,7 +285,7 @@ class EvolvableMLP(EvolvableModule):
 
     def recreate_network(self) -> None:
         """Recreates neural networks.
-        
+
         :param shrink_params: Shrink parameters of neural networks, defaults to False
         :type shrink_params: bool, optional
         """
@@ -307,7 +302,9 @@ class EvolvableMLP(EvolvableModule):
             noise_std=self.noise_std,
             new_gelu=self.new_gelu,
             device=self.device,
-            name=self.name
+            name=self.name,
         )
 
-        self.model = EvolvableModule.preserve_parameters(old_net=self.model, new_net=model)
+        self.model = EvolvableModule.preserve_parameters(
+            old_net=self.model, new_net=model
+        )

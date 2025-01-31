@@ -9,7 +9,7 @@ from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
-    observation_space_channels_to_first
+    observation_space_channels_to_first,
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -23,9 +23,11 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {"encoder_config": {
-        "hidden_size": [32, 32],  # Actor hidden size
-    }}
+    NET_CONFIG = {
+        "encoder_config": {
+            "hidden_size": [32, 32],  # Actor hidden size
+        }
+    }
 
     INIT_HP = {
         "DOUBLE": True,  # Use double Q-learning

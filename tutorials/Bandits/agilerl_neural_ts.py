@@ -10,9 +10,9 @@ from gymnasium import spaces
 from scipy.ndimage import gaussian_filter1d
 from ucimlrepo import fetch_ucirepo
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population
 from agilerl.wrappers.learning import BanditEnv
@@ -20,9 +20,7 @@ from agilerl.wrappers.learning import BanditEnv
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {
-        "head_config": {"hidden_size": [128]}  # Actor head hidden size
-    }
+    NET_CONFIG = {"head_config": {"hidden_size": [128]}}  # Actor head hidden size
 
     INIT_HP = {
         "POPULATION_SIZE": 4,  # Population size
@@ -47,16 +45,16 @@ if __name__ == "__main__":
 
     # Mutation config for RL hyperparameters
     hp_config = HyperparameterConfig(
-        lr = RLParameter(min=6.25e-5, max=1e-2),
-        batch_size = RLParameter(min=8, max=512, dtype=int),
-        learn_step = RLParameter(min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75)
+        lr=RLParameter(min=6.25e-5, max=1e-2),
+        batch_size=RLParameter(min=8, max=512, dtype=int),
+        learn_step=RLParameter(
+            min=1, max=10, dtype=int, grow_factor=1.5, shrink_factor=0.75
+        ),
     )
 
     observation_space = spaces.Box(
-        low=features.values.min(),
-        high=features.values.max(),
-        shape=context_dim
-        )
+        low=features.values.min(), high=features.values.max(), shape=context_dim
+    )
     action_space = spaces.Discrete(action_dim)
     pop = create_population(
         algo="NeuralTS",  # Algorithm

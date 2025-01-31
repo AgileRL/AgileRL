@@ -1,7 +1,6 @@
-import pytest
-
 from agilerl.modules.base import EvolvableModule, mutation
 from agilerl.protocols import MutationType
+
 
 def test_register_mutation_fn():
     @mutation(MutationType.NODE)
@@ -9,6 +8,7 @@ def test_register_mutation_fn():
         return {"mutation": "dummy"}
 
     assert dummy_mutation._mutation_type == MutationType.NODE
+
 
 def test_evolvable_module_initialization():
     class DummyEvolvableModule(EvolvableModule):
@@ -21,6 +21,7 @@ def test_evolvable_module_initialization():
     module = DummyEvolvableModule(device="cpu")
     assert module.device == "cpu"
     assert module.init_dict == {"device": "cpu"}
+
 
 def test_evolvable_module_get_mutation_methods():
     class DummyEvolvableModule(EvolvableModule):
@@ -39,6 +40,7 @@ def test_evolvable_module_get_mutation_methods():
     assert "dummy_mutation" in mutation_methods
     assert mutation_methods["dummy_mutation"]._mutation_type == MutationType.NODE
 
+
 def test_evolvable_module_clone():
     class DummyEvolvableModule(EvolvableModule):
         def forward(self, x):
@@ -51,6 +53,7 @@ def test_evolvable_module_clone():
     clone = module.clone()
     assert clone.device == module.device
     assert clone.init_dict == module.init_dict
+
 
 def test_evolvable_module_make_unevolvable():
     class DummyEvolvableModule(EvolvableModule):
@@ -70,6 +73,7 @@ def test_evolvable_module_make_unevolvable():
     assert module.layer_mutation_methods == []
     assert module.node_mutation_methods == []
 
+
 def test_evolvable_module_sample_mutation_method():
     class DummyEvolvableModule(EvolvableModule):
         @mutation(MutationType.NODE)
@@ -85,6 +89,7 @@ def test_evolvable_module_sample_mutation_method():
     module = DummyEvolvableModule(device="cpu")
     sampled_method = module.sample_mutation_method(new_layer_prob=0.5)
     assert sampled_method == "dummy_mutation"
+
 
 def test_inherited_evolvable_module_mutation_methods():
     class BaseEvolvableModule(EvolvableModule):
@@ -116,6 +121,7 @@ def test_inherited_evolvable_module_mutation_methods():
     assert mutation_methods["base_mutation"]._mutation_type == MutationType.NODE
     assert mutation_methods["inherited_mutation"]._mutation_type == MutationType.LAYER
 
+
 def test_evolvable_module_with_evolvable_attributes():
     class AttributeEvolvableModule(EvolvableModule):
         @mutation(MutationType.NODE)
@@ -142,4 +148,7 @@ def test_evolvable_module_with_evolvable_attributes():
     module = ParentEvolvableModule(device="cpu")
     mutation_methods = module.get_mutation_methods()
     assert "attribute_module.attribute_mutation" in mutation_methods
-    assert mutation_methods["attribute_module.attribute_mutation"]._mutation_type == MutationType.NODE
+    assert (
+        mutation_methods["attribute_module.attribute_mutation"]._mutation_type
+        == MutationType.NODE
+    )

@@ -1,14 +1,15 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from tqdm import trange
 from gymnasium import spaces
+from tqdm import trange
 
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.utils import create_population, make_vect_envs
 from agilerl.wrappers.make_evolvable import MakeEvolvable
+
 
 class MLPActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
@@ -60,7 +61,9 @@ if __name__ == "__main__":
     mlp = MLPActor(observation_space.shape[0], [32, 32], action_space.n)
     evolvable_mlp = MakeEvolvable(
         mlp,
-        input_tensor=torch.ones(observation_space.shape[0]),  # Example input tensor to the network
+        input_tensor=torch.ones(
+            observation_space.shape[0]
+        ),  # Example input tensor to the network
         device=device,
     )
 
@@ -76,7 +79,6 @@ if __name__ == "__main__":
         num_envs=num_envs,  # Number of vectorized envs
         device=device,
     )
-
 
     # Create the replay buffer
     field_names = ["state", "action", "reward", "next_state", "done"]

@@ -1,23 +1,23 @@
 import numpy as np
-import torch
-import torch.nn as nn
 import pytest
+import torch
 
-from agilerl.modules.custom_components import NewGELU
 from agilerl.modules.gpt import (
     MLP,
     CausalSelfAttention,
     EvolvableGPT,
     PositionalEncoding,
-    TokenEmbedding
-    )
+    TokenEmbedding,
+)
 
 #### TESTING EvolvableGPT CLASS ####
+
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 # The model can be initialized with default parameters.
 def test_default_parameters_initialization():

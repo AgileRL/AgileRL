@@ -1,20 +1,21 @@
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import torch
-import torch.optim as optim
-from torch.nn.utils import clip_grad_norm_
 import torch.nn as nn
+import torch.optim as optim
 from gymnasium import spaces
+from torch.nn.utils import clip_grad_norm_
 
-from agilerl.typing import ArrayLike, GymEnvType, ExperiencesType, TorchObsType
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
-from agilerl.modules.configs import MlpNetConfig
 from agilerl.modules.base import EvolvableModule
+from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.q_networks import RainbowQNetwork
+from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, TorchObsType
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
-from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
 
 
 class RainbowDQN(RLAlgorithm):
@@ -94,7 +95,7 @@ class RainbowDQN(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-        ) -> None:
+    ) -> None:
         super().__init__(
             observation_space,
             action_space,
@@ -103,7 +104,7 @@ class RainbowDQN(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="Rainbow DQN"
+            name="Rainbow DQN",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
@@ -154,7 +155,9 @@ class RainbowDQN(RLAlgorithm):
         self.combined_reward = combined_reward
         self.noise_std = noise_std
 
-        self.support = torch.linspace(self.v_min, self.v_max, self.num_atoms, device=self.device)
+        self.support = torch.linspace(
+            self.v_min, self.v_max, self.num_atoms, device=self.device
+        )
         self.delta_z = (self.v_max - self.v_min) / (self.num_atoms - 1)
 
         if actor_network is not None:
@@ -169,16 +172,22 @@ class RainbowDQN(RLAlgorithm):
                 raise TypeError(
                     f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
                 )
-            
-            self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
+
+            self.actor, self.actor_target = make_safe_deepcopies(
+                actor_network, actor_network
+            )
         else:
             net_config = {} if net_config is None else net_config
             head_config: Optional[Dict[str, Any]] = net_config.get("head_config", None)
 
             head_config = MlpNetConfig(
-                hidden_size=[64] if head_config is None else head_config.get("hidden_size", [64]),
+                hidden_size=(
+                    [64]
+                    if head_config is None
+                    else head_config.get("hidden_size", [64])
+                ),
                 noise_std=self.noise_std,
-                output_activation="ReLU"
+                output_activation="ReLU",
             )
             net_config["head_config"] = head_config
 
@@ -189,7 +198,7 @@ class RainbowDQN(RLAlgorithm):
                 num_atoms=self.num_atoms,
                 noise_std=self.noise_std,
                 device=self.device,
-                **net_config
+                **net_config,
             )
 
             self.actor = create_actor()
@@ -199,11 +208,7 @@ class RainbowDQN(RLAlgorithm):
         self.actor_target.load_state_dict(self.actor.state_dict())
 
         # Optimizer
-        self.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            lr=self.lr
-        )
+        self.optimizer = OptimizerWrapper(optim.Adam, networks=self.actor, lr=self.lr)
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -214,19 +219,15 @@ class RainbowDQN(RLAlgorithm):
 
         # Register network groups for mutations
         self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                shared=self.actor_target,
-                policy=True
-            )
+            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
 
     def get_action(
-            self,
-            state: ArrayLike,
-            action_mask: Optional[ArrayLike] = None,
-            training: bool = True
-            ) -> ArrayLike:
+        self,
+        state: ArrayLike,
+        action_mask: Optional[ArrayLike] = None,
+        training: bool = True,
+    ) -> ArrayLike:
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -264,7 +265,7 @@ class RainbowDQN(RLAlgorithm):
         rewards: torch.Tensor,
         next_states: torch.Tensor,
         dones: torch.Tensor,
-        gamma: float
+        gamma: float,
     ) -> torch.Tensor:
         """Calculates the DQN loss.
 
@@ -314,7 +315,10 @@ class RainbowDQN(RLAlgorithm):
             u[(L < (self.num_atoms - 1)) * (L == u)] += 1
             offset = (
                 torch.linspace(
-                    0, (self.batch_size - 1) * self.num_atoms, self.batch_size, device=self.device
+                    0,
+                    (self.batch_size - 1) * self.num_atoms,
+                    self.batch_size,
+                    device=self.device,
                 )
                 .long()
                 .unsqueeze(1)
@@ -338,11 +342,8 @@ class RainbowDQN(RLAlgorithm):
         return elementwise_loss
 
     def learn(
-            self,
-            experiences: ExperiencesType,
-            n_step: bool = False,
-            per: bool = False
-            ) -> Tuple[float, Optional[ArrayLike], Optional[ArrayLike]]:
+        self, experiences: ExperiencesType, n_step: bool = False, per: bool = False
+    ) -> Tuple[float, Optional[ArrayLike], Optional[ArrayLike]]:
         """Updates agent network parameters to learn from experiences.
 
         :param experiences: List of batched states, actions, rewards, next_states, dones in that order.
@@ -473,12 +474,12 @@ class RainbowDQN(RLAlgorithm):
             )
 
     def test(
-            self,
-            env: GymEnvType,
-            swap_channels: bool = False,
-            max_steps: Optional[int] = None,
-            loop: int = 3
-            ) -> float:
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -520,4 +521,3 @@ class RainbowDQN(RLAlgorithm):
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
-

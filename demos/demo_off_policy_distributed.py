@@ -31,9 +31,11 @@ if __name__ == "__main__":
         print("===== AgileRL Online Distributed Demo =====")
     accelerator.wait_for_everyone()
 
-    NET_CONFIG = {"encoder_config": {
-        "hidden_size": [32, 32],  # Actor hidden size
-    }}
+    NET_CONFIG = {
+        "encoder_config": {
+            "hidden_size": [32, 32],  # Actor hidden size
+        }
+    }
 
     INIT_HP = {
         "DOUBLE": True,  # Use double Q-learning in DQN or CQN

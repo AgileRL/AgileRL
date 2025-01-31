@@ -1,6 +1,5 @@
-from typing import Optional, Dict, List, Tuple, Any
-import copy
 from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -8,19 +7,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import Accelerator
 
-from agilerl.typing import ArrayOrTensor
-from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
 from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear
+from agilerl.typing import ArrayOrTensor
 from agilerl.utils.evolvable_networks import (
     get_activation,
+    get_conv_layer,
     get_normalization,
     get_pooling,
-    get_conv_layer,
-    layer_init
+    layer_init,
 )
 
 LayerInfo = Dict[str, Dict[int, str]]
+
 
 class MakeEvolvable(EvolvableModule):
     """Wrapper to make a neural network evolvable
@@ -165,22 +165,18 @@ class MakeEvolvable(EvolvableModule):
         # Need to remove CNN mutation methods if network is not a CNN
         if not self.has_conv_layers:
             self._layer_mutation_methods = [
-                method
-                for method in self._layer_mutation_methods
-                if "cnn" not in method
+                method for method in self._layer_mutation_methods if "cnn" not in method
             ]
 
             self._node_mutation_methods = [
-                method
-                for method in self._node_mutation_methods
-                if "cnn" not in method
+                method for method in self._node_mutation_methods if "cnn" not in method
             ]
-    
+
     @property
     def activation(self) -> str:
         """Returns the activation function."""
         return self.mlp_activation
-    
+
     @property
     def output_activation(self) -> str:
         """Returns the output activation function."""
@@ -189,8 +185,11 @@ class MakeEvolvable(EvolvableModule):
     def get_output_dense(self) -> nn.Module:
         """Returns the output dense layer."""
         final_layer = self.value_net if self.value_net is not None else self.feature_net
-        return getattr(final_layer, f"{'value' if self.value_net is not None else 'feature'}_linear_layer_output")
-    
+        return getattr(
+            final_layer,
+            f"{'value' if self.value_net is not None else 'feature'}_linear_layer_output",
+        )
+
     def init_weights_gaussian(self, std_coeff: float = 4.0, output_coeff: float = 2.0):
         """Initialise network weights using Gaussian distribution.
 
@@ -211,9 +210,7 @@ class MakeEvolvable(EvolvableModule):
                     EvolvableModule.init_weights_gaussian(layer, std_coeff=std_coeff)
                     l_no += 1
             else:
-                EvolvableModule.init_weights_gaussian(
-                    layer, std_coeff=output_coeff
-                )
+                EvolvableModule.init_weights_gaussian(layer, std_coeff=output_coeff)
 
     def forward(self, x: ArrayOrTensor, xc: ArrayOrTensor = None, q: bool = True):
         """Returns output of neural network.
@@ -279,11 +276,11 @@ class MakeEvolvable(EvolvableModule):
         return x
 
     def detect_architecture(
-            self,
-            network: nn.Module,
-            input_tensor: torch.Tensor,
-            secondary_input_tensor: Optional[torch.Tensor] = None
-            ) -> None:
+        self,
+        network: nn.Module,
+        input_tensor: torch.Tensor,
+        secondary_input_tensor: Optional[torch.Tensor] = None,
+    ) -> None:
         """Detect the architecture of a neural network.
 
         :param network: Neural network whose architecture is being detected
@@ -306,7 +303,9 @@ class MakeEvolvable(EvolvableModule):
         mlp_layer_info = dict()
 
         def register_hooks(module):
-            def forward_hook(module: nn.Module, input: torch.Tensor, output: torch.Tensor):
+            def forward_hook(
+                module: nn.Module, input: torch.Tensor, output: torch.Tensor
+            ):
                 # Convolutional layer detection
                 if isinstance(module, nn.modules.conv._ConvNd):
                     self.has_conv_layers = True
@@ -361,7 +360,7 @@ class MakeEvolvable(EvolvableModule):
                 ):
                     if "pooling_layers" not in cnn_layer_info.keys():
                         cnn_layer_info["pooling_layers"] = dict()
-                    cnn_layer_info["pooling_layers"][self.conv_counter] = dict() 
+                    cnn_layer_info["pooling_layers"][self.conv_counter] = dict()
                     cnn_layer_info["pooling_layers"][self.conv_counter]["name"] = str(
                         module.__class__.__name__
                     )
@@ -589,7 +588,7 @@ class MakeEvolvable(EvolvableModule):
         stride_size: List[int],
         padding: List[int],
         name: str,
-        ) -> nn.Sequential:
+    ) -> nn.Sequential:
         """Creates and returns convolutional neural network.
 
         :param input_size: Channel size of first layer
@@ -695,7 +694,9 @@ class MakeEvolvable(EvolvableModule):
                 self.padding,
                 name="feature",
             )
-            cnn_output: torch.Tensor = feature_net(torch.zeros(*self.input_tensor.shape))
+            cnn_output: torch.Tensor = feature_net(
+                torch.zeros(*self.input_tensor.shape)
+            )
             self.cnn_output_size = cnn_output.shape
             input_size = (cnn_output).to(self.device).view(1, -1).size(1)
 
@@ -818,7 +819,7 @@ class MakeEvolvable(EvolvableModule):
         }
 
         return init_dict
-    
+
     @mutation(MutationType.ACTIVATION)
     def change_activation(self, activation: str, output: bool = False) -> None:
         """Set the activation function for the network.
@@ -886,10 +887,8 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_mlp_node(
-            self,
-            hidden_layer: Optional[int] = None,
-            numb_new_nodes: Optional[int] = None
-            ) -> Dict[str, int]:
+        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, int]:
         """Adds nodes to hidden layer of value network.
 
         :param hidden_layer: Depth of hidden layer to add nodes to, defaults to None
@@ -913,10 +912,8 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_mlp_node(
-            self,
-            hidden_layer: Optional[int] = None,
-            numb_new_nodes: Optional[int] = None
-            ) -> Dict[str, int]:
+        self, hidden_layer: Optional[int] = None, numb_new_nodes: Optional[int] = None
+    ) -> Dict[str, int]:
         """Removes nodes from hidden layer of neural network.
 
         :param hidden_layer: Depth of hidden layer to remove nodes from, defaults to None
@@ -1034,10 +1031,10 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_cnn_channel(
-            self,
-            hidden_layer: Optional[int] = None,
-            numb_new_channels: Optional[int] = None
-            ) -> Dict[str, int]:
+        self,
+        hidden_layer: Optional[int] = None,
+        numb_new_channels: Optional[int] = None,
+    ) -> Dict[str, int]:
         """Adds channel to hidden layer of Convolutional Neural Network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1061,10 +1058,10 @@ class MakeEvolvable(EvolvableModule):
 
     @mutation(MutationType.NODE, shrink_params=True)
     def remove_cnn_channel(
-            self,
-            hidden_layer: Optional[int] = None,
-            numb_new_channels: Optional[int] = None
-            ) -> Dict[str, int]:
+        self,
+        hidden_layer: Optional[int] = None,
+        numb_new_channels: Optional[int] = None,
+    ) -> Dict[str, int]:
         """Remove channel from hidden layer of convolutional neural network.
 
         :param hidden_layer: Depth of hidden layer to add channel to, defaults to None
@@ -1085,7 +1082,6 @@ class MakeEvolvable(EvolvableModule):
             self.channel_size[hidden_layer] -= numb_new_channels
 
         return {"hidden_layer": hidden_layer, "numb_new_channels": numb_new_channels}
-
 
     def calc_max_kernel_sizes(self) -> List[Tuple[int, int]]:
         "Calculates the max kernel size for each convolutional layer of the feature net."

@@ -7,21 +7,21 @@ from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.wrappers.make_evolvable import MakeEvolvable
 from agilerl.training.train_offline import train_offline
-
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
-    print_hyperparams
+    print_hyperparams,
 )
+from agilerl.wrappers.make_evolvable import MakeEvolvable
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
 
 # import sys
 # sys.path.append('../')
+
 
 class BasicNetActor(nn.Module):
     def __init__(self, input_size, hidden_sizes, output_size):
@@ -62,7 +62,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG):
 
     state_dim = RLAlgorithm.get_state_dim(observation_space)
     action_dim = RLAlgorithm.get_action_dim(action_space)
-    
+
     actor = BasicNetActor(state_dim[0], [32, 32], action_dim)
     actor_network = MakeEvolvable(
         actor, input_tensor=torch.ones(state_dim), device=device

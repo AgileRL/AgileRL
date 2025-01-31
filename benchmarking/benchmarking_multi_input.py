@@ -1,20 +1,16 @@
-import torch
 import copy
+import sys
+
+import torch
 import yaml
 
-from agilerl.hpo.mutation import Mutations
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.networks.actors import StochasticActor
 from agilerl.networks.value_functions import ValueFunction
 from agilerl.training.train_on_policy import train_on_policy
-
-from agilerl.utils.utils import (
-    create_population,
-    print_hyperparams,
-    make_vect_envs
-)
+from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -22,10 +18,9 @@ from agilerl.utils.utils import (
 # import sys
 # sys.path.append('../')
 
-import sys
-sys.path.append('../racecar_gym')
 
-import steelix
+sys.path.append("../racecar_gym")
+
 
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
@@ -62,34 +57,32 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
         head_config = net_config.get("head_config", None)
         critic_head_config = copy.deepcopy(head_config)
-        critic_head_config["output_activation"] = None # Value function has no output activation
+        critic_head_config["output_activation"] = (
+            None  # Value function has no output activation
+        )
         critic_net_config["head_config"] = critic_head_config
 
         actor = StochasticActor(
-                observation_space,
-                action_space,
-                log_std_init=INIT_HP['ACTION_STD_INIT'],
-                device=device,
-                **net_config
-            )
-        critic = ValueFunction(
-                observation_space,
-                device=device,
-                **critic_net_config
-            )
-        actor.filter_mutation_methods('kernel')
-        critic.filter_mutation_methods('kernel')
+            observation_space,
+            action_space,
+            log_std_init=INIT_HP["ACTION_STD_INIT"],
+            device=device,
+            **net_config,
+        )
+        critic = ValueFunction(observation_space, device=device, **critic_net_config)
+        actor.filter_mutation_methods("kernel")
+        critic.filter_mutation_methods("kernel")
     else:
         actor = None
         critic = None
 
     hp_config = HyperparameterConfig(
-        lr = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
-        batch_size = RLParameter(
-            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
-            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
-            dtype=int
-            )
+        lr=RLParameter(min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
     )
 
     agent_pop = create_population(

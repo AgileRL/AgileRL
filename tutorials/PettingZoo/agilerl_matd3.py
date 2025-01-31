@@ -10,11 +10,11 @@ import torch
 from pettingzoo.mpe import simple_speaker_listener_v4
 from tqdm import trange
 
+from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
-from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.utils.utils import create_population, observation_space_channels_to_first
 from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
@@ -60,8 +60,9 @@ if __name__ == "__main__":
     observation_spaces = [env.single_observation_space(agent) for agent in env.agents]
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
     if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [observation_space_channels_to_first(obs) for obs in observation_spaces]
-
+        observation_spaces = [
+            observation_space_channels_to_first(obs) for obs in observation_spaces
+        ]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     INIT_HP["N_AGENTS"] = env.num_agents
@@ -69,12 +70,12 @@ if __name__ == "__main__":
 
     # Mutation config for RL hyperparameters
     hp_config = HyperparameterConfig(
-        lr_actor = RLParameter(min=1e-4, max=1e-2),
-        lr_critic = RLParameter(min=1e-4, max=1e-2),
-        batch_size = RLParameter(min=8, max=512, dtype=int),
-        learn_step = RLParameter(
+        lr_actor=RLParameter(min=1e-4, max=1e-2),
+        lr_critic=RLParameter(min=1e-4, max=1e-2),
+        batch_size=RLParameter(min=8, max=512, dtype=int),
+        learn_step=RLParameter(
             min=20, max=200, dtype=int, grow_factor=1.5, shrink_factor=0.75
-            )
+        ),
     )
 
     # Create a population ready for evolutionary hyper-parameter optimisation
@@ -142,8 +143,7 @@ if __name__ == "__main__":
             steps = 0
             if INIT_HP["CHANNELS_LAST"]:
                 state = {
-                    agent_id: obs_channels_to_first(s)
-                    for agent_id, s in state.items()
+                    agent_id: obs_channels_to_first(s) for agent_id, s in state.items()
                 }
 
             for idx_step in range(evo_steps // num_envs):

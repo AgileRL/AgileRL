@@ -1,22 +1,23 @@
-from typing import Optional, Union, Tuple, Dict, Any
 import copy
 import warnings
+from typing import Any, Dict, Optional, Tuple, Union
+
+import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-import gymnasium as gym
 
-from agilerl.typing import ArrayLike, ArrayOrTensor, NumpyObsType, ExperiencesType
-from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.networks.actors import DeterministicActor
-from agilerl.modules.base import EvolvableModule
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
-from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+from agilerl.modules.base import EvolvableModule
+from agilerl.modules.configs import MlpNetConfig
+from agilerl.networks.actors import DeterministicActor
+from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, NumpyObsType
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
 class DDPG(RLAlgorithm):
@@ -103,7 +104,7 @@ class DDPG(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-        ) -> None:
+    ) -> None:
 
         super().__init__(
             observation_space,
@@ -113,12 +114,14 @@ class DDPG(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="DDPG"
+            name="DDPG",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
-        assert isinstance(action_space, spaces.Box), "DDPG only supports continuous action spaces."
+        assert isinstance(
+            action_space, spaces.Box
+        ), "DDPG only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
@@ -182,14 +185,18 @@ class DDPG(RLAlgorithm):
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
                     f"'actor_network' is of type {type(actor_network)}, but must be of type EvolvableModule."
-                     )
+                )
             if not isinstance(critic_network, EvolvableModule):
                 raise TypeError(
                     f"'critic_network' is of type {type(critic_network)}, but must be of type EvolvableModule."
                 )
 
-            self.actor, self.critic = make_safe_deepcopies(actor_network, critic_network)
-            self.actor_target, self.critic_target = make_safe_deepcopies(actor_network, critic_network)
+            self.actor, self.critic = make_safe_deepcopies(
+                actor_network, critic_network
+            )
+            self.actor_target, self.critic_target = make_safe_deepcopies(
+                actor_network, critic_network
+            )
         else:
             net_config = {} if net_config is None else net_config
             head_config = net_config.get("head_config", None)
@@ -198,7 +205,7 @@ class DDPG(RLAlgorithm):
                 critic_head_config["output_activation"] = None
             else:
                 critic_head_config = MlpNetConfig(hidden_size=[64])
-            
+
             critic_net_config = copy.deepcopy(net_config)
             critic_net_config["head_config"] = critic_head_config
 
@@ -206,13 +213,13 @@ class DDPG(RLAlgorithm):
                 observation_space=observation_space,
                 action_space=action_space,
                 device=device,
-                **net_config
+                **net_config,
             )
             create_critic = lambda: ContinuousQNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
                 device=device,
-                **critic_net_config
+                **critic_net_config,
             )
 
             self.actor = create_actor()
@@ -225,14 +232,10 @@ class DDPG(RLAlgorithm):
 
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            lr=lr_actor
+            optim.Adam, networks=self.actor, lr=lr_actor
         )
         self.critic_optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.critic,
-            lr=lr_critic
+            optim.Adam, networks=self.critic, lr=lr_critic
         )
 
         if self.accelerator is not None and wrap:
@@ -242,20 +245,15 @@ class DDPG(RLAlgorithm):
 
         # Register network groups for actors and critics
         self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                shared=self.actor_target,
-                policy=True
-            )
+            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
         self.register_network_group(
-            NetworkGroup(
-                eval=self.critic,
-                shared=self.critic_target
-            )
+            NetworkGroup(eval=self.critic, shared=self.critic_target)
         )
 
-    def scale_to_action_space(self, action: ArrayLike, convert_to_torch: bool = False) -> ArrayOrTensor:
+    def scale_to_action_space(
+        self, action: ArrayLike, convert_to_torch: bool = False
+    ) -> ArrayOrTensor:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
@@ -350,11 +348,11 @@ class DDPG(RLAlgorithm):
         return noise.astype(np.float32)
 
     def multi_dim_clamp(
-            self,
-            min: Union[float, np.ndarray],
-            max: Union[float, np.ndarray],
-            input: torch.Tensor
-            ) -> torch.Tensor:
+        self,
+        min: Union[float, np.ndarray],
+        max: Union[float, np.ndarray],
+        input: torch.Tensor,
+    ) -> torch.Tensor:
         """Multi-dimensional clamp function
 
         :param min: Minimum value or array of minimum values
@@ -370,16 +368,8 @@ class DDPG(RLAlgorithm):
             return torch.clamp(input, min, max)
 
         device = self.device if self.accelerator is None else self.accelerator.device
-        min = (
-            torch.from_numpy(min).to(device)
-            if isinstance(min, np.ndarray)
-            else min
-        )
-        max = (
-            torch.from_numpy(max).to(device)
-            if isinstance(max, np.ndarray)
-            else max
-        )
+        min = torch.from_numpy(min).to(device) if isinstance(min, np.ndarray) else min
+        max = torch.from_numpy(max).to(device) if isinstance(max, np.ndarray) else max
 
         if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
             min = torch.full_like(max, min).to(device)
@@ -395,11 +385,11 @@ class DDPG(RLAlgorithm):
         self.current_noise[indices] = self.mean_noise[indices]
 
     def learn(
-            self,
-            experiences: ExperiencesType,
-            noise_clip: float = 0.5,
-            policy_noise: float = 0.2
-            ) -> Tuple[float, float]:
+        self,
+        experiences: ExperiencesType,
+        noise_clip: float = 0.5,
+        policy_noise: float = 0.2,
+    ) -> Tuple[float, float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, rewards, next_states, dones in that order.
@@ -490,7 +480,13 @@ class DDPG(RLAlgorithm):
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env: gym.Env, swap_channels: bool = False, max_steps: Optional[int] = None, loop: int = 3) -> float:
+    def test(
+        self,
+        env: gym.Env,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -528,4 +524,3 @@ class DDPG(RLAlgorithm):
         mean_fit = np.mean(rewards)
         self.fitness.append(mean_fit)
         return mean_fit
-

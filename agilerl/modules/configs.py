@@ -1,7 +1,9 @@
-from typing import List, Optional, Dict, Any, Union, Tuple, Literal
 from dataclasses import dataclass, field
-import yaml
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+
 import torch
+import yaml
+
 
 @dataclass
 class NetConfig:
@@ -10,19 +12,19 @@ class NetConfig:
     @classmethod
     def from_dict(cls, config: Dict[str, Any]) -> "NetConfig":
         return cls(**config)
-    
+
     @classmethod
     def from_yaml(cls, path: str) -> "NetConfig":
-        with open(path, "r") as file:
+        with open(path) as file:
             config: Dict[str, Any] = yaml.safe_load(file)
             assert "NET_CONFIG" in config, "NET_CONFIG not found in yaml file."
             net_config = config["NET_CONFIG"]
 
         return cls.from_dict(net_config)
-    
+
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
-    
+
     def __setitem__(self, key: str, value: Any) -> None:
         setattr(self, key, value)
 
@@ -31,12 +33,13 @@ class NetConfig:
 
     def keys(self) -> List[str]:
         return list(self.__dataclass_fields__.keys())
-    
+
     def values(self) -> List[Any]:
         return [getattr(self, key) for key in self.keys()]
-    
+
     def items(self) -> Dict[str, Any]:
         return {key: getattr(self, key) for key in self.keys()}.items()
+
 
 @dataclass
 class MlpNetConfig(NetConfig):
@@ -55,19 +58,23 @@ class MlpNetConfig(NetConfig):
 
     def __post_init__(self):
         assert (
-            len(self.hidden_size) >= self.min_hidden_layers, 
-            "Hidden layers must be greater than min_hidden_layers."
+            len(self.hidden_size) >= self.min_hidden_layers,
+            "Hidden layers must be greater than min_hidden_layers.",
         )
         assert (
             len(self.hidden_size) <= self.max_hidden_layers,
-            "Hidden layers must be less than max_hidden_layers."
+            "Hidden layers must be less than max_hidden_layers.",
         )
         assert (
-            all([self.min_mlp_nodes <= nodes 
-                 and nodes <= self.max_mlp_nodes 
-                 for nodes in self.hidden_size]), 
-            "Nodes must be within min_nodes and max_nodes."
+            all(
+                [
+                    self.min_mlp_nodes <= nodes and nodes <= self.max_mlp_nodes
+                    for nodes in self.hidden_size
+                ]
+            ),
+            "Nodes must be within min_nodes and max_nodes.",
         )
+
 
 @dataclass
 class CnnNetConfig(NetConfig):
@@ -84,6 +91,7 @@ class CnnNetConfig(NetConfig):
     max_channel_size: int = field(default=256)
     layer_norm: bool = field(default=True)
     init_layers: bool = field(default=True)
+
 
 @dataclass
 class MultiInputNetConfig(NetConfig):

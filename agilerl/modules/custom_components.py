@@ -1,15 +1,19 @@
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from agilerl.typing import DeviceType
 
+
 class GumbelSoftmax(nn.Module):
     """Applies gumbel softmax function element-wise"""
 
     @staticmethod
-    def gumbel_softmax(logits: torch.Tensor, tau: float = 1.0, eps: float = 1e-20) -> torch.Tensor:
+    def gumbel_softmax(
+        logits: torch.Tensor, tau: float = 1.0, eps: float = 1e-20
+    ) -> torch.Tensor:
         """Implementation of the gumbel softmax activation function
 
         :param logits: Tensor containing unnormalized log probabilities for each class.
@@ -28,6 +32,7 @@ class GumbelSoftmax(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self.gumbel_softmax(input)
 
+
 class NoisyLinear(nn.Module):
     """The Noisy Linear Neural Network class.
 
@@ -40,16 +45,17 @@ class NoisyLinear(nn.Module):
     :param device: Device, defaults to "cpu"
     :type device: str, optional
     """
+
     weight_epsilon: torch.Tensor
     bias_epsilon: torch.Tensor
 
     def __init__(
-            self,
-            in_features: int,
-            out_features: int,
-            std_init: float = 0.5,
-            device: DeviceType = "cpu"
-            ):
+        self,
+        in_features: int,
+        out_features: int,
+        std_init: float = 0.5,
+        device: DeviceType = "cpu",
+    ):
         super().__init__()
 
         self.in_features = in_features
@@ -57,8 +63,12 @@ class NoisyLinear(nn.Module):
         self.std_init = std_init
         self.device = device
 
-        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features, device=device))
-        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features, device=device))
+        self.weight_mu = nn.Parameter(
+            torch.empty(out_features, in_features, device=device)
+        )
+        self.weight_sigma = nn.Parameter(
+            torch.empty(out_features, in_features, device=device)
+        )
         self.register_buffer(
             "weight_epsilon", torch.empty(out_features, in_features, device=device)
         )
@@ -69,7 +79,7 @@ class NoisyLinear(nn.Module):
 
         self.reset_parameters()
         self.reset_noise()
-    
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(in_features={self.in_features}, out_features={self.out_features})"
 
@@ -116,6 +126,7 @@ class NoisyLinear(nn.Module):
         """
         x = torch.randn(size, device=self.device)
         return x.sign().mul_(x.abs().sqrt_())
+
 
 class NewGELU(nn.Module):
     """

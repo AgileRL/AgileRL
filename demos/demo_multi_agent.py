@@ -21,9 +21,11 @@ if __name__ == "__main__":
     print("===== AgileRL Online Multi-Agent Demo =====")
 
     # Define the network configuration
-    NET_CONFIG = {"encoder_config": {
-        "hidden_size": [32, 32],  # Actor hidden size
-    }}
+    NET_CONFIG = {
+        "encoder_config": {
+            "hidden_size": [32, 32],  # Actor hidden size
+        }
+    }
 
     # Define the initial hyperparameters
     INIT_HP = {
@@ -56,7 +58,9 @@ if __name__ == "__main__":
     action_spaces = [env.single_action_space(agent) for agent in env.agents]
 
     if INIT_HP["CHANNELS_LAST"]:
-        observation_spaces = [observation_space_channels_to_first(space) for space in observation_spaces]
+        observation_spaces = [
+            observation_space_channels_to_first(space) for space in observation_spaces
+        ]
 
     # Append number of agents and agent IDs to the initial hyperparameter dictionary
     INIT_HP["N_AGENTS"] = env.num_agents

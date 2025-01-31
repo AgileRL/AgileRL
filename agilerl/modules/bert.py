@@ -1,13 +1,14 @@
-from typing import Tuple, Optional, Any, Dict
 import math
 import warnings
 from collections import OrderedDict
-from typing import List
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
 import torch.nn as nn
 
 from agilerl.modules.base import EvolvableModule, MutationType, mutation
+
 
 class EvolvableBERT(EvolvableModule):
     """The Evolvable BERT class.
@@ -67,8 +68,8 @@ class EvolvableBERT(EvolvableModule):
         max_encoder_layers: int = 12,
         max_decoder_layers: int = 12,
         device: str = "cpu",
-        name: str = "bert"
-        ) -> None:
+        name: str = "bert",
+    ) -> None:
         super().__init__(device)
 
         self.encoder_layers = encoder_layers
@@ -108,11 +109,11 @@ class EvolvableBERT(EvolvableModule):
     @property
     def activation(self) -> str:
         return self._activation
-    
+
     @activation.setter
     def activation(self, activation: str) -> None:
         self._activation = activation
-        
+
     def build_networks(self):
         """Creates and returns transformer neural network."""
         encoder_dict = OrderedDict()
@@ -134,8 +135,10 @@ class EvolvableBERT(EvolvableModule):
                 )
             )
         if self.encoder_norm:
-            encoder_dict[f"{self.name}_encoder_norm_0"] = nn.modules.normalization.LayerNorm(
-                self.d_model, eps=self.layer_norm_eps, device=self.device
+            encoder_dict[f"{self.name}_encoder_norm_0"] = (
+                nn.modules.normalization.LayerNorm(
+                    self.d_model, eps=self.layer_norm_eps, device=self.device
+                )
             )
 
         # Create the decoder
@@ -154,8 +157,10 @@ class EvolvableBERT(EvolvableModule):
                 )
             )
         if self.decoder_norm:
-            decoder_dict[f"{self.name}_decoder_norm_0"] = nn.modules.normalization.LayerNorm(
-                self.d_model, eps=self.layer_norm_eps, device=self.device
+            decoder_dict[f"{self.name}_decoder_norm_0"] = (
+                nn.modules.normalization.LayerNorm(
+                    self.d_model, eps=self.layer_norm_eps, device=self.device
+                )
             )
 
         self._reset_parameters()
@@ -180,7 +185,9 @@ class EvolvableBERT(EvolvableModule):
         )
         return mask
 
-    def create_mask(self, src: torch.Tensor, tgt: torch.Tensor, pad_idx: int) -> Tuple[torch.Tensor, ...]:
+    def create_mask(
+        self, src: torch.Tensor, tgt: torch.Tensor, pad_idx: int
+    ) -> Tuple[torch.Tensor, ...]:
         """Returns masks to hide source and target padding tokens.
 
         :param src: Source
@@ -269,7 +276,7 @@ class EvolvableBERT(EvolvableModule):
         src: torch.Tensor,
         src_mask: Optional[torch.Tensor] = None,
         src_key_padding_mask: Optional[torch.Tensor] = None,
-        is_causal: bool = False
+        is_causal: bool = False,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """Returns encoded transformer input.
 
@@ -430,30 +437,34 @@ class EvolvableBERT(EvolvableModule):
             and first_layer.norm1.eps == first_layer.norm2.eps
             and src.dim() == 3
             and src_key_padding_mask is not None
-            and torch._nested_tensor_from_mask_left_aligned(src, src_key_padding_mask.logical_not())
+            and torch._nested_tensor_from_mask_left_aligned(
+                src, src_key_padding_mask.logical_not()
+            )
             and not output.is_nested
             and mask is None
             and first_layer.self_attn.num_heads % 2 != 1
             and not torch.is_autocast_enabled()
         ):
             tensor_args = (
-            src,
-            first_layer.self_attn.in_proj_weight,
-            first_layer.self_attn.in_proj_bias,
-            first_layer.self_attn.out_proj.weight,
-            first_layer.self_attn.out_proj.bias,
-            first_layer.norm1.weight,
-            first_layer.norm1.bias,
-            first_layer.norm2.weight,
-            first_layer.norm2.bias,
-            first_layer.linear1.weight,
-            first_layer.linear1.bias,
-            first_layer.linear2.weight,
-            first_layer.linear2.bias,
+                src,
+                first_layer.self_attn.in_proj_weight,
+                first_layer.self_attn.in_proj_bias,
+                first_layer.self_attn.out_proj.weight,
+                first_layer.self_attn.out_proj.bias,
+                first_layer.norm1.weight,
+                first_layer.norm1.bias,
+                first_layer.norm2.weight,
+                first_layer.norm2.bias,
+                first_layer.linear1.weight,
+                first_layer.linear1.bias,
+                first_layer.linear2.weight,
+                first_layer.linear2.bias,
             )
 
-            if (src.is_cuda or "cpu" in str(src.device)) and torch.is_grad_enabled() and any(
-            x.requires_grad for x in tensor_args
+            if (
+                (src.is_cuda or "cpu" in str(src.device))
+                and torch.is_grad_enabled()
+                and any(x.requires_grad for x in tensor_args)
             ):
                 convert_to_nested = True
                 output = torch._nested_tensor_from_mask(
@@ -533,10 +544,10 @@ class EvolvableBERT(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def add_node(
-        self, 
-        network: Optional[str] = None, 
-        hidden_layer: Optional[int] = None, 
-        numb_new_nodes: Optional[int] = None
+        self,
+        network: Optional[str] = None,
+        hidden_layer: Optional[int] = None,
+        numb_new_nodes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Adds nodes to hidden layer of encoder/decoder.
 
@@ -579,10 +590,10 @@ class EvolvableBERT(EvolvableModule):
 
     @mutation(MutationType.NODE)
     def remove_node(
-        self, 
-        network: Optional[str] = None, 
-        hidden_layer: Optional[int] = None, 
-        numb_new_nodes: Optional[int] = None
+        self,
+        network: Optional[str] = None,
+        hidden_layer: Optional[int] = None,
+        numb_new_nodes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Removes nodes from hidden layer of encoder/decoder.
 
@@ -631,21 +642,22 @@ class EvolvableBERT(EvolvableModule):
 
         new_encoder = EvolvableModule.preserve_parameters(
             old_net=self.encoder, new_net=new_encoder
-            )
+        )
         self.decoder = EvolvableModule.preserve_parameters(
             old_net=self.decoder, new_net=new_decoder
-            )
-        
+        )
+
         self.encoder = new_encoder
         self.decoder = new_decoder
 
+
 def _canonical_mask(
-    mask: Optional[torch.Tensor], 
-    mask_name: str, 
-    other_type: Optional[torch.dtype], 
-    other_name: str, 
-    target_type: torch.dtype, 
-    check_other: bool = True
+    mask: Optional[torch.Tensor],
+    mask_name: str,
+    other_type: Optional[torch.dtype],
+    other_name: str,
+    target_type: torch.dtype,
+    check_other: bool = True,
 ) -> Optional[torch.Tensor]:
     """Returns canonical mask. Adapted from torch.nn.functional.
 
@@ -695,6 +707,7 @@ class PositionalEncoder(nn.Module):
     :param maxlen: Maximum length of sequence, defaults to 5000
     :type maxlen: int, optional
     """
+
     pos_embedding: torch.Tensor
 
     def __init__(self, emb_size: int, dropout: float, maxlen: int = 5000) -> None:
@@ -717,10 +730,12 @@ class PositionalEncoder(nn.Module):
         """
         return self.dropout(x + self.pos_embedding[: x.size(0), :])
 
+
 class PositionalEncoding(nn.Module):
     """The positional embedding class.
     Converts tensor of input indices into corresponding tensor of position embeddings.
     """
+
     def __init__(self, max_positions: int, emb_size: int):
         super().__init__()
         self.embedding = nn.Embedding(max_positions, emb_size)
@@ -733,15 +748,17 @@ class PositionalEncoding(nn.Module):
         """
         return self.embedding(tokens)
 
+
 class TokenEmbedding(nn.Module):
-    """The token embedding class. Converts tensor of input indices into corresponding 
+    """The token embedding class. Converts tensor of input indices into corresponding
     tensor of token embeddings.
-    
+
     :param vocab_size: Size of the vocabulary
     :type vocab_size: int
     :param emb_size: Size of the embedding
     :type emb_size: int
     """
+
     def __init__(self, vocab_size: int, emb_size: int):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, emb_size)
@@ -754,6 +771,7 @@ class TokenEmbedding(nn.Module):
         """
         # return self.embedding(tokens.long()) * math.sqrt(self.emb_size)
         return self.embedding(tokens)
+
 
 def _none_or_dtype(input: Any) -> Optional[torch.dtype]:
     """Returns None or dtype of input. Adapted from torch.nn.functional.

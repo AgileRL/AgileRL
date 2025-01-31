@@ -8,4 +8,3 @@ Parameters
 
 .. autoclass:: agilerl.networks.value_functions.ValueFunction
   :members:
-

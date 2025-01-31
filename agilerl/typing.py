@@ -1,14 +1,15 @@
-from typing import Union, Dict, List, Tuple, Any
-import torch
-from numpy.typing import ArrayLike
-from torch.optim import Optimizer
-from torch.nn import Module
-from accelerate.optimizer import AcceleratedOptimizer
-import gymnasium as gym
-from gymnasium import spaces
+from typing import Any, Dict, List, Tuple, Union
 
+import gymnasium as gym
+import torch
+from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
+from numpy.typing import ArrayLike
+from torch.nn import Module
+from torch.optim import Optimizer
+
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig
 from agilerl.protocols import EvolvableAlgorithm
-from agilerl.modules.configs import MlpNetConfig, CnnNetConfig
 
 ArrayOrTensor = Union[ArrayLike, torch.Tensor]
 TensorDict = Dict[str, torch.Tensor]

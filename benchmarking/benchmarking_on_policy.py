@@ -6,14 +6,12 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.modules.mlp import EvolvableMLP
-from agilerl.networks.actors import EvolvableDistribution
 from agilerl.training.train_on_policy import train_on_policy
-
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
-    print_hyperparams
+    print_hyperparams,
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -21,6 +19,7 @@ from agilerl.utils.utils import (
 
 # import sys
 # sys.path.append('../')
+
 
 def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -57,12 +56,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
     if use_net:
         # For PPO
         actor = EvolvableMLP(
-                num_inputs=state_dim[0],
-                num_outputs=action_dim,
-                device=device,
-                hidden_size=[64, 64],
-                activation="Tanh",
-                output_activation="Softmax",
+            num_inputs=state_dim[0],
+            num_outputs=action_dim,
+            device=device,
+            hidden_size=[64, 64],
+            activation="Tanh",
+            output_activation="Softmax",
         )
 
         critic = EvolvableMLP(
@@ -77,12 +76,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         critic = None
 
     hp_config = HyperparameterConfig(
-        lr = RLParameter(min=MUTATION_PARAMS['MIN_LR'], max=MUTATION_PARAMS['MAX_LR']),
-        batch_size = RLParameter(
-            min=MUTATION_PARAMS['MIN_BATCH_SIZE'],
-            max=MUTATION_PARAMS['MAX_BATCH_SIZE'],
-            dtype=int
-            )
+        lr=RLParameter(min=MUTATION_PARAMS["MIN_LR"], max=MUTATION_PARAMS["MAX_LR"]),
+        batch_size=RLParameter(
+            min=MUTATION_PARAMS["MIN_BATCH_SIZE"],
+            max=MUTATION_PARAMS["MAX_BATCH_SIZE"],
+            dtype=int,
+        ),
     )
 
     agent_pop = create_population(

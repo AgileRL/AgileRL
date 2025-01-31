@@ -50,7 +50,6 @@ NET_CONFIG:
 
     encoder_config:
         hidden_size: [64]
-    
+
     head_config:
         hidden_size: [64]
-

@@ -3,20 +3,22 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.custom_components import NoisyLinear
+from agilerl.modules.mlp import EvolvableMLP
+
 
 ######### Define fixtures #########
 @pytest.fixture
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
+
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 def test_noisy_linear(device):
     noisy_linear = NoisyLinear(2, 10).to(device)
@@ -234,9 +236,7 @@ def test_remove_nodes(
         device=device,
     )
     original_hidden_size = copy.deepcopy(mlp.hidden_size)
-    result = mlp.remove_node(
-        numb_new_nodes=numb_new_nodes, hidden_layer=hidden_layer
-    )
+    result = mlp.remove_node(numb_new_nodes=numb_new_nodes, hidden_layer=hidden_layer)
     hidden_layer = result["hidden_layer"]
     if numb_new_nodes is None:
         numb_new_nodes = result["numb_new_nodes"]

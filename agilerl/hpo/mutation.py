@@ -1,21 +1,20 @@
-from typing import List, Optional, Union, Dict, Callable, Any, Tuple, Type, TypeVar
-import inspect
 import copy
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+
+import fastrand
 import numpy as np
 import torch
 import torch.nn as nn
-import fastrand
-from torch.optim import Optimizer
 from accelerate import Accelerator
-from torch._dynamo.eval_frame import OptimizedModule
 from numpy.random import Generator
+from torch._dynamo.eval_frame import OptimizedModule
 
-from agilerl.protocols import OptimizerConfig
-from agilerl.algorithms.neural_ts_bandit import NeuralTS
-from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.core import EvolvableAlgorithm
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
+from agilerl.algorithms.neural_ts_bandit import NeuralTS
+from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.modules.base import EvolvableModule
+from agilerl.protocols import OptimizerConfig
 from agilerl.utils.algo_utils import remove_compile_prefix
 
 NetworkConfig = Dict[str, str]
@@ -28,6 +27,7 @@ ModuleType = Union[OptimizedModule, EvolvableModule]
 OffspringType = Union[List[EvolvableModule], EvolvableModule]
 MutationReturnType = Union[Dict[str, Any], List[Dict[str, Any]]]
 BanditAlgorithm = Union[NeuralUCB, NeuralTS]
+
 
 def set_global_seed(seed: Optional[int]) -> None:
     """Set the global seed for random number generators.
@@ -46,12 +46,10 @@ def set_global_seed(seed: Optional[int]) -> None:
 
 
 def get_architecture_mut_method(
-        eval: OffspringType,
-        new_layer_prob: float,
-        rng: Generator
-        ) -> str:
+    eval: OffspringType, new_layer_prob: float, rng: Generator
+) -> str:
     """Get the mutation method and its return type of the individual.
-    
+
     :param individual: The individual to inspect
     :type individual: EvolvableAlgorithm
     :param new_layer_prob: Relative probability of new layer mutation (type of architecture mutation)
@@ -60,24 +58,27 @@ def get_architecture_mut_method(
     :type rng: Generator
     :return: The mutation methods name
     :rtype: str
-    """ 
-    # All of the offsprings should be the same EvolvableModule type, so we can 
+    """
+    # All of the offsprings should be the same EvolvableModule type, so we can
     # just sample the mutation method from the first offspring
     if isinstance(eval, list):
-        assert all(isinstance(offspring, eval[0].__class__) for offspring in eval), \
-            "All offspring should be of the same type."
+        assert all(
+            isinstance(offspring, eval[0].__class__) for offspring in eval
+        ), "All offspring should be of the same type."
 
         eval = eval[0]
 
-    return  eval.sample_mutation_method(new_layer_prob, rng)
+    return eval.sample_mutation_method(new_layer_prob, rng)
 
 
-def get_offspring_eval_modules(individual: SelfEvolvableAlgorithm) -> Tuple[Dict[str, OffspringType], ...]:
+def get_offspring_eval_modules(
+    individual: SelfEvolvableAlgorithm,
+) -> Tuple[Dict[str, OffspringType], ...]:
     """Get the offsprings of all of the evaluation modules in the individual.
-    
+
     :param individual: The individual to inspect
     :type individual: EvolvableAlgorithm
-    
+
     :return: The offspring evaluation modules
     :rtype: Dict[str, OffspringType]
     """
@@ -88,19 +89,24 @@ def get_offspring_eval_modules(individual: SelfEvolvableAlgorithm) -> Tuple[Dict
     for group in registry.groups:
         eval_module: OffspringType = getattr(individual, group.eval)
 
-        offspring = [mod.clone() for mod in eval_module] if isinstance(eval_module, list) else eval_module.clone()
+        offspring = (
+            [mod.clone() for mod in eval_module]
+            if isinstance(eval_module, list)
+            else eval_module.clone()
+        )
 
         if group.policy:
             offspring_policy[group.eval] = offspring
         else:
             offspring_modules[group.eval] = offspring
-    
+
     return offspring_policy, offspring_modules
 
+
 def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
-    """Get the output layer of different types of offsprings for bandit algorithms. 
+    """Get the output layer of different types of offsprings for bandit algorithms.
     Returns None if algorithm is not a bandit algorithm.
-    
+
     :param offspring: The offspring to inspect
     :type offspring: EvolvableModule
 
@@ -110,8 +116,10 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
     if isinstance(offspring, EvolvableModule):
         exp_layer = offspring.get_output_dense()
     else:
-        raise ValueError(f"Bandit algorithm architecture {type(offspring)} not supported.")
-    
+        raise ValueError(
+            f"Bandit algorithm architecture {type(offspring)} not supported."
+        )
+
     return exp_layer
 
 
@@ -161,6 +169,7 @@ class Mutations:
     :param accelerator: Accelerator for distributed computing, defaults to None
     :type accelerator: accelerate.Accelerator(), optional
     """
+
     def __init__(
         self,
         no_mutation: float,
@@ -246,26 +255,30 @@ class Mutations:
         self.device = device
         self.accelerator = accelerator
 
-        self.pretraining_mut_options, self.pretraining_mut_proba = self.get_mutations_options(pretraining=True)
+        self.pretraining_mut_options, self.pretraining_mut_proba = (
+            self.get_mutations_options(pretraining=True)
+        )
         self.mut_options, self.mut_proba = self.get_mutations_options()
-    
-    def get_mutations_options(self, pretraining: bool = False) -> Tuple[List[Callable], List[float]]:
-        """Get the mutation options and probabilities for the given mutation 
+
+    def get_mutations_options(
+        self, pretraining: bool = False
+    ) -> Tuple[List[Callable], List[float]]:
+        """Get the mutation options and probabilities for the given mutation
         configuration.
-        
+
         :param pretraining: Boolean flag indicating if the mutation is before the training loop
         :type pretraining: bool
         :return: Mutation functions and their respective relative probabilities
         :rtype: Tuple[List[Callable], List[float]]
         """
-        # Create lists of possible mutation functions and their 
+        # Create lists of possible mutation functions and their
         # respective relative probabilities
         mutation_options = [
             (self.no_mutation, self.no_mut),
             (self.architecture_mutate, self.architecture_mut),
             (self.parameter_mutation, self.parameters_mut),
             (self.activation_mutation, self.activation_mut),
-            (self.rl_hyperparam_mutation, self.rl_hp_mut)
+            (self.rl_hyperparam_mutation, self.rl_hp_mut),
         ]
 
         if pretraining:
@@ -273,7 +286,7 @@ class Mutations:
 
         mutation_options = [(func, prob) for func, prob in mutation_options if prob > 0]
 
-        # This will really only happen when pretraining is True and user has set 
+        # This will really only happen when pretraining is True and user has set
         # all mutation probabilities to zero, hence we apply no mutation
         if len(mutation_options) == 0:
             mutation_options = [(self.no_mutation, 1)]
@@ -293,7 +306,7 @@ class Mutations:
 
     def to_device(self, offsprings: OffspringType) -> OffspringType:
         """Move offspring to device.
-        
+
         :param offsprings: The offspring to move to device
         :type offsprings: OffspringType
         """
@@ -303,13 +316,10 @@ class Mutations:
             return offsprings.to(self.device)
 
     def to_device_and_set_individual(
-        self, 
-        individual: SelfEvolvableAlgorithm, 
-        name: str, 
-        networks: OffspringType
+        self, individual: SelfEvolvableAlgorithm, name: str, networks: OffspringType
     ) -> None:
         """Moves networks to the device and assigns them back to the individual.
-        
+
         :param individual: The individual to assign the networks to
         :type individual: EvolvableAlgorithm
         :param name: The name of the attribute to assign the networks to
@@ -321,13 +331,15 @@ class Mutations:
             setattr(individual, name, self.to_device(networks))
         else:
             setattr(individual, name, networks)
-    
-    def reinit_module(self, module: EvolvableModule, init_dict: Dict[str, Any]) -> EvolvableModule:
+
+    def reinit_module(
+        self, module: EvolvableModule, init_dict: Dict[str, Any]
+    ) -> EvolvableModule:
         """Reinitialize the module with the given initialization dictionary.
-        
+
         :param module: The module to reinitialize
         :type module: EvolvableModule
-        
+
         :param init_dict: The initialization dictionary
         :type init_dict: Dict[str, Any]
         """
@@ -335,44 +347,43 @@ class Mutations:
             module_cls = type(module._orig_mod)
         else:
             module_cls = type(module)
-        
+
         return module_cls(**init_dict)
 
-    def reinit_from_mutated(self, offspring: OffspringType, remove_compile_prefix: bool = False) -> OffspringType:
+    def reinit_from_mutated(
+        self, offspring: OffspringType, remove_compile_prefix: bool = False
+    ) -> OffspringType:
         """Reinitialize the mutated offspring with their state dictionary.
-        
+
         :param offspring: The offspring to reinitialize
         :type offspring: OffspringType
-        
+
         :return: The reinitialized offspring
         :rtype: OffspringType
         """
         if isinstance(offspring, list):
             ind_shared = [
-                self.reinit_module(offspring, offspring.init_dict) 
+                self.reinit_module(offspring, offspring.init_dict)
                 for offspring in offspring
-                ]
+            ]
 
-            # Load eval state dicts into shared networks                        
+            # Load eval state dicts into shared networks
             state_dicts = [offspring.state_dict() for offspring in offspring]
             self.load_state_dicts(ind_shared, state_dicts, remove_compile_prefix)
         else:
-            ind_shared = self.reinit_module(
-                offspring,
-                offspring.init_dict
-                )
+            ind_shared = self.reinit_module(offspring, offspring.init_dict)
             ind_shared.load_state_dict(offspring.state_dict())
-        
+
         return ind_shared
-        
 
     def load_state_dicts(
-            self, modules: List[ModuleType],
-            state_dicts: List[Dict[str, Any]],
-            remove_prefix: bool = False
-            ) -> None:
+        self,
+        modules: List[ModuleType],
+        state_dicts: List[Dict[str, Any]],
+        remove_prefix: bool = False,
+    ) -> None:
         """Load the state dictionary into the module.
-        
+
         :param module: The module to load the state dictionary into
         :type module: ModuleType
         :param state_dict: The state dictionary to load
@@ -381,15 +392,17 @@ class Mutations:
         :type remove_prefix: bool, optional
         """
         for module, state_dict in zip(modules, state_dicts):
-            state_dict = remove_compile_prefix(state_dict) if remove_prefix else state_dict
+            state_dict = (
+                remove_compile_prefix(state_dict) if remove_prefix else state_dict
+            )
             module.load_state_dict(state_dict)
 
     def compile_modules(self, modules: OffspringType, compiler: str) -> OffspringType:
         """Compile the modules using the given compiler.
-        
+
         :param modules: The modules to compile
         :type modules: List[ModuleType]
-        
+
         :param compiler: The compiler to use
         :type compiler: Optional[str]
         """
@@ -407,7 +420,9 @@ class Mutations:
 
         return compiled_modules if not single_offspring else compiled_modules[0]
 
-    def mutation(self, population: PopulationType, pre_training_mut: bool = False) -> PopulationType:
+    def mutation(
+        self, population: PopulationType, pre_training_mut: bool = False
+    ) -> PopulationType:
         """Returns mutated population.
 
         :param population: Population of agents
@@ -416,8 +431,12 @@ class Mutations:
         :type pre_training_mut: bool, optional
         """
         # Create lists of possible mutation functions and their respective relative probabilities
-        mutation_options = self.pretraining_mut_options if pre_training_mut else self.mut_options
-        mutation_proba = self.pretraining_mut_proba if pre_training_mut else self.mut_proba
+        mutation_options = (
+            self.pretraining_mut_options if pre_training_mut else self.mut_options
+        )
+        mutation_proba = (
+            self.pretraining_mut_proba if pre_training_mut else self.mut_proba
+        )
 
         # Randomly choose mutation for each agent in population from options with
         # relative probabilities
@@ -442,24 +461,33 @@ class Mutations:
             if hasattr(individual, "torch_compiler") and individual.torch_compiler:
                 compiled_individual = True
                 individual.recompile()
-            
+
             # Reinitiliaze shared networks to mutated evaluation networks
             for net_group in registry.groups:
                 if net_group.shared is not None:
                     for shared_name in net_group.shared:
-                        eval_offspring: OffspringType = getattr(individual, net_group.eval)
+                        eval_offspring: OffspringType = getattr(
+                            individual, net_group.eval
+                        )
 
-                        # Reinitialize shared with frozen weights due to 
+                        # Reinitialize shared with frozen weights due to
                         # potential mutation in architecture
-                        ind_shared = self.reinit_from_mutated(eval_offspring, remove_compile_prefix=compiled_individual)
+                        ind_shared = self.reinit_from_mutated(
+                            eval_offspring, remove_compile_prefix=compiled_individual
+                        )
 
                         if self.accelerator is None:
                             ind_shared = self.to_device(ind_shared)
 
                         # Compile modules if necessary
-                        if hasattr(individual, "torch_compiler") and individual.torch_compiler:
-                            ind_shared = self.compile_modules(ind_shared, individual.torch_compiler)
-                        
+                        if (
+                            hasattr(individual, "torch_compiler")
+                            and individual.torch_compiler
+                        ):
+                            ind_shared = self.compile_modules(
+                                ind_shared, individual.torch_compiler
+                            )
+
                         setattr(individual, shared_name, ind_shared)
 
             # Call hooks specified by user
@@ -469,12 +497,17 @@ class Mutations:
 
         return mutated_population
 
-    def reinit_opt(self, individual: SelfEvolvableAlgorithm, optimizer: Optional[OptimizerConfig] = None) -> None:
+    def reinit_opt(
+        self,
+        individual: SelfEvolvableAlgorithm,
+        optimizer: Optional[OptimizerConfig] = None,
+    ) -> None:
         """Reinitialize the optimizers of an individual.
 
         :param individual: The individual to reinitialize the optimizers for
         :type individual: EvolvableAlgorithm
         """
+
         def _reinit_individual(config: OptimizerConfig) -> None:
             opt: OptimizerWrapper = getattr(individual, config.name)
             optimizer = opt.optimizer
@@ -508,7 +541,9 @@ class Mutations:
             for opt_config in optimizer_configs:
                 _reinit_individual(opt_config)
 
-    def rl_hyperparam_mutation(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
+    def rl_hyperparam_mutation(
+        self, individual: SelfEvolvableAlgorithm
+    ) -> SelfEvolvableAlgorithm:
         """Returns individual from population with RL hyperparameter mutation.
 
         :param individual: Individual agent from population
@@ -524,7 +559,7 @@ class Mutations:
         mutate_attr, mutate_param = hp_config.sample()
         if mutate_param.value is None:
             mutate_param.value = getattr(individual, mutate_attr)
-        
+
         # Randomly grow or shrink hyperparameters by specified factors
         new_value = mutate_param.mutate()
         setattr(individual, mutate_attr, new_value)
@@ -532,14 +567,22 @@ class Mutations:
         # Need to reinitialize respective optimizer if mutated learning rate
         if mutate_attr in individual.get_lr_names():
             optimizer_configs = individual.registry.optimizers
-            to_reinit = [opt_config for opt_config in optimizer_configs if mutate_attr == opt_config.lr][0]
-            self.reinit_opt(individual, optimizer=to_reinit)  # Reinitialise optimizer if new learning rate
+            to_reinit = [
+                opt_config
+                for opt_config in optimizer_configs
+                if mutate_attr == opt_config.lr
+            ][0]
+            self.reinit_opt(
+                individual, optimizer=to_reinit
+            )  # Reinitialise optimizer if new learning rate
 
         individual.mut = mutate_attr
 
         return individual
 
-    def activation_mutation(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
+    def activation_mutation(
+        self, individual: SelfEvolvableAlgorithm
+    ) -> SelfEvolvableAlgorithm:
         """Returns individual from population with activation layer mutation.
 
         :param individual: Individual agent from population
@@ -547,7 +590,7 @@ class Mutations:
         """
         # Needs to stay constant for policy gradient methods
         # TODO: Could set up an algorithm registry to make algo checks more robust
-        # OR perform actation mutations within evolvable modules directly and disable 
+        # OR perform actation mutations within evolvable modules directly and disable
         # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
             individual.mut = "None"
@@ -561,7 +604,7 @@ class Mutations:
                 eval_module = [self._permutate_activation(mod) for mod in eval_module]
             else:
                 eval_module = self._permutate_activation(eval_module)
-            
+
             if self.accelerator is None:
                 eval_module = self.to_device(eval_module)
 
@@ -584,11 +627,17 @@ class Mutations:
         if len(possible_activations) > 1 and current_activation in possible_activations:
             possible_activations.remove(current_activation)
 
-        new_activation = self.rng.choice(possible_activations, size=1)[0]  # Select new activation
-        network.change_activation(new_activation, output=False)  # Change activation layer
+        new_activation = self.rng.choice(possible_activations, size=1)[
+            0
+        ]  # Select new activation
+        network.change_activation(
+            new_activation, output=False
+        )  # Change activation layer
         return network
 
-    def parameter_mutation(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
+    def parameter_mutation(
+        self, individual: SelfEvolvableAlgorithm
+    ) -> SelfEvolvableAlgorithm:
         """Returns individual from population with network parameters mutation.
 
         :param individual: Individual agent from population
@@ -596,17 +645,19 @@ class Mutations:
         """
         registry = individual.registry
 
-        # We only apply parameter mutations to the evaluation policy network 
+        # We only apply parameter mutations to the evaluation policy network
         # (i.e. the network used to select actions)
         offspring_policy: OffspringType = getattr(individual, registry.policy)
         if isinstance(offspring_policy, list):
-            offspring_policy = [self.classic_parameter_mutation(mod) for mod in offspring_policy]
+            offspring_policy = [
+                self.classic_parameter_mutation(mod) for mod in offspring_policy
+            ]
         else:
             offspring_policy = self.classic_parameter_mutation(offspring_policy)
-        
+
         if self.accelerator is None:
             offspring_policy = self.to_device(offspring_policy)
-        
+
         setattr(individual, registry.policy, offspring_policy)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
@@ -688,15 +739,17 @@ class Mutations:
 
         return network
 
-    def architecture_mutate(self, individual: SelfEvolvableAlgorithm) -> SelfEvolvableAlgorithm:
-        """Returns individual from population with network architecture mutation, which 
+    def architecture_mutate(
+        self, individual: SelfEvolvableAlgorithm
+    ) -> SelfEvolvableAlgorithm:
+        """Returns individual from population with network architecture mutation, which
         adds either layers or nodes to different types of network architectures.
 
         :param individual: Individual agent from population
         :type individual: object
         """
         # Get the offspring evaluation modules
-        # We first extract and apply a mutation for the algo policy and then apply 
+        # We first extract and apply a mutation for the algo policy and then apply
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
         policy_name, policy_offspring = list(policy.items())[0]
@@ -704,9 +757,11 @@ class Mutations:
         # Sample mutation method from policy network
         mut_method = get_architecture_mut_method(
             policy_offspring, self.new_layer_prob, self.rng
-            )
+        )
 
-        applied_mutations, mut_dict = self._apply_arch_mutation(policy_offspring, mut_method)
+        applied_mutations, mut_dict = self._apply_arch_mutation(
+            policy_offspring, mut_method
+        )
         self.to_device_and_set_individual(individual, policy_name, policy_offspring)
 
         if isinstance(individual, (NeuralTS, NeuralUCB)):
@@ -728,13 +783,13 @@ class Mutations:
         return individual
 
     def _apply_arch_mutation(
-        self, 
-        networks: OffspringType, 
-        mut_method: Union[Optional[str], List[Optional[str]]], 
-        applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
+        self,
+        networks: OffspringType,
+        mut_method: Union[Optional[str], List[Optional[str]]],
+        applied_mut_dict: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
     ) -> Tuple[Union[str, List[str]], MutationReturnType]:
         """Applies the mutation method to networks and returns mutation data if needed.
-        
+
         :param networks: The networks to apply the mutation to
         :type networks: OffspringType
         :param mut_method: The mutation method to apply
@@ -748,7 +803,9 @@ class Mutations:
         :rtype: Tuple[Union[str, List[str]], MutationReturnType]
         """
         if applied_mut_dict is None:
-            applied_mut_dict = [{}] * len(networks) if isinstance(networks, list) else {}
+            applied_mut_dict = (
+                [{}] * len(networks) if isinstance(networks, list) else {}
+            )
 
         mut_dict = None
         if isinstance(networks, list):
@@ -779,17 +836,18 @@ class Mutations:
 
             mut_dict = mut_dict if mut_dict is not None else {}
             applied_muts = networks.last_mutation_attr
-    
+
         return applied_muts, mut_dict
 
     # TODO: This can be implemented as a mutation hook for the bandit algorithms
     def _reinit_bandit_grads(
-            self,
-            individual: BanditAlgorithm,
-            offspring_actor: EvolvableModule,
-            old_exp_layer: nn.Module) -> None:
+        self,
+        individual: BanditAlgorithm,
+        offspring_actor: EvolvableModule,
+        old_exp_layer: nn.Module,
+    ) -> None:
         """Reinitialise bandit gradients after architecture mutation.
-        
+
         :param individual: Individual agent from population
         :type individual: EvolvableAlgorithm
         :param offspring_actor: Offspring actor network
@@ -800,7 +858,9 @@ class Mutations:
         if isinstance(offspring_actor, EvolvableModule):
             exp_layer = offspring_actor.get_output_dense()
         else:
-            raise ValueError(f"Bandit algorithm architecture {type(offspring_actor)} not supported.")
+            raise ValueError(
+                f"Bandit algorithm architecture {type(offspring_actor)} not supported."
+            )
 
         individual.numel = sum(
             w.numel() for w in exp_layer.parameters() if w.requires_grad

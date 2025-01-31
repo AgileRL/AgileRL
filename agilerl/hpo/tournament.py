@@ -1,9 +1,11 @@
 from typing import List, Tuple
+
 import numpy as np
 
 from agilerl.algorithms.core.base import EvolvableAlgorithm
 
 PopulationType = List[EvolvableAlgorithm]
+
 
 class TournamentSelection:
     """The tournament selection class.
@@ -18,7 +20,9 @@ class TournamentSelection:
     :type eval_loop: int
     """
 
-    def __init__(self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int) -> None:
+    def __init__(
+        self, tournament_size: int, elitism: bool, population_size: int, eval_loop: int
+    ) -> None:
         assert tournament_size > 0, "Tournament size must be greater than zero."
         assert isinstance(elitism, bool), "Elitism must be boolean value True or False."
         assert population_size > 0, "Population size must be greater than zero."
@@ -43,7 +47,9 @@ class TournamentSelection:
         winner = selection[np.argmax(selection_values)]
         return winner
 
-    def _elitism(self, population: PopulationType) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
+    def _elitism(
+        self, population: PopulationType
+    ) -> Tuple[EvolvableAlgorithm, np.ndarray, int]:
         """
         Perform elitism selection.
 
@@ -52,7 +58,7 @@ class TournamentSelection:
         :return: Elite member of population, rank array, and max id
         :rtype: tuple[EvolvableAlgorithm, np.ndarray, int]
         """
-        last_fitness = [np.mean(indi.fitness[-self.eval_loop:]) for indi in population]
+        last_fitness = [np.mean(indi.fitness[-self.eval_loop :]) for indi in population]
         rank = np.argsort(last_fitness).argsort()
 
         max_id = max([ind.index for ind in population])
@@ -61,7 +67,9 @@ class TournamentSelection:
         elite = model.clone()
         return elite, rank, max_id
 
-    def select(self, population: PopulationType) -> Tuple[EvolvableAlgorithm, PopulationType]:
+    def select(
+        self, population: PopulationType
+    ) -> Tuple[EvolvableAlgorithm, PopulationType]:
         """
         Returns best agent and new population of agents following tournament selection.
 

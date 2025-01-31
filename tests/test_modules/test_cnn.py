@@ -3,15 +3,16 @@ import copy
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 
 from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.custom_components import NoisyLinear
+
 
 ######### Define fixtures #########
 @pytest.fixture
 def device():
     return "cuda" if torch.cuda.is_available() else "cpu"
+
 
 @pytest.fixture(autouse=True)
 def cleanup():
@@ -116,14 +117,7 @@ def test_instantiation_for_multi_agents(
 @pytest.mark.parametrize(
     "input_shape, channel_size, kernel_size, stride_size, sample_input, num_outputs",
     [
-        (
-            [1, 16, 16],
-            [3, 32],
-            [3, 3],
-            [2, 2],
-            "tensor",
-            10
-        ),
+        ([1, 16, 16], [3, 32], [3, 3], [2, 2], "tensor", 10),
         ([1, 16, 16], [3, 32], [3, 3], [2, 2], None, 10),
     ],
 )
@@ -350,6 +344,7 @@ def test_add_cnn_layer_else_statement(device):
     original_num_hidden_layers = copy.deepcopy(evolvable_cnn.channel_size)
     evolvable_cnn.add_layer()
     assert len(original_num_hidden_layers) == len(evolvable_cnn.channel_size)
+
 
 ######### Test remove_cnn_layer #########
 @pytest.mark.parametrize(
@@ -602,4 +597,3 @@ def test_clone_instance(
     assert str(clone.state_dict()) == str(evolvable_cnn.state_dict())
     for key, param in clone_net.named_parameters():
         torch.testing.assert_close(param, original_feature_net_dict[key])
-

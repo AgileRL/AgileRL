@@ -16,12 +16,12 @@ import yaml
 from pettingzoo.classic import connect_four_v3
 from tqdm import tqdm, trange
 
-from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
+from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.utils.utils import create_population, observation_space_channels_to_first
 from agilerl.utils.algo_utils import obs_channels_to_first
+from agilerl.utils.utils import create_population, observation_space_channels_to_first
 
 
 class CurriculumEnv:
@@ -518,7 +518,7 @@ if __name__ == "__main__":
             },
             "head_config": {
                 "hidden_size": [64, 64],  # Actor head hidden size
-            }
+            },
         }
 
         # Define the initial hyperparameters
@@ -559,16 +559,18 @@ if __name__ == "__main__":
         # Pre-process dimensions for PyTorch layers
         # We only need to worry about the state dim of a single agent
         # We flatten the 6x7x2 observation as input to the agent"s neural network
-        observation_space = observation_space_channels_to_first(observation_spaces[0]['observation'])
+        observation_space = observation_space_channels_to_first(
+            observation_spaces[0]["observation"]
+        )
         action_space = action_spaces[0]
 
         # Mutation config for RL hyperparameters
         hp_config = HyperparameterConfig(
-            lr = RLParameter(min=1e-4, max=1e-2),
-            batch_size = RLParameter(min=8, max=64, dtype=int),
-            learn_step = RLParameter(
+            lr=RLParameter(min=1e-4, max=1e-2),
+            batch_size=RLParameter(min=8, max=64, dtype=int),
+            learn_step=RLParameter(
                 min=1, max=120, dtype=int, grow_factor=1.5, shrink_factor=0.75
-                )
+            ),
         )
 
         # Create a population ready for evolutionary hyper-parameter optimisation

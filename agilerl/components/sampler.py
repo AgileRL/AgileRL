@@ -1,16 +1,20 @@
 import warnings
-from typing import Optional, Union, Tuple, Any
+from typing import Any, Optional, Tuple, Union
+
 from torch.utils.data import DataLoader
 
-from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
     PrioritizedReplayBuffer,
     ReplayBuffer,
 )
+from agilerl.components.replay_data import ReplayDataset
 
-BufferType = Union[ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer]
+BufferType = Union[
+    ReplayBuffer, MultiAgentReplayBuffer, PrioritizedReplayBuffer, MultiStepReplayBuffer
+]
+
 
 class Sampler:
     """Sampler class to handle both standard and distributed training.
@@ -87,7 +91,9 @@ class Sampler:
         """
         return self.memory.sample(batch_size, return_idx)
 
-    def sample_distributed(self, batch_size: int, return_idx: Optional[bool] = None) -> Any:
+    def sample_distributed(
+        self, batch_size: int, return_idx: Optional[bool] = None
+    ) -> Any:
         """Sample a batch of experiences from the distributed dataset.
 
         :param batch_size: Size of the batch to sample

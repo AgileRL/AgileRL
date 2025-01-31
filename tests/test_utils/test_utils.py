@@ -1,10 +1,9 @@
-import copy
 from unittest.mock import patch
 
 import gymnasium as gym
 import numpy as np
-from pettingzoo.mpe import simple_speaker_listener_v4
 from gymnasium import spaces
+from pettingzoo.mpe import simple_speaker_listener_v4
 
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
@@ -63,6 +62,7 @@ SHARED_INIT_HP = {
     "DT": 0.01,
 }
 
+
 # Returns an AsyncVectorEnv object when given a valid environment name and number of environments
 def test_returns_asyncvectorenv_object():
     num_envs = 3
@@ -95,7 +95,7 @@ def test_create_initial_population_single_agent():
     observation_space = spaces.Box(0, 1, shape=(4,))
     continuous_action_space = spaces.Box(0, 1, shape=(2,))
     discrete_action_space = spaces.Discrete(2)
-    net_config = {'encoder_config': {"hidden_size": [8, 8]}}
+    net_config = {"encoder_config": {"hidden_size": [8, 8]}}
     population_size = 4
     device = "cpu"
     accelerator = None
@@ -138,7 +138,7 @@ def test_create_initial_population_single_agent():
 def test_create_initial_population_multi_agent():
     observation_space = [spaces.Box(0, 1, shape=(4,)) for _ in range(2)]
     action_space = [spaces.Discrete(2) for _ in range(2)]
-    net_config = {'encoder_config': {"hidden_size": [8]}}
+    net_config = {"encoder_config": {"hidden_size": [8]}}
     population_size = 4
     device = "cpu"
     accelerator = None
@@ -238,7 +238,7 @@ def test_prints_hyperparams():
     # Arrange
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
-    net_config = {'encoder_config': {"hidden_size": [8]}}
+    net_config = {"encoder_config": {"hidden_size": [8]}}
     population_size = 1
     device = "cpu"
     accelerator = None

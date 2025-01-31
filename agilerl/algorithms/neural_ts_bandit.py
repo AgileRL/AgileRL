@@ -1,29 +1,32 @@
-from typing import Optional, Union, Dict, Any
+from typing import Any, Dict, Optional, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.typing import NumpyObsType, ArrayLike, ExperiencesType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.modules.base import EvolvableModule
-from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.cnn import EvolvableCNN
+from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.networks.base import EvolvableNetwork
 from agilerl.networks.value_functions import ValueFunction
+from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
-from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
 
-SupportedEvolvable = Union[EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableNetwork]
+SupportedEvolvable = Union[
+    EvolvableCNN, EvolvableMLP, EvolvableMultiInput, EvolvableNetwork
+]
 
 
 class NeuralTS(RLAlgorithm):
-    """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827    
-    
+    """The NeuralTS algorithm class. NeuralTS paper: https://arxiv.org/abs/2010.00827
+
     :param observation_space: Observation space of the environment
     :type observation_space: gym.spaces.Space
     :param action_space: Action space of the environment
@@ -89,7 +92,7 @@ class NeuralTS(RLAlgorithm):
             accelerator=accelerator,
             normalize_images=normalize_images,
             name="NeuralTS",
-            )
+        )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
@@ -125,31 +128,28 @@ class NeuralTS(RLAlgorithm):
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
                     f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
-                     )
+                )
 
             # Need to make deepcopies for target and detached networks
             self.actor = make_safe_deepcopies(actor_network)
         else:
             net_config = {} if net_config is None else net_config
             encoder_config = (
-                get_default_encoder_config(observation_space) 
-                if net_config.get('encoder_config') is None else net_config['encoder_config']
+                get_default_encoder_config(observation_space)
+                if net_config.get("encoder_config") is None
+                else net_config["encoder_config"]
             )
-            encoder_config['layer_norm'] = False # Layer norm is not used in the original implementation
+            encoder_config["layer_norm"] = (
+                False  # Layer norm is not used in the original implementation
+            )
 
-            net_config['encoder_config'] = encoder_config
+            net_config["encoder_config"] = encoder_config
 
             self.actor = ValueFunction(
-                observation_space=observation_space,
-                device=self.device,
-                **net_config
+                observation_space=observation_space, device=self.device, **net_config
             )
 
-        self.optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            lr=self.lr
-        )
+        self.optimizer = OptimizerWrapper(optim.Adam, networks=self.actor, lr=self.lr)
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -163,11 +163,7 @@ class NeuralTS(RLAlgorithm):
         # Register network groups for mutations
         self.register_init_hook(self.init_params)
         self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                shared=None,
-                policy=True
-            )
+            NetworkGroup(eval=self.actor, shared=None, policy=True)
         )
 
     def init_params(self) -> None:
@@ -182,8 +178,9 @@ class NeuralTS(RLAlgorithm):
             [w.flatten() for w in self.exp_layer.parameters() if w.requires_grad]
         )
 
-
-    def get_action(self, state: NumpyObsType, action_mask: Optional[ArrayLike] = None) -> int:
+    def get_action(
+        self, state: NumpyObsType, action_mask: Optional[ArrayLike] = None
+    ) -> int:
         """Returns the next action to take in the environment.
 
         :param state: State observation, or multiple observations in a batch
@@ -275,11 +272,12 @@ class NeuralTS(RLAlgorithm):
         return loss.item()
 
     def test(
-            self,
-            env: GymEnvType,
-            swap_channels: bool = False,
-            max_steps: int = 100,
-            loop: int = 1) -> float:
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: int = 100,
+        loop: int = 1,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in

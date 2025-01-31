@@ -1,20 +1,21 @@
-from typing import Optional, Dict, Any, Tuple
 import random
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
-from numpy.typing import ArrayLike
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn.utils import clip_grad_norm_
 from gymnasium import spaces
+from numpy.typing import ArrayLike
+from torch.nn.utils import clip_grad_norm_
 
+from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
+from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.algorithms.core import RLAlgorithm
-from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.typing import NumpyObsType
-from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
 class CQN(RLAlgorithm):
@@ -74,7 +75,7 @@ class CQN(RLAlgorithm):
         actor_network: Optional[nn.Module] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
-        wrap: bool = True
+        wrap: bool = True,
     ) -> None:
 
         super().__init__(
@@ -85,8 +86,8 @@ class CQN(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="CQN"
-            )
+            name="CQN",
+        )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
         assert isinstance(learn_step, int), "Learn step rate must be an integer."
@@ -119,21 +120,23 @@ class CQN(RLAlgorithm):
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
                     f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
-                     )
+                )
 
             # Need to make deepcopies for target and detached networks
-            self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
+            self.actor, self.actor_target = make_safe_deepcopies(
+                actor_network, actor_network
+            )
         else:
             net_config = {} if net_config is None else net_config
             create_actor = lambda: QNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
                 device=self.device,
-                **net_config
+                **net_config,
             )
             self.actor = create_actor()
             self.actor_target = create_actor()
-        
+
         self.actor_target.load_state_dict(self.actor.state_dict())
 
         # Initialize optimizer
@@ -141,7 +144,7 @@ class CQN(RLAlgorithm):
             optim.Adam,
             networks=self.actor,
             lr=self.lr,
-            )
+        )
 
         if self.accelerator is not None and wrap:
             self.wrap_models()
@@ -150,19 +153,15 @@ class CQN(RLAlgorithm):
 
         # Register policy for mutations
         self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                shared=self.actor_target,
-                policy=True
-            )
+            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
 
     def get_action(
-            self,
-            obs: NumpyObsType,
-            epsilon: float = 0,
-            action_mask: Optional[ArrayLike] = None
-            ) -> ArrayLike:
+        self,
+        obs: NumpyObsType,
+        epsilon: float = 0,
+        action_mask: Optional[ArrayLike] = None,
+    ) -> ArrayLike:
         """Returns the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -265,7 +264,13 @@ class CQN(RLAlgorithm):
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels: bool = False, max_steps: Optional[int] = None, loop: int=3):
+    def test(
+        self,
+        env,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 3,
+    ):
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in

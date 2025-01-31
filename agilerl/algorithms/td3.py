@@ -1,21 +1,22 @@
-from typing import Optional, Dict, Any, Tuple
 import copy
 import warnings
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.typing import NumpyObsType, ExperiencesType, ArrayLike
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
-from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.networks.actors import DeterministicActor
-from agilerl.utils.algo_utils import obs_channels_to_first, make_safe_deepcopies
+from agilerl.networks.q_networks import ContinuousQNetwork
+from agilerl.typing import ArrayLike, ExperiencesType, NumpyObsType
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
 class TD3(RLAlgorithm):
@@ -100,7 +101,7 @@ class TD3(RLAlgorithm):
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
-        ) -> None:
+    ) -> None:
         super().__init__(
             observation_space,
             action_space,
@@ -109,10 +110,12 @@ class TD3(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="TD3"
+            name="TD3",
         )
 
-        assert isinstance(action_space, spaces.Box), "TD3 only supports continuous action spaces."
+        assert isinstance(
+            action_space, spaces.Box
+        ), "TD3 only supports continuous action spaces."
         assert (isinstance(expl_noise, (float, int))) or (
             isinstance(expl_noise, np.ndarray)
             and expl_noise.shape == (vect_noise_dim, self.action_dim)
@@ -193,10 +196,16 @@ class TD3(RLAlgorithm):
             elif not isinstance(critic_networks[1], EvolvableModule):
                 raise TypeError(
                     f"Passed critic network at index 1 is of type {type(critic_networks[1])}, but must be of type EvolvableModule."
-                     )
+                )
 
-            self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
-            self.actor_target, self.critic_target_1, self.critic_target_2 = make_safe_deepcopies(actor_network, critic_networks[0], critic_networks[1])
+            self.actor, self.critic_1, self.critic_2 = make_safe_deepcopies(
+                actor_network, critic_networks[0], critic_networks[1]
+            )
+            self.actor_target, self.critic_target_1, self.critic_target_2 = (
+                make_safe_deepcopies(
+                    actor_network, critic_networks[0], critic_networks[1]
+                )
+            )
 
         else:
             net_config = {} if net_config is None else net_config
@@ -214,13 +223,13 @@ class TD3(RLAlgorithm):
                 observation_space=observation_space,
                 action_space=action_space,
                 device=device,
-                **net_config
+                **net_config,
             )
             create_critic = lambda: ContinuousQNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
                 device=device,
-                **critic_net_config
+                **critic_net_config,
             )
 
             self.actor = create_actor()
@@ -236,21 +245,15 @@ class TD3(RLAlgorithm):
 
         # Optimizers
         self.actor_optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.actor,
-            lr=self.lr_actor
+            optim.Adam, networks=self.actor, lr=self.lr_actor
         )
 
         self.critic_1_optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.critic_1,
-            lr=self.lr_critic
+            optim.Adam, networks=self.critic_1, lr=self.lr_critic
         )
 
         self.critic_2_optimizer = OptimizerWrapper(
-            optim.Adam,
-            networks=self.critic_2,
-            lr=self.lr_critic
+            optim.Adam, networks=self.critic_2, lr=self.lr_critic
         )
 
         if self.accelerator is not None and wrap:
@@ -260,26 +263,18 @@ class TD3(RLAlgorithm):
 
         # Register network groups for mutations
         self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                shared=self.actor_target,
-                policy=True
-            )
+            NetworkGroup(eval=self.actor, shared=self.actor_target, policy=True)
         )
         self.register_network_group(
-            NetworkGroup(
-                eval=self.critic_1,
-                shared=self.critic_target_1
-            )
+            NetworkGroup(eval=self.critic_1, shared=self.critic_target_1)
         )
         self.register_network_group(
-            NetworkGroup(
-                eval=self.critic_2,
-                shared=self.critic_target_2
-            )
+            NetworkGroup(eval=self.critic_2, shared=self.critic_target_2)
         )
 
-    def scale_to_action_space(self, action: ArrayLike, convert_to_torch: bool = False) -> ArrayLike:
+    def scale_to_action_space(
+        self, action: ArrayLike, convert_to_torch: bool = False
+    ) -> ArrayLike:
         """Scales actions to action space defined by self.min_action and self.max_action.
 
         :param action: Action to be scaled
@@ -291,7 +286,9 @@ class TD3(RLAlgorithm):
         :rtype: numpy.ndarray
         """
         if convert_to_torch:
-            device = self.device if self.accelerator is None else self.accelerator.device
+            device = (
+                self.device if self.accelerator is None else self.accelerator.device
+            )
             max_action = (
                 torch.from_numpy(self.max_action).to(device)
                 if isinstance(self.max_action, (np.ndarray))
@@ -343,16 +340,8 @@ class TD3(RLAlgorithm):
             return torch.clamp(input, min, max)
 
         device = self.device if self.accelerator is None else self.accelerator.device
-        min = (
-            torch.from_numpy(min).to(device)
-            if isinstance(min, np.ndarray)
-            else min
-        )
-        max = (
-            torch.from_numpy(max).to(device)
-            if isinstance(max, np.ndarray)
-            else max
-        )
+        min = torch.from_numpy(min).to(device) if isinstance(min, np.ndarray) else min
+        max = torch.from_numpy(max).to(device) if isinstance(max, np.ndarray) else max
 
         if isinstance(max, torch.Tensor) and isinstance(min, (int, float)):
             min = torch.full_like(max, min).to(self.device)
@@ -416,11 +405,11 @@ class TD3(RLAlgorithm):
         self.current_noise[indices] = self.mean_noise[indices]
 
     def learn(
-            self,
-            experiences: ExperiencesType,
-            noise_clip: float = 0.5,
-            policy_noise: float = 0.2
-            ) -> Tuple[Optional[float], float]:
+        self,
+        experiences: ExperiencesType,
+        noise_clip: float = 0.5,
+        policy_noise: float = 0.2,
+    ) -> Tuple[Optional[float], float]:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, rewards, next_states, dones in that order.

@@ -16,10 +16,12 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
+
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 class DummyNeuralTS(NeuralTS):
     def __init__(
@@ -119,11 +121,9 @@ def test_initialize_bandit_with_cnn_accelerator():
     observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
     index = 0
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1]
-    }}
+    net_config_cnn = {
+        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
+    }
     batch_size = 64
     lr = 1e-3
     learn_step = 5
@@ -211,7 +211,10 @@ def test_initialize_bandit_with_evo_nets():  #
     observation_space = spaces.Box(0, 1, shape=(4,))
     action_space = spaces.Discrete(2)
     actor_network = EvolvableMLP(
-        num_inputs=observation_space.shape[0], num_outputs=1, hidden_size=[64, 64], layer_norm=False
+        num_inputs=observation_space.shape[0],
+        num_outputs=1,
+        hidden_size=[64, 64],
+        layer_norm=False,
     )
 
     bandit = NeuralTS(observation_space, action_space, actor_network=actor_network)
@@ -318,7 +321,9 @@ def test_learns_from_experiences_if_cuda():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create an instance of the NeuralTS class
-    bandit = NeuralTS(observation_space, action_space, batch_size=batch_size, device=device)
+    bandit = NeuralTS(
+        observation_space, action_space, batch_size=batch_size, device=device
+    )
 
     # Create a batch of experiences
     states = torch.randn(batch_size, *observation_space.shape).to(device)
@@ -376,11 +381,9 @@ def test_learning_cnn():
     observation_space = spaces.Box(0, 1, shape=(3, 32, 32))
     action_space = spaces.Discrete(2)
     batch_size = 64
-    net_config = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1]
-    }}
+    net_config = {
+        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
+    }
 
     # Create an instance of the NeuralTS class
     bandit = NeuralTS(
@@ -428,11 +431,9 @@ def test_algorithm_test_loop_images():
 
     env = DummyBanditEnv(state_size=observation_space.shape, arms=action_space.n)
 
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1]
-    }}
+    net_config_cnn = {
+        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
+    }
 
     agent = NeuralTS(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
@@ -449,11 +450,13 @@ def test_algorithm_test_loop_images():
     [
         (
             spaces.Box(0, 1, shape=(3, 32, 32)),
-            {"encoder_config": {
-                "channel_size": [3],
-                "kernel_size": [3],
-                "stride_size": [1]
-            }},
+            {
+                "encoder_config": {
+                    "channel_size": [3],
+                    "kernel_size": [3],
+                    "stride_size": [1],
+                }
+            },
         ),
         (spaces.Box(0, 1, shape=(4,)), {"encoder_config": {"hidden_size": [128]}}),
     ],
@@ -505,7 +508,9 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.scores == bandit.scores
 
     accelerator = Accelerator()
-    bandit = NeuralTS(observation_space, action_space, accelerator=accelerator, wrap=False)
+    bandit = NeuralTS(
+        observation_space, action_space, accelerator=accelerator, wrap=False
+    )
     clone_agent = bandit.clone(wrap=False)
 
     assert clone_agent.observation_space == bandit.observation_space
@@ -523,12 +528,13 @@ def test_clone_returns_identical_agent(observation_space, net_config):
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
 
+
 @pytest.mark.parametrize(
     "observation_space, actor_network, input_tensor",
     [
         (spaces.Box(0, 1, shape=(4,)), "simple_mlp", torch.randn(1, 4)),
         (spaces.Box(0, 1, shape=(3, 64, 64)), "simple_cnn", torch.randn(1, 3, 64, 64)),
-    ]
+    ],
 )
 def test_clone_with_make_evo(observation_space, actor_network, input_tensor, request):
     action_space = spaces.Discrete(2)
@@ -552,7 +558,6 @@ def test_clone_with_make_evo(observation_space, actor_network, input_tensor, req
     assert clone_agent.fitness == bandit.fitness
     assert clone_agent.steps == bandit.steps
     assert clone_agent.scores == bandit.scores
-
 
 
 def test_clone_new_index():
@@ -594,7 +599,11 @@ def test_clone_after_learning():
 
 # The method successfully unwraps the actor model when an accelerator is present.
 def test_unwrap_models():
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2), accelerator=Accelerator())
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(4,)),
+        action_space=spaces.Discrete(2),
+        accelerator=Accelerator(),
+    )
     bandit.unwrap_models()
     assert isinstance(bandit.actor, nn.Module)
 
@@ -602,7 +611,9 @@ def test_unwrap_models():
 # The saved checkpoint file contains the correct data and format.
 def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -612,9 +623,9 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -625,7 +636,9 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
@@ -655,14 +668,16 @@ def test_save_load_checkpoint_correct_data_and_format(tmpdir):
 
 
 def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
-    net_config_cnn = {"encoder_config": {
-        "channel_size": [3],
-        "kernel_size": [3],
-        "stride_size": [1]
-    }}
+    net_config_cnn = {
+        "encoder_config": {"channel_size": [3], "kernel_size": [3], "stride_size": [1]}
+    }
 
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(3, 32, 32)), action_space=spaces.Discrete(2), net_config=net_config_cnn)
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
+        action_space=spaces.Discrete(2),
+        net_config=net_config_cnn,
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -672,9 +687,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -685,7 +700,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn(tmpdir):
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
@@ -728,7 +745,11 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     actor_network = MakeEvolvable(actor_network, input_tensor)
 
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(3, 64, 64)), action_space=spaces.Discrete(2), actor_network=actor_network)
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(3, 64, 64)),
+        action_space=spaces.Discrete(2),
+        actor_network=actor_network,
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -738,9 +759,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     checkpoint = torch.load(checkpoint_path, pickle_module=dill)
 
     # Check if the loaded checkpoint has the correct keys
-    assert "actor_init_dict" in checkpoint['network_info']['modules']
-    assert "actor_state_dict" in checkpoint['network_info']['modules']
-    assert "optimizer_state_dict" in checkpoint['network_info']['optimizers']
+    assert "actor_init_dict" in checkpoint["network_info"]["modules"]
+    assert "actor_state_dict" in checkpoint["network_info"]["modules"]
+    assert "optimizer_state_dict" in checkpoint["network_info"]["optimizers"]
     assert "batch_size" in checkpoint
     assert "lr" in checkpoint
     assert "learn_step" in checkpoint
@@ -751,7 +772,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
     assert "fitness" in checkpoint
     assert "steps" in checkpoint
 
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
     # Load checkpoint
     bandit.load_checkpoint(checkpoint_path)
 
@@ -790,7 +813,9 @@ def test_save_load_checkpoint_correct_data_and_format_cnn_network(
 # The saved checkpoint file contains the correct data and format.
 def test_load_from_pretrained(device, accelerator, tmpdir):
     # Initialize the NeuralTS agent
-    bandit = NeuralTS(observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2))
+    bandit = NeuralTS(
+        observation_space=spaces.Box(0, 1, shape=(4,)), action_space=spaces.Discrete(2)
+    )
 
     # Save the checkpoint to a file
     checkpoint_path = Path(tmpdir) / "checkpoint.pth"
@@ -844,11 +869,13 @@ def test_load_from_pretrained_cnn(device, accelerator, tmpdir):
     bandit = NeuralTS(
         observation_space=spaces.Box(0, 1, shape=(3, 32, 32)),
         action_space=spaces.Discrete(2),
-        net_config={"encoder_config": {
-            "channel_size": [3],
-            "kernel_size": [3],
-            "stride_size": [1]
-        }},
+        net_config={
+            "encoder_config": {
+                "channel_size": [3],
+                "kernel_size": [3],
+                "stride_size": [1],
+            }
+        },
     )
 
     # Save the checkpoint to a file

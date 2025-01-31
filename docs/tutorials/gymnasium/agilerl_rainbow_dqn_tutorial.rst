@@ -105,7 +105,7 @@ is the case, we do not need to define a mutatinos parameters dictionary.
 Create the Environment
 ----------------------
 In this particular tutorial, we will be focussing on the cartpole environment as Rainbow-DQN can only be
-used with discrete action environments. The snippet below creates a vectorised environment and 
+used with discrete action environments. The snippet below creates a vectorised environment and
 initialises the population of agents from the corresponding observation and action spaces.
 
 .. code-block:: python

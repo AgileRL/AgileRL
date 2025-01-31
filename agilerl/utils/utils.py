@@ -1,15 +1,16 @@
-from typing import Dict, Any, Optional, List, Union, Callable
 import os
 import warnings
 from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional, Union
+
 import gymnasium as gym
-from gymnasium import spaces
 import matplotlib.pyplot as plt
-from accelerate import Accelerator
 import numpy as np
 import wandb
+from accelerate import Accelerator
+from gymnasium import spaces
 
-from agilerl.typing import GymSpaceType, PopulationType
+from agilerl.algorithms.core.registry import HyperparameterConfig
 from agilerl.algorithms.cqn import CQN
 from agilerl.algorithms.ddpg import DDPG
 from agilerl.algorithms.dqn import DQN
@@ -20,11 +21,11 @@ from agilerl.algorithms.neural_ts_bandit import NeuralTS
 from agilerl.algorithms.neural_ucb_bandit import NeuralUCB
 from agilerl.algorithms.ppo import PPO
 from agilerl.algorithms.td3 import TD3
-from agilerl.algorithms.core.registry import HyperparameterConfig
-from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
-from agilerl.modules.base import EvolvableModule
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
+from agilerl.modules.base import EvolvableModule
+from agilerl.typing import GymSpaceType, PopulationType
+from agilerl.vector.pz_async_vec_env import AsyncPettingZooVecEnv
 
 
 def make_vect_envs(
@@ -33,7 +34,7 @@ def make_vect_envs(
     *,
     make_env: Optional[Callable] = None,
     should_async_vector: bool = True,
-    **env_kwargs
+    **env_kwargs,
 ):
     """Returns async-vectorized gym environments.
 
@@ -60,7 +61,10 @@ def make_vect_envs(
 
     return vectorize([make_env for _ in range(num_envs)])
 
-def make_multi_agent_vect_envs(env: Any, num_envs: int = 1, **env_kwargs: Any) -> AsyncPettingZooVecEnv:
+
+def make_multi_agent_vect_envs(
+    env: Any, num_envs: int = 1, **env_kwargs: Any
+) -> AsyncPettingZooVecEnv:
     """Returns async-vectorized PettingZoo parallel environments.
 
     :param env: PettingZoo parallel environment object
@@ -71,7 +75,10 @@ def make_multi_agent_vect_envs(env: Any, num_envs: int = 1, **env_kwargs: Any) -
     env_fns = [lambda: env(**env_kwargs) for _ in range(num_envs)]
     return AsyncPettingZooVecEnv(env_fns=env_fns)
 
-def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.vector.AsyncVectorEnv:
+
+def make_skill_vect_envs(
+    env_name: str, skill: Any, num_envs: int = 1
+) -> gym.vector.AsyncVectorEnv:
     """Returns async-vectorized gym environments.
 
     :param env_name: Gym environment name
@@ -85,7 +92,10 @@ def make_skill_vect_envs(env_name: str, skill: Any, num_envs: int = 1) -> gym.ve
         [lambda: skill(gym.make(env_name)) for i in range(num_envs)]
     )
 
-def observation_space_channels_to_first(observation_space: Union[spaces.Box, spaces.Dict]) -> spaces.Box:
+
+def observation_space_channels_to_first(
+    observation_space: Union[spaces.Box, spaces.Dict]
+) -> spaces.Box:
     """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
 
     :param observation_space: Observation space
@@ -95,13 +105,19 @@ def observation_space_channels_to_first(observation_space: Union[spaces.Box, spa
     """
     if isinstance(observation_space, spaces.Dict):
         for key in observation_space.spaces.keys():
-            if isinstance(observation_space[key], spaces.Box) and len(observation_space[key].shape) == 3:
-                observation_space[key] = observation_space_channels_to_first(observation_space[key])
+            if (
+                isinstance(observation_space[key], spaces.Box)
+                and len(observation_space[key].shape) == 3
+            ):
+                observation_space[key] = observation_space_channels_to_first(
+                    observation_space[key]
+                )
         return observation_space
-    
+
     low = observation_space.low.transpose(2, 0, 1)
     high = observation_space.high.transpose(2, 0, 1)
     return spaces.Box(low=low, high=high, dtype=observation_space.dtype)
+
 
 def create_population(
     algo: str,
@@ -164,7 +180,7 @@ def create_population(
                 gamma=INIT_HP["GAMMA"],
                 tau=INIT_HP["TAU"],
                 double=INIT_HP["DOUBLE"],
-                cudagraphs=INIT_HP['CUDAGRAPHS'],
+                cudagraphs=INIT_HP["CUDAGRAPHS"],
                 actor_network=actor_network,
                 device=device,
                 accelerator=accelerator,
@@ -400,12 +416,13 @@ def create_population(
 
     return population
 
+
 def save_population_checkpoint(
-        population: PopulationType,
-        save_path: str,
-        overwrite_checkpoints: bool,
-        accelerator: Optional[Accelerator] = None
-        ) -> None:
+    population: PopulationType,
+    save_path: str,
+    overwrite_checkpoints: bool,
+    accelerator: Optional[Accelerator] = None,
+) -> None:
     """Saves checkpoint of population of agents.
 
     :param population: Population of agents
@@ -451,6 +468,7 @@ def save_population_checkpoint(
             agent.save_checkpoint(current_checkpoint_path)
         print("Saved checkpoint.")
 
+
 def tournament_selection_and_mutation(
     population: PopulationType,
     tournament: TournamentSelection,
@@ -460,7 +478,7 @@ def tournament_selection_and_mutation(
     elite_path: Optional[str] = None,
     save_elite: bool = False,
     accelerator: Optional[Accelerator] = None,
-    ) -> PopulationType:
+) -> PopulationType:
     """Performs tournament selection and mutation on a population of agents.
 
     :param population: Population of agents
@@ -504,17 +522,13 @@ def tournament_selection_and_mutation(
             elite, population = tournament.select(population)
             population = mutation.mutation(population)
             for pop_i, model in enumerate(population):
-                model.save_checkpoint(
-                    f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                )
+                model.save_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
         accelerator.wait_for_everyone()
 
         # Load models back to accelerator processes
         if not accelerator.is_main_process:
             for pop_i, model in enumerate(population):
-                model.load_checkpoint(
-                    f"{accel_temp_models_path}/{algo}_{pop_i}.pt"
-                )
+                model.load_checkpoint(f"{accel_temp_models_path}/{algo}_{pop_i}.pt")
         accelerator.wait_for_everyone()
 
         # Wrap models back to accelerator
@@ -532,18 +546,19 @@ def tournament_selection_and_mutation(
             else f"{env_name}-elite_{algo}"
         )
         elite.save_checkpoint(f"{elite_save_path}.pt")
-    
+
     return population
 
+
 def init_wandb(
-        algo: str,
-        env_name: str,
-        init_hyperparams: Optional[Dict[str, Any]] = None,
-        mutation_hyperparams: Optional[Dict[str, Any]] = None,
-        wandb_api_key: Optional[str] = None,
-        accelerator: Optional[Accelerator] = None,
-        project: str = "AgileRL",
-    ) -> None:
+    algo: str,
+    env_name: str,
+    init_hyperparams: Optional[Dict[str, Any]] = None,
+    mutation_hyperparams: Optional[Dict[str, Any]] = None,
+    wandb_api_key: Optional[str] = None,
+    accelerator: Optional[Accelerator] = None,
+    project: str = "AgileRL",
+) -> None:
     """Initializes wandb for logging hyperparameters and run metadata.
 
     :param algo: RL algorithm
@@ -593,6 +608,7 @@ def init_wandb(
             # track hyperparameters and run metadata
             config=config_dict,
         )
+
 
 def calculate_vectorized_scores(
     rewards: np.ndarray,
@@ -657,6 +673,7 @@ def calculate_vectorized_scores(
 
     return episode_rewards
 
+
 def print_hyperparams(pop: PopulationType) -> None:
     """Prints current hyperparameters of agents in a population and their fitnesses.
 
@@ -669,6 +686,7 @@ def print_hyperparams(pop: PopulationType) -> None:
                 agent.index, np.mean(agent.fitness[-5:]), agent.inspect_attributes()
             )
         )
+
 
 def plot_population_score(pop: PopulationType) -> None:
     """Plots the fitness scores of agents in a population.

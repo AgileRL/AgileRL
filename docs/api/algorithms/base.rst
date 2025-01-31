@@ -3,31 +3,31 @@
 EvolvableAlgorithm Base Class
 =============================
 
-We develop a class hierarchy for RL algorithms with a focus on making the evolution of their hyperparameters, and that of their 
-underlying neural networks, seamless. The base class implements methods and attributes that are used by :class:`Mutations <agilerl.hpo.mutation.Mutations>` 
-objects to mutate individuals of a population in a general manner. In order to this, we have created a framework for signalling the "network groups" in 
-an algorithm such that architecture mutations on the networks are applied correctly. Under the hood, all ``EvolvableAlgorithm`` objects create a 
-:class:`MutationRegistry <agilerl.algorithms.core.registry.MutationRegistry>` object that keeps a log of the network groups, optimizers, and the 
-hyperparameters of the algorithm that the user wishes to mutate during training. 
+We develop a class hierarchy for RL algorithms with a focus on making the evolution of their hyperparameters, and that of their
+underlying neural networks, seamless. The base class implements methods and attributes that are used by :class:`Mutations <agilerl.hpo.mutation.Mutations>`
+objects to mutate individuals of a population in a general manner. In order to this, we have created a framework for signalling the "network groups" in
+an algorithm such that architecture mutations on the networks are applied correctly. Under the hood, all ``EvolvableAlgorithm`` objects create a
+:class:`MutationRegistry <agilerl.algorithms.core.registry.MutationRegistry>` object that keeps a log of the network groups, optimizers, and the
+hyperparameters of the algorithm that the user wishes to mutate during training.
 
-We have base classes for single-agent and multi-agent algorithms, namely :class:`RLAlgorithm <agilerl.algorithms.core.base.RLAlgorithm>` 
+We have base classes for single-agent and multi-agent algorithms, namely :class:`RLAlgorithm <agilerl.algorithms.core.base.RLAlgorithm>`
 and :class:`MultiAgentAlgorithm <agilerl.algorithms.core.base.MultiAgentAlgorithm>`, respectively.
 
 Network Groups
 --------------
 
-Users must specify the :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>`'s in their algorithm, which contain at least one 
-**evaluation** network (i.e. a network that is optimized during training e.g. the Q-network in DQN) and, optionally, "shared" networks that share 
-parameters with the evaluation network in the group but arent optimized during training directly (e.g. the target network in DQN). An RL algorithm 
-must also contain one :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` corresponding to the policy (i.e. the network used to 
-select actions), signalled by the ``policy`` attribute in the group. 
+Users must specify the :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>`'s in their algorithm, which contain at least one
+**evaluation** network (i.e. a network that is optimized during training e.g. the Q-network in DQN) and, optionally, "shared" networks that share
+parameters with the evaluation network in the group but arent optimized during training directly (e.g. the target network in DQN). An RL algorithm
+must also contain one :class:`NetworkGroup <agilerl.algorithms.core.registry.NetworkGroup>` corresponding to the policy (i.e. the network used to
+select actions), signalled by the ``policy`` attribute in the group.
 
 OptimizerWrapper
 ----------------
 
-The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`, 
-specifying the networks that the optimizer is responsible for optimizing. Since we are mutating network architectures during training, we need to have knowledge of 
-this in order to reinitiliaze the optimizers correctly when we do so. 
+The last thing users should do when creating a custom algorithm is wrap their optimizers in an :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`,
+specifying the networks that the optimizer is responsible for optimizing. Since we are mutating network architectures during training, we need to have knowledge of
+this in order to reinitiliaze the optimizers correctly when we do so.
 
 .. note::
     All of the network groups and optimizers of an algorithm should by convention all be defined in the ``__init__`` method of the algorithm.
@@ -179,7 +179,7 @@ Below is a simple example of how this is can be done for the DQN algorithm:
                 self._get_action = torch.compile(self._get_action, mode=None, fullgraph=True)
                 self.update = CudaGraphModule(self.update)
                 self._get_action = CudaGraphModule(self._get_action)
-            
+
             # Register DQN network groups and mutation hook
             self.register_network_group(
                 NetworkGroup(

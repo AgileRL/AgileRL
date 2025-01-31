@@ -56,7 +56,7 @@ NET_CONFIG:
         activation: Tanh
         min_mlp_nodes: 64
         max_mlp_nodes: 500
-    
+
     head_config:
         hidden_size: [8]
         activation: Tanh
@@ -64,4 +64,3 @@ NET_CONFIG:
         max_hidden_layers: 3
         min_mlp_nodes: 64
         max_mlp_nodes: 500
-

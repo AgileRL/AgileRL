@@ -163,8 +163,8 @@ class ILQL(nn.Module):
             min_layers=net_config["min_layers"],
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
-            device=self.device
-            )
+            device=self.device,
+        )
         # lm policy
         self.actor = EvolvableGPT(
             n_layer=net_config["n_layer"],
@@ -179,8 +179,8 @@ class ILQL(nn.Module):
             min_layers=net_config["min_layers"],
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
-            device=self.device
-            )
+            device=self.device,
+        )
         # lm target
         self.actor_target = EvolvableGPT(
             n_layer=net_config["n_layer"],
@@ -196,7 +196,7 @@ class ILQL(nn.Module):
             max_layers=net_config["max_layers"],
             bias=net_config["bias"],
             device=self.device,
-            )
+        )
 
         self.copy_model_to_actor_target()
 
@@ -435,8 +435,8 @@ class ILQL(nn.Module):
                     policy_hidden_states.shape[0],
                     policy_hidden_states.shape[1],
                     self.dataset.tokenizer.num_tokens(),
-                ), 
-                device=self.device
+                ),
+                device=self.device,
             )
         else:
             if detach_full_policy:
@@ -851,28 +851,22 @@ class ILQL(nn.Module):
     ):
         trivial_value_query = False
         if state_idxs is None or action_idxs is None:
-            state_idxs = (
-                torch.full(
-                    (
-                        tokens.shape[0],
-                        1,
-                    ),
-                    tokens.shape[1] - 1,
-                    device=self.device,
-                )
-                .long()
-            )
-            action_idxs = (
-                torch.full(
-                    (
-                        tokens.shape[0],
-                        1,
-                    ),
-                    tokens.shape[1] - 1,
-                    device=self.device,
-                )
-                .long()
-            )
+            state_idxs = torch.full(
+                (
+                    tokens.shape[0],
+                    1,
+                ),
+                tokens.shape[1] - 1,
+                device=self.device,
+            ).long()
+            action_idxs = torch.full(
+                (
+                    tokens.shape[0],
+                    1,
+                ),
+                tokens.shape[1] - 1,
+                device=self.device,
+            ).long()
             trivial_value_query = True
         self_outputs = self(
             tokens,

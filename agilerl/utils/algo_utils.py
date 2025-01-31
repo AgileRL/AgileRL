@@ -1,29 +1,31 @@
-from typing import Union, Dict, Any, Tuple, Optional, TypeGuard, Iterable, List
+import copy
+import inspect
 from collections import OrderedDict, defaultdict
 from numbers import Number
-import inspect
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeGuard, Union
+
 import numpy as np
-import copy
-from gymnasium import spaces
+import torch
+import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.optimizer import AcceleratedOptimizer
+from gymnasium import spaces
 from tensordict.nn import CudaGraphModule
-import torch
-from torch.optim import Optimizer
-from torch.nn import Module
-import torch.nn.functional as F
 from torch._dynamo import OptimizedModule
+from torch.nn import Module
+from torch.optim import Optimizer
 
-from agilerl.utils.evolvable_networks import is_image_space
-from agilerl.protocols import EvolvableAttributeType, OptimizerWrapper, EvolvableModule
+from agilerl.protocols import EvolvableAttributeType, EvolvableModule, OptimizerWrapper
 from agilerl.typing import (
-    NumpyObsType,
-    TorchObsType,
-    NetworkType,
-    OptimizerType,
+    ArrayOrTensor,
     MaybeObsList,
-    ArrayOrTensor
+    NetworkType,
+    NumpyObsType,
+    OptimizerType,
+    TorchObsType,
 )
+from agilerl.utils.evolvable_networks import is_image_space
+
 
 def contains_image_space(space: spaces.Space) -> bool:
     """Checks if the space contains an image space.
@@ -41,12 +43,13 @@ def contains_image_space(space: spaces.Space) -> bool:
         return is_image_space(space)
     return False
 
+
 def multi_agent_sample_tensor_from_space(
-        space: spaces.Space,
-        n_agents: int,
-        critic: bool = False,
-        device: torch.device = torch.device("cpu")
-        ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+    space: spaces.Space,
+    n_agents: int,
+    critic: bool = False,
+    device: torch.device = torch.device("cpu"),
+) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
     """Gets the sample tensor from an observation space for multi-agent settings.
 
     :param space: Observation space
@@ -59,90 +62,107 @@ def multi_agent_sample_tensor_from_space(
     :return: Sample tensor
     :rtype: torch.Tensor or dict[str, torch.Tensor]
     """
+
     def sample(image_shape: Tuple[int, ...], critic: bool) -> torch.Tensor:
         tensor = torch.zeros(
             (1, *image_shape), dtype=torch.float32, device=device
-            ).unsqueeze(2)
-        
+        ).unsqueeze(2)
+
         if critic:
             tensor = tensor.repeat(1, 1, n_agents, 1, 1)
-        
+
         return tensor
-    
+
     if isinstance(space, spaces.Dict):
         sample_tensor = {
-            key: multi_agent_sample_tensor_from_space(subspace, n_agents, critic, device)
-            for key, subspace in space.spaces.items() if is_image_space(subspace)
+            key: multi_agent_sample_tensor_from_space(
+                subspace, n_agents, critic, device
+            )
+            for key, subspace in space.spaces.items()
+            if is_image_space(subspace)
         }
     elif isinstance(space, spaces.Tuple):
         sample_tensor = tuple(
-            multi_agent_sample_tensor_from_space(subspace, n_agents, critic, device)
-            if is_image_space(subspace) else None for subspace in space.spaces
+            (
+                multi_agent_sample_tensor_from_space(subspace, n_agents, critic, device)
+                if is_image_space(subspace)
+                else None
+            )
+            for subspace in space.spaces
         )
     elif is_image_space(space):
         sample_tensor = sample(space.shape, critic)
     else:
         sample_tensor = None
-    
+
     return sample_tensor
+
 
 def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
     """Makes deep copies of EvolvableModule's and their attributes.
-    
+
     :param args: EvolvableModule's or lists of EvolvableModule's to copy.
     :type args: Union[EvolvableModule, List[EvolvableModule]].
-    
+
     :return: Deep copies of the EvolvableModule's and their attributes.
     :rtype: List[EvolvableModule].
     """
     copies = []
     for arg in args:
         if isinstance(arg, list):
-            arg_copy = [copy.deepcopy(inner_arg.cpu()).to(inner_arg.device) for inner_arg in arg]
+            arg_copy = [
+                copy.deepcopy(inner_arg.cpu()).to(inner_arg.device) for inner_arg in arg
+            ]
         else:
             arg_copy = copy.deepcopy(arg.cpu()).to(arg.device)
-        
+
         copies.append(arg_copy)
-    
+
     return copies[0] if len(copies) == 1 else copies
+
 
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
     """Type guard to check if an object is a list of EvolvableModule's.
-    
+
     :param obj: The object to check.
     :type obj: EvolvableAttributeType.
-    
+
     :return: True if the object is a list of EvolvableModule's, False otherwise.
     :rtype: bool.
     """
     if not isinstance(obj, list):
         return False
 
-    return all(isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj)
+    return all(
+        isinstance(inner_obj, (OptimizedModule, EvolvableModule)) for inner_obj in obj
+    )
+
 
 def is_optimizer_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[Optimizer]]:
     """Type guard to check if an object is a list of Optimizer's.
-    
+
     :param obj: The object to check.
     :type obj: EvolvableAttributeType.
-    
+
     :return: True if the object is a list of Optimizer's, False otherwise.
     :rtype: bool.
     """
     return all(isinstance(inner_obj, Optimizer) for inner_obj in obj)
 
+
 def assert_supported_space(space: spaces.Space) -> bool:
     """Checks if the space is supported by the AgileRL framework.
-    
+
     :param space: The space to check.
     :type space: spaces.Space.
-    
+
     :return: True if the space is supported, False otherwise.
     :rtype: bool.
     """
     # Nested Dict or Tuple spaces are not supported
     if isinstance(space, spaces.Dict) and any(
-        isinstance(subspace, (spaces.Dict, spaces.Tuple)) for subspace in space.spaces.values()
+        isinstance(subspace, (spaces.Dict, spaces.Tuple))
+        for subspace in space.spaces.values()
     ):
         raise TypeError(f"Nested {type(space)} spaces are not supported.")
     elif isinstance(space, spaces.Tuple) and any(
@@ -150,8 +170,9 @@ def assert_supported_space(space: spaces.Space) -> bool:
     ):
         raise TypeError(f"Nested {type(space)} spaces are not supported.")
 
+
 def isroutine(obj: object) -> bool:
-    """Checks if an attribute is a routine, considering also methods wrapped by 
+    """Checks if an attribute is a routine, considering also methods wrapped by
     CudaGraphModule.
 
     :param attr: The attribute to check.
@@ -167,12 +188,10 @@ def isroutine(obj: object) -> bool:
 
 
 def unwrap_optimizer(
-        optimizer: OptimizerType,
-        network: NetworkType,
-        lr: float
-        ) -> Optimizer:
+    optimizer: OptimizerType, network: NetworkType, lr: float
+) -> Optimizer:
     """Unwraps AcceleratedOptimizer to get the underlying optimizer.
-    
+
     :param optimizer: AcceleratedOptimizer
     :type optimizer: AcceleratedOptimizer
     :param network: Network or list of networks
@@ -187,12 +206,15 @@ def unwrap_optimizer(
             optim_arg = [{"params": net.parameters(), "lr": lr} for net in network]
             unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(optim_arg)
         else:
-            unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(network.parameters(), lr=lr)
+            unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(
+                network.parameters(), lr=lr
+            )
         unwrapped_optimizer.load_state_dict(optimizer.state_dict())
         return unwrapped_optimizer
     else:
         return optimizer
-    
+
+
 def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     """Recursively check if the object has any attributes that are EvolvableModule's or Optimizer's.
 
@@ -212,12 +234,20 @@ def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
     elif isinstance(obj, Optimizer):
         raise TypeError("Optimizer objects should be wrapped by OptimizerWrapper.")
     if isinstance(obj, dict):
-        return any(recursive_check_module_attrs(v, networks_only=networks_only) for v in obj.values())
+        return any(
+            recursive_check_module_attrs(v, networks_only=networks_only)
+            for v in obj.values()
+        )
     if isinstance(obj, list):
-        return any(recursive_check_module_attrs(v, networks_only=networks_only) for v in obj)
+        return any(
+            recursive_check_module_attrs(v, networks_only=networks_only) for v in obj
+        )
     return False
 
-def chkpt_attribute_to_device(chkpt_dict: Dict[str, torch.Tensor], device: str) -> Dict[str, Any]:
+
+def chkpt_attribute_to_device(
+    chkpt_dict: Dict[str, torch.Tensor], device: str
+) -> Dict[str, Any]:
     """Place checkpoint attributes on device. Used when loading saved agents.
 
     :param chkpt_dict: Checkpoint dictionary
@@ -235,6 +265,7 @@ def chkpt_attribute_to_device(chkpt_dict: Dict[str, torch.Tensor], device: str) 
             chkpt_dict[key] = value.to(device)
     return chkpt_dict
 
+
 def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
     """Helper function to determine if key is in nested dictionary
 
@@ -249,6 +280,7 @@ def key_in_nested_dict(nested_dict: Dict[str, Any], target: str) -> bool:
         if isinstance(v, dict):
             return key_in_nested_dict(v, target)
     return False
+
 
 def compile_model(model: Module, mode: Optional[str] = "default") -> Module:
     """Compiles torch model if not already compiled
@@ -267,6 +299,7 @@ def compile_model(model: Module, mode: Optional[str] = "default") -> Module:
         else model
     )
 
+
 def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Removes _orig_mod prefix on state dict created by torch compile
 
@@ -282,10 +315,14 @@ def remove_compile_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
         ]
     )
 
-SupportedSpace = Union[spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete, spaces.MultiDiscrete]
+
+SupportedSpace = Union[
+    spaces.Box, spaces.Dict, spaces.Tuple, spaces.Discrete, spaces.MultiDiscrete
+]
+
 
 def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
-    """Concatenates a list of spaces into a single space. If spaces correspond to images, 
+    """Concatenates a list of spaces into a single space. If spaces correspond to images,
     we check that their shapes are the same and use the first space's shape as the shape of the
     concatenated space.
 
@@ -304,17 +341,21 @@ def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
 
     elif all(isinstance(space, spaces.Tuple) for space in space_list):
         return spaces.Tuple(
-            [concatenate_spaces([space[i] for space in space_list]) for i in range(len(space_list[0]))]
+            [
+                concatenate_spaces([space[i] for space in space_list])
+                for i in range(len(space_list[0]))
+            ]
         )
 
     elif all(isinstance(space, spaces.Box) for space in space_list):
-        # NOTE: For image spaces the concatenation is handled under-the-hood through the 
-        # specification of `n_agents` in EvolvableNetwork objects, whereby 3d convolutions 
+        # NOTE: For image spaces the concatenation is handled under-the-hood through the
+        # specification of `n_agents` in EvolvableNetwork objects, whereby 3d convolutions
         # are used. This is why we enforce all image spaces to have the same shape.
         if all(is_image_space(space) for space in space_list):
-            assert all(space.shape == space_list[0].shape for space in space_list), \
-                "AgileRL only supports multi-agent settings with the same shape for the image " \
+            assert all(space.shape == space_list[0].shape for space in space_list), (
+                "AgileRL only supports multi-agent settings with the same shape for the image "
                 "spaces of different agents."
+            )
 
             return space_list[0]
 
@@ -325,15 +366,18 @@ def concatenate_spaces(space_list: List[SupportedSpace]) -> spaces.Space:
     elif all(isinstance(space, spaces.Discrete) for space in space_list):
         n = sum(space.n for space in space_list)
         return spaces.Discrete(n)
-    
+
     elif all(isinstance(space, spaces.MultiDiscrete) for space in space_list):
         nvec = np.concatenate([space.nvec for space in space_list], axis=0)
         return spaces.MultiDiscrete(nvec)
-    
-    else:
-        raise TypeError(f"Unsupported space types: {set(type(space) for space in spaces)}")
 
-def obs_channels_to_first(observation: NumpyObsType) ->  NumpyObsType:
+    else:
+        raise TypeError(
+            f"Unsupported space types: {set(type(space) for space in spaces)}"
+        )
+
+
+def obs_channels_to_first(observation: NumpyObsType) -> NumpyObsType:
     """Converts observation space from channels last to channels first format.
 
     :param observation_space: Observation space
@@ -352,6 +396,7 @@ def obs_channels_to_first(observation: NumpyObsType) ->  NumpyObsType:
     else:
         raise TypeError(f"Expected np.ndarray or dict, got {type(observation)}")
 
+
 def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchObsType:
     """
     Moves the observation to the given device.
@@ -368,15 +413,21 @@ def obs_to_tensor(obs: NumpyObsType, device: Union[str, torch.device]) -> TorchO
     if isinstance(obs, np.ndarray):
         return torch.as_tensor(obs, device=device).float()
     elif isinstance(obs, dict):
-        return {key: torch.as_tensor(_obs, device=device).float() for (key, _obs) in obs.items()}
+        return {
+            key: torch.as_tensor(_obs, device=device).float()
+            for (key, _obs) in obs.items()
+        }
     elif isinstance(obs, tuple):
         return tuple(torch.as_tensor(_obs, device=device).float() for _obs in obs)
     elif isinstance(obs, Number):
         return torch.tensor(obs, device=device).float()
     else:
         raise Exception(f"Unrecognized type of observation {type(obs)}")
-    
-def maybe_add_batch_dim(obs: TorchObsType, space_shape: Tuple[int, ...]) -> TorchObsType:
+
+
+def maybe_add_batch_dim(
+    obs: TorchObsType, space_shape: Tuple[int, ...]
+) -> TorchObsType:
     """Adds batch dimension if necessary.
 
     :param obs: Observation tensor
@@ -393,16 +444,17 @@ def maybe_add_batch_dim(obs: TorchObsType, space_shape: Tuple[int, ...]) -> Torc
     elif obs.dim() != len(space_shape) + 1:
         raise ValueError(
             f"Expected observation to have {len(space_shape) + 1} dimensions, got {obs.dim()}."
-            )
+        )
 
     return obs
 
+
 def preprocess_observation(
-        observation: NumpyObsType,
-        observation_space: spaces.Space,
-        device: Union[str, torch.device] = "cpu",
-        normalize_images: bool = True
-        ) -> TorchObsType:
+    observation: NumpyObsType,
+    observation_space: spaces.Space,
+    device: Union[str, torch.device] = "cpu",
+    normalize_images: bool = True,
+) -> TorchObsType:
     """Preprocesses observations for forward pass through neural network.
 
     :param observations: Observations of environment
@@ -428,32 +480,40 @@ def preprocess_observation(
                 observation=_obs,
                 observation_space=observation_space[key],
                 device=device,
-                normalize_images=normalize_images
-                )
+                normalize_images=normalize_images,
+            )
 
         return preprocessed_obs
-    
+
     elif isinstance(observation_space, spaces.Tuple):
-        assert isinstance(observation, tuple), f"Expected tuple, got {type(observation)}"
+        assert isinstance(
+            observation, tuple
+        ), f"Expected tuple, got {type(observation)}"
         return tuple(
-            preprocess_observation(_obs, _space, device, normalize_images) 
+            preprocess_observation(_obs, _space, device, normalize_images)
             for _obs, _space in zip(observation, observation_space.spaces)
-            )
-    
-    assert isinstance(observation, torch.Tensor), f"Expected torch.Tensor, got {type(observation)}"
-    
+        )
+
+    assert isinstance(
+        observation, torch.Tensor
+    ), f"Expected torch.Tensor, got {type(observation)}"
+
     if isinstance(observation_space, spaces.Box):
         # Normalize images if applicable and specified
         if len(observation_space.shape) == 3 and normalize_images:
             observation = observation.float() / 255.0
 
         space_shape = observation_space.shape
-    
+
     elif isinstance(observation_space, spaces.Discrete):
         # One hot encoding of discrete observation
-        observation = F.one_hot(observation.long(), num_classes=int(observation_space.n)).float()
+        observation = F.one_hot(
+            observation.long(), num_classes=int(observation_space.n)
+        ).float()
         if observation_space.n > 1:
-            observation = observation.squeeze() # If n == 1 then squeeze removes obs dim
+            observation = (
+                observation.squeeze()
+            )  # If n == 1 then squeeze removes obs dim
 
         space_shape = (observation_space.n,)
 
@@ -461,23 +521,30 @@ def preprocess_observation(
         # Tensor concatenation of one hot encodings of each Categorical sub-space
         observation = torch.cat(
             [
-                F.one_hot(obs_.long(), num_classes=int(observation_space.nvec[idx])).float()
+                F.one_hot(
+                    obs_.long(), num_classes=int(observation_space.nvec[idx])
+                ).float()
                 for idx, obs_ in enumerate(torch.split(observation.long(), 1, dim=1))
             ],
             dim=-1,
         )
         space_shape = (sum(observation_space.nvec),)
     else:
-        raise TypeError(f"AgileRL currently doesn't support {type(observation_space)} spaces.")
-    
+        raise TypeError(
+            f"AgileRL currently doesn't support {type(observation_space)} spaces."
+        )
+
     # Check add batch dimension if necessary
     observation = maybe_add_batch_dim(observation, space_shape)
 
     return observation
 
-# TODO: The following functions are currently used in PPO (on-policy) as a means of handling 
+
+# TODO: The following functions are currently used in PPO (on-policy) as a means of handling
 # experiences in the absence of a rollout buffer -> This will not be needed in the future.
-def get_experiences_samples(minibatch_indices: np.ndarray, *experiences: TorchObsType) -> Tuple[TorchObsType, ...]:
+def get_experiences_samples(
+    minibatch_indices: np.ndarray, *experiences: TorchObsType
+) -> Tuple[TorchObsType, ...]:
     """Samples experiences given minibatch indices.
 
     :param minibatch_indices: Minibatch indices
@@ -496,13 +563,15 @@ def get_experiences_samples(minibatch_indices: np.ndarray, *experiences: TorchOb
             sampled_exp = exp[minibatch_indices]
         else:
             raise TypeError(f"Unsupported experience type: {type(exp)}")
-        
+
         sampled_experiences.append(sampled_exp)
-    
+
     return tuple(sampled_experiences)
 
 
-def stack_experiences(*experiences: MaybeObsList, to_torch: bool = True) -> Tuple[ArrayOrTensor, ...]:
+def stack_experiences(
+    *experiences: MaybeObsList, to_torch: bool = True
+) -> Tuple[ArrayOrTensor, ...]:
     """Stacks experiences into a single array or tensor.
 
     :param experiences: Experiences to stack
@@ -529,13 +598,15 @@ def stack_experiences(*experiences: MaybeObsList, to_torch: bool = True) -> Tupl
 
             stacked_exp = {key: np.array(value) for key, value in stacked_exp.items()}
             if to_torch:
-                stacked_exp = {key: torch.from_numpy(value) for key, value in stacked_exp.items()}
-            
+                stacked_exp = {
+                    key: torch.from_numpy(value) for key, value in stacked_exp.items()
+                }
+
         elif isinstance(exp[0], (np.ndarray, Number)):
             stacked_exp = np.array(exp)
             if to_torch:
                 stacked_exp = torch.from_numpy(stacked_exp)
-            
+
         elif isinstance(exp[0], torch.Tensor):
             stacked_exp = torch.stack(exp)
 
@@ -556,6 +627,7 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
     :return: Flattened experiences
     :rtype: Tuple[numpy.ndarray[float], ...] or Tuple[torch.Tensor[float], ...]
     """
+
     def flatten(arr: ArrayOrTensor) -> ArrayOrTensor:
         # Need to flatten batch and n_env dimensions
         shape = arr.shape
@@ -573,9 +645,9 @@ def flatten_experiences(*experiences: ArrayOrTensor) -> Tuple[ArrayOrTensor, ...
             flattened_exp = flatten(exp)
         else:
             raise TypeError(f"Unsupported experience type: {type(exp)}")
-        
+
         flattened_experiences.append(flattened_exp)
-    
+
     return tuple(flattened_experiences)
 
 
@@ -596,5 +668,5 @@ def is_vectorized_experiences(*experiences: ArrayOrTensor) -> bool:
             is_vec = exp.ndim > 1
 
         is_vec_ls.append(is_vec)
-    
+
     return all(is_vec_ls)

@@ -1,25 +1,24 @@
-from typing import Optional, Dict, Any
 import warnings
+from typing import Any, Dict, Optional
+
 import numpy as np
-from numpy.typing import ArrayLike
 import torch
+import torch._dynamo
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
-import torch._dynamo
+from numpy.typing import ArrayLike
 from tensordict import TensorDict, from_module
 from tensordict.nn import CudaGraphModule
 
-from agilerl.typing import TorchObsType, ExperiencesType, NumpyObsType, GymEnvType
 from agilerl.algorithms.core import RLAlgorithm
+from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
-from agilerl.algorithms.core.registry import NetworkGroup, HyperparameterConfig
-from agilerl.networks.q_networks import QNetwork
 from agilerl.modules.base import EvolvableModule
-from agilerl.utils.algo_utils import (
-    obs_channels_to_first,
-    make_safe_deepcopies
-)
+from agilerl.networks.q_networks import QNetwork
+from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType, TorchObsType
+from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
+
 
 class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
@@ -80,7 +79,7 @@ class DQN(RLAlgorithm):
         accelerator: Optional[Any] = None,
         cudagraphs: bool = False,
         wrap: bool = True,
-        ) -> None:
+    ) -> None:
         super().__init__(
             observation_space,
             action_space,
@@ -89,7 +88,7 @@ class DQN(RLAlgorithm):
             device=device,
             accelerator=accelerator,
             normalize_images=normalize_images,
-            name="DQN"
+            name="DQN",
         )
 
         assert learn_step >= 1, "Learn step must be greater than or equal to one."
@@ -125,17 +124,19 @@ class DQN(RLAlgorithm):
             if not isinstance(actor_network, EvolvableModule):
                 raise TypeError(
                     f"'actor_network' argument is of type {type(actor_network)}, but must be of type EvolvableModule."
-                     )
+                )
 
             # Need to make deepcopies for target and detached networks
-            self.actor, self.actor_target = make_safe_deepcopies(actor_network, actor_network)
+            self.actor, self.actor_target = make_safe_deepcopies(
+                actor_network, actor_network
+            )
         else:
             net_config = {} if net_config is None else net_config
             create_actor = lambda: QNetwork(
                 observation_space=observation_space,
                 action_space=action_space,
                 device=self.device,
-                **net_config
+                **net_config,
             )
             self.actor = create_actor()
             self.actor_target = create_actor()
@@ -148,7 +149,7 @@ class DQN(RLAlgorithm):
             optim.Adam,
             networks=self.actor,
             lr=self.lr,
-            optimizer_kwargs={"capturable": self.capturable}
+            optimizer_kwargs={"capturable": self.capturable},
         )
 
         if self.accelerator is not None and wrap:
@@ -158,19 +159,19 @@ class DQN(RLAlgorithm):
 
         # torch.compile and cuda graph optimizations
         if self.cudagraphs:
-            warnings.warn("CUDA graphs for DQN are implemented experimentally and may not work as expected.")
+            warnings.warn(
+                "CUDA graphs for DQN are implemented experimentally and may not work as expected."
+            )
             self.update = torch.compile(self.update, mode=None)
-            self._get_action = torch.compile(self._get_action, mode=None, fullgraph=True)
+            self._get_action = torch.compile(
+                self._get_action, mode=None, fullgraph=True
+            )
             self.update = CudaGraphModule(self.update)
             self._get_action = CudaGraphModule(self._get_action)
-        
+
         # Register DQN network groups and mutation hook
         self.register_network_group(
-            NetworkGroup(
-                eval=self.actor,
-                shared=[self.actor_target],
-                policy=True
-            )
+            NetworkGroup(eval=self.actor, shared=[self.actor_target], policy=True)
         )
         self.register_init_hook(self.init_hook)
 
@@ -178,18 +179,18 @@ class DQN(RLAlgorithm):
         """Resets module parameters for the detached and target networks."""
         self.param_vals: TensorDict = from_module(self.actor).detach()
 
-        # NOTE: This removes the target params from the computation graph which 
-        # reduces memory overhead and speeds up training, however these won't 
+        # NOTE: This removes the target params from the computation graph which
+        # reduces memory overhead and speeds up training, however these won't
         # appear in the module's parameters
         self.target_params: TensorDict = self.param_vals.clone().lock_()
         self.target_params.to_module(self.actor_target)
 
     def get_action(
-            self,
-            obs: NumpyObsType,
-            epsilon: float = 0.0,
-            action_mask: Optional[ArrayLike] = None
-            ) -> ArrayLike:
+        self,
+        obs: NumpyObsType,
+        epsilon: float = 0.0,
+        action_mask: Optional[ArrayLike] = None,
+    ) -> ArrayLike:
         """Returns the next action to take in the environment.
 
         :param obs: The current observation from the environment
@@ -213,15 +214,12 @@ class DQN(RLAlgorithm):
                 batch_size = torch_obs.size(0)
 
             action_mask = torch.ones((batch_size, self.action_dim), device=device)
-    
+
         return self._get_action(torch_obs, epsilon, action_mask).cpu().numpy()
 
     def _get_action(
-            self,
-            obs: TorchObsType,
-            epsilon: torch.Tensor,
-            action_mask: torch.Tensor
-            ) -> torch.Tensor:
+        self, obs: TorchObsType, epsilon: torch.Tensor, action_mask: torch.Tensor
+    ) -> torch.Tensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -245,7 +243,11 @@ class DQN(RLAlgorithm):
         masked_policy_actions = torch.argmax(masked_q_values, dim=-1)
 
         # actions_random = torch.randint_like(actions, n_act)
-        use_policy = torch.empty(masked_policy_actions.shape, device=q_values.device).uniform_().gt(epsilon)
+        use_policy = (
+            torch.empty(masked_policy_actions.shape, device=q_values.device)
+            .uniform_()
+            .gt(epsilon)
+        )
 
         # Recompute actions with masking
         actions = torch.where(use_policy, masked_policy_actions, masked_random_actions)
@@ -253,13 +255,13 @@ class DQN(RLAlgorithm):
         return actions
 
     def update(
-            self,
-            obs: TorchObsType,
-            actions: torch.Tensor,
-            rewards: torch.Tensor,
-            next_obs: TorchObsType,
-            dones: torch.Tensor
-            ) -> torch.Tensor:
+        self,
+        obs: TorchObsType,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        next_obs: TorchObsType,
+        dones: torch.Tensor,
+    ) -> torch.Tensor:
         """Updates agent network parameters to learn from experiences.
 
         :param obs: List of batched states
@@ -316,18 +318,18 @@ class DQN(RLAlgorithm):
         # soft update target network
         self.soft_update()
         return loss.item()
-    
+
     def soft_update(self) -> None:
         "Soft updates target network."
         self.target_params.lerp_(self.param_vals, self.tau)
 
     def test(
-            self,
-            env: GymEnvType,
-            swap_channels: bool = False,
-            max_steps: Optional[int] = None,
-            loop: int = 1
-            ) -> float:
+        self,
+        env: GymEnvType,
+        swap_channels: bool = False,
+        max_steps: Optional[int] = None,
+        loop: int = 1,
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -356,7 +358,9 @@ class DQN(RLAlgorithm):
                         state = obs_channels_to_first(state)
 
                     action_mask = info.get("action_mask", None)
-                    action = self.get_action(state, epsilon=0.0, action_mask=action_mask)
+                    action = self.get_action(
+                        state, epsilon=0.0, action_mask=action_mask
+                    )
                     state, reward, done, trunc, info = env.step(action)
                     step += 1
                     scores += np.array(reward)

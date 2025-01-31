@@ -134,7 +134,7 @@ used with continuous action environments.
 
     num_envs=8
     env = make_vect_envs("LunarLanderContinuous-v2", num_envs=num_envs)  # Create environment
-    
+
     observation_space = env.single_observation_space
     action_space = env.single_action_space
     if INIT_HP["CHANNELS_LAST"]:

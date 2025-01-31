@@ -5,12 +5,11 @@ from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.training.train_offline import train_offline
-
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,
     observation_space_channels_to_first,
-    print_hyperparams
+    print_hyperparams,
 )
 
 # !Note: If you are running this demo without having installed agilerl,
@@ -138,8 +137,10 @@ if __name__ == "__main__":
         "RAND_SEED": 1,  # Random seed
     }
 
-    NET_CONFIG = {"encoder_config": {
-        "hidden_size": [32, 32],  # Actor hidden size
-    }}
+    NET_CONFIG = {
+        "encoder_config": {
+            "hidden_size": [32, 32],  # Actor hidden size
+        }
+    }
 
     main(INIT_HP, MUTATION_PARAMS, NET_CONFIG)

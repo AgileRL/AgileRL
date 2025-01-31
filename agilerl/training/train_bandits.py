@@ -1,30 +1,30 @@
-from typing import Any, Dict, List, Optional, Tuple
-import os
 import warnings
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+import gymnasium as gym
 import numpy as np
 import wandb
+from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
-import gymnasium as gym
-from accelerate import Accelerator
 
+from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
-from agilerl.algorithms.core.base import RLAlgorithm
-from agilerl.hpo.tournament import TournamentSelection
 from agilerl.hpo.mutation import Mutations
+from agilerl.hpo.tournament import TournamentSelection
 from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
-    tournament_selection_and_mutation,
+    init_wandb,
     save_population_checkpoint,
-    init_wandb
+    tournament_selection_and_mutation,
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[RLAlgorithm]   
+PopulationType = List[RLAlgorithm]
+
 
 def train_bandits(
     env: gym.Env,
@@ -53,7 +53,6 @@ def train_bandits(
     accelerator: Optional[Accelerator] = None,
     wandb_api_key: Optional[str] = None,
 ) -> Tuple[PopulationType, List[List[float]]]:
-
     """The general bandit training function. Returns trained population of agents
     and their fitnesses.
 
@@ -144,7 +143,7 @@ def train_bandits(
             mutation_hyperparams=MUT_P,
             wandb_api_key=wandb_api_key,
             accelerator=accelerator,
-            project="AgileRL-Bandits"
+            project="AgileRL-Bandits",
         )
 
     save_path = (
@@ -161,9 +160,7 @@ def train_bandits(
         replay_dataloader = DataLoader(replay_dataset, batch_size=None)
         replay_dataloader = accelerator.prepare(replay_dataloader)
         sampler = Sampler(
-            distributed=True,
-            dataset=replay_dataset,
-            dataloader=replay_dataloader
+            distributed=True, dataset=replay_dataset, dataloader=replay_dataloader
         )
     else:
         sampler = Sampler(memory=memory)
@@ -298,7 +295,7 @@ def train_bandits(
                     algo=algo,
                     elite_path=elite_path,
                     save_elite=save_elite,
-                    accelerator=accelerator
+                    accelerator=accelerator,
                 )
                 evo_count += 1
 
@@ -335,7 +332,7 @@ def train_bandits(
                     population=pop,
                     save_path=save_path,
                     overwrite_checkpoints=overwrite_checkpoints,
-                    accelerator=accelerator
+                    accelerator=accelerator,
                 )
                 checkpoint_count += 1
 

@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 
 from agilerl.modules.bert import (
     EvolvableBERT,
@@ -11,10 +10,12 @@ from agilerl.modules.bert import (
     _none_or_dtype,
 )
 
+
 @pytest.fixture(autouse=True)
 def cleanup():
     yield  # Run the test first
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 #### TESTING EVOLVABLE BERT CLASS ####
 def test_evolvable_bert_init_default():

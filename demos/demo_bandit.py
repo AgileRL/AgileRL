@@ -1,9 +1,9 @@
 from datetime import datetime
 
-from gymnasium import spaces
 import numpy as np
 import torch
 import wandb
+from gymnasium import spaces
 from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
@@ -26,9 +26,11 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NET_CONFIG = {"encoder_config": {
-        "encoder_config": {"hidden_size": [128]}  # Actor hidden size
-    }}
+    NET_CONFIG = {
+        "encoder_config": {
+            "encoder_config": {"hidden_size": [128]}  # Actor hidden size
+        }
+    }
 
     INIT_HP = {
         "BATCH_SIZE": 64,  # Batch size
@@ -51,7 +53,9 @@ if __name__ == "__main__":
     context_dim = env.context_dim
     action_dim = env.arms
 
-    observation_space = spaces.Box(low=features.values.min(), high=features.values.max())
+    observation_space = spaces.Box(
+        low=features.values.min(), high=features.values.max()
+    )
     action_space = spaces.Discrete(env.arms)
     pop = create_population(
         algo="NeuralUCB",  # Algorithm

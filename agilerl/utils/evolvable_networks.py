@@ -1,22 +1,24 @@
 # This file contains utility functions for tuning
-from typing import Tuple, Union, List, Dict, Optional, Iterable, Literal
+from collections import OrderedDict
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
+
 import numpy as np
 import torch
-from torch.optim import Optimizer
 import torch.nn as nn
-from collections import OrderedDict
 from accelerate.optimizer import AcceleratedOptimizer
 from gymnasium import spaces
+from torch.optim import Optimizer
 
-from agilerl.typing import DeviceType, ConfigType
-from agilerl.modules.custom_components import GumbelSoftmax, NoisyLinear, NewGELU
-from agilerl.modules.configs import MlpNetConfig, CnnNetConfig, MultiInputNetConfig
+from agilerl.modules.configs import CnnNetConfig, MlpNetConfig, MultiInputNetConfig
+from agilerl.modules.custom_components import GumbelSoftmax, NewGELU, NoisyLinear
+from agilerl.typing import ConfigType, DeviceType
 
 TupleorInt = Union[Tuple[int, ...], int]
 
+
 def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
     """Converts a Tuple observation space to a Dict observation space.
-    
+
     :param observation_space: Tuple observation space.
     :type observation_space: spaces.Tuple
     :return: Dictionary observation space.
@@ -35,12 +37,13 @@ def tuple_to_dict_space(observation_space: spaces.Tuple) -> spaces.Dict:
 
     return spaces.Dict(dict_space)
 
+
 def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
     """Get the default configuration for the encoder network based on the observation space.
-    
+
     :param observation_space: Observation space of the environment.
     :type observation_space: spaces.Space
-    
+
     :return: Default configuration for the encoder network.
     :rtype: Dict[str, Any]
     """
@@ -49,25 +52,24 @@ def get_default_encoder_config(observation_space: spaces.Space) -> ConfigType:
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
-            output_activation=None
+            output_activation=None,
         )
     elif is_image_space(observation_space):
         return CnnNetConfig(
             channel_size=[16, 16],
             kernel_size=[3, 3],
             stride_size=[1, 1],
-            output_activation=None
+            output_activation=None,
         )
     else:
-        return MlpNetConfig(
-            hidden_size=[16, 16],
-            output_activation=None
-        )
+        return MlpNetConfig(hidden_size=[16, 16], output_activation=None)
+
 
 def unwrap_optimizer(
-        optimizer: Union[Optimizer, AcceleratedOptimizer],
-        network: Union[nn.Module, Iterable[nn.Module]],
-        lr: int):
+    optimizer: Union[Optimizer, AcceleratedOptimizer],
+    network: Union[nn.Module, Iterable[nn.Module]],
+    lr: int,
+):
     """Unwrap the optimizer.
 
     :param optimizer: Optimizer to unwrap
@@ -85,12 +87,15 @@ def unwrap_optimizer(
             optim_arg = [{"params": net.parameters(), "lr": lr} for net in network]
             unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(optim_arg)
         else:
-            unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(network.parameters(), lr=lr)
+            unwrapped_optimizer: Optimizer = type(optimizer.optimizer)(
+                network.parameters(), lr=lr
+            )
 
         unwrapped_optimizer.load_state_dict(optimizer.state_dict())
         return unwrapped_optimizer
     else:
         return optimizer
+
 
 def contains_moduledict(module: nn.Module) -> bool:
     """Check if a module contains a ModuleDict.
@@ -106,6 +111,7 @@ def contains_moduledict(module: nn.Module) -> bool:
             return True
     return False
 
+
 def get_module_dict(module: nn.Module) -> nn.ModuleDict:
     """Get the ModuleDict from a module.
 
@@ -120,7 +126,10 @@ def get_module_dict(module: nn.Module) -> nn.ModuleDict:
             return submodule
     return None
 
-def get_batch_norm_layer(name: str, num_features: int, device: DeviceType = "cpu") -> nn.Module:
+
+def get_batch_norm_layer(
+    name: str, num_features: int, device: DeviceType = "cpu"
+) -> nn.Module:
     """Return batch normalization layer for corresponding batch normalization name.
 
     :param name: Batch normalization layer name
@@ -139,51 +148,55 @@ def get_batch_norm_layer(name: str, num_features: int, device: DeviceType = "cpu
 
     return batch_norm_layers[name](num_features, device=device)
 
+
 def get_conv_layer(
-        conv_layer_name: Literal["Conv2d", "Conv3d"],
-        in_channels: int,
-        out_channels: int,
-        kernel_size: TupleorInt,
-        stride: TupleorInt = 1,
-        padding: TupleorInt = 0,
-        device: DeviceType = "cpu"
-    ) -> nn.Module:
-        """Return convolutional layer for corresponding convolutional layer name.
+    conv_layer_name: Literal["Conv2d", "Conv3d"],
+    in_channels: int,
+    out_channels: int,
+    kernel_size: TupleorInt,
+    stride: TupleorInt = 1,
+    padding: TupleorInt = 0,
+    device: DeviceType = "cpu",
+) -> nn.Module:
+    """Return convolutional layer for corresponding convolutional layer name.
 
-        :param conv_layer_name: Convolutional layer name
-        :type conv_layer_name: str
-        :param in_channels: Number of input channels to convolutional layer
-        :type in_channels: int
-        :param out_channels: Number of output channels from convolutional layer
-        :type out_channels: int
-        :param kernel_size: Kernel size of convolutional layer
-        :type kernel_size: int or Tuple[int]
-        :param stride: Stride size of convolutional layer
-        :type stride: int or Tuple[int]
-        :param padding: Convolutional layer padding
-        :type padding: int or Tuple[int]
+    :param conv_layer_name: Convolutional layer name
+    :type conv_layer_name: str
+    :param in_channels: Number of input channels to convolutional layer
+    :type in_channels: int
+    :param out_channels: Number of output channels from convolutional layer
+    :type out_channels: int
+    :param kernel_size: Kernel size of convolutional layer
+    :type kernel_size: int or Tuple[int]
+    :param stride: Stride size of convolutional layer
+    :type stride: int or Tuple[int]
+    :param padding: Convolutional layer padding
+    :type padding: int or Tuple[int]
 
-        :return: Convolutional layer
-        :rtype: nn.Module
-        """
-        if conv_layer_name not in ["Conv2d", "Conv3d"]:
-            raise ValueError(
-                f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv2d', 'Conv3d'."
-                )
-
-        convolutional_layers = {
-            # "1d": nn.Conv1d,
-            "2d": nn.Conv2d,
-            "3d": nn.Conv3d
-            }
-
-        # remove 'Conv' from the name if it is present
-        conv_layer_name = conv_layer_name.replace("Conv", "")
-        return convolutional_layers[conv_layer_name](
-            in_channels, out_channels, kernel_size, stride, padding, device=device
+    :return: Convolutional layer
+    :rtype: nn.Module
+    """
+    if conv_layer_name not in ["Conv2d", "Conv3d"]:
+        raise ValueError(
+            f"Invalid convolutional layer {conv_layer_name}. Must be one of 'Conv2d', 'Conv3d'."
         )
 
-def get_normalization(normalization_name: str, layer_size: int, device: DeviceType = "cpu") -> nn.Module:
+    convolutional_layers = {
+        # "1d": nn.Conv1d,
+        "2d": nn.Conv2d,
+        "3d": nn.Conv3d,
+    }
+
+    # remove 'Conv' from the name if it is present
+    conv_layer_name = conv_layer_name.replace("Conv", "")
+    return convolutional_layers[conv_layer_name](
+        in_channels, out_channels, kernel_size, stride, padding, device=device
+    )
+
+
+def get_normalization(
+    normalization_name: str, layer_size: int, device: DeviceType = "cpu"
+) -> nn.Module:
     """Returns normalization layer for corresponding normalization name.
 
     :param normalization_names: Normalization layer name
@@ -203,6 +216,7 @@ def get_normalization(normalization_name: str, layer_size: int, device: DeviceTy
     }
 
     return normalization_functions[normalization_name](layer_size, device=device)
+
 
 def get_activation(activation_name: Optional[str], new_gelu: bool = False) -> nn.Module:
     """Returns activation function for corresponding activation name.
@@ -232,12 +246,13 @@ def get_activation(activation_name: Optional[str], new_gelu: bool = False) -> nn
         else activation_functions[activation_name]()
     )
 
+
 def get_pooling(
-          pooling_name: str,
-          kernel_size: Union[Tuple[int, ...], int],
-          stride: Union[Tuple[int, ...], int],
-          padding: Union[Tuple[int, ...], int]
-          ) -> nn.Module:
+    pooling_name: str,
+    kernel_size: Union[Tuple[int, ...], int],
+    stride: Union[Tuple[int, ...], int],
+    padding: Union[Tuple[int, ...], int],
+) -> nn.Module:
     """Returns pooling layer for corresponding activation name.
 
     :param pooling_names: Pooling layer name
@@ -261,9 +276,13 @@ def get_pooling(
 
     return pooling_functions[pooling_name](kernel_size, stride, padding)
 
+
 LayerType = Union[nn.Module, GumbelSoftmax, NoisyLinear]
 
-def layer_init(layer: LayerType, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Module:
+
+def layer_init(
+    layer: LayerType, std: float = np.sqrt(2), bias_const: float = 0.0
+) -> nn.Module:
     """
     Initializes the weights and biases of a layer.
 
@@ -293,6 +312,7 @@ def layer_init(layer: LayerType, std: float = np.sqrt(2), bias_const: float = 0.
 
     return layer
 
+
 def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
     """Initialize weights of a module using Gaussian distribution.
 
@@ -310,11 +330,11 @@ def init_weights_gaussian(m: nn.Module, mean: float, std: float) -> None:
 
 
 def calc_max_kernel_sizes(
-        channel_size: List[int],
-        kernel_size: List[int],
-        stride_size: List[int],
-        input_shape: List[int]
-        ) -> List[int]:
+    channel_size: List[int],
+    kernel_size: List[int],
+    stride_size: List[int],
+    input_shape: List[int],
+) -> List[int]:
     """Calculates the max kernel size for each convolutional layer of the feature net.
 
     :param channel_size: List of channel sizes for each convolutional layer
@@ -348,9 +368,10 @@ def calc_max_kernel_sizes(
         width_in = width_out
 
     return max_kernel_list
-    
+
+
 def is_image_space(space: spaces.Space) -> bool:
-    """Check if the space is an image space. We ignore dtype and number of channels 
+    """Check if the space is an image space. We ignore dtype and number of channels
     checks.
 
     :param space: Input space
@@ -361,18 +382,19 @@ def is_image_space(space: spaces.Space) -> bool:
     """
     return isinstance(space, spaces.Box) and len(space.shape) == 3
 
+
 def create_cnn(
-        block_type: Literal["Conv2d", "Conv3d"],
-        in_channels: int,
-        channel_size: List[int],
-        kernel_size: List[TupleorInt],
-        stride_size: List[TupleorInt],
-        name: str = "cnn",
-        init_layers: bool = True,
-        layer_norm: bool = False,
-        activation_fn: str = "ReLU",
-        device: DeviceType = "cpu"
-        ) -> Dict[str, nn.Module]:
+    block_type: Literal["Conv2d", "Conv3d"],
+    in_channels: int,
+    channel_size: List[int],
+    kernel_size: List[TupleorInt],
+    stride_size: List[TupleorInt],
+    name: str = "cnn",
+    init_layers: bool = True,
+    layer_norm: bool = False,
+    activation_fn: str = "ReLU",
+    device: DeviceType = "cpu",
+) -> Dict[str, nn.Module]:
     """
     Build a convolutional block.
 
@@ -396,7 +418,7 @@ def create_cnn(
     :type activation_fn: str, optional
     :param device: Device to use. Defaults to "cpu".
     :type device: DeviceType, optional
-    
+
     :return: Convolutional block.
     :rtype: Dict[str, nn.Module]
     """
@@ -409,7 +431,7 @@ def create_cnn(
             out_channels=channel_size[l_no],
             kernel_size=kernel_size[l_no - 1],
             stride=stride_size[l_no - 1],
-            device=device
+            device=device,
         )
         if init_layers:
             net_dict[f"{name}_conv_layer_{str(l_no)}"] = layer_init(
@@ -419,15 +441,15 @@ def create_cnn(
             net_dict[f"{name}_layer_norm_{str(l_no)}"] = get_batch_norm_layer(
                 block_type.replace("Conv", ""),
                 num_features=channel_size[l_no],
-                device=device
+                device=device,
             )
-        net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
-            activation_fn
-        )
+        net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(activation_fn)
 
     return net_dict
 
+
 MlpLayer = Union[nn.Linear, NoisyLinear, nn.LayerNorm]
+
 
 def create_mlp(
     input_size: int,
@@ -443,9 +465,9 @@ def create_mlp(
     device: DeviceType = "cpu",
     new_gelu: bool = False,
     name: str = "mlp",
-    ) -> nn.Sequential:
+) -> nn.Sequential:
     """Creates and returns multi-layer perceptron.
-    
+
     :param input_size: Number of input features.
     :type input_size: int
     :param output_size: Number of output features.
@@ -468,14 +490,14 @@ def create_mlp(
     :type noise_std: float, optional
     :param name: Name of the network.
     :type name: str, default "mlp"
-    
+
     :return: Multi-layer perceptron.
     :rtype: nn.Sequential
     """
     net_dict: Dict[str, MlpLayer] = OrderedDict()
     hidden_size = [input_size] + hidden_size
     for l_no in range(1, len(hidden_size)):
-        if noisy: # Add linear layer
+        if noisy:  # Add linear layer
             net_dict[f"{name}_linear_layer_{str(l_no)}"] = NoisyLinear(
                 hidden_size[l_no - 1], hidden_size[l_no], noise_std, device=device
             )
@@ -484,22 +506,26 @@ def create_mlp(
                 hidden_size[l_no - 1], hidden_size[l_no], device=device
             )
 
-        if init_layers: # Initialize layer weights
+        if init_layers:  # Initialize layer weights
             net_dict[f"{name}_linear_layer_{str(l_no)}"] = layer_init(
                 net_dict[f"{name}_linear_layer_{str(l_no)}"]
-                )
+            )
 
-        if layer_norm: # Add layer normalization
+        if layer_norm:  # Add layer normalization
             net_dict[f"{name}_layer_norm_{str(l_no)}"] = nn.LayerNorm(
                 hidden_size[l_no], device=device
-                )
+            )
 
         # Add activation function
-        net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(activation, new_gelu)
+        net_dict[f"{name}_activation_{str(l_no)}"] = get_activation(
+            activation, new_gelu
+        )
 
     # Output layer
     if noisy:
-        output_layer = NoisyLinear(hidden_size[-1], output_size, noise_std, device=device)
+        output_layer = NoisyLinear(
+            hidden_size[-1], output_size, noise_std, device=device
+        )
     else:
         output_layer = nn.Linear(hidden_size[-1], output_size, device=device)
 
@@ -521,4 +547,3 @@ def create_mlp(
         activation_name=output_activation, new_gelu=new_gelu
     )
     return nn.Sequential(net_dict)
-
