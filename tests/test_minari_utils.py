@@ -115,7 +115,7 @@ def test_minari_to_agile_buffer(dataset_id, env_id):
 
 @pytest.mark.parametrize(
     "dataset_id",
-    [("cartpole/test-v0")],
+    ["cartpole/test-v0"],
 )
 def test_load_minari_dataset_errors(dataset_id):
     # test load a dataset absent in local
@@ -135,7 +135,7 @@ def test_load_minari_dataset_errors(dataset_id):
 
 @pytest.mark.parametrize(
     "dataset_id",
-    [("D4RL/door/human-v2")],
+    ["D4RL/door/human-v2"],
 )
 def test_load_remote_minari_dataset(dataset_id):
     dataset = minari_utils.load_minari_dataset(dataset_id, remote=True)
@@ -147,7 +147,7 @@ def test_load_remote_minari_dataset(dataset_id):
 
 @pytest.mark.parametrize(
     "dataset_id",
-    [("D4RL/door/human-v2")],
+    ["D4RL/door/human-v2"],
 )
 def test_load_remote_minari_dataset_accelerator(dataset_id):
     accelerator = Accelerator()
