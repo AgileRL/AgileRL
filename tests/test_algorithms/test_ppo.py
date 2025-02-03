@@ -160,7 +160,7 @@ def test_initializes_with_default_values():
     assert ppo.algo == "PPO"
     assert ppo.observation_space == generate_random_box_space(shape=(4,), low=0, high=1)
     assert ppo.action_space == generate_random_box_space(shape=(2,), low=-1, high=1)
-    assert ppo.discrete_actions == False
+    assert not ppo.discrete_actions
     assert ppo.batch_size == 64
     assert ppo.lr == 1e-4
     assert ppo.gamma == 0.99
@@ -238,7 +238,7 @@ def test_initialize_ppo_with_cnn_accelerator():
 
     assert ppo.observation_space == observation_space
     assert ppo.action_space == action_space
-    assert ppo.discrete_actions == True
+    assert ppo.discrete_actions
     assert ppo.batch_size == batch_size
     assert ppo.lr == lr
     assert ppo.gamma == gamma

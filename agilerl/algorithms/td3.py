@@ -18,8 +18,6 @@ from agilerl.networks.q_networks import ContinuousQNetwork
 from agilerl.typing import ArrayLike, ExperiencesType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
-__all__ = ["TD3"]
-
 
 class TD3(RLAlgorithm):
     """The TD3 algorithm class. TD3 paper: https://arxiv.org/abs/1802.09477
@@ -221,18 +219,21 @@ class TD3(RLAlgorithm):
 
             critic_net_config["head_config"] = critic_head_config
 
-            create_actor = lambda: DeterministicActor(
-                observation_space=observation_space,
-                action_space=action_space,
-                device=device,
-                **net_config,
-            )
-            create_critic = lambda: ContinuousQNetwork(
-                observation_space=observation_space,
-                action_space=action_space,
-                device=device,
-                **critic_net_config,
-            )
+            def create_actor():
+                return DeterministicActor(
+                    observation_space=observation_space,
+                    action_space=action_space,
+                    device=device,
+                    **net_config,
+                )
+
+            def create_critic():
+                return ContinuousQNetwork(
+                    observation_space=observation_space,
+                    action_space=action_space,
+                    device=device,
+                    **critic_net_config,
+                )
 
             self.actor = create_actor()
             self.actor_target = create_actor()

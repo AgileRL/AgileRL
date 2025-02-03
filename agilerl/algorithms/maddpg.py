@@ -33,8 +33,6 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
-__all__ = ["MADDPG"]
-
 
 class MADDPG(MultiAgentAlgorithm):
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
@@ -278,22 +276,24 @@ class MADDPG(MultiAgentAlgorithm):
             critic_net_config["encoder_config"] = critic_encoder_config
             critic_net_config["head_config"] = critic_head_config
 
-            create_actor = lambda idx: DeterministicActor(
-                self.observation_spaces[idx],
-                self.action_spaces[idx],
-                n_agents=self.n_agents,
-                device=self.device,
-                **copy.deepcopy(net_config),
-            )
+            def create_actor(idx):
+                return DeterministicActor(
+                    self.observation_spaces[idx],
+                    self.action_spaces[idx],
+                    n_agents=self.n_agents,
+                    device=self.device,
+                    **copy.deepcopy(net_config),
+                )
 
             # NOTE: Critic uses observations + actions of all agents to predict Q-value
-            create_critic = lambda: ContinuousQNetwork(
-                observation_space=concatenate_spaces(observation_spaces),
-                action_space=concatenate_spaces(action_spaces),
-                n_agents=self.n_agents,
-                device=self.device,
-                **copy.deepcopy(critic_net_config),
-            )
+            def create_critic():
+                return ContinuousQNetwork(
+                    observation_space=concatenate_spaces(observation_spaces),
+                    action_space=concatenate_spaces(action_spaces),
+                    n_agents=self.n_agents,
+                    device=self.device,
+                    **copy.deepcopy(critic_net_config),
+                )
 
             self.actors = [create_actor(idx) for idx in range(self.n_agents)]
             self.critics = [create_critic() for _ in range(self.n_agents)]

@@ -22,8 +22,6 @@ from agilerl.utils.sampling_utils import (
     update_kvs,
 )
 
-__all__ = ["ILQL"]
-
 
 class ILQL(nn.Module):
     """The Implicit Language Q Learning algorithm class. ILQL paper: https://arxiv.org/pdf/2206.11871.pdf

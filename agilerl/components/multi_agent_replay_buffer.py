@@ -74,21 +74,21 @@ class MultiAgentReplayBuffer:
         # Stack the transitions into a single array or tuple/dictionary of arrays
         ts = []
         for ft in transitions:
-            if field_type == dict:
+            if field_type is dict:
                 ft = {k: np.array(v) for k, v in ft.items()}
-            elif field_type == tuple:
+            elif field_type is tuple:
                 ft = tuple(np.array(v) for v in ft)
 
             ts.append(ft)
 
-        if field_type == dict:
+        if field_type is dict:
             _ts = {}
             for k in ts[0].keys():
                 kts = np.array([t[k] for t in ts])
                 _ts[k] = np.expand_dims(kts, axis=1) if kts.ndim == 1 else kts
 
             ts = _ts
-        elif field_type == tuple:
+        elif field_type is tuple:
             _ts = []
             for i in range(len(ts[0])):
                 its = np.array([t[i] for t in ts])

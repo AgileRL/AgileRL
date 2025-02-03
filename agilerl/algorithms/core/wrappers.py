@@ -47,11 +47,10 @@ class OptimizerWrapper:
         if isinstance(networks, nn.Module):
             self.networks = [networks]
         else:
-            assert (
-                isinstance(networks, list)
-                and all(isinstance(net, nn.Module) for net in networks),
-                "Expected a single network or a list of networks.",
-            )
+            assert isinstance(networks, list) and all(
+                isinstance(net, nn.Module) for net in networks
+            ), "Expected a single network or a list of networks."
+
             self.networks = networks
 
         # NOTE: This should be passed when reintializing the optimizer

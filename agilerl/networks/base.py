@@ -53,10 +53,9 @@ def assert_correct_cnn_net_config(net_config: Dict[str, Any]) -> None:
         ), f"Net config {key} must contain at least one element."
 
         if key == "kernel_size":
-            assert (
-                isinstance(net_config[key], (int, tuple, list)),
-                "Kernel size must be of type int, list, or tuple.",
-            )
+            assert isinstance(
+                net_config[key], (int, tuple, list)
+            ), "Kernel size must be of type int, list, or tuple."
 
 
 def assert_correct_multi_input_net_config(net_config: Dict[str, Any]) -> None:

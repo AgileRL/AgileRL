@@ -32,8 +32,6 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
-__all__ = ["MATD3"]
-
 
 class MATD3(MultiAgentAlgorithm):
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
@@ -283,22 +281,27 @@ class MATD3(MultiAgentAlgorithm):
             critic_net_config["encoder_config"] = critic_encoder_config
             critic_net_config["head_config"] = critic_head_config
 
-            create_actor = lambda idx: DeterministicActor(
-                self.observation_spaces[idx],
-                self.action_spaces[idx],
-                n_agents=self.n_agents,
-                device=self.device,
-                **copy.deepcopy(net_config),
-            )
+            def create_actor(idx):
+                return DeterministicActor(
+                    self.observation_spaces[idx],
+                    self.action_spaces[idx],
+                    n_agents=self.n_agents,
+                    device=self.device,
+                    **copy.deepcopy(net_config),
+                )
 
             # NOTE: Critic uses observations + actions of all agents to predict Q-value
-            create_critic = lambda: ContinuousQNetwork(
-                observation_space=concatenate_spaces(observation_spaces),
-                action_space=concatenate_spaces(action_spaces),
-                n_agents=self.n_agents,
-                device=self.device,
-                **copy.deepcopy(critic_net_config),
-            )
+            concatenated_obs_space = concatenate_spaces(observation_spaces)
+            concatenated_action_space = concatenate_spaces(action_spaces)
+
+            def create_critic():
+                return ContinuousQNetwork(
+                    observation_space=concatenated_obs_space,
+                    action_space=concatenated_action_space,
+                    n_agents=self.n_agents,
+                    device=self.device,
+                    **copy.deepcopy(critic_net_config),
+                )
 
             self.actors = [create_actor(idx) for idx in range(self.n_agents)]
             self.critics_1 = [create_critic() for _ in range(self.n_agents)]

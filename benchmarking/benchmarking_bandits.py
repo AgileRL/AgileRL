@@ -35,7 +35,6 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
 
     env = BanditEnv(features, targets)  # Create environment
     context_dim = env.context_dim
-    action_dim = env.arms
 
     if INIT_HP["CHANNELS_LAST"]:
         context_dim = (context_dim[2], context_dim[0], context_dim[1])

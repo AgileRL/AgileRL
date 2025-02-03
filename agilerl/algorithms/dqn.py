@@ -19,8 +19,6 @@ from agilerl.networks.q_networks import QNetwork
 from agilerl.typing import ExperiencesType, GymEnvType, NumpyObsType, TorchObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
-__all__ = ["DQN"]
-
 
 class DQN(RLAlgorithm):
     """The DQN algorithm class. DQN paper: https://arxiv.org/abs/1312.5602
@@ -134,12 +132,15 @@ class DQN(RLAlgorithm):
             )
         else:
             net_config = {} if net_config is None else net_config
-            create_actor = lambda: QNetwork(
-                observation_space=observation_space,
-                action_space=action_space,
-                device=self.device,
-                **net_config,
-            )
+
+            def create_actor():
+                return QNetwork(
+                    observation_space=observation_space,
+                    action_space=action_space,
+                    device=self.device,
+                    **net_config,
+                )
+
             self.actor = create_actor()
             self.actor_target = create_actor()
 

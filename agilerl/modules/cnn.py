@@ -41,10 +41,9 @@ def _assert_correct_kernel_sizes(
                 f"have a length of {msg} for {block_type}.",
             )
 
-        assert (
-            len(wh_unique) == 1,
-            "AgileRL currently doesn't support having different ",
-            f"values for width and height in a single CNN kernel: {wh_unique}",
+        assert len(wh_unique) == 1, (
+            "AgileRL currently doesn't support having different "
+            f"values for width and height in a single CNN kernel: {wh_unique}"
         )
 
 

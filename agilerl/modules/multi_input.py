@@ -128,10 +128,10 @@ class EvolvableMultiInput(EvolvableModule):
         super().__init__(device)
 
         assert num_outputs > 0, "Number of outputs must be greater than 0."
-        assert (
-            isinstance(observation_space, (spaces.Dict, spaces.Tuple)),
-            "Observation space must be a Dict or Tuple space.",
-        )
+        assert isinstance(
+            observation_space, (spaces.Dict, spaces.Tuple)
+        ), "Observation space must be a Dict or Tuple space."
+
         subspaces = (
             observation_space.spaces.values()
             if isinstance(observation_space, spaces.Dict)
@@ -457,9 +457,9 @@ class EvolvableMultiInput(EvolvableModule):
         # Optional MLP for all concatenated vector inputs
         if self.vector_space_mlp:
             assert (
-                self.hidden_size is not None,
-                "Hidden size must be specified for vector space MLP.",
-            )
+                self.hidden_size is not None
+            ), "Hidden size must be specified for vector space MLP."
+
             init_dict = copy.deepcopy(self.get_init_dict("vector_mlp", default="mlp"))
             vector_mlp = EvolvableMLP(
                 num_inputs=vector_input_dim,

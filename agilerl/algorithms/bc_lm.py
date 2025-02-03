@@ -16,8 +16,6 @@ from agilerl.utils.sampling_utils import (
     update_kvs,
 )
 
-__all__ = ["BC_LM", "BC_Policy", "BC_Evaluator"]
-
 
 class BC_LM(nn.Module):
     def __init__(

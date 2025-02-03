@@ -300,9 +300,7 @@ class ObsDependentRewardContActionsDictEnv(gym.Env):
                 "box": [np.zeros((1, 1, 3, 3)), np.ones((1, 1, 3, 3))],
             }
         ]
-        self.sample_actions = [
-            {"action": np.array([[1.0]]), "action": np.array([[1.0]])}
-        ]
+        self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[-1.0], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[-1.0], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
@@ -473,9 +471,7 @@ class DiscountedRewardContActionsDictEnv(gym.Env):
             {"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))},
             {"discrete": np.array([[1]]), "box": np.ones((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
-            {"action": np.array([[1.0]]), "action": np.array([[1.0]])}
-        ]
+        self.sample_actions = self.sample_actions = [[[1.0]], [[1.0]]]
         self.q_values = [[0.99], [1.0]]  # Correct Q values to learn, s x a table
         self.v_values = [[0.99], [1.0]]  # Correct V values to learn, s table
         self.policy_values = [None]  # Correct policy to learn
@@ -859,9 +855,7 @@ class PolicyContActionsDictEnv(gym.Env):
             {"discrete": np.array([[0]]), "box": np.zeros((1, 1, 3, 3))},
             {"discrete": np.array([[1]]), "box": np.ones((1, 1, 3, 3))},
         ]
-        self.sample_actions = [
-            {"action": np.array([[1.0, 0.0]]), "action": np.array([[0.0, 1.0]])}
-        ]
+        self.sample_actions = [[1.0, 0.0], 0.0, 1.0]
         self.q_values = [[0.0], [0.0]]  # Correct Q values to learn
         self.policy_values = [[1.0, 0.0], [0.0, 1.0]]  # Correct policy to learn
         self.v_values = [None]  # Correct V values to learn, s table

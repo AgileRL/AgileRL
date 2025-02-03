@@ -1297,48 +1297,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     mutations.rng = DummyRNG()
 
     for individual in population:
-        if accelerator is not None:
-            adam_actors = [
-                actor_optimizer.optimizer
-                for actor_optimizer in individual.actor_optimizers
-            ]
-            if algo == "MATD3":
-                adam_critics_1 = [
-                    critic_optimizer_1.optimizer
-                    for critic_optimizer_1 in individual.critic_1_optimizers
-                ]
-                adam_critics_2 = [
-                    critic_optimizer_2.optimizer
-                    for critic_optimizer_2 in individual.critic_2_optimizers
-                ]
-            else:
-                adam_critics = [
-                    critic_optimizer.optimizer
-                    for critic_optimizer in individual.critic_optimizers
-                ]
-
-        else:
-            adam_actors = [
-                actor_optimizer for actor_optimizer in individual.actor_optimizers
-            ]
-            if algo == "MATD3":
-                adam_critics_1 = [
-                    critic_optimizer_1
-                    for critic_optimizer_1 in individual.critic_1_optimizers
-                ]
-                adam_critics_2 = [
-                    critic_optimizer_2
-                    for critic_optimizer_2 in individual.critic_2_optimizers
-                ]
-            else:
-                adam_critics = [
-                    critic_optimizer
-                    for critic_optimizer in individual.critic_optimizers
-                ]
-
-        if algo == "MADDPG":
-            print(adam_critics)
-
         individual.actors = [EvolvableBERT([12], [12], device=device)]
         individual.actor_targets = copy.deepcopy(individual.actors)
         if algo == "MADDPG":

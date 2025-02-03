@@ -60,16 +60,16 @@ class ReplayBuffer:
         # Stack the transitions into a single array or tuple/dictionary of arrays
         ts = []
         for ft in transitions:
-            if field_type == dict:
+            if field_type is dict:
                 ts.append({k: np.expand_dims(v, axis=0) for k, v in ft.items()})
-            elif field_type == tuple:
+            elif field_type is tuple:
                 ts.append(tuple(np.expand_dims(v, axis=0) for v in ft))
             else:
                 ts.append(np.expand_dims(ft, axis=0))
 
-        if field_type == dict:
+        if field_type is dict:
             ts = {k: np.vstack([t[k] for t in ts]) for k in ts[0].keys()}
-        elif field_type == tuple:
+        elif field_type is tuple:
             ts = tuple(np.vstack([t[i] for t in ts]) for i in range(len(ts[0])))
         else:
             ts = np.vstack(ts)
@@ -219,6 +219,7 @@ class MultiStepReplayBuffer(ReplayBuffer):
             or "termination" in field_names
             or "terminated" in field_names
         ), "Done/termination must be saved in replay buffer under the field name 'done', 'termination', or 'terminated'."
+
         self.num_envs = num_envs
         self.n_step_buffers = [deque(maxlen=n_step) for _ in range(num_envs)]
         self.args_deque = deque(maxlen=n_step)

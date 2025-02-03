@@ -17,8 +17,6 @@ from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, TorchObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.wrappers.make_evolvable import MakeEvolvable
 
-__all__ = ["RainbowDQN"]
-
 
 class RainbowDQN(RLAlgorithm):
     """The Rainbow DQN algorithm class. Rainbow DQN paper: https://arxiv.org/abs/1710.02298
@@ -193,15 +191,16 @@ class RainbowDQN(RLAlgorithm):
             )
             net_config["head_config"] = head_config
 
-            create_actor = lambda: RainbowQNetwork(
-                observation_space=observation_space,
-                action_space=action_space,
-                support=self.support,
-                num_atoms=self.num_atoms,
-                noise_std=self.noise_std,
-                device=self.device,
-                **net_config,
-            )
+            def create_actor():
+                return RainbowQNetwork(
+                    observation_space=observation_space,
+                    action_space=action_space,
+                    support=self.support,
+                    num_atoms=self.num_atoms,
+                    noise_std=self.noise_std,
+                    device=self.device,
+                    **net_config,
+                )
 
             self.actor = create_actor()
             self.actor_target = create_actor()

@@ -4,6 +4,7 @@ from tqdm import trange
 
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.utils.algo_utils import obs_channels_to_first
 from agilerl.utils.utils import (
     create_population,
     make_vect_envs,

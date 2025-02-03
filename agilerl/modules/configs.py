@@ -58,22 +58,19 @@ class MlpNetConfig(NetConfig):
 
     def __post_init__(self):
         assert (
-            len(self.hidden_size) >= self.min_hidden_layers,
-            "Hidden layers must be greater than min_hidden_layers.",
-        )
+            len(self.hidden_size) >= self.min_hidden_layers
+        ), "Hidden layers must be greater than min_hidden_layers."
+
         assert (
-            len(self.hidden_size) <= self.max_hidden_layers,
-            "Hidden layers must be less than max_hidden_layers.",
-        )
-        assert (
-            all(
-                [
-                    self.min_mlp_nodes <= nodes and nodes <= self.max_mlp_nodes
-                    for nodes in self.hidden_size
-                ]
-            ),
-            "Nodes must be within min_nodes and max_nodes.",
-        )
+            len(self.hidden_size) <= self.max_hidden_layers
+        ), "Hidden layers must be less than max_hidden_layers."
+
+        assert all(
+            [
+                self.min_mlp_nodes <= nodes and nodes <= self.max_mlp_nodes
+                for nodes in self.hidden_size
+            ]
+        ), "Nodes must be within min_nodes and max_nodes."
 
 
 @dataclass
