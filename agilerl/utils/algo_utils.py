@@ -99,12 +99,12 @@ def multi_agent_sample_tensor_from_space(
 
 
 def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
-    """Makes deep copies of EvolvableModule's and their attributes.
+    """Makes deep copies of EvolvableModule objects and their attributes.
 
-    :param args: EvolvableModule's or lists of EvolvableModule's to copy.
+    :param args: EvolvableModule or lists of EvolvableModule objects to copy.
     :type args: Union[EvolvableModule, List[EvolvableModule]].
 
-    :return: Deep copies of the EvolvableModule's and their attributes.
+    :return: Deep copies of the EvolvableModule objects and their attributes.
     :rtype: List[EvolvableModule].
     """
     copies = []
@@ -122,12 +122,12 @@ def make_safe_deepcopies(*args: Union[Module, List[Module]]) -> List[Module]:
 
 
 def is_module_list(obj: EvolvableAttributeType) -> TypeGuard[Iterable[EvolvableModule]]:
-    """Type guard to check if an object is a list of EvolvableModule's.
+    """Type guard to check if an object is a list of EvolvableModule objects.
 
     :param obj: The object to check.
     :type obj: EvolvableAttributeType.
 
-    :return: True if the object is a list of EvolvableModule's, False otherwise.
+    :return: True if the object is a list of EvolvableModule objects, False otherwise.
     :rtype: bool.
     """
     if not isinstance(obj, list):
@@ -216,13 +216,13 @@ def unwrap_optimizer(
 
 
 def recursive_check_module_attrs(obj: Any, networks_only: bool = False) -> bool:
-    """Recursively check if the object has any attributes that are EvolvableModule's or Optimizer's.
+    """Recursively check if the object has any attributes that are EvolvableModule objects or Optimizer's.
 
-    :param obj: The object to check for EvolvableModule's or Optimizer's.
+    :param obj: The object to check for EvolvableModule objects or Optimizer's.
     :type obj: Any
-    :return: True if the object has any attributes that are EvolvableModule's or Optimizer's, False otherwise.
+    :return: True if the object has any attributes that are EvolvableModule objects or Optimizer's, False otherwise.
     :rtype: bool
-    :param networks_only: If True, only check for EvolvableModule's, defaults to False
+    :param networks_only: If True, only check for EvolvableModule objects, defaults to False
     :type networks_only: bool, optional
     """
     check_types = (OptimizedModule, EvolvableModule)

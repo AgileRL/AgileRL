@@ -11,12 +11,13 @@ from agilerl.protocols import EvolvableAlgorithm, EvolvableModule
 
 @dataclass
 class NetworkConfig:
-    """Dataclass for storing the configuration of a en evolvable network
+    """Dataclass for storing the configuration of an evolvable network
     within an `EvolvableAlgorithm`.
 
     :param name: The name of the attribute where the network is stored.
     :type name: str
-    :param eval: Whether the network is an evaluation network. This implies that the network
+    :param eval: Whether the network is an evaluation network. This implies
+    that the network is optimized during training. Default is False.
 
     :type eval: bool
     :param optimizer: The name of the optimizer that updates the network.

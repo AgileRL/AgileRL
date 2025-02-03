@@ -48,7 +48,7 @@ class MlpNetConfig(NetConfig):
     output_activation: Optional[str] = field(default=None)
     min_hidden_layers: int = field(default=1)
     max_hidden_layers: int = field(default=3)
-    min_mlp_nodes: int = field(default=64)
+    min_mlp_nodes: int = field(default=16)
     max_mlp_nodes: int = field(default=500)
     layer_norm: bool = field(default=True)
     output_vanish: bool = field(default=True)

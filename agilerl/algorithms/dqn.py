@@ -184,7 +184,7 @@ class DQN(RLAlgorithm):
 
         # NOTE: This removes the target params from the computation graph which
         # reduces memory overhead and speeds up training, however these won't
-        # appear in the module's parameters
+        # appear in the modules parameters
         self.target_params: TensorDict = self.param_vals.clone().lock_()
         self.target_params.to_module(self.actor_target)
 
@@ -225,7 +225,7 @@ class DQN(RLAlgorithm):
     ) -> torch.Tensor:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
+        For greedy behaviour, set epsilon to 0.
 
         :param obs: The current observation from the environment
         :type obs: torch.Tensor, dict[str, torch.Tensor], tuple[torch.Tensor]

@@ -24,6 +24,12 @@ class OptimizerWrapper:
     :type lr: float
     :param optimizer_kwargs: The keyword arguments to be passed to the optimizer.
     :type optimizer_kwargs: Dict[str, Any]
+    :param network_names: The attribute names of the networks in the parent container.
+    :type network_names: List[str]
+    :param lr_name: The attribute name of the learning rate in the parent container.
+    :type lr_name: str
+    :param multiagent: Flag to indicate if the optimizer is multi-agent.
+    :type multiagent: bool
     """
 
     optimizer: _Optimizer

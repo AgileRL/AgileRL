@@ -74,7 +74,7 @@ class MutationContext:
     """Tracks nested mutation method calls. This allows us to automatically call a modules
     `recreate_network` method after the outermost mutation method has been called. It handles
     cases where we fall back on another mutation method when a limit has been reached e.g. in
-    EvolvableMLP's `add_layer` method, after the maximum number of layers has been reached we
+    the EvolvableMLP `add_layer` method, after the maximum number of layers has been reached we
     instead call `add_node`. In cases like this, we want to avoid redundant recreations of the
     network.
 

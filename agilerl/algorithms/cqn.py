@@ -167,7 +167,7 @@ class CQN(RLAlgorithm):
     ) -> ArrayLike:
         """Returns the next action to take in the environment. Epsilon is the
         probability of taking a random action, used for exploration.
-        For epsilon-greedy behaviour, set epsilon to 0.
+        For greedy behaviour, set epsilon to 0.
 
         :param state: State observation, or multiple observations in a batch
         :type state: numpy.ndarray[float]

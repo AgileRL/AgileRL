@@ -64,7 +64,7 @@ class TD3(RLAlgorithm):
     :type policy_freq: int, optional
     :param actor_network: Custom actor network, defaults to None
     :type actor_network: nn.Module, optional
-    :param critic_networks: List of two custom critic networks (one for each of TD3's two critics), defaults to None
+    :param critic_networks: List of two custom critic networks (one for each of the two critics), defaults to None
     :type critic_networks: list[nn.Module], optional
     :param device: Device for accelerated computing, 'cpu' or 'cuda', defaults to 'cpu'
     :type device: str, optional

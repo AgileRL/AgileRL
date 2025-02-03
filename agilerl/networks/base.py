@@ -83,7 +83,7 @@ class NetworkMeta(ModuleMeta):
                 attr = mut_method.split(".")[0]
                 if attr not in ["encoder", "head_net"]:
                     raise AttributeError(
-                        "Mutation methods of underlying modules in EvolvableNetwork's should only correspond "
+                        "Mutation methods of underlying modules in EvolvableNetwork objects should only correspond "
                         "to the encoder or head_net. This is done to ensure that analogous architecture mutations "
                         "can be applied between different networks. "
                     )
@@ -344,7 +344,7 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         return {"numb_new_nodes": numb_new_nodes}
 
     def _build_encoder(self, net_config: Dict[str, Any]) -> SupportedEvolvable:
-        """Builds the encoder for the network based on the environment's observation space.
+        """Builds the encoder for the network based on the environments observation space.
 
         :return: Encoder module.
         :rtype: EvolvableModule

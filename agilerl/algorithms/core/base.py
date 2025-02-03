@@ -256,7 +256,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Sets the attribute of the algorithm. If the attribute is an OptimizerWrapper,
-        we register the optimizer with the algorithm's registry.
+        we register the optimizer with the algorithms registry.
 
         :param name: The name of the attribute.
         :type name: str
@@ -288,7 +288,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
 
         if not self.registry.groups:
             raise AttributeError(
-                "No network groups have been registered in the algorithm's __init__ method. "
+                "No network groups have been registered in the algorithms __init__ method. "
                 "Please register NetworkGroup objects specifying all of the evaluation and "
                 "shared/target networks through the `register_network_group()` method."
             )
@@ -301,7 +301,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         if not_found:
             raise AttributeError(
                 f"The following evolvable attributes could not be found in the registry: {not_found}. "
-                "Please check that the defined NetworkGroup objects contain all of the EvolvableModule's "
+                "Please check that the defined NetworkGroup objects contain all of the EvolvableModule objects "
                 "in the algorithm."
             )
 
@@ -399,7 +399,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         as the optimizers associated with the networks.
 
         :param networks_only: If True, only include evolvable networks, defaults to False
-        :type networks_only: bool, optionals
+        :type networks_only: bool, optional
 
         :return: A dictionary of network attributes.
         :rtype: dict[str, Any]
@@ -424,7 +424,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
     def inspect_attributes(self, input_args_only: bool = False) -> Dict[str, Any]:
         """
         Inspect and retrieve the attributes of the current object, excluding attributes related to the
-        underlying evolvable networks (i.e. `EvolvableModule`'s, `torch.optim.Optimizer`'s) and with
+        underlying evolvable networks (i.e. `EvolvableModule`, `torch.optim.Optimizer`) and with
         an option to include only the attributes that are input arguments to the constructor.
 
         :param input_args_only: If True, only include attributes that are input arguments to the constructor.
@@ -436,7 +436,7 @@ class EvolvableAlgorithm(ABC, metaclass=RegistryMeta):
         # Get all attributes of the current object
         attributes = inspect.getmembers(self, lambda a: not isroutine(a))
 
-        # Exclude attributes that are EvolvableModule's or Optimizer's (also check for nested
+        # Exclude attributes that are EvolvableModule or Optimizer objects (also check for nested
         # module-related attributes for multi-agent algorithms)
         exclude = list(self.evolvable_attributes().keys())
         exclude += [attr for attr, val in attributes if isinstance(val, TensorDict)]
@@ -938,10 +938,10 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
 
         assert isinstance(
             observation_space, spaces.Space
-        ), "Observation space must be an instance of gym.spaces.Space."
+        ), "Observation space must be an instance of gymnasium.spaces.Space."
         assert isinstance(
             action_space, spaces.Space
-        ), "Action space must be an instance of gym.spaces.Space."
+        ), "Action space must be an instance of gymnasium.spaces.Space."
 
         self.observation_space = observation_space
         self.action_space = action_space
@@ -1052,13 +1052,13 @@ class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
         ), "Observation spaces must be a list or tuple."
         assert all(
             isinstance(_space, spaces.Space) for _space in observation_spaces
-        ), "Observation spaces must be instances of gym.spaces.Space."
+        ), "Observation spaces must be instances of gymnasium.spaces.Space."
         assert isinstance(
             action_spaces, (list, tuple)
         ), "Action spaces must be a list or tuple."
         assert all(
             isinstance(_space, spaces.Space) for _space in action_spaces
-        ), "Action spaces must be instances of gym.spaces.Space."
+        ), "Action spaces must be instances of gymnasium.spaces.Space."
 
         if not all(
             isinstance(space, observation_spaces[0].__class__)
