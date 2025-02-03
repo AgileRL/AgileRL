@@ -366,7 +366,11 @@ class DDPG:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
-            return np.where(action > 0, action * max_action, action * -min_action)
+            return (
+                torch.where(action > 0, action * max_action, action * -min_action)
+                if convert_to_torch
+                else np.where(action > 0, action * max_action, action * -min_action)
+            )
 
         if not (
             isinstance(min_action, (np.ndarray, torch.Tensor))
