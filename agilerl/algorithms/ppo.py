@@ -416,9 +416,15 @@ class PPO:
             pre_scaled_max = 1
         else:
             return (
-                torch.where(action > 0, action * max_action, action * -min_action)
+                torch.clamp(
+                    torch.where(action > 0, action * max_action, action * -min_action),
+                    min_action,
+                    max_action,
+                )
                 if convert_to_torch
-                else np.where(action > 0, action * max_action, action * -min_action)
+                else np.where(
+                    action > 0, action * max_action, action * -min_action
+                ).clip(min_action, max_action)
             )
 
         if not (
