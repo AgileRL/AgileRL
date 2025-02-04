@@ -3,7 +3,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
@@ -103,8 +102,8 @@ class PPO(RLAlgorithm):
         target_kl: Optional[float] = None,
         normalize_images: bool = True,
         update_epochs: int = 4,
-        actor_network: Optional[nn.Module] = None,
-        critic_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
+        critic_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,

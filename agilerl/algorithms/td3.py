@@ -15,7 +15,7 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ArrayLike, ExperiencesType, NumpyObsType
+from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
@@ -96,8 +96,8 @@ class TD3(RLAlgorithm):
         normalize_images: bool = True,
         mut: Optional[str] = None,
         policy_freq: int = 2,
-        actor_network: Optional[nn.Module] = None,
-        critic_networks: Optional[list[nn.Module]] = None,
+        actor_network: Optional[EvolvableModule] = None,
+        critic_networks: Optional[list[EvolvableModule]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -289,16 +289,13 @@ class TD3(RLAlgorithm):
         :rtype: numpy.ndarray
         """
         if convert_to_torch:
-            device = (
-                self.device if self.accelerator is None else self.accelerator.device
-            )
             max_action = (
-                torch.from_numpy(self.max_action).to(device)
+                torch.from_numpy(self.max_action).to(self.device)
                 if isinstance(self.max_action, (np.ndarray))
                 else self.max_action
             )
             min_action = (
-                torch.from_numpy(self.min_action).to(device)
+                torch.from_numpy(self.min_action).to(self.device)
                 if isinstance(self.min_action, (np.ndarray))
                 else self.min_action
             )
@@ -508,7 +505,9 @@ class TD3(RLAlgorithm):
                 self.tau * eval_param.data + (1.0 - self.tau) * target_param.data
             )
 
-    def test(self, env, swap_channels=False, max_steps=None, loop=3):
+    def test(
+        self, env: GymEnvType, swap_channels=False, max_steps=None, loop=3
+    ) -> float:
         """Returns mean test score of agent in environment with epsilon-greedy policy.
 
         :param env: The environment to be tested in
@@ -519,6 +518,9 @@ class TD3(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
+
+        :return: Mean test score
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []

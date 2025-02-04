@@ -93,7 +93,7 @@ Below is a simple example of how this is can be done for the DQN algorithm:
             mut: Optional[str] = None,
             double: bool = False,
             normalize_images: bool = True,
-            actor_network: Optional[nn.Module] = None,
+            actor_network: Optional[EvolvableModule] = None,
             device: str = "cpu",
             accelerator: Optional[Any] = None,
             cudagraphs: bool = False,

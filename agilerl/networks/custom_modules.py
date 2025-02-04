@@ -57,20 +57,34 @@ class DuelingMLP(EvolvableMLP):
         num_atoms: int,
         support: torch.Tensor,
         noise_std: float = 0.5,
-        **kwargs
+        activation: str = "ReLU",
+        output_activation: str = None,
+        min_hidden_layers: int = 1,
+        max_hidden_layers: int = 3,
+        min_mlp_nodes: int = 64,
+        max_mlp_nodes: int = 500,
+        new_gelu: bool = False,
+        device: str = "cpu",
     ) -> None:
 
         super().__init__(
             num_inputs,
             num_atoms,
             hidden_size,
-            noisy=True,
-            init_layers=False,
+            activation,
+            output_activation,
+            min_hidden_layers,
+            max_hidden_layers,
+            min_mlp_nodes,
+            max_mlp_nodes,
             layer_norm=True,
             output_vanish=True,
+            init_layers=False,
+            noisy=True,
             noise_std=noise_std,
+            new_gelu=new_gelu,
+            device=device,
             name="value",
-            **kwargs
         )
 
         self.num_atoms = num_atoms
@@ -99,19 +113,6 @@ class DuelingMLP(EvolvableMLP):
         net_config.pop("num_atoms")
         net_config.pop("support")
         return net_config
-
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        mlp_dict = super().init_dict
-        mlp_dict["num_atoms"] = self.num_atoms
-        mlp_dict["num_outputs"] = self.num_actions
-        mlp_dict["support"] = self.support
-        mlp_dict.pop("noisy")
-        mlp_dict.pop("init_layers")
-        mlp_dict.pop("layer_norm")
-        mlp_dict.pop("output_vanish")
-        mlp_dict.pop("name")
-        return mlp_dict
 
     def forward(
         self, x: torch.Tensor, q: bool = True, log: bool = False

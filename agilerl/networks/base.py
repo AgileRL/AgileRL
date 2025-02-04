@@ -127,6 +127,7 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     """
 
     encoder: SupportedEvolvable
+    head_net: SupportedEvolvable
 
     def __init__(
         self,
@@ -158,16 +159,17 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.min_latent_dim = min_latent_dim
         self.max_latent_dim = max_latent_dim
         self.device = device
-        self.encoder_config = (
+
+        encoder_config = (
             encoder_config
             if isinstance(encoder_config, dict)
             else asdict(encoder_config)
         )
 
         # Encoder processes an observation into a latent vector representation
-        output_activation = self.encoder_config.get("output_activation", None)
+        output_activation = encoder_config.get("output_activation", None)
         if output_activation is None:
-            activation = self.encoder_config.get("activation", "ReLU")
+            activation = encoder_config.get("activation", "ReLU")
             encoder_config["output_activation"] = activation
 
         self.encoder = self._build_encoder(encoder_config)
@@ -177,20 +179,25 @@ class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
         self.encoder.disable_mutations(MutationType.LAYER)
 
     @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Initial dictionary for the network.
+    def encoder_config(self) -> Dict[str, Any]:
+        """Net configuration for encoder.
 
         :return: Initial dictionary for the network.
         :rtype: Dict[str, Any]
         """
-        return {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "encoder_config": self.encoder.net_config,
-            "n_agents": self.n_agents,
-            "latent_dim": self.latent_dim,
-            "device": self.device,
-        }
+        return self.encoder.net_config
+
+    @property
+    def head_config(self) -> Dict[str, Any]:
+        """Net configuration for head.
+
+        :return: Initial dictionary for the network.
+        :rtype: Dict[str, Any]
+        """
+        if not hasattr(self, "head_net"):
+            raise AttributeError("Network does not have a head_net attribute.")
+
+        return self.head_net.net_config
 
     @property
     def activation(self) -> str:

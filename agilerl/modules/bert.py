@@ -486,30 +486,6 @@ class EvolvableBERT(EvolvableModule):
                 count += param.data.cpu().numpy().flatten().shape[0]
         return count
 
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Returns model information in dictionary."""
-        init_dict = {
-            "encoder_layers": self.encoder_layers,
-            "decoder_layers": self.decoder_layers,
-            "end2end": self.end2end,
-            "src_vocab_size": self.src_vocab_size,
-            "tgt_vocab_size": self.tgt_vocab_size,
-            "encoder_norm": self.encoder_norm,
-            "decoder_norm": self.decoder_norm,
-            "d_model": self.d_model,
-            "n_head": self.n_head,
-            "dropout": self.dropout,
-            "activation": self.activation,
-            "layer_norm_eps": self.layer_norm_eps,
-            "batch_first": self.batch_first,
-            "norm_first": self.norm_first,
-            "max_encoder_layers": self.max_encoder_layers,
-            "max_decoder_layers": self.max_decoder_layers,
-            "device": self.device,
-        }
-        return init_dict
-
     @mutation(MutationType.LAYER)
     def add_encoder_layer(self):
         """Adds an encoder layer to transformer."""

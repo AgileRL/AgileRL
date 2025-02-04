@@ -75,25 +75,6 @@ class QNetwork(EvolvableNetwork):
         # Build value network
         self.build_network_head(head_config)
 
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Initializes the configuration of the Q network.
-
-        :return: Configuration of the Q network.
-        :rtype: Dict[str, Any]
-        """
-        return {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.net_config,
-            "min_latent_dim": self.min_latent_dim,
-            "max_latent_dim": self.max_latent_dim,
-            "n_agents": self.n_agents,
-            "latent_dim": self.latent_dim,
-            "device": self.device,
-        }
-
     def build_network_head(self, net_config: Dict[str, Any]) -> None:
         """Builds the head of the network based on the passed configuration.
 
@@ -233,27 +214,6 @@ class RainbowQNetwork(EvolvableNetwork):
         # Build value and advantage networks
         self.build_network_head(head_config)
 
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Initializes the configuration of the Rainbow Q network.
-
-        :return: Configuration of the Rainbow Q network.
-        :rtype: Dict[str, Any]
-        """
-        return {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "support": self.support,
-            "num_atoms": self.num_atoms,
-            "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.net_config,
-            "min_latent_dim": self.min_latent_dim,
-            "max_latent_dim": self.max_latent_dim,
-            "n_agents": self.n_agents,
-            "latent_dim": self.latent_dim,
-            "device": self.device,
-        }
-
     def build_network_head(self, net_config: Dict[str, Any]) -> None:
         """Builds the value and advantage heads of the network based on the passed configuration.
 
@@ -363,25 +323,6 @@ class ContinuousQNetwork(EvolvableNetwork):
 
         # Build value network
         self.build_network_head(head_config)
-
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Initializes the configuration of the Rainbow Q network.
-
-        :return: Configuration of the Rainbow Q network.
-        :rtype: Dict[str, Any]
-        """
-        return {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.net_config,
-            "min_latent_dim": self.min_latent_dim,
-            "max_latent_dim": self.max_latent_dim,
-            "n_agents": self.n_agents,
-            "latent_dim": self.latent_dim,
-            "device": self.device,
-        }
 
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.

@@ -72,7 +72,7 @@ class CQN(RLAlgorithm):
         double: bool = False,
         normalize_images: bool = True,
         mut: Optional[str] = None,
-        actor_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -207,25 +207,6 @@ class DeterministicActor(EvolvableNetwork):
         self.build_network_head(head_config)
         self.output_activation = head_config.get("output_activation", output_activation)
 
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Initializes the configuration of the Rainbow Q network.
-
-        :return: Configuration of the Rainbow Q network.
-        :rtype: Dict[str, Any]
-        """
-        return {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.net_config,
-            "min_latent_dim": self.min_latent_dim,
-            "max_latent_dim": self.max_latent_dim,
-            "n_agents": self.n_agents,
-            "latent_dim": self.latent_dim,
-            "device": self.device,
-        }
-
     def build_network_head(self, net_config: Optional[ConfigType] = None) -> None:
         """Builds the head of the network.
 
@@ -318,26 +299,6 @@ class StochasticActor(DeterministicActor):
         self.head_net = EvolvableDistribution(
             action_space, self.head_net, log_std_init=log_std_init, device=device
         )
-
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Initializes the configuration of the Rainbow Q network.
-
-        :return: Configuration of the Rainbow Q network.
-        :rtype: Dict[str, Any]
-        """
-        return {
-            "observation_space": self.observation_space,
-            "action_space": self.action_space,
-            "encoder_config": self.encoder.net_config,
-            "head_config": self.head_net.net_config,
-            "log_std_init": self.head_net.log_std_init,
-            "min_latent_dim": self.min_latent_dim,
-            "max_latent_dim": self.max_latent_dim,
-            "n_agents": self.n_agents,
-            "latent_dim": self.latent_dim,
-            "device": self.device,
-        }
 
     def forward(
         self, obs: TorchObsType, action_mask: Optional[ArrayOrTensor] = None

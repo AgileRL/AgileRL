@@ -2,7 +2,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 from torch.nn.utils import clip_grad_norm_
@@ -91,7 +90,7 @@ class RainbowDQN(RLAlgorithm):
         mut: Optional[str] = None,
         normalize_images: bool = True,
         combined_reward: bool = False,
-        actor_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,

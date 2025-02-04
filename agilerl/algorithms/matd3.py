@@ -122,7 +122,7 @@ class MATD3(MultiAgentRLAlgorithm):
         tau: float = 0.01,
         normalize_images: bool = True,
         mut: Optional[str] = None,
-        actor_networks: Optional[List[nn.Module]] = None,
+        actor_networks: Optional[list[EvolvableModule]] = None,
         critic_networks: Optional[List[List[nn.Module]]] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,

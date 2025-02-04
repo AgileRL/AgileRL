@@ -9,6 +9,17 @@ from agilerl.data.rl_data import ConstantTokenReward, DataPoint, List_RL_Dataset
 from agilerl.data.torch_datasets import GeneralDataset
 from tests.test_data import WordleTokenizer
 
+torch.serialization.add_safe_globals(
+    [
+        WordleTokenizer,
+        List_RL_Dataset,
+        ConstantTokenReward,
+        DataPoint,
+        GeneralDataset,
+        Language_Observation,
+    ]
+)
+
 
 @pytest.fixture(autouse=True)
 def cleanup():

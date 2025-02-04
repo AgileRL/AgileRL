@@ -1,4 +1,5 @@
 import copy
+import warnings
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar, Union
 
 import fastrand
@@ -582,13 +583,26 @@ class Mutations:
 
         # Mutate network activation layer
         registry = individual.registry
+        no_activation = False
         for network_group in registry.groups:
             eval_module: OffspringType = getattr(individual, network_group.eval)
             if isinstance(eval_module, list):
+                if eval_module[0].activation is None:
+                    no_activation = True
+
                 eval_module = [self._permutate_activation(mod) for mod in eval_module]
             else:
+                if eval_module.activation is None:
+                    no_activation = True
+
                 eval_module = self._permutate_activation(eval_module)
 
+            if no_activation:
+                warnings.warn(
+                    "Found no activation mutation capabilities. We advise setting the probability to "
+                    "0.0 to disable activation mutations."
+                )
+                break
             if self.accelerator is None:
                 eval_module = self.to_device(eval_module)
 
@@ -598,7 +612,7 @@ class Mutations:
             setattr(individual, network_group.eval, eval_module)
 
         self.reinit_opt(individual)  # Reinitialise optimizer
-        individual.mut = "act"
+        individual.mut = "act" if not no_activation else "None"
         return individual
 
     def _permutate_activation(self, network: EvolvableModule) -> EvolvableModule:
@@ -745,6 +759,19 @@ class Mutations:
         # the same mutation to the rest of the evaluation modules e.g. critics
         policy, offspring_evals = get_offspring_eval_modules(individual)
         policy_name, policy_offspring = list(policy.items())[0]
+
+        sample_policy = (
+            policy_offspring[0]
+            if isinstance(policy_offspring, list)
+            else policy_offspring
+        )
+        if not sample_policy.mutation_methods:
+            warnings.warn(
+                "No mutation methods found for the policy network. Skipping architecture mutation. "
+                "We advise setting the probability of architecture mutations to zero."
+            )
+            individual.mut = "None"
+            return individual
 
         # Sample mutation method from policy network
         mut_method = get_architecture_mut_method(

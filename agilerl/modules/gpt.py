@@ -1,7 +1,7 @@
 import inspect
 import math
 from collections import OrderedDict
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -580,26 +580,6 @@ class EvolvableGPT(EvolvableModule):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
-
-    @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Returns model information in dictionary."""
-        init_dict = {
-            "n_layer": self.n_layer,
-            "vocab_size": self.vocab_size,
-            "n_embd": self.n_embd,
-            "n_head": self.n_head,
-            "dim_feedfwd": self.dim_feedfwd,
-            "block_size": self.block_size,
-            "dropout": self.dropout,
-            "activation": self.activation,
-            "layer_norm_eps": self.layer_norm_eps,
-            "min_layers": self.min_layers,
-            "max_layers": self.max_layers,
-            "bias": self.bias,
-            "device": self.device,
-        }
-        return init_dict
 
     @mutation(MutationType.LAYER)
     def add_layer(self):

@@ -246,10 +246,9 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         self._mutation_hook = None
         self._mutation_depth = 0
 
-    # TODO: Can probably extract this automatically to not have to define it in each subclass
     @property
     def init_dict(self) -> Dict[str, Any]:
-        return {"device": self.device}
+        return self.get_init_dict()
 
     @property
     def mutation_methods(self) -> List[str]:
@@ -299,6 +298,22 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     def __call__(self, *args, **kwargs) -> torch.Tensor:
         """Forward pass of the network."""
         return self.forward(*args, **kwargs)
+
+    def get_init_dict(self) -> Dict[str, Any]:
+        """Get the dictionary of constructor arguments for the network.
+
+        :return: The dictionary of constructor arguments.
+        :rtype: Dict[str, Any]
+        """
+        constructor_args = inspect.signature(self.__init__).parameters
+
+        try:
+            return {k: getattr(self, k) for k in constructor_args.keys()}
+        except AttributeError:
+            raise AttributeError(
+                "Custom EvolvableModule objects must be explicit about their "
+                "constructor arguments (i.e. don't use *args and **kwargs)"
+            )
 
     def change_activation(self, activation: str, output: bool) -> None:
         """Set the activation function for the network.
@@ -592,6 +607,11 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return: The sampled mutation method.
         rtype: MutationMethod
         """
+        if not self.mutation_methods:
+            raise ValueError(
+                "No mutation methods available. Please use the @mutation decorator to register methods."
+            )
+
         if rng is None:
             rng = np.random.default_rng()
 
@@ -600,7 +620,7 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
 
     def clone(self: SelfEvolvableModule) -> SelfEvolvableModule:
         """Returns clone of neural net with identical parameters."""
-        clone = self.__class__(**copy.deepcopy(self.init_dict))
+        clone = self.__class__(**copy.deepcopy(self.get_init_dict()))
         clone._layer_mutation_methods = self._layer_mutation_methods
         clone._node_mutation_methods = self._node_mutation_methods
 

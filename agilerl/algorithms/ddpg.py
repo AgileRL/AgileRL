@@ -2,7 +2,6 @@ import copy
 import warnings
 from typing import Any, Dict, Optional, Tuple, Union
 
-import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,7 +15,13 @@ from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import DeterministicActor
 from agilerl.networks.q_networks import ContinuousQNetwork
-from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, NumpyObsType
+from agilerl.typing import (
+    ArrayLike,
+    ArrayOrTensor,
+    ExperiencesType,
+    GymEnvType,
+    NumpyObsType,
+)
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
@@ -99,8 +104,8 @@ class DDPG(RLAlgorithm):
         normalize_images: bool = True,
         mut: Optional[str] = None,
         policy_freq: int = 2,
-        actor_network: Optional[nn.Module] = None,
-        critic_network: Optional[nn.Module] = None,
+        actor_network: Optional[EvolvableModule] = None,
+        critic_network: Optional[EvolvableModule] = None,
         device: str = "cpu",
         accelerator: Optional[Any] = None,
         wrap: bool = True,
@@ -485,7 +490,7 @@ class DDPG(RLAlgorithm):
 
     def test(
         self,
-        env: gym.Env,
+        env: GymEnvType,
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3,
@@ -500,6 +505,9 @@ class DDPG(RLAlgorithm):
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional
+
+        :return: Mean test score
+        :rtype: float
         """
         with torch.no_grad():
             rewards = []

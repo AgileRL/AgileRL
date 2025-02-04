@@ -6,7 +6,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
-from agilerl.modules.mlp import EvolvableMLP
+from agilerl.modules.dummy import DummyEvolvable
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
@@ -14,6 +14,7 @@ from agilerl.utils.utils import (
     observation_space_channels_to_first,
     print_hyperparams,
 )
+from benchmarking.networks import BasicNetActorDQN
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -61,12 +62,12 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net):
     action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
         # Currently set up for DQN
-        actor = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            hidden_size=[64, 64],
-            device=device,
+        actor_kwargs = dict(
+            input_size=state_dim[0],
+            hidden_sizes=[64, 64],
+            output_size=action_dim,
         )
+        actor = DummyEvolvable(BasicNetActorDQN, actor_kwargs, device=device)
         critic = None
     else:
         actor = None
@@ -164,4 +165,4 @@ if __name__ == "__main__":
     INIT_HP = config["INIT_HP"]
     MUTATION_PARAMS = config["MUTATION_PARAMS"]
     NET_CONFIG = config["NET_CONFIG"]
-    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False)
+    main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=True)

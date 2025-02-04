@@ -20,7 +20,7 @@ def test_evolvable_module_initialization():
 
     module = DummyEvolvableModule(device="cpu")
     assert module.device == "cpu"
-    assert module.init_dict == {"device": "cpu"}
+    assert module.get_init_dict() == {"device": "cpu"}
 
 
 def test_evolvable_module_get_mutation_methods():
@@ -52,7 +52,7 @@ def test_evolvable_module_clone():
     module = DummyEvolvableModule(device="cpu")
     clone = module.clone()
     assert clone.device == module.device
-    assert clone.init_dict == module.init_dict
+    assert clone.get_init_dict() == module.get_init_dict()
 
 
 def test_evolvable_module_make_unevolvable():

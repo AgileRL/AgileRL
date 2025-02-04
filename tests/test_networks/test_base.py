@@ -51,8 +51,28 @@ class InvalidCustomNetwork(EvolvableNetwork):
 
 
 class CustomNetwork(EvolvableNetwork):
-    def __init__(self, observation_space: spaces.Space, **kwargs):
-        super().__init__(observation_space)
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        encoder_config=None,
+        head_config=None,
+        action_space=None,
+        min_latent_dim=8,
+        max_latent_dim=128,
+        n_agents=None,
+        latent_dim=32,
+        device="cpu",
+    ):
+        super().__init__(
+            observation_space,
+            encoder_config,
+            action_space,
+            min_latent_dim,
+            max_latent_dim,
+            n_agents,
+            latent_dim,
+            device,
+        )
 
         self.name = "dummy"
         self.net_config = {"hidden_size": [16]}

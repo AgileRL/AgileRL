@@ -321,43 +321,6 @@ class EvolvableMultiInput(EvolvableModule):
         return base
 
     @property
-    def init_dict(self) -> Dict[str, Any]:
-        """Returns model information in dictionary.
-
-        :return: Model information
-        :rtype: Dict[str, Any]
-        """
-        kwargs = self.base_init_dict.copy()
-        extra_kwargs = {
-            "observation_space": self.observation_space,
-            "num_outputs": self.num_outputs,
-            "latent_dim": self.latent_dim,
-            "vector_space_mlp": self.vector_space_mlp,
-            "init_dicts": self.init_dicts,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
-            "name": self.name,
-            # CNN kwargs
-            "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size,
-            "stride_size": self.stride_size,
-            "sample_input": self.sample_input,
-            "cnn_block_type": self.cnn_block_type,
-            "min_cnn_hidden_layers": self.min_cnn_hidden_layers,
-            "max_cnn_hidden_layers": self.max_cnn_hidden_layers,
-            "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,
-            # MLP kwargs
-            "hidden_size": self.hidden_size,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-        }
-        kwargs.update(extra_kwargs)
-        return kwargs
-
-    @property
     def init_dicts(self) -> Dict[str, Dict[str, Any]]:
         """Returns the initialization dictionaries for the network.
 
@@ -387,7 +350,9 @@ class EvolvableMultiInput(EvolvableModule):
         # Initialise final dense layer
         EvolvableModule.init_weights_gaussian(self.final_dense, std_coeff=output_coeff)
 
-    def get_init_dict(self, key: str, default: Literal["cnn", "mlp"]) -> Dict[str, Any]:
+    def get_inner_init_dict(
+        self, key: str, default: Literal["cnn", "mlp"]
+    ) -> Dict[str, Any]:
         """Returns the initialization dictionary for the specified key.
 
         Arguments:
@@ -417,7 +382,7 @@ class EvolvableMultiInput(EvolvableModule):
         feature_net = ModuleDict(device=self.device)
         for i, (key, space) in enumerate(self.observation_space.spaces.items()):
             if is_image_space(space):  # Use CNN if it's an image space
-                init_dict = copy.deepcopy(self.get_init_dict(key, default="cnn"))
+                init_dict = copy.deepcopy(self.get_inner_init_dict(key, default="cnn"))
 
                 if "sample_input" in init_dict:
                     sample_input = init_dict.pop("sample_input")
@@ -459,7 +424,9 @@ class EvolvableMultiInput(EvolvableModule):
                 self.hidden_size is not None
             ), "Hidden size must be specified for vector space MLP."
 
-            init_dict = copy.deepcopy(self.get_init_dict("vector_mlp", default="mlp"))
+            init_dict = copy.deepcopy(
+                self.get_inner_init_dict("vector_mlp", default="mlp")
+            )
             vector_mlp = EvolvableMLP(
                 num_inputs=vector_input_dim,
                 name=init_dict.pop("name", "vector_mlp"),

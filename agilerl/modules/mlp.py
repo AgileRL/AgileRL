@@ -131,30 +131,6 @@ class EvolvableMLP(EvolvableModule):
         return net_config
 
     @property
-    def init_dict(self):
-        """Returns model information in dictionary."""
-        init_dict = {
-            "num_inputs": self.num_inputs,
-            "num_outputs": self.num_outputs,
-            "hidden_size": self.hidden_size,
-            "activation": self.activation,
-            "output_activation": self.output_activation,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_mlp_nodes": self.min_mlp_nodes,
-            "max_mlp_nodes": self.max_mlp_nodes,
-            "layer_norm": self.layer_norm,
-            "init_layers": self.init_layers,
-            "output_vanish": self.output_vanish,
-            "noise_std": self.noise_std,
-            "new_gelu": self.new_gelu,
-            "noisy": self.noisy,
-            "device": self.device,
-            "name": self.name,
-        }
-        return init_dict
-
-    @property
     def activation(self) -> str:
         """Returns activation function."""
         return self._activation

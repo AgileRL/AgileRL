@@ -787,8 +787,7 @@ class MakeEvolvable(EvolvableModule):
             )
         return feature_net, value_net, advantage_net
 
-    @property
-    def init_dict(self) -> Dict[str, Any]:
+    def get_init_dict(self) -> Dict[str, Any]:
         """Returns model information in dictionary."""
         init_dict = {
             "network": None,

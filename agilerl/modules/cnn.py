@@ -276,12 +276,12 @@ class EvolvableCNN(EvolvableModule):
         self.init_layers = init_layers
         self.sample_input = sample_input
         self.name = name
-        self.kernel_size = MutableKernelSizes(kernel_size, block_type, sample_input)
+        self.mut_kernel_size = MutableKernelSizes(kernel_size, block_type, sample_input)
 
         self.model = self.create_cnn(
             in_channels=input_shape[0],
             channel_size=channel_size,
-            kernel_size=self.kernel_size.sizes,
+            kernel_size=self.mut_kernel_size.sizes,
             stride_size=stride_size,
             sample_input=sample_input,
             name=self.name,
@@ -296,27 +296,9 @@ class EvolvableCNN(EvolvableModule):
         return net_config
 
     @property
-    def init_dict(self):
-        """Returns model information in dictionary."""
-        init_dict = {
-            "input_shape": self.input_shape,
-            "num_outputs": self.num_outputs,
-            "channel_size": self.channel_size,
-            "kernel_size": self.kernel_size.int_sizes,
-            "stride_size": self.stride_size,
-            "activation": self.activation,
-            "block_type": self.block_type,
-            "sample_input": self.sample_input,
-            "output_activation": self.output_activation,
-            "min_hidden_layers": self.min_hidden_layers,
-            "max_hidden_layers": self.max_hidden_layers,
-            "min_channel_size": self.min_channel_size,
-            "max_channel_size": self.max_channel_size,
-            "layer_norm": self.layer_norm,
-            "device": self.device,
-            "name": self.name,
-        }
-        return init_dict
+    def kernel_size(self) -> List[KernelSizeType]:
+        """Returns the kernel size of the network."""
+        return self.mut_kernel_size.int_sizes
 
     @property
     def activation(self) -> str:
@@ -478,7 +460,7 @@ class EvolvableCNN(EvolvableModule):
     @mutation(MutationType.LAYER)
     def add_layer(self) -> None:
         """Adds a hidden layer to convolutional neural network."""
-        max_kernels = self.kernel_size.calc_max_kernel_sizes(
+        max_kernels = self.mut_kernel_size.calc_max_kernel_sizes(
             self.channel_size, self.stride_size, self.input_shape
         )
         if (
@@ -488,7 +470,7 @@ class EvolvableCNN(EvolvableModule):
         ):  # HARD LIMIT
             self.channel_size += [self.channel_size[-1]]
             k_size = np.random.randint(2, max_kernels[-1] + 1)
-            self.kernel_size.add_layer(k_size)
+            self.mut_kernel_size.add_layer(k_size)
             self.stride_size = self.stride_size + [
                 np.random.randint(1, self.stride_size[-1] + 1)
             ]
@@ -500,7 +482,7 @@ class EvolvableCNN(EvolvableModule):
         """Removes a hidden layer from convolutional neural network."""
         if len(self.channel_size) > self.min_hidden_layers:
             self.channel_size = self.channel_size[:-1]
-            self.kernel_size.remove_layer()
+            self.mut_kernel_size.remove_layer()
             self.stride_size = self.stride_size[:-1]
         else:
             return self.add_channel()
@@ -525,7 +507,7 @@ class EvolvableCNN(EvolvableModule):
                     0
                 ]
 
-            new_kernel_size = self.kernel_size.change_kernel_size(
+            new_kernel_size = self.mut_kernel_size.change_kernel_size(
                 hidden_layer,
                 self.channel_size,
                 self.stride_size,
@@ -612,7 +594,7 @@ class EvolvableCNN(EvolvableModule):
         model = self.create_cnn(
             in_channels=self.input_shape[0],
             channel_size=self.channel_size,
-            kernel_size=self.kernel_size.sizes,
+            kernel_size=self.mut_kernel_size.sizes,
             stride_size=self.stride_size,
             sample_input=sample_input,
             name=self.name,

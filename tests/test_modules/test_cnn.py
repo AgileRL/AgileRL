@@ -316,7 +316,7 @@ def test_add_and_remove_multiple_cnn_layers(
     output = evolvable_cnn(torch.ones(1, 3, 84, 84).to(device))
     assert output.squeeze().shape[0] == num_outputs
     assert len(evolvable_cnn.stride_size) == len(evolvable_cnn.channel_size)
-    assert len(evolvable_cnn.kernel_size) == len(evolvable_cnn.channel_size)
+    assert len(evolvable_cnn.mut_kernel_size) == len(evolvable_cnn.channel_size)
 
     # Remove as many layers as possible
     for _ in evolvable_cnn.channel_size:
@@ -328,7 +328,7 @@ def test_add_and_remove_multiple_cnn_layers(
     output = evolvable_cnn(torch.ones(1, 3, 84, 84).to(device))
     assert output.squeeze().shape[0] == num_outputs
     assert len(evolvable_cnn.stride_size) == len(evolvable_cnn.channel_size)
-    assert len(evolvable_cnn.kernel_size) == len(evolvable_cnn.channel_size)
+    assert len(evolvable_cnn.mut_kernel_size) == len(evolvable_cnn.channel_size)
 
 
 def test_add_cnn_layer_else_statement(device):
@@ -474,14 +474,14 @@ def test_change_cnn_kernel(device):
     # Change kernel size
     evolvable_cnn.change_kernel()
 
-    while evolvable_cnn.kernel_size == [(3, 3), (3, 3)]:
+    while evolvable_cnn.mut_kernel_size == [(3, 3), (3, 3)]:
         evolvable_cnn.change_kernel()
 
     # Check if kernel size has changed
-    assert evolvable_cnn.kernel_size != [
+    assert evolvable_cnn.mut_kernel_size != [
         (3, 3),
         (3, 3),
-    ], evolvable_cnn.kernel_size
+    ], evolvable_cnn.mut_kernel_size
 
 
 def test_change_kernel_size(device):
@@ -514,11 +514,11 @@ def test_change_cnn_kernel_else_statement(device):
     # Change kernel size
     evolvable_cnn.change_kernel()
 
-    while evolvable_cnn.kernel_size == [3, 3]:
+    while evolvable_cnn.mut_kernel_size == [3, 3]:
         evolvable_cnn.change_kernel()
 
     # Check if kernel size has changed
-    assert evolvable_cnn.kernel_size != [3, 3]
+    assert evolvable_cnn.mut_kernel_size != [3, 3]
 
 
 def test_change_cnn_kernel_multi(device):
@@ -536,14 +536,14 @@ def test_change_cnn_kernel_multi(device):
     # Change kernel size
     evolvable_cnn.change_kernel()
 
-    while evolvable_cnn.kernel_size.int_sizes == [3, 3]:
+    while evolvable_cnn.mut_kernel_size.int_sizes == [3, 3]:
         evolvable_cnn.change_kernel()
 
     # Check if kernel size has changed
-    assert evolvable_cnn.kernel_size != [
+    assert evolvable_cnn.mut_kernel_size != [
         3,
         3,
-    ], evolvable_cnn.kernel_size
+    ], evolvable_cnn.mut_kernel_size
 
 
 def test_change_cnn_kernel_multi_else_statement(device):
@@ -559,11 +559,11 @@ def test_change_cnn_kernel_multi_else_statement(device):
     )
 
     # Change kernel size
-    while evolvable_cnn.kernel_size.int_sizes == [3]:
+    while evolvable_cnn.mut_kernel_size.int_sizes == [3]:
         evolvable_cnn.change_kernel()
 
     # Check if kernel size has changed
-    assert len(evolvable_cnn.kernel_size) == 2
+    assert len(evolvable_cnn.mut_kernel_size) == 2
 
 
 ######### Test clone #########
