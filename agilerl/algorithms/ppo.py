@@ -415,17 +415,13 @@ class PPO:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
-            return (
-                torch.clamp(
-                    torch.where(action > 0, action * max_action, action * -min_action),
-                    min_action,
-                    max_action,
+            if np.inf not in max_action and -np.inf not in min_action:
+                action = (
+                    torch.where(action > 0, action * max_action, action * -min_action)
+                    if convert_to_torch
+                    else np.where(action > 0, action * max_action, action * -min_action)
                 )
-                if convert_to_torch
-                else np.where(
-                    action > 0, action * max_action, action * -min_action
-                ).clip(min_action, max_action)
-            )
+            return action.clip(min_action, max_action)
 
         if not (
             isinstance(min_action, (np.ndarray, torch.Tensor))
