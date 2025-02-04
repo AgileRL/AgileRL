@@ -6,11 +6,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
@@ -214,6 +214,7 @@ def train_multi_agent(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         pop_episode_scores = []
+        pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             scores = (
@@ -236,6 +237,8 @@ def train_multi_agent(
                         agent_id: obs_channels_to_first(s)
                         for agent_id, s in state.items()
                     }
+
+            start_time = time.time()
             for idx_step in range(evo_steps // num_envs):
                 # Get next action from agent
                 cont_actions, discrete_action = agent.get_action(
@@ -349,9 +352,12 @@ def train_multi_agent(
                         if not is_vectorised:
                             state, info = env.reset()
                 agent.reset_action_noise(reset_noise_indices)
+
             pbar.update(evo_steps // len(pop))
 
             agent.steps[-1] += steps
+            fps = steps / (time.time() - start_time)
+            pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
             if len(losses[agent_ids[0]]) > 0:
                 if all([losses[a_id] for a_id in agent_ids]):
@@ -437,6 +443,7 @@ def train_multi_agent(
                     if accelerator is not None and accelerator.is_main_process
                     else total_steps
                 ),
+                "fps": np.mean(pop_fps),
             }
             wandb_dict.update(fitness_dict)
             wandb_dict.update(mean_score_dict)

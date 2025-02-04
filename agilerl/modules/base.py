@@ -181,8 +181,17 @@ def _mutation_wrapper(
 
 
 def _get_filtered_methods(
-    module: "EvolvableModule", mut_type: MutationType
+    module: SelfEvolvableModule, mut_type: MutationType
 ) -> List[str]:
+    """Gets the mutation methods of a given type for the module.
+
+    :param module: The evolvable module.
+    :type module: EvolvableModule
+    :param mut_type: The type of mutation method.
+    :type mut_type: MutationType
+    :return: The filtered mutation methods.
+    :rtype: List[str]
+    """
     _fetch = (
         "layer_mutation_methods"
         if mut_type == MutationType.LAYER

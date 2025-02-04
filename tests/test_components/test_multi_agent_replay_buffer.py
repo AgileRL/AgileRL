@@ -291,6 +291,31 @@ def test_sample_experiences_from_memory_images():
     assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
 
 
+# Can sample experiences from memory using sample method
+def test_sample_experiences_from_memory_dict():
+    memory_size = 100
+    field_names = ["state", "action", "reward"]
+    agent_ids = ["agent1", "agent2"]
+
+    buffer = MultiAgentReplayBuffer(memory_size, field_names, agent_ids)
+
+    state = {
+        "agent1": {i: np.random.rand(3, 128, 128) for i in range(3)},
+        "agent2": {i: np.random.rand(3, 128, 128) for i in range(3)},
+    }
+    action = {"agent1": np.array([4, 5]), "agent2": np.array([4, 5])}
+    reward = {"agent1": np.array([6]), "agent2": np.array([7])}
+
+    buffer.save_to_memory(state, action, reward)
+
+    batch_size = 1
+    transition = buffer.sample(batch_size)
+
+    assert len(transition) == len(field_names)
+    assert transition[1]["agent1"].shape == (batch_size,) + action["agent1"].shape
+    assert transition[2]["agent1"].shape == (batch_size,) + reward["agent1"].shape
+
+
 # Can process a transition from experiences and return a dictionary of numpy arrays.
 def test_returns_np_transition_dictionary():
     memory_size = 100

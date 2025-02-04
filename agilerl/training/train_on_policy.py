@@ -1,13 +1,14 @@
+import time
 import warnings
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
@@ -195,12 +196,13 @@ def train_on_policy(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         pop_episode_scores = []
+        pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             state, info = env.reset()  # Reset environment at start of episode
             scores = np.zeros(num_envs)
             completed_episode_scores = []
             steps = 0
-
+            start_time = time.time()
             for _ in range(-(evo_steps // -agent.learn_step)):
 
                 states = []
@@ -212,7 +214,6 @@ def train_on_policy(
                 truncs = []
 
                 learn_steps = 0
-
                 for idx_step in range(-(agent.learn_step // -num_envs)):
 
                     if swap_channels:
@@ -277,6 +278,8 @@ def train_on_policy(
                 pop_loss[agent_idx].append(loss)
 
             agent.steps[-1] += steps
+            fps = steps / (time.time() - start_time)
+            pop_fps.append(fps)
             pop_episode_scores.append(completed_episode_scores)
 
         # Evaluate population
@@ -303,6 +306,7 @@ def train_on_policy(
                     if accelerator is not None and accelerator.is_main_process
                     else total_steps
                 ),
+                "fps": np.mean(pop_fps),
                 "train/mean_score": np.mean(
                     [
                         mean_score

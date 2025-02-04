@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Protocol, Tuple, Union
 
 import gymnasium as gym
 import torch
@@ -8,8 +8,12 @@ from numpy.typing import ArrayLike
 from torch.nn import Module
 from torch.optim import Optimizer
 
-from agilerl.modules.configs import CnnNetConfig, MlpNetConfig
 from agilerl.protocols import EvolvableAlgorithm
+
+
+class IsDataclass(Protocol):
+    __dataclass_fields__: ClassVar[Dict[str, Any]]
+
 
 ArrayOrTensor = Union[ArrayLike, torch.Tensor]
 TensorDict = Dict[str, torch.Tensor]
@@ -32,5 +36,5 @@ DeviceType = Union[str, torch.device]
 OptimizerType = Union[Optimizer, AcceleratedOptimizer]
 NetworkType = Union[Module, List[Module], Tuple[Module, ...]]
 PopulationType = List[EvolvableAlgorithm]
-ConfigType = Union[Union[MlpNetConfig, CnnNetConfig], Dict[str, Any]]
+ConfigType = Union[IsDataclass, Dict[str, Any]]
 StateDict = Union[Dict[str, Any], List[Dict[str, Any]]]

@@ -1,14 +1,15 @@
+import time
 import warnings
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
@@ -198,10 +199,13 @@ def train_bandits(
         if accelerator is not None:
             accelerator.wait_for_everyone()
         pop_episode_scores = []
+        pop_fps = []
         for agent_idx, agent in enumerate(pop):  # Loop through population
             score = 0
             losses = []
             context = env.reset()  # Reset environment at start of episode
+
+            start_time = time.time()
             for idx_step in range(episode_steps):
                 if swap_channels:
                     context = obs_channels_to_first(context)
@@ -230,6 +234,8 @@ def train_bandits(
             pop_episode_scores.append(score)
             pop_loss[agent_idx].append(np.mean(losses))
             agent.steps[-1] += episode_steps
+            fps = episode_steps / (time.time() - start_time)
+            pop_fps.append(fps)
             total_steps += episode_steps
             pbar.update(episode_steps // len(pop))
 

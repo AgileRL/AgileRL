@@ -1,7 +1,6 @@
 import torch
 import yaml
 
-from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.components.replay_buffer import (
     MultiStepReplayBuffer,
@@ -10,6 +9,7 @@ from agilerl.components.replay_buffer import (
 )
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
+from agilerl.networks import RainbowQNetwork
 from agilerl.training.train_off_policy import train_off_policy
 from agilerl.utils.utils import (
     create_population,
@@ -17,7 +17,6 @@ from agilerl.utils.utils import (
     observation_space_channels_to_first,
     print_hyperparams,
 )
-from benchmarking.legacy_mlp import EvolvableMLP
 
 # !Note: If you are running this demo without having installed agilerl,
 # uncomment and place the following above agilerl imports:
@@ -100,24 +99,13 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
         device=device,
     )
 
-    state_dim = RLAlgorithm.get_state_dim(observation_space)
-    action_dim = RLAlgorithm.get_action_dim(action_space)
     if use_net:
-        actor = EvolvableMLP(
-            num_inputs=state_dim[0],
-            num_outputs=action_dim,
-            output_vanish=True,
-            init_layers=False,
-            layer_norm=True,
-            num_atoms=51,
-            support=torch.linspace(-200, 200, 51).to(device),
-            rainbow=True,
-            device=device,
-            min_hidden_layers=2,
-            max_hidden_layers=3,
-            hidden_size=[128, 128],
-            mlp_activation="ReLU",
-            mlp_output_activation="ReLU",
+        actor = RainbowQNetwork(
+            observation_space=observation_space,
+            action_space=action_space,
+            support=torch.linspace(
+                -INIT_HP["V_MAX"], INIT_HP["V_MAX"], INIT_HP["NUM_ATOMS"]
+            ),
         )
     else:
         actor = None

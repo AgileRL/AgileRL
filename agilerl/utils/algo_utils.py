@@ -24,7 +24,19 @@ from agilerl.typing import (
     OptimizerType,
     TorchObsType,
 )
-from agilerl.utils.evolvable_networks import is_image_space
+
+
+def is_image_space(space: spaces.Space) -> bool:
+    """Check if the space is an image space. We ignore dtype and number of channels
+    checks.
+
+    :param space: Input space
+    :type space: spaces.Space
+
+    :return: True if the space is an image space, False otherwise
+    :rtype: bool
+    """
+    return isinstance(space, spaces.Box) and len(space.shape) == 3
 
 
 def contains_image_space(space: spaces.Space) -> bool:

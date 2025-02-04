@@ -210,3 +210,196 @@ Below we show our implementation of our custom head with a distributional duelin
             self.advantage_net = EvolvableModule.preserve_parameters(
                 self.advantage_net, advantage_net
                 )
+
+Creating a Custom :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`
+-----------------------------------------------------------------------------------
+
+Now that we have our custom head, we can create a custom network that inherits from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` and uses our custom head. Since we have done most of the work in the head,
+the implementation is quite simple and analogous to the :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` implementation. We only need to change the head to our custom head and update the
+:meth:`recreate_network() <agilerl.networks.base.EvolvableNetwork.recreate_network>` method.
+
+.. code-block:: python
+
+    from typing import Optional, Dict, Any
+    from dataclasses import asdict
+
+    import torch
+    from gym import spaces
+
+    from agilerl.networks.base import EvolvableNetwork
+    from agilerl.modules.configs import MlpNetConfig
+
+    class RainbowQNetwork(EvolvableNetwork):
+        """RainbowQNetwork is an extension of the QNetwork that incorporates the Rainbow DQN improvements
+        from "Rainbow: Combining Improvements in Deep Reinforcement Learning" (Hessel et al., 2017).
+
+        Paper: https://arxiv.org/abs/1710.02298
+
+        :param observation_space: Observation space of the environment.
+        :type observation_space: spaces.Space
+        :param action_space: Action space of the environment
+        :type action_space: DiscreteSpace
+        :param encoder_config: Configuration of the encoder network.
+        :type encoder_config: ConfigType
+        :param support: Support for the distributional value function.
+        :type support: torch.Tensor
+        :param num_atoms: Number of atoms in the distributional value function. Defaults to 51.
+        :type num_atoms: int
+        :param head_config: Configuration of the network MLP head.
+        :type head_config: Optional[ConfigType]
+        :param min_latent_dim: Minimum dimension of the latent space representation. Defaults to 8.
+        :type min_latent_dim: int
+        :param max_latent_dim: Maximum dimension of the latent space representation. Defaults to 128.
+        :type max_latent_dim: int
+        :param n_agents: Number of agents in the environment. Defaults to None, which corresponds to
+            single-agent environments.
+        :type n_agents: Optional[int]
+        :param latent_dim: Dimension of the latent space representation.
+        :type latent_dim: int
+        :param device: Device to use for the network.
+        :type device: str
+        """
+
+        def __init__(
+            self,
+            observation_space: spaces.Space,
+            action_space: spaces.Discrete,
+            support: torch.Tensor,
+            num_atoms: int = 51,
+            noise_std: float = 0.5,
+            encoder_config: Optional[ConfigType] = None,
+            head_config: Optional[ConfigType] = None,
+            min_latent_dim: int = 8,
+            max_latent_dim: int = 128,
+            n_agents: Optional[int] = None,
+            latent_dim: int = 32,
+            device: str = "cpu",
+        ):
+
+            if isinstance(observation_space, spaces.Box) and not is_image_space(
+                observation_space
+            ):
+                if encoder_config is None:
+                    encoder_config = asdict(MlpNetConfig(hidden_size=[16]))
+
+                encoder_config["noise_std"] = noise_std
+                encoder_config["output_activation"] = encoder_config.get(
+                    "activation", "ReLU"
+                )
+                encoder_config["output_vanish"] = False
+                encoder_config["init_layers"] = False
+                encoder_config["layer_norm"] = True
+
+            super().__init__(
+                observation_space,
+                encoder_config=encoder_config,
+                action_space=action_space,
+                min_latent_dim=min_latent_dim,
+                max_latent_dim=max_latent_dim,
+                n_agents=n_agents,
+                latent_dim=latent_dim,
+                device=device,
+            )
+
+            if not isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
+                raise ValueError("Action space must be either Discrete or MultiDiscrete")
+
+            if head_config is None:
+                head_config = asdict(
+                    MlpNetConfig(
+                        hidden_size=[16], output_activation=None, noise_std=noise_std
+                    )
+                )
+            elif isinstance(head_config, NetConfig):
+                head_config = asdict(head_config)
+                head_config["noise_std"] = noise_std
+
+            # The heads should have no output activation
+            head_config["output_activation"] = None
+
+            for arg in ["noisy", "init_layers", "layer_norm", "output_vanish"]:
+                if head_config.get(arg, None) is not None:
+                    head_config.pop(arg)
+
+            self.num_actions = spaces.flatdim(action_space)
+            self.num_atoms = num_atoms
+            self.support = support
+            self.noise_std = noise_std
+
+            # Build value and advantage networks
+            self.build_network_head(head_config)
+
+        @property
+        def init_dict(self) -> Dict[str, Any]:
+            """Initializes the configuration of the Rainbow Q network.
+
+            :return: Configuration of the Rainbow Q network.
+            :rtype: Dict[str, Any]
+            """
+            return {
+                "observation_space": self.observation_space,
+                "action_space": self.action_space,
+                "support": self.support,
+                "num_atoms": self.num_atoms,
+                "encoder_config": self.encoder.net_config,
+                "head_config": self.head_net.net_config,
+                "min_latent_dim": self.min_latent_dim,
+                "max_latent_dim": self.max_latent_dim,
+                "n_agents": self.n_agents,
+                "latent_dim": self.latent_dim,
+                "device": self.device,
+            }
+
+        def build_network_head(self, net_config: Dict[str, Any]) -> None:
+            """Builds the value and advantage heads of the network based on the passed configuration.
+
+            :param net_config: Configuration of the network head.
+            :type net_config: Dict[str, Any]
+            """
+            self.head_net = DuelingMLP(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions,
+                num_atoms=self.num_atoms,
+                support=self.support,
+                device=self.device,
+                **net_config
+            )
+
+        def forward(
+            self, obs: TorchObsType, q: bool = True, log: bool = False
+        ) -> torch.Tensor:
+            """Forward pass of the Rainbow Q network.
+
+            :param obs: Input to the network.
+            :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]
+            :param q: Whether to return Q values. Defaults to True.
+            :type q: bool
+            :param log: Whether to return log probabilities. Defaults to False.
+            :type log: bool
+
+            :return: Output of the network.
+            :rtype: torch.Tensor
+            """
+            latent = self.encoder(obs)
+            return self.head_net(latent, q=q, log=log)
+
+        def recreate_network(self) -> None:
+            """Recreates the network"""
+            encoder = self._build_encoder(self.encoder.net_config)
+
+            head_net = DuelingMLP(
+                num_inputs=self.latent_dim,
+                num_outputs=self.num_actions,
+                num_atoms=self.num_atoms,
+                support=self.support,
+                device=self.device,
+                **self.head_net.net_config
+            )
+
+            self.encoder = EvolvableModule.preserve_parameters(self.encoder, encoder)
+            self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
+
+This network is used by default in the :class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent, which is an extension of the
+:class:`DQN <agilerl.algorithms.dqn.DQN>` that incorporates the Rainbow DQN improvements. However, users can employ their custom networks in
+the implemented algorithms by passing them as ``actor_network`` and/or ``critic_network`` arguments in the agent's constructor. AgileRL will
+automatically perform the enabled architecture mutations during training as part of its evolutionary hyperparameter optimization process!

@@ -4,11 +4,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
-import wandb
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
+import wandb
 from agilerl.algorithms.core.base import RLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
@@ -243,6 +243,7 @@ def train_offline(
     while np.less([agent.steps[-1] for agent in pop], max_steps).all():
         if accelerator is not None:
             accelerator.wait_for_everyone()
+
         for agent_idx, agent in enumerate(pop):  # Loop through population
             losses = []
             for idx_step in range(evo_steps):

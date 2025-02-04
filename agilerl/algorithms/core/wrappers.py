@@ -181,11 +181,29 @@ class OptimizerWrapper:
         def _match_condition(attr_value: Any) -> bool:
             return self.lr is attr_value
 
-        return [
+        def _check_lr_names(attr_name: str) -> bool:
+            return "lr" in attr_name.lower() or "learning_rate" in attr_name.lower()
+
+        matches = [
             attr_name
             for attr_name, attr_value in vars(container).items()
             if _match_condition(attr_value)
-        ][0]
+        ]
+
+        if len(matches) == 1:
+            return matches[0]
+        elif len(matches) > 1:
+            for match in matches:
+                if _check_lr_names(match):
+                    return match
+            raise AttributeError(
+                "Multiple attributes matched with the same value as the learning rate. "
+                "Please have your attribute contain 'lr' or 'learning_rate' in its name."
+            )
+        else:
+            raise AttributeError(
+                "Learning rate attribute not found in the parent container."
+            )
 
     def load_state_dict(self, state_dict: StateDict) -> None:
         """
