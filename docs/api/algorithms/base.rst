@@ -11,7 +11,7 @@ an algorithm such that architecture mutations on the networks are applied correc
 hyperparameters of the algorithm that the user wishes to mutate during training.
 
 We have base classes for single-agent and multi-agent algorithms, namely :class:`RLAlgorithm <agilerl.algorithms.core.base.RLAlgorithm>`
-and :class:`MultiAgentAlgorithm <agilerl.algorithms.core.base.MultiAgentAlgorithm>`, respectively.
+and :class:`MultiAgentRLAlgorithm <agilerl.algorithms.core.base.MultiAgentRLAlgorithm>`, respectively.
 
 Network Groups
 --------------
@@ -200,5 +200,5 @@ Parameters
 .. autoclass:: agilerl.algorithms.core.base.RLAlgorithm
     :members:
 
-.. autoclass:: agilerl.algorithms.core.base.MultiAgentAlgorithm
+.. autoclass:: agilerl.algorithms.core.base.MultiAgentRLAlgorithm
     :members:

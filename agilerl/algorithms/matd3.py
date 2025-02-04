@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
@@ -33,7 +33,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class MATD3(MultiAgentAlgorithm):
+class MATD3(MultiAgentRLAlgorithm):
     """The MATD3 algorithm class. MATD3 paper: https://arxiv.org/abs/1910.01465
 
     :param observation_spaces: Observation space for each agent

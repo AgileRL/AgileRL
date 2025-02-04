@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 
-from agilerl.algorithms.core import MultiAgentAlgorithm
+from agilerl.algorithms.core import MultiAgentRLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
@@ -34,7 +34,7 @@ from agilerl.utils.algo_utils import (
 from agilerl.utils.evolvable_networks import get_default_encoder_config
 
 
-class MADDPG(MultiAgentAlgorithm):
+class MADDPG(MultiAgentRLAlgorithm):
     """The MADDPG algorithm class. MADDPG paper: https://arxiv.org/abs/1706.02275
 
     :param observation_spaces: Observation space for each agent
@@ -468,7 +468,7 @@ class MADDPG(MultiAgentAlgorithm):
         states: Dict[str, NumpyObsType],
         training: bool = True,
         infos: Optional[InfosDict] = None,
-    ) -> Tuple[TensorDict, TensorDict]:
+    ) -> Tuple[ArrayDict, ArrayDict]:
         """Returns the next action to take in the environment.
         Epsilon is the probability of taking a random action, used for exploration.
         For epsilon-greedy behaviour, set epsilon to 0.
@@ -480,7 +480,7 @@ class MADDPG(MultiAgentAlgorithm):
         :param infos: Information dictionary returned by env.step(actions)
         :type infos: Dict[str, Dict[str, ...]]
         :return: Tuple of actions for each agent
-        :rtype: Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]
+        :rtype: Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
         """
         assert not key_in_nested_dict(
             states, "action_mask"

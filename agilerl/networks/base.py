@@ -1,4 +1,3 @@
-from abc import ABC, abstractmethod
 from dataclasses import asdict
 from typing import Any, Dict, Optional, TypeVar, Union
 
@@ -91,7 +90,7 @@ class NetworkMeta(ModuleMeta):
         return instance
 
 
-class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
+class EvolvableNetwork(EvolvableModule, metaclass=NetworkMeta):
     """
     Base class for evolvable networks, i.e., evolvable modules that are configured in
     a specific way for a reinforcement learning algorithm, similar to how CNNs are used
@@ -202,7 +201,6 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         """
         return self.encoder.activation
 
-    @abstractmethod
     def forward(self, x: TorchObsType) -> torch.Tensor:
         """Forward pass of the network.
 
@@ -214,7 +212,6 @@ class EvolvableNetwork(EvolvableModule, ABC, metaclass=NetworkMeta):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def build_network_head(self, *args, **kwargs) -> None:
         """Build the head of the network."""
         raise NotImplementedError(

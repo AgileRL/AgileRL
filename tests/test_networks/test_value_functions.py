@@ -8,7 +8,7 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.networks.value_functions import ValueFunction
+from agilerl.networks.value_networks import ValueNetwork
 from tests.helper_functions import (
     assert_close_dict,
     check_equal_params_ind,
@@ -28,7 +28,7 @@ from tests.helper_functions import (
     ],
 )
 def test_value_function_initialization(observation_space, encoder_type):
-    network = ValueFunction(observation_space)
+    network = ValueNetwork(observation_space)
 
     assert network.observation_space == observation_space
 
@@ -50,7 +50,7 @@ def test_value_function_initialization(observation_space, encoder_type):
     ],
 )
 def test_value_function_mutation_methods(observation_space):
-    network = ValueFunction(observation_space)
+    network = ValueNetwork(observation_space)
 
     for method in network.mutation_methods:
         new_network = network.clone()
@@ -81,7 +81,7 @@ def test_value_function_mutation_methods(observation_space):
     ],
 )
 def test_value_function_forward(observation_space: spaces.Space):
-    network = ValueFunction(observation_space)
+    network = ValueNetwork(observation_space)
 
     x_np = observation_space.sample()
 
@@ -122,7 +122,7 @@ def test_value_function_forward(observation_space: spaces.Space):
     ],
 )
 def test_value_function_clone(observation_space: spaces.Space):
-    network = ValueFunction(observation_space)
+    network = ValueNetwork(observation_space)
 
     original_net_dict = dict(network.named_parameters())
     clone = network.clone()

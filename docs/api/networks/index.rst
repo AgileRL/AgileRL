@@ -7,7 +7,7 @@ Evolvable network architectures implemented: (More coming soon!)
     * ContinuousQNetwork
     * DeterministicActor
     * StochasticActor
-    * ValueFunction
+    * ValueNetwork
 
 .. toctree::
    :maxdepth: 1

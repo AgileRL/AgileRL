@@ -1,6 +1,5 @@
 import copy
 import inspect
-from abc import ABC, ABCMeta
 from functools import wraps
 from typing import (
     Any,
@@ -87,7 +86,7 @@ class MutationContext:
     """
 
     def __init__(
-        self, module: "EvolvableModule", method: MutationMethod, attribute: str
+        self, module: SelfEvolvableModule, method: MutationMethod, attribute: str
     ):
         self.module = module
         self.method = method
@@ -153,8 +152,10 @@ class MutationContext:
 
 
 def _mutation_wrapper(
-    module: "EvolvableModule", method: MutationMethod, attribute: str
-) -> Callable:
+    module: SelfEvolvableModule,
+    method: MutationMethod,
+    attribute: str
+    ) -> Callable:
     """Wraps mutation methods to use context manager.
 
     :param module: The evolvable module.
@@ -207,7 +208,7 @@ def _get_filtered_methods(
 
 
 # TODO: Think of a way that doesn't require the use of a metaclass
-class _ModuleMeta(type):
+class ModuleMeta(type):
     """Metaclass to parse the mutation methods of an EvolvableModule instance
     and its superclasses."""
 
@@ -220,12 +221,7 @@ class _ModuleMeta(type):
 
         return instance
 
-
-class ModuleMeta(_ModuleMeta, ABCMeta):
-    pass
-
-
-class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
+class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     """Base class for evolvable neural networks.
 
     :param device: The device to run the network on.
@@ -577,8 +573,10 @@ class EvolvableModule(nn.Module, ABC, metaclass=ModuleMeta):
         return probs
 
     def sample_mutation_method(
-        self, new_layer_prob: float, rng: Optional[Generator] = None
-    ) -> MutationMethod:
+        self,
+        new_layer_prob: float,
+        rng: Optional[Generator] = None
+        ) -> MutationMethod:
         """Sample a mutation method based on the mutation probabilities.
 
         param new_layer_prob: The probability of selecting a layer mutation method.

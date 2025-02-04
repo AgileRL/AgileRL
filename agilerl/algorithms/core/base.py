@@ -54,7 +54,7 @@ from agilerl.utils.algo_utils import (
 )
 from agilerl.utils.evolvable_networks import is_image_space
 
-__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentAlgorithm"]
+__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]
 
 SelfEvolvableAlgorithm = TypeVar("SelfEvolvableAlgorithm", bound="EvolvableAlgorithm")
 SelfRLAlgorithm = TypeVar("SelfRLAlgorithm", bound="RLAlgorithm")
@@ -1000,7 +1000,7 @@ class RLAlgorithm(EvolvableAlgorithm, ABC):
         return on_device
 
 
-class MultiAgentAlgorithm(EvolvableAlgorithm, ABC):
+class MultiAgentRLAlgorithm(EvolvableAlgorithm, ABC):
     """Base object for all multi-agent algorithms in the AgileRL framework.
 
     :param observation_spaces: The observation spaces of the agent environments.

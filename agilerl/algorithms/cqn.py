@@ -14,7 +14,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import NumpyObsType
+from agilerl.typing import NumpyObsType, GymEnvType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
@@ -228,8 +228,10 @@ class CQN(RLAlgorithm):
         next_states = self.preprocess_observation(next_states)
 
         if self.double:  # Double Q-learning
-            q_idx = self.actor_target(next_states).argmax(dim=1).unsqueeze(1)
-            q_target_next = self.actor(next_states).gather(dim=1, index=q_idx).detach()
+            q_idx = self.actor(next_states).argmax(dim=1).unsqueeze(1)
+            q_target_next = (
+                self.actor_target(next_states).gather(dim=1, index=q_idx).detach()
+            )
         else:
             q_target_next = (
                 self.actor_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
@@ -269,7 +271,7 @@ class CQN(RLAlgorithm):
 
     def test(
         self,
-        env,
+        env: GymEnvType,
         swap_channels: bool = False,
         max_steps: Optional[int] = None,
         loop: int = 3,
@@ -280,7 +282,7 @@ class CQN(RLAlgorithm):
         :type env: Gym-style environment
         :param swap_channels: Swap image channels dimension from last to first [H, W, C] -> [C, H, W], defaults to False
         :type swap_channels: bool, optional
-        :param max_steps: Maximum number of testing steps, defaults to 500
+        :param max_steps: Maximum number of testing steps, defaults to None.
         :type max_steps: int, optional
         :param loop: Number of testing loops/episodes to complete. The returned score is the mean. Defaults to 3
         :type loop: int, optional

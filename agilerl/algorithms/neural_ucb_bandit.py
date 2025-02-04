@@ -10,7 +10,7 @@ from agilerl.algorithms.core import RLAlgorithm
 from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
-from agilerl.networks.value_functions import ValueFunction
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
@@ -138,7 +138,7 @@ class NeuralUCB(RLAlgorithm):
 
             net_config["encoder_config"] = encoder_config
 
-            self.actor = ValueFunction(
+            self.actor = ValueNetwork(
                 observation_space=observation_space, device=self.device, **net_config
             )
 

@@ -1,3 +1,3 @@
-from .base import EvolvableAlgorithm, MultiAgentAlgorithm, RLAlgorithm
+from .base import EvolvableAlgorithm, MultiAgentRLAlgorithm, RLAlgorithm
 
-__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentAlgorithm"]
+__all__ = ["EvolvableAlgorithm", "RLAlgorithm", "MultiAgentRLAlgorithm"]

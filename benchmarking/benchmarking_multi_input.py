@@ -8,7 +8,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, RLParameter
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
 from agilerl.networks.actors import StochasticActor
-from agilerl.networks.value_functions import ValueFunction
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.training.train_on_policy import train_on_policy
 from agilerl.utils.utils import create_population, make_vect_envs, print_hyperparams
 
@@ -68,7 +68,7 @@ def main(INIT_HP, MUTATION_PARAMS, NET_CONFIG, use_net=False):
             device=device,
             **net_config,
         )
-        critic = ValueFunction(observation_space, device=device, **critic_net_config)
+        critic = ValueNetwork(observation_space, device=device, **critic_net_config)
         actor.filter_mutation_methods("kernel")
         critic.filter_mutation_methods("kernel")
     else:

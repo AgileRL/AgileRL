@@ -10,7 +10,7 @@ from agilerl.networks.base import EvolvableNetwork
 from agilerl.typing import ConfigType, TorchObsType
 
 
-class ValueFunction(EvolvableNetwork):
+class ValueNetwork(EvolvableNetwork):
     """Value functions are used in reinforcement learning to estimate the expected value of a state.
     Therefore, for any given observation, we predict a single scalar value that represents
     the discounted return from that state.
@@ -125,4 +125,4 @@ class ValueFunction(EvolvableNetwork):
         self.head_net = EvolvableModule.preserve_parameters(self.head_net, head_net)
 
 
-# TODO: Implement DistributionalValueFunction
+# TODO: Implement DistributionalValueNetwork

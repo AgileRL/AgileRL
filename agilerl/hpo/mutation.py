@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, Iterable
 
 import fastrand
 import numpy as np
@@ -22,7 +22,7 @@ NetworkList = List[NetworkConfig]
 SelfEvolvableAlgorithm = TypeVar("T", bound=EvolvableAlgorithm)
 MutationMethod = Callable[[SelfEvolvableAlgorithm], SelfEvolvableAlgorithm]
 AlgoConfig = Dict[str, Union[NetworkConfig, NetworkList]]
-PopulationType = List[SelfEvolvableAlgorithm]
+PopulationType = Iterable[SelfEvolvableAlgorithm]
 ModuleType = Union[OptimizedModule, EvolvableModule]
 OffspringType = Union[List[EvolvableModule], EvolvableModule]
 MutationReturnType = Union[Dict[str, Any], List[Dict[str, Any]]]
@@ -126,8 +126,6 @@ def get_exp_layer(offspring: EvolvableModule) -> nn.Module:
 class Mutations:
     """The Mutations class for evolutionary hyperparameter optimization.
 
-    :param algo: RL algorithm. Use str e.g. 'DQN' if using AgileRL algos, or provide a dict with names of agent networks
-    :type algo: str or dict
     :param no_mutation: Relative probability of no mutation
     :type no_mutation: float
     :param architecture: Relative probability of architecture mutation
@@ -146,20 +144,6 @@ class Mutations:
     :type mutation_sd: float
     :param activation_selection: Activation functions to choose from, defaults to ["ReLU", "ELU", "GELU"]
     :type activation_selection: list[str], optional
-    :param min_lr: Minimum learning rate in the hyperparameter search space
-    :type min_lr: float, optional
-    :param max_lr: Maximum learning rate in the hyperparameter search space
-    :type max_lr: float, optional
-    :param min_learn_step: Minimum learn step in the hyperparameter search space
-    :type min_learn_step: int, optional
-    :param max_learn_step: Maximum learn step in the hyperparameter search space
-    :type max_learn_step: int, optional
-    :param min_batch_size: Minimum batch size in the hyperparameter search space
-    :type min_batch_size: int, optional
-    :param max_batch_size: Maximum batch size in the hyperparameter search space
-    :type max_batch_size: int, optional
-    :param agents_id: List of agent ID's for multi-agent algorithms
-    :type agents_id: list[str]
     :param mutate_elite: Mutate elite member of population, defaults to True
     :type mutate_elite: bool, optional
     :param rand_seed: Random seed for repeatability, defaults to None
@@ -426,7 +410,7 @@ class Mutations:
         """Returns mutated population.
 
         :param population: Population of agents
-        :type population: list[PopulationType]
+        :type population: list[EvolvableAlgorithm]
         :param pre_training_mut: Boolean flag indicating if the mutation is before the training loop
         :type pre_training_mut: bool, optional
         """
@@ -590,7 +574,7 @@ class Mutations:
         """
         # Needs to stay constant for policy gradient methods
         # TODO: Could set up an algorithm registry to make algo checks more robust
-        # OR perform actation mutations within evolvable modules directly and disable
+        # OR perform activation mutations within evolvable modules directly and disable
         # on an algorithm basis
         if individual.algo in ["PPO", "DDPG", "TD3", "MADDPG", "MATD3"]:
             individual.mut = "None"
@@ -618,6 +602,14 @@ class Mutations:
         return individual
 
     def _permutate_activation(self, network: EvolvableModule) -> EvolvableModule:
+        """Permutate the activation layer of the network.
+
+        :param network: The network to permutate the activation layer for
+        :type network: EvolvableModule
+
+        :return: The network with permutated activation layer
+        :rtype: EvolvableModule
+        """
         # Function to change network activation layer
         possible_activations = copy.deepcopy(self.activation_selection)
         current_activation = network.activation

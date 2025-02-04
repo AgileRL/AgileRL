@@ -14,7 +14,7 @@ from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig
 from agilerl.networks.actors import StochasticActor
-from agilerl.networks.value_functions import ValueFunction
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayLike, ArrayOrTensor, ExperiencesType, GymEnvType
 from agilerl.utils.algo_utils import (
     flatten_experiences,
@@ -235,7 +235,7 @@ class PPO(RLAlgorithm):
                 **net_config,
             )
 
-            self.critic = ValueFunction(
+            self.critic = ValueNetwork(
                 observation_space, device=device, **critic_net_config
             )
 
@@ -379,20 +379,11 @@ class PPO(RLAlgorithm):
                 state_values.cpu().data.numpy(),
             )
 
-    def learn(
-        self,
-        experiences: ExperiencesType,
-        noise_clip: float = 0.5,
-        policy_noise: float = 0.2,
-    ) -> float:
+    def learn(self, experiences: ExperiencesType) -> float:
         """Updates agent network parameters to learn from experiences.
 
         :param experience: List of batched states, actions, log_probs, rewards, dones, values, next_state in that order.
         :type experience: Tuple[Union[numpy.ndarray, Dict[str, numpy.ndarray]], ...]
-        :param noise_clip: Maximum noise limit to apply to actions, defaults to 0.5
-        :type noise_clip: float, optional
-        :param policy_noise: Standard deviation of noise applied to policy, defaults to 0.2
-        :type policy_noise: float, optional
         """
         (states, actions, log_probs, rewards, dones, values, next_state) = (
             stack_experiences(*experiences)

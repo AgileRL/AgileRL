@@ -120,7 +120,7 @@ DEFAULT_CONFIG = HyperparameterConfig(
     ),
 )
 
-ENCODER_MLP_CONFIG = {"encoder_config": {"hidden_size": [8]}}
+ENCODER_MLP_CONFIG = {"encoder_config": {"hidden_size": [4]}}
 ENCODER_CNN_CONFIG = {
     "encoder_config": {
         "channel_size": [3],
@@ -133,7 +133,7 @@ ENCODER_MULTI_INPUT_CONFIG = {
         "channel_size": [3],
         "kernel_size": [3],
         "stride_size": [1],
-        "hidden_size": [8],
+        "hidden_size": [4],
     }
 }
 
@@ -429,7 +429,7 @@ def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_no_mutations_pre_training_mut(
-    algo, device, accelerator, init_pop
+    device, accelerator, init_pop
 ):
     pre_training_mut = True
     population = init_pop

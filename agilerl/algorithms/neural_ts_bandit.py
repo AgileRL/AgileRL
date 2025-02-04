@@ -14,7 +14,7 @@ from agilerl.modules.cnn import EvolvableCNN
 from agilerl.modules.mlp import EvolvableMLP
 from agilerl.modules.multi_input import EvolvableMultiInput
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.networks.value_functions import ValueFunction
+from agilerl.networks.value_networks import ValueNetwork
 from agilerl.typing import ArrayLike, ExperiencesType, GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 from agilerl.utils.evolvable_networks import get_default_encoder_config
@@ -145,7 +145,7 @@ class NeuralTS(RLAlgorithm):
 
             net_config["encoder_config"] = encoder_config
 
-            self.actor = ValueFunction(
+            self.actor = ValueNetwork(
                 observation_space=observation_space, device=self.device, **net_config
             )
 

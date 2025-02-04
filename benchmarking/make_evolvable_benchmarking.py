@@ -6,7 +6,7 @@ from gymnasium.wrappers.atari_preprocessing import AtariPreprocessing
 from pettingzoo.atari import pong_v3
 from pettingzoo.mpe import simple_speaker_listener_v4
 
-from agilerl.algorithms.core.base import MultiAgentAlgorithm, RLAlgorithm
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm, RLAlgorithm
 from agilerl.components.multi_agent_replay_buffer import MultiAgentReplayBuffer
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
@@ -208,8 +208,8 @@ def main(INIT_HP, MUTATION_PARAMS, atari, multi=False, NET_CONFIG=None):
         INIT_HP["AGENT_IDS"] = [agent_id for agent_id in env.agents]
         if not atari:
             # MLPs
-            state_dims = MultiAgentAlgorithm.get_state_dim(observation_space)
-            action_dims = MultiAgentAlgorithm.get_action_dim(action_space)
+            state_dims = MultiAgentRLAlgorithm.get_state_dim(observation_space)
+            action_dims = MultiAgentRLAlgorithm.get_action_dim(action_space)
             total_state_dims = sum(state_dim[0] for state_dim in state_dims)
             total_actions = sum(action_dims)
             actor = [

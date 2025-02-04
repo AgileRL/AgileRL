@@ -1,10 +1,10 @@
 .. _value_functions:
 
-ValueFunction
+ValueNetwork
 ==================
 
 Parameters
 ----------
 
-.. autoclass:: agilerl.networks.value_functions.ValueFunction
+.. autoclass:: agilerl.networks.value_functions.ValueNetwork
   :members:

@@ -410,9 +410,8 @@ class EvolvableMultiInput(EvolvableModule):
     def build_feature_extractor(self) -> Dict[str, SupportedEvolvableTypes]:
         """Creates the feature extractor and final MLP networks.
 
-        Returns:
-            Tuple[Dict[str, ModuleType], EvolvableMLP, EvolvableMLP]: Tuple containing the feature extractor,
-                value network, and advantage network.
+        :return: Dictionary of feature extractors.
+        :rtype: Dict[str, Union[EvolvableCNN, EvolvableMLP]]
         """
         # Build feature extractors for image spaces only
         feature_net = ModuleDict(device=self.device)

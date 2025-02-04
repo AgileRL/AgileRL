@@ -27,7 +27,7 @@ common networks used in RL algorithms:
    -  ``QNetwork``: State-action value function (used in e.g. DQN).
    -  ``RainbowQNetwork``: State-action value function that uses a dueling distributional architecture for the network head (used in Rainbow DQN).
    -  ``ContinuousQNetwork``: State-action value function for continuous action spaces, which takes the actions as input with the observations.
-   -  ``ValueFunction``: Outputs the scalar value of an observation (used in e.g. PPO).
+   -  ``ValueNetwork``: Outputs the scalar value of an observation (used in e.g. PPO).
    -  ``DeterministicActor``: Outputs deterministic actions given an action space.
    -  ``StochasticActor``: Outputs an appropriate PyTorch distribution over the given action space.
 

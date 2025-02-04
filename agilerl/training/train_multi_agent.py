@@ -11,7 +11,8 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import trange
 
-from agilerl.algorithms.core.base import MultiAgentAlgorithm
+import wandb
+from agilerl.algorithms.core.base import MultiAgentRLAlgorithm
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.components.replay_data import ReplayDataset
 from agilerl.components.sampler import Sampler
@@ -25,7 +26,7 @@ from agilerl.utils.utils import (
 )
 
 InitDictType = Optional[Dict[str, Any]]
-PopulationType = List[MultiAgentAlgorithm]
+PopulationType = List[MultiAgentRLAlgorithm]
 
 
 def train_multi_agent(
