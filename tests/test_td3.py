@@ -503,13 +503,13 @@ def test_returns_expected_action_training():
 
 # learns from experiences and updates network parameters
 @pytest.mark.parametrize(
-    "min_action, max_action", [(-1, 1), ([-1, 0], 1), (-1, [0, 1]), ([-1, -2], [1, 0])]
+    "min_action, max_action",
+    [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
 )
 def test_learns_from_experiences(min_action, max_action):
     state_dim = (3, 32, 32)
     action_dim = 2
     one_hot = False
-    max_action = 1
     batch_size = 64
     net_config_cnn = {
         "arch": "cnn",
@@ -1411,11 +1411,11 @@ def test_initialize_td3_with_incorrect_actor_net():
         ([0.1, 0.2, 0.3, 0], (0, 1), "Tanh"),
         ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-2, 2), "Sigmoid"),
         ([0.1, 0.2, 0.3, -0.1, -0.2, -0.3], (-1, 2), "Softmax"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 1, 1, 1]), "Tanh"),
+        ([0.1, 0.2, 0.3, 0], ([-2, -2, -2, -2], [-1, 0, -1, 0]), "Tanh"),
         ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Tanh"),
-        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], 1), "Sigmoid"),
-        ([0.1, 0.2, 0.3, 0], (-2, [-1, 0, -1, 0]), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 1, 1, 1]), "Sigmoid"),
+        ([0.1, 0.2, 0.3, 0], ([-2, -2, -2, -2], [-1, 0, -1, 0]), "Sigmoid"),
         ([0.1, 0.2, 0.3, 0], ([-1, 0, -1, 0], [1, 2, 3, 4]), "Sigmoid"),
     ],
 )
@@ -1442,9 +1442,12 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     scaled_action = td3.scale_to_action_space(action)
     min_action = np.array(min_action) if isinstance(min_action, list) else min_action
     max_action = np.array(max_action) if isinstance(max_action, list) else max_action
-    expected_result = min_action + (action - min_activation_val) * (
-        max_action - min_action
-    ) / (max_activation_val - min_activation_val)
+    expected_result = (
+        min_action
+        + (action - min_activation_val)
+        * (max_action - min_action)
+        / (max_activation_val - min_activation_val)
+    ).clip(min_action, max_action)
     assert np.allclose(scaled_action, expected_result)
 
 
