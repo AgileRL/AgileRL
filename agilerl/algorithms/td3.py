@@ -398,10 +398,10 @@ class TD3:
             pre_scaled_max = 1
         else:
             if (
-                isinstance(self.max_action, (np.ndarray, torch.Tensor))
+                isinstance(max_action, (np.ndarray, torch.Tensor))
                 and (np.inf not in max_action and -np.inf not in min_action)
             ) or (
-                not isinstance(self.max_action, (np.ndarray, torch.Tensor))
+                not isinstance(max_action, (np.ndarray, torch.Tensor))
                 and (np.inf != max_action and -np.inf != min_action)
             ):
                 action = (

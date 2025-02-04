@@ -416,10 +416,10 @@ class PPO:
             pre_scaled_max = 1
         else:
             if (
-                isinstance(self.max_action, (np.ndarray, torch.Tensor))
+                isinstance(max_action, (np.ndarray, torch.Tensor))
                 and (np.inf not in max_action and -np.inf not in min_action)
             ) or (
-                not isinstance(self.max_action, (np.ndarray, torch.Tensor))
+                not isinstance(max_action, (np.ndarray, torch.Tensor))
                 and (np.inf != max_action and -np.inf != min_action)
             ):
                 action = (
@@ -434,11 +434,14 @@ class PPO:
             or isinstance(max_action, (np.ndarray, torch.Tensor))
         ):
             if pre_scaled_min == min_action and pre_scaled_max == max_action:
-                return action
+                return action.clip(min_action, max_action)
 
-        return min_action + (max_action - min_action) * (action - pre_scaled_min) / (
-            pre_scaled_max - pre_scaled_min
-        )
+        return (
+            min_action
+            + (max_action - min_action)
+            * (action - pre_scaled_min)
+            / (pre_scaled_max - pre_scaled_min)
+        ).clip(min_action, max_action)
 
     def get_action(self, state, action=None, grad=False, action_mask=None):
         """Returns the next action to take in the environment.
