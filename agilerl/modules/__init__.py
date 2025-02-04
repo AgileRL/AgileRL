@@ -1,9 +1,9 @@
-from .base import EvolvableModule, ModuleDict, EvolvableWrapper
+from .base import EvolvableModule, EvolvableWrapper, ModuleDict
 from .bert import EvolvableBERT
-from .custom_components import NoisyLinear, GumbelSoftmax, NewGELU
+from .cnn import EvolvableCNN
+from .custom_components import GumbelSoftmax, NewGELU, NoisyLinear
 from .gpt import EvolvableGPT
 from .mlp import EvolvableMLP
-from .cnn import EvolvableCNN
 from .multi_input import EvolvableMultiInput
 
 __all__ = [

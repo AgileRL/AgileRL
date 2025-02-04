@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, Iterable
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar, Union
 
 import fastrand
 import numpy as np

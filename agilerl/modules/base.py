@@ -152,10 +152,8 @@ class MutationContext:
 
 
 def _mutation_wrapper(
-    module: SelfEvolvableModule,
-    method: MutationMethod,
-    attribute: str
-    ) -> Callable:
+    module: SelfEvolvableModule, method: MutationMethod, attribute: str
+) -> Callable:
     """Wraps mutation methods to use context manager.
 
     :param module: The evolvable module.
@@ -220,6 +218,7 @@ class ModuleMeta(type):
             setattr(instance, name, _mutation_wrapper(instance, method, name))
 
         return instance
+
 
 class EvolvableModule(nn.Module, metaclass=ModuleMeta):
     """Base class for evolvable neural networks.
@@ -573,10 +572,8 @@ class EvolvableModule(nn.Module, metaclass=ModuleMeta):
         return probs
 
     def sample_mutation_method(
-        self,
-        new_layer_prob: float,
-        rng: Optional[Generator] = None
-        ) -> MutationMethod:
+        self, new_layer_prob: float, rng: Optional[Generator] = None
+    ) -> MutationMethod:
         """Sample a mutation method based on the mutation probabilities.
 
         param new_layer_prob: The probability of selecting a layer mutation method.

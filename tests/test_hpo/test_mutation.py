@@ -428,9 +428,7 @@ def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-def test_mutation_applies_no_mutations_pre_training_mut(
-    device, accelerator, init_pop
-):
+def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, init_pop):
     pre_training_mut = True
     population = init_pop
 

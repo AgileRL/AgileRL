@@ -14,7 +14,7 @@ from agilerl.algorithms.core.registry import HyperparameterConfig, NetworkGroup
 from agilerl.algorithms.core.wrappers import OptimizerWrapper
 from agilerl.modules.base import EvolvableModule
 from agilerl.networks.q_networks import QNetwork
-from agilerl.typing import NumpyObsType, GymEnvType
+from agilerl.typing import GymEnvType, NumpyObsType
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
 
