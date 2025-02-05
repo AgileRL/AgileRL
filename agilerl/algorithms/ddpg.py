@@ -358,6 +358,15 @@ class DDPG:
             max_action = self.max_action
             min_action = self.min_action
 
+        # True if min and max action limits are defined as arrays/tensors
+        array_limits = isinstance(max_action, (np.ndarray, torch.Tensor))
+
+        if (array_limits and (np.inf in max_action or -np.inf in min_action)) or (
+            not array_limits and (np.inf == max_action or -np.inf == min_action)
+        ):
+            # If infinity in action limits, impossible to scale
+            return action.clip(min_action, max_action)
+
         mlp_output_activation = self.actor.mlp_output_activation
         if mlp_output_activation in ["Tanh"]:
             pre_scaled_min = -1
@@ -366,22 +375,24 @@ class DDPG:
             pre_scaled_min = 0
             pre_scaled_max = 1
         else:
-            return (
+            action = (
                 torch.where(action > 0, action * max_action, action * -min_action)
                 if convert_to_torch
                 else np.where(action > 0, action * max_action, action * -min_action)
             )
+            return action.clip(min_action, max_action)
 
-        if not (
-            isinstance(min_action, (np.ndarray, torch.Tensor))
-            or isinstance(max_action, (np.ndarray, torch.Tensor))
+        if not array_limits and (
+            pre_scaled_min == min_action and pre_scaled_max == max_action
         ):
-            if pre_scaled_min == min_action and pre_scaled_max == max_action:
-                return action
+            return action.clip(min_action, max_action)
 
-        return min_action + (max_action - min_action) * (action - pre_scaled_min) / (
-            pre_scaled_max - pre_scaled_min
-        )
+        return (
+            min_action
+            + (max_action - min_action)
+            * (action - pre_scaled_min)
+            / (pre_scaled_max - pre_scaled_min)
+        ).clip(min_action, max_action)
 
     def get_action(self, state, training=True):
         """Returns the next action to take in the environment.
