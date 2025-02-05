@@ -94,7 +94,7 @@ def make_skill_vect_envs(
 
 
 def observation_space_channels_to_first(
-    observation_space: Union[spaces.Box, spaces.Dict]
+    observation_space: Union[spaces.Box, spaces.Dict],
 ) -> spaces.Box:
     """Swaps the channel order of an image observation space from [H, W, C] -> [C, H, W].
 

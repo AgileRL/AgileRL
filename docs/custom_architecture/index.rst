@@ -43,9 +43,9 @@ For simple use cases, it might be appropriate to create a network using ``Evolva
 environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument.
 
 Please refer to the `RainbowQNetwork <Custom_networks_tutorials>`_ tutorial for an example of how to build a custom network using AgileRL.
-  
-3. :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`: This is a wrapper that allows users to load a pre-trained model that is not an 
-:class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and use it in an evolvable AgileRL algorithm. This disables architecture mutations but still 
+
+3. :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`: This is a wrapper that allows users to load a pre-trained model that is not an
+:class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and use it in an evolvable AgileRL algorithm. This disables architecture mutations but still
 allows for RL hyperparameter and weight mutations.
 
 Example Usage
@@ -81,7 +81,7 @@ Example Usage
 
       def forward(self, x):
           return self.model(x)
-    
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     actor_kwargs = {
         "input_size": 4,  # Input size
@@ -107,8 +107,8 @@ Integrating Architecture Mutations Into a Custom PyTorch Network
 ----------------------------------------------------------------
 
 .. warning::
-  The following section pertains to the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper, which willl be deprecated in a 
-  future release. We recommend using the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` 
+  The following section pertains to the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper, which willl be deprecated in a
+  future release. We recommend using the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`
   classes to create custom networks, or wrapping your ``nn.Module`` objects with :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`.
 
 For sequential architectures that users have already implemented using PyTorch, it is also possible to add
