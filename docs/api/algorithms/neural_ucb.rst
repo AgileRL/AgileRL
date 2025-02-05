@@ -103,6 +103,12 @@ For dictionary / tuple observations containing any combination of image, discret
 
   agent = NeuralUCB(observation_space, action_space, net_config=NET_CONFIG)   # Create NeuralUCB agent
 
+Evolutionary Hyperparameter Optimization
+----------------------------------------
+
+AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time. 
+For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
+
 Saving and loading agents
 -------------------------
 

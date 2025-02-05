@@ -8,7 +8,7 @@ from agilerl.modules.mlp import EvolvableMLP
 from agilerl.utils.evolvable_networks import create_mlp
 
 
-class DuelingMLP(EvolvableMLP):
+class DuelingDistributionalMLP(EvolvableMLP):
     """A multi-layer perceptron network that calculates state-action values through
     the use of separate advantage and value networks. It outputs a distribution of values
     for both of these networks. Used in the Rainbow DQN algorithm.
@@ -117,7 +117,7 @@ class DuelingMLP(EvolvableMLP):
     def forward(
         self, x: torch.Tensor, q: bool = True, log: bool = False
     ) -> torch.Tensor:
-        """Forward pass of the RainbowMLP.
+        """Forward pass of the network.
 
         :param obs: Input to the network.
         :type obs: torch.Tensor, dict[str, torch.Tensor], or list[torch.Tensor]

@@ -1,5 +1,7 @@
-Creating Custom Evolvable Networks
-==================================
+.. _custom_network_architectures:
+
+Creating Custom Networks
+========================
 
 Creating Evolvable Networks from Scratch
 ----------------------------------------
@@ -17,7 +19,7 @@ change their architectures during training. :class:`EvolvableModule <agilerl.mod
 :meth:`recreate_network() <agilerl.modules.base.EvolvableModule.recreate_network>` method that recreates the network with the new architecture
 after a mutation method is applied. This method is called automatically after calling a method wrapped by the ``@mutation`` decorator.
 
-1. :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`: Abstracting neural networks for RL problems is hard because different observation spaces require different
+2. :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`: Abstracting neural networks for RL problems is hard because different observation spaces require different
 architectures. To address this, we provide a simple way of defining custom evolvable networks for RL algorithms through the
 :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` class, which inherits from :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>`.
 Under the hood, any network inheriting from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`  automatically creates an appropriate encoder from the passed observation space. Custom networks only need to
@@ -41,11 +43,73 @@ For simple use cases, it might be appropriate to create a network using ``Evolva
 environments observation space), and passing it in to the desired algorithm as the ``actor_network`` or ``critic_network`` argument.
 
 Please refer to the `RainbowQNetwork <Custom_networks_tutorials>`_ tutorial for an example of how to build a custom network using AgileRL.
+  
+3. :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`: This is a wrapper that allows users to load a pre-trained model that is not an 
+:class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and use it in an evolvable AgileRL algorithm. This disables architecture mutations but still 
+allows for RL hyperparameter and weight mutations.
+
+Example Usage
+~~~~~~~~~~~~~
+
+.. code-block:: python
+
+    import torch
+    import torch.nn as nn
+
+    from sgilerl.algorithms import DQN
+    from agilerl.modules.dummy import DummyEvolvable
+
+    class BasicNetActorDQN(nn.Module):
+      def __init__(self, input_size, hidden_sizes, output_size):
+          super().__init__()
+          layers = []
+
+          # Add input layer
+          layers.append(nn.Linear(input_size, hidden_sizes[0]))
+          layers.append(nn.ReLU())  # Activation function
+
+          # Add hidden layers
+          for i in range(len(hidden_sizes) - 1):
+              layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i + 1]))
+              layers.append(nn.ReLU())  # Activation function
+
+          # Add output layer with a sigmoid activation
+          layers.append(nn.Linear(hidden_sizes[-1], output_size))
+
+          # Combine all layers into a sequential model
+          self.model = nn.Sequential(*layers)
+
+      def forward(self, x):
+          return self.model(x)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    actor_kwargs = {
+        "input_size": 4,  # Input size
+        "hidden_sizes": [64, 64],  # Hidden layer sizes
+        "output_size": 2  # Output size
+    }
+
+    actor = DummyEvolvable(BasicNetActor, actor_kwargs, device=device)
+
+    # Use the actor in an algorithm
+    observation_space = ...
+    action_space = ...
+    population = DQN.population(
+        size=4,
+        observation_space=observation_space,
+        action_space=action_space
+        actor_network=actor
+        )
 
 .. _createcustnet:
 
-Making an Existing PyTorch Network Evolvable
---------------------------------------------
+Integrating Architecture Mutations Into a Custom PyTorch Network
+----------------------------------------------------------------
+
+.. warning::
+  The following section pertains to the :class:`MakeEvolvable <agilerl.wrappers.make_evolvable.MakeEvolvable>` wrapper, which willl be deprecated in a 
+  future release. We recommend using the :class:`EvolvableModule <agilerl.modules.base.EvolvableModule>` and :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` 
+  classes to create custom networks, or wrapping your ``nn.Module`` objects with :class:`DummyEvolvable <agilerl.modules.dummy.DummyEvolvable>`.
 
 For sequential architectures that users have already implemented using PyTorch, it is also possible to add
 evolvable functionality through the ``MakeEvolvable`` wrapper. Below is an example of a simple multi-layer

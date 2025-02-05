@@ -24,7 +24,6 @@ from agilerl.typing import (
 )
 from agilerl.utils.algo_utils import make_safe_deepcopies, obs_channels_to_first
 
-
 class DDPG(RLAlgorithm):
     """The DDPG algorithm class. DDPG paper: https://arxiv.org/abs/1509.02971
 

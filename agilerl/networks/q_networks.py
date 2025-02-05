@@ -7,7 +7,7 @@ from gymnasium import spaces
 from agilerl.modules.base import EvolvableModule
 from agilerl.modules.configs import MlpNetConfig, NetConfig
 from agilerl.networks.base import EvolvableNetwork
-from agilerl.networks.custom_modules import DuelingMLP
+from agilerl.networks.custom_modules import DuelingDistributionalMLP
 from agilerl.typing import ConfigType, TorchObsType
 from agilerl.utils.evolvable_networks import is_image_space
 
@@ -220,7 +220,7 @@ class RainbowQNetwork(EvolvableNetwork):
         :param net_config: Configuration of the network head.
         :type net_config: Dict[str, Any]
         """
-        self.head_net = DuelingMLP(
+        self.head_net = DuelingDistributionalMLP(
             num_inputs=self.latent_dim,
             num_outputs=self.num_actions,
             num_atoms=self.num_atoms,
@@ -251,7 +251,7 @@ class RainbowQNetwork(EvolvableNetwork):
         """Recreates the network"""
         encoder = self._build_encoder(self.encoder.net_config)
 
-        head_net = DuelingMLP(
+        head_net = DuelingDistributionalMLP(
             num_inputs=self.latent_dim,
             num_outputs=self.num_actions,
             num_atoms=self.num_atoms,

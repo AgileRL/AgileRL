@@ -6,5 +6,5 @@ ValueNetwork
 Parameters
 ----------
 
-.. autoclass:: agilerl.networks.value_functions.ValueNetwork
+.. autoclass:: agilerl.networks.value_networks.ValueNetwork
   :members:

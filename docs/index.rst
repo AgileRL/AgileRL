@@ -46,7 +46,7 @@ Contents
 
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Training
 
    evo_hyperparam_opt/index

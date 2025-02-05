@@ -23,7 +23,12 @@ LayerInfo = Dict[str, Dict[int, str]]
 
 
 class MakeEvolvable(EvolvableModule):
-    """Wrapper to make a neural network evolvable
+    """Wrapper to make a neural network evolvable,
+
+    .. warning::
+        This class will be deprecated in a future release. We recommend users to define evolvable networks through 
+        the ``EvolvableModule`` and ``EvolvableNetwork class hierarchies. Please refer to :ref:`custom_network_architectures` 
+        for more information on how to do this.
 
     :param network: Input neural network
     :type network: nn.Module

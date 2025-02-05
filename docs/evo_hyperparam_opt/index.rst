@@ -1,3 +1,5 @@
+.. _evo_hyperparam_opt:
+
 Evolutionary Hyperparameter Optimization
 ========================================
 

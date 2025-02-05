@@ -510,7 +510,7 @@ def test_policy_q_learning_with_probe_env():
 
 def test_policy_q_learning_with_probe_env_cnn():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = FixedObsPolicyContActionsImageEnv()
+    env = ConstantRewardContActionsImageEnv()
     learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,
@@ -543,7 +543,7 @@ def test_policy_q_learning_with_probe_env_cnn():
 
 def test_policy_q_learning_with_probe_env_dict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = FixedObsPolicyContActionsDictEnv()
+    env = ConstantRewardContActionsDictEnv()
     learn_steps = 100
     algo_args = {
         "observation_space": env.observation_space,

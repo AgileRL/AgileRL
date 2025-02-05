@@ -15,4 +15,4 @@ Evolvable network architectures implemented: (More coming soon!)
    base
    q_networks
    actors
-   value_functions
+   value_networks
