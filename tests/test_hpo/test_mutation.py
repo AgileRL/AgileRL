@@ -208,6 +208,7 @@ def test_constructor_initializes_attributes():
 
     del mutations
 
+
 # Can regularize weight
 def test_returns_regularize_weight():
     mutations = Mutations(0, 0, 0, 0, 0, 0, 0.1)
@@ -274,6 +275,7 @@ def test_mutation_no_options(
     del population
     del mutated_population
     del new_population
+
 
 #### Single-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
@@ -348,6 +350,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     del population
     del mutated_population
 
+
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, action_space",
@@ -409,6 +412,7 @@ def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
     del population
     del mutated_population
     del new_population
+
 
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -479,6 +483,7 @@ def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, ini
     del mutated_population
     del new_population
 
+
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, hp_config, action_space",
@@ -545,6 +550,7 @@ def test_mutation_applies_rl_hp_mutations(
     del mutated_population
     del new_population
 
+
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, action_space",
@@ -610,11 +616,12 @@ def test_mutation_applies_activation_mutations(
             assert old.actor.activation != individual.actor.activation
             assert individual.actor.activation in activation_selection
         assert old.index == individual.index
-    
+
     del mutations
     del population
     del mutated_population
     del new_population
+
 
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -673,6 +680,7 @@ def test_mutation_applies_activation_mutations_no_skip(
     del population
     del mutated_population
     del new_population
+
 
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
@@ -773,6 +781,7 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
     del mutated_population
     del new_population
 
+
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, action_space",
@@ -858,6 +867,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
     del mutated_population
     del new_population
 
+
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["DDPG"])
 @pytest.mark.parametrize(
@@ -870,9 +880,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=True)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -950,6 +958,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     del mutated_population
     del new_population
 
+
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
@@ -964,9 +973,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_random_mutations_multi_agent(
@@ -1012,6 +1019,7 @@ def test_mutation_applies_random_mutations_multi_agent(
     del population
     del mutated_population
 
+
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1022,9 +1030,7 @@ def test_mutation_applies_random_mutations_multi_agent(
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, init_pop):
     pre_training_mut = False
@@ -1057,6 +1063,7 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
     del population
     del mutated_population
 
+
 # The mutation method applies RL hyperparameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1065,9 +1072,7 @@ def test_mutation_applies_no_mutations_multi_agent(algo, device, accelerator, in
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("hp_config", [ACTOR_CRITIC_CONFIG])
@@ -1109,6 +1114,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
     del mutated_population
     del new_population
 
+
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1122,9 +1128,7 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent(
@@ -1166,6 +1170,7 @@ def test_mutation_applies_activation_mutations_multi_agent(
     del mutated_population
     del new_population
 
+
 # The mutation method applies activation mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1175,9 +1180,7 @@ def test_mutation_applies_activation_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_activation_mutations_multi_agent_no_skip(
@@ -1222,6 +1225,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
     del mutated_population
     del new_population
 
+
 # The mutation method applies parameter mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1235,9 +1239,7 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_parameter_mutations_multi_agent(
@@ -1273,6 +1275,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
     del mutated_population
     del new_population
 
+
 # The mutation method applies architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1286,9 +1289,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 def test_mutation_applies_architecture_mutations_multi_agent(
@@ -1348,6 +1349,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
     del mutated_population
     del new_population
 
+
 # The mutation method applies BERT architecture mutations to the population and returns the mutated population.
 @pytest.mark.parametrize("algo", ["MADDPG", "MATD3"])
 @pytest.mark.parametrize(
@@ -1362,9 +1364,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -1475,6 +1475,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del mutated_population
     del new_population
 
+
 @pytest.mark.parametrize(
     "algo, action_space",
     [
@@ -1488,9 +1489,7 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
         ("NeuralTS", generate_discrete_space(2)),
     ],
 )
-@pytest.mark.parametrize(
-    "device", [torch.device("cpu")]
-)
+@pytest.mark.parametrize("device", [torch.device("cpu")])
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP])
 @pytest.mark.parametrize(
