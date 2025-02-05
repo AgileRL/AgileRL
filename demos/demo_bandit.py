@@ -2,11 +2,11 @@ from datetime import datetime
 
 import numpy as np
 import torch
+import wandb
 from gymnasium import spaces
 from tqdm import trange
 from ucimlrepo import fetch_ucirepo
 
-import wandb
 from agilerl.components.replay_buffer import ReplayBuffer
 from agilerl.hpo.mutation import Mutations
 from agilerl.hpo.tournament import TournamentSelection
