@@ -443,9 +443,8 @@ def test_returns_expected_action_training():
     [(-1, 1), ([-1, 0], [1, 1]), ([-1, -1], [0, 1]), ([-1, -2], [1, 0])],
 )
 def test_learns_from_experiences(min_action, max_action):
-    state_dim = (3, 32, 32)
-    action_dim = 2
-    one_hot = False
+    observation_space = generate_random_box_space(shape=(3, 32, 32), low=0, high=255)
+    action_space = generate_random_box_space(shape=(2,))
     batch_size = 4
     policy_freq = 4
     net_config_cnn = {
@@ -1137,7 +1136,7 @@ def test_action_scaling_ddpg(action_array_vals, min_max, activation_func):
     ddpg = DDPG(
         observation_space=generate_random_box_space(shape=(4,)),
         action_space=generate_random_box_space(
-            shape=(4,), low=min_action, high=max_action
+            low=min_action, high=max_action, shape=(len(action),)
         ),
         net_config=net_config,
     )

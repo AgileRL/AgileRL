@@ -1318,7 +1318,7 @@ def test_action_scaling_td3(action_array_vals, min_max, activation_func):
     td3 = TD3(
         observation_space=generate_random_box_space(shape=(4,), low=0, high=1),
         action_space=generate_random_box_space(
-            shape=(4,), low=min_action, high=max_action
+            low=min_action, high=max_action, shape=(len(action),)
         ),
         net_config=net_config,
     )
