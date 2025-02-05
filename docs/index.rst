@@ -19,6 +19,10 @@
 Streamlining reinforcement learning.
 ====================================
 
+.. highlights::
+
+   **✨ NEW: AgileRL 2.0 is here! Check out the latest powerful** :ref:`updates <agilerl2changes>` **✨**
+
 **AgileRL** is a Deep Reinforcement Learning library focused on improving development by introducing RLOps - MLOps for reinforcement learning.
 
 This library is initially focused on reducing the time taken for training models and hyperparameter optimisation (HPO) by pioneering evolutionary HPO techniques for reinforcement learning.
@@ -43,6 +47,7 @@ Contents
    :caption: Introduction
 
    get_started/index
+   get_started/agilerl2changes
 
 
 .. toctree::
