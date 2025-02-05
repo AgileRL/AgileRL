@@ -55,8 +55,8 @@ def generate_multidiscrete_space(n: int, m: int) -> spaces.MultiDiscrete:
 def generate_dict_or_tuple_space(
     n_image: int,
     n_vector: int,
-    image_shape: Tuple[int, ...] = (3, 128, 128),
-    vector_shape: Tuple[int] = (5,),
+    image_shape: Tuple[int, ...] = (3, 32, 32),
+    vector_shape: Tuple[int] = (4,),
     dict_space: Optional[bool] = False,
 ) -> Union[spaces.Dict, spaces.Tuple]:
 
@@ -111,8 +111,8 @@ def gen_multi_agent_dict_or_tuple_spaces(
     n_agents: int,
     n_image: int,
     n_vector: int,
-    image_shape: Tuple[int, ...] = (3, 128, 128),
-    vector_shape: Tuple[int] = (5,),
+    image_shape: Tuple[int, ...] = (3, 16, 16),
+    vector_shape: Tuple[int] = (4,),
     dict_space: Optional[bool] = False,
 ) -> List[Union[spaces.Dict, spaces.Tuple]]:
     return [

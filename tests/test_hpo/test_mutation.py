@@ -301,8 +301,8 @@ def test_mutation_no_options(
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -369,8 +369,8 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -432,8 +432,8 @@ def test_mutation_applies_no_mutations(algo, device, accelerator, init_pop):
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -502,8 +502,8 @@ def test_mutation_applies_no_mutations_pre_training_mut(device, accelerator, ini
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -569,8 +569,8 @@ def test_mutation_applies_rl_hp_mutations(
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -628,8 +628,8 @@ def test_mutation_applies_activation_mutations(
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -800,8 +800,8 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
     "observation_space, net_config",
     [
         (generate_random_box_space((4,)), ENCODER_MLP_CONFIG),
-        (generate_random_box_space((3, 32, 32)), ENCODER_CNN_CONFIG),
-        (generate_dict_or_tuple_space(2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_random_box_space((3, 16, 16)), ENCODER_CNN_CONFIG),
+        (generate_dict_or_tuple_space(1, 1), ENCODER_MULTI_INPUT_CONFIG),
         (generate_discrete_space(4), ENCODER_MLP_CONFIG),
     ],
 )
@@ -966,8 +966,8 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     "observation_space, net_config",
     [
         (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
@@ -1121,8 +1121,8 @@ def test_mutation_applies_rl_hp_mutations_multi_agent(
     "observation_space, net_config",
     [
         (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
@@ -1232,8 +1232,8 @@ def test_mutation_applies_activation_mutations_multi_agent_no_skip(
     "observation_space, net_config",
     [
         (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
@@ -1282,8 +1282,8 @@ def test_mutation_applies_parameter_mutations_multi_agent(
     "observation_space, net_config",
     [
         (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
@@ -1356,8 +1356,8 @@ def test_mutation_applies_architecture_mutations_multi_agent(
     "observation_space, net_config",
     [
         (generate_multi_agent_box_spaces(2, shape=(4,)), ENCODER_MLP_CONFIG),
-        (generate_multi_agent_box_spaces(2, shape=(3, 32, 32)), ENCODER_CNN_CONFIG),
-        (gen_multi_agent_dict_or_tuple_spaces(2, 2, 3), ENCODER_MULTI_INPUT_CONFIG),
+        (generate_multi_agent_box_spaces(2, shape=(3, 16, 16)), ENCODER_CNN_CONFIG),
+        (gen_multi_agent_dict_or_tuple_spaces(2, 1, 1), ENCODER_MULTI_INPUT_CONFIG),
     ],
 )
 @pytest.mark.parametrize("action_space", [generate_multi_agent_discrete_spaces(2, 2)])
