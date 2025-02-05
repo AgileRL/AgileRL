@@ -247,7 +247,7 @@ trained_pop, pop_fitnesses = train_off_policy(
 If you use AgileRL in your work, please cite the repository:
 ```bibtex
 @software{Ustaran-Anderegg_AgileRL,
-author = {Ustaran-Anderegg, Nicholas and Pratt, Michael},
+author = {Ustaran-Anderegg, Nicholas and Pratt, Michael and Sabal-Bermudez, Jaime},
 license = {Apache-2.0},
 title = {{AgileRL}},
 url = {https://github.com/AgileRL/AgileRL}

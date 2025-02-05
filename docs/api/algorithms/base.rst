@@ -36,8 +36,8 @@ Example
 -------
 
 Below is a simple example of how this is can be done for the DDPG algorithm, which contains a combination of actors and critics. Here we have two network groups,
-one for the actor and one for the critic (the actor being flagged as the policy since it is used to select actions), and each with their respective target networks 
-being flagged as having shared parameters. We also have two separate optimizers (one for each network groups evaluation network) that are wrapped in an 
+one for the actor and one for the critic (the actor being flagged as the policy since it is used to select actions), and each with their respective target networks
+being flagged as having shared parameters. We also have two separate optimizers (one for each network groups evaluation network) that are wrapped in an
 :class:`OptimizerWrapper <agilerl.algorithms.core.wrappers.OptimizerWrapper>`.
 
 .. code-block:: python

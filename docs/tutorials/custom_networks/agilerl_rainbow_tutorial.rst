@@ -4,9 +4,9 @@ Building a Dueling Distributional Q Network Using AgileRL
 =========================================================
 
 .. note::
-    Here we go through the process we followed to develop the network in the :class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent. 
-    However, users can employ their custom networks in the implemented algorithms by passing them as ``actor_network`` and/or ``critic_network`` 
-    arguments in the agent's constructor. AgileRL will automatically perform the enabled architecture mutations during training as part of its 
+    Here we go through the process we followed to develop the network in the :class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent.
+    However, users can employ their custom networks in the implemented algorithms by passing them as ``actor_network`` and/or ``critic_network``
+    arguments in the agent's constructor. AgileRL will automatically perform the enabled architecture mutations during training as part of its
     evolutionary hyperparameter optimization process!
 
 
@@ -33,7 +33,7 @@ Approaches:
 network as an :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>`. When we do this, its mutation methods will be added automatically so we need to disable them manually through the
 :meth:`EvolvableMLP.disable_mutations() <agilerl.modules.base.EvolvableModule.disable_mutations>` method.
 
-2. **Creating a Custom MLP**: We can create a custom MLP that inherits from :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>` and add the advantage head without having to 
+2. **Creating a Custom MLP**: We can create a custom MLP that inherits from :class:`EvolvableMLP <agilerl.modules.mlp.EvolvableMLP>` and add the advantage head without having to
 disable the mutations on it.
 
 For either of the above solutions, we need to be able to recreate the network after an architecture mutation such that the same mutation is applied to both the
@@ -219,8 +219,8 @@ Below we show our implementation of our custom head with a distributional duelin
 Creating a Custom Evolvable Network
 ------------------------------------------------------------------------------------
 
-Now that we have our custom head, we can create a custom network that inherits from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>` 
-and uses our custom head. Since we have done most of the work in the head, the implementation is quite simple and analogous to the 
+Now that we have our custom head, we can create a custom network that inherits from :class:`EvolvableNetwork <agilerl.networks.base.EvolvableNetwork>`
+and uses our custom head. Since we have done most of the work in the head, the implementation is quite simple and analogous to the
 :class:`QNetwork <agilerl.networks.q_networks.QNetwork>` implementation. We only need to change the head to our custom head and update the
 :meth:`recreate_network() <agilerl.networks.base.EvolvableNetwork.recreate_network>` method to reflect the changes in the head.
 
@@ -414,7 +414,7 @@ that can be applied to the network. This can be done by calling the ``mutation_m
 .. code-block:: python
 
     import torch
-    from gymnasium import spaces 
+    from gymnasium import spaces
 
     # Define an image observation space and a discrete action space
     observation_space = spaces.Box(low=0, high=255, shape=(3, 128, 128), dtype=np.uint8)
@@ -430,7 +430,7 @@ that can be applied to the network. This can be done by calling the ``mutation_m
 
     print(network.mutation_methods)
 
-This will output the following list of available mutations. We can recognise the mutation methods of the underlying ``EvolvableCNN`` encoder, the 
+This will output the following list of available mutations. We can recognise the mutation methods of the underlying ``EvolvableCNN`` encoder, the
 ``DuelingDistributionalMLP`` head, and the **add_latent_node** and **remove_latent_node** mutations that are available for all instances of ``EvolvabelNetwork``.
 
 .. code-block:: text
@@ -450,8 +450,8 @@ This will output the following list of available mutations. We can recognise the
 Training the Rainbow DQN Agent
 ------------------------------
 
-Now that we have our custom network, we can define it with a specific architecture and pass it to the 
-:class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent as the ``actor_network`` argument. The agent will automatically mutate the architecture 
+Now that we have our custom network, we can define it with a specific architecture and pass it to the
+:class:`RainbowDQN <agilerl.algorithms.dqn_rainbow.RainbowDQN>` agent as the ``actor_network`` argument. The agent will automatically mutate the architecture
 of the network with the corresponding probability specified in the ``architecture`` argument of ::class:`Mutations <agilerl.hpo.mutation.Mutations>`.
 
 End-to-end example
@@ -536,7 +536,7 @@ End-to-end example
             "hidden_size": [64] # Head hidden size
         }
     }
-    
+
     # Define the support for the distributional value function and the custom actor
     support = torch.linspace(INIT_HP['V_MIN'], INIT_HP['V_MAX'], INIT_HP['NUM_ATOMS'], device=device)
     actor = RainbowQNetwork(
@@ -556,7 +556,7 @@ End-to-end example
             )
     )
 
-    # Tournament selection 
+    # Tournament selection
     tournament = TournamentSelection(
         tournament_size=INIT_HP["TOURN_SIZE"],
         elitism=INIT_HP["ELITISM"],
@@ -639,6 +639,3 @@ End-to-end example
         mutation=mutations,
         wb=INIT_HP["WANDB"],
     )
-
-
-

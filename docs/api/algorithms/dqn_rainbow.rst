@@ -135,7 +135,7 @@ For dictionary / tuple observations containing any combination of image, discret
 Evolutionary Hyperparameter Optimization
 ----------------------------------------
 
-AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time. 
+AgileRL allows for efficient hyperparameter optimization during training to provide state-of-the-art results in a fraction of the time.
 For more information on how this is done, please refer to the :ref:`Evolutionary Hyperparameter Optimization <evo_hyperparam_opt>` documentation.
 
 Saving and loading agents
