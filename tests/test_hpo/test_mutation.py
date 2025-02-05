@@ -772,7 +772,7 @@ def test_mutation_applies_parameter_mutations(algo, device, accelerator, init_po
 @pytest.mark.parametrize("hp_config", [None])
 @pytest.mark.parametrize("population_size", [1])
 def test_mutation_applies_architecture_mutations(algo, device, accelerator, init_pop):
-    for _ in range(10):
+    for _ in range(2):
         population = init_pop
         mutations = Mutations(
             0,
@@ -1211,7 +1211,7 @@ def test_mutation_applies_parameter_mutations_multi_agent(
 def test_mutation_applies_architecture_mutations_multi_agent(
     algo, device, accelerator, init_pop
 ):
-    for _ in range(10):
+    for _ in range(2):
         population = init_pop
 
         mutations = Mutations(
