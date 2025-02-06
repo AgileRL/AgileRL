@@ -344,6 +344,7 @@ def test_mutation_applies_random_mutations(algo, device, accelerator, init_pop):
 
     torch.cuda.empty_cache()  # Free up GPU memory
 
+
 # The mutation method applies no mutations to the population and returns the mutated population.
 @pytest.mark.parametrize(
     "algo, action_space",
@@ -833,6 +834,7 @@ def test_mutation_applies_architecture_mutations(algo, device, accelerator, init
 
     mut_methods = population[0].actor.mutation_methods
     for mut_method in mut_methods:
+
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
                 return [mut_method]
@@ -952,6 +954,7 @@ def test_mutation_applies_bert_architecture_mutations_single_agent(
     del new_population
 
     torch.cuda.empty_cache()  # Free up GPU memory
+
 
 #### Multi-agent algorithm mutations ####
 # The mutation method applies random mutations to the population and returns the mutated population.
@@ -1314,6 +1317,7 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 
     mut_methods = population[0].actors[0].mutation_methods
     for mut_method in mut_methods:
+
         class DummyRNG:
             def choice(self, a, size=None, replace=True, p=None):
                 return [mut_method]
@@ -1356,7 +1360,9 @@ def test_mutation_applies_architecture_mutations_multi_agent(
 @pytest.mark.parametrize("INIT_HP", [SHARED_INIT_HP_MA])
 @pytest.mark.parametrize("population_size", [1])
 @pytest.mark.parametrize("hp_config", [None])
-@pytest.mark.parametrize("device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")])
+@pytest.mark.parametrize(
+    "device", [torch.device("cuda" if torch.cuda.is_available() else "cpu")]
+)
 @pytest.mark.parametrize("accelerator", [None, Accelerator(device_placement=False)])
 @pytest.mark.parametrize(
     "mut_method",
@@ -1468,7 +1474,6 @@ def test_mutation_applies_bert_architecture_mutations_multi_agent(
     del population
     del mutated_population
     del new_population
-
 
 
 @pytest.mark.parametrize(
